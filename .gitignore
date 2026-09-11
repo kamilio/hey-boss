@@ -1,0 +1,12 @@
+/target/
+/out/
+.DS_Store
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.sock
+*.log
+hey-boss.state
+*_cookies.txt

@@ -1,0 +1,20 @@
+name: Check
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: cargo test --locked
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      - run: |
+          mkdir -p out
+          xcrun swiftc -O setup_hey_boss.swift -o out/hey-boss-setup
+          xcrun swiftc -O -whole-module-optimization -parse-as-library hey_boss_daemon.swift -o out/hey-boss-daemon
+          xcrun swiftc -O -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
+          out/hey-boss-test
+      - run: cargo package --locked --allow-dirty

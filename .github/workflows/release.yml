@@ -1,0 +1,31 @@
+name: Release artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version from Cargo.toml
+        required: true
+        type: string
+jobs:
+  build:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: cargo test --locked
+      - run: |
+          mkdir -p out
+          xcrun swiftc -O -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
+          out/hey-boss-test
+      - run: swift release_hey_boss.swift "$RELEASE_VERSION" "$GITHUB_REPOSITORY"
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hey-boss-source
+          path: |
+            out/hey-boss-*-source.tar.gz
+            out/hey-boss.rb
+            out/SHA256SUMS
+          if-no-files-found: error
