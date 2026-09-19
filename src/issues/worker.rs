@@ -1351,8 +1351,7 @@ pub fn serve_instance_with_history(
             thread::sleep(Duration::from_millis(200));
         }
     }
-    let reload =
-        worker.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
+    let reload = worker.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
     drop(worker);
     if !reload && !store.worker_shutdown_requested(&id)? {
         crate::fleet::record_local_worker(&id, None, "stop")?;
