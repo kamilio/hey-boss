@@ -4,6 +4,7 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   let csrf = "", graph = null, projects = [], generation = 0, controller = null, boot = null;
   const collapsed = new Set(), openBodies = new Set();
+  let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
   const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
   const route = () => new URLSearchParams(location.hash.slice(1));
   const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
@@ -30,6 +31,29 @@
     const full = fullBodies.has(node.id);
     const error = bodyErrors.has(node.id) ? `<p class="body-error" role="alert">${esc(bodyErrors.get(node.id))}</p>` : "";
     return `${full ? `<button class="read-body" data-collapse-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>Show less</button>${error}` : ""}<div class="body" id="body-${esc(node.id)}" tabindex="-1">${node.body_html || esc(node.body)}</div>${node.body_truncated ? `<button class="read-body" data-read-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>${loadingBodies.has(node.id) ? "Loading…" : "Read full text"}</button>` : ""}${full ? "" : error}`;
+  }
+  const mapUI = new HeyBossMap.Mindmap($("#mindmap"), {
+    select(id) { selected = id; render(); mapUI.focus(id, false); $("#map-details h2")?.focus({preventScroll:true}); },
+    toggle(id) {
+      const before = mapUI.data?.positions.get(id), y = before ? before.y * mapUI.camera.scale + mapUI.camera.y : null;
+      collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); render();
+      const after = mapUI.data?.positions.get(id); if (after && y !== null) { mapUI.camera.y = y - after.y * mapUI.camera.scale; mapUI.schedule(); }
+    },
+    escape() { closeInspector(); }
+  });
+  function closeInspector() {
+    const previous = selected; selected = null; render();
+    if (previous) mapUI.focus(previous);
+  }
+  function details(nodes, incidents, visible) {
+    const node = selected && visible.has(selected) ? nodes.get(selected) : null;
+    $("#map-inspector").hidden = !node;
+    if (!node) { $("#map-details").innerHTML = ""; return; }
+    const resource = node.kind === "issue" && node.available !== false ? `<a class="map-resource-link" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))} ↗</a>` : node.kind === "pr" ? `<a class="map-resource-link" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open pull request ↗</a>` : node.kind === "notification" ? `<a class="map-resource-link" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification ↗</a>` : "";
+    const rel = relationships(node, nodes, incidents);
+    const children = graph.nodes.filter(n => n.parent_id === node.id);
+    const topics = children.length ? `<section class="topic-children" aria-label="Child topics"><h3>Topics <span>${children.length}</span></h3><ul>${children.slice(0,50).map(n => `<li><button type="button" data-select-topic="${esc(n.id)}">${esc(nodes.get(n.id).title)}</button></li>`).join("")}</ul>${children.length > 50 ? '<button type="button" data-topic-outline>View all in outline</button>' : ""}</section>` : "";
+    $("#map-details").innerHTML = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(node.title)}</h2><div class="meta"><span class="badge">${esc(node.kind)}</span>${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div>`;
   }
   async function readBody(id, mode = "full") {
     if (loadingBodies.has(id) || !graph) return;
@@ -93,15 +117,31 @@
         incidents.get(id).push(link);
       }
     }
-    const visible = new Set();
+    const visible = new Set(), matched = new Set();
     for (const node of graph.nodes) {
       const rel = query ? incidents.get(node.id) || [] : [];
       const display = nodes.get(node.id);
       if (!query || [display.title, display.body, display.state, display.assignee, node.kind === "issue" && display.available !== false ? assigneeName(display.assignee) : "", node.alias, node.kind, node.reference, node.reference_project, node.reference_project_name, ...rel.flatMap((l) => [l.kind, l.description, nodes.get(l.from)?.title, nodes.get(l.to)?.title])].join(" ").toLowerCase().includes(query)) {
+        matched.add(node.id);
         let current = node;
         while (current && !visible.has(current.id)) { visible.add(current.id); current = nodes.get(current.parent_id); }
       }
     }
+    $("#count").textContent = `${graph.nodes.length} ${graph.nodes.length === 1 ? "node" : "nodes"} · ${graph.links.length} ${graph.links.length === 1 ? "link" : "links"}`;
+    $("#revision").textContent = `Map version ${graph.version}`;
+    $("#outline").hidden = viewMode !== "outline"; $("#map-panel").hidden = viewMode !== "map";
+    if (viewMode === "map") {
+      $("#outline").innerHTML = "";
+      if (mapQuery !== query && query && !mapQuery) mapSearchCamera = {...mapUI.camera};
+      mapUI.update(graph.nodes.map(n => nodes.get(n.id)), {collapsed, matches:query ? visible : null, hits:query ? matched : null, project:graph.project, selected, links:graph.links, assigneeName});
+      if (mapQuery !== query) {
+        mapQuery = query;
+        if (query) { mapUI.fit(); const first = matched.values().next().value; if (first) mapUI.focus(first, false); }
+        else if (mapSearchCamera) { mapUI.camera = mapSearchCamera; mapSearchCamera = null; mapUI.schedule(); }
+      }
+      details(nodes, incidents, visible); return;
+    }
+    $("#map-details").innerHTML = "";
     const tree = (parent = "") => {
       const list = (children.get(parent) || []).filter((n) => visible.has(n.id));
       if (!list.length) return "";
@@ -114,14 +154,16 @@
       }).join("")}</ul>`;
     };
     $("#outline").innerHTML = tree() || `<p class="empty">${query ? "No matching topics or relationships." : 'No topics yet.<br>Add the first with <code>hey-boss mm add \'Topic\' --id topic</code>'}</p>`;
-    $("#count").textContent = `${graph.nodes.length} ${graph.nodes.length === 1 ? "node" : "nodes"} · ${graph.links.length} ${graph.links.length === 1 ? "link" : "links"}`;
-    $("#revision").textContent = `Map version ${graph.version}`;
     if (toggleFocus) [...document.querySelectorAll("[data-toggle]")].find((b) => b.dataset.toggle === toggleFocus)?.focus();
   }
   function reveal() {
     const target = route().get("node"); if (!target || !graph) return;
     const nodes = allNodes(); let node = nodes.get(target);
     while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
+    if (viewMode === "map") {
+      if (!nodes.has(target)) return;
+      selected = target; $("#search").value = ""; render(); mapUI.focus(target, false); $("#map-details h2")?.focus({preventScroll:true}); return;
+    }
     render();
     let element = document.getElementById(target);
     if (!element && nodes.has(target) && $("#search").value) { $("#search").value = ""; render(); element = document.getElementById(target); }
@@ -145,6 +187,7 @@
       if (response.status === 403 && !refresh && ticket === generation) { csrf = ""; return load({ refresh: true }); }
       if (!response.ok || !value.ok) throw new Error(value.error?.message || "Cannot load mindmap");
       if (ticket !== generation) return;
+      if (graph?.project.id !== value.project.id) { selected = null; mapSearchCamera = null; mapQuery = ""; }
       graph = value; fullBodies.clear(); bodyVersions.clear(); loadingBodies.clear(); bodyErrors.clear();
       if (!initializedProjects.has(graph.project.id)) {
         if (graph.nodes.length > 200) graph.nodes.filter((node) => !node.parent_id).forEach((node) => collapsed.add(node.id));
@@ -170,9 +213,28 @@
   $("#refresh").addEventListener("click", () => load({ refresh: true }));
   $("#expand").addEventListener("click", () => { collapsed.clear(); render(); });
   $("#collapse").addEventListener("click", () => { if (graph) graph.nodes.forEach((n) => collapsed.add(n.id)); render(); });
-  $("#outline").addEventListener("click", (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } });
+  const bodyClick = (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } };
+  $("#outline").addEventListener("click", bodyClick); $("#map-details").addEventListener("click", bodyClick);
+  $("#map-details").addEventListener("click", event => {
+    const topic = event.target.closest("[data-select-topic]");
+    if (topic) {
+      $("#search").value = ""; const nodes = allNodes(); let node = nodes.get(topic.dataset.selectTopic);
+      while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
+      mapUI.select(topic.dataset.selectTopic);
+    } else if (event.target.closest("[data-topic-outline]")) {
+      collapsed.delete(selected); setView("outline"); document.getElementById(selected)?.scrollIntoView({block:"start"});
+    }
+  });
   $("#outline").addEventListener("toggle", (event) => { const details = event.target; if (details.isConnected && details.dataset.bodyDetails) { details.open ? openBodies.add(details.dataset.bodyDetails) : openBodies.delete(details.dataset.bodyDetails); } }, true);
-  $(".skip").addEventListener("click", (event) => { event.preventDefault(); $("#outline").focus(); $("#outline").scrollIntoView({ block: "start" }); });
+  function setView(mode) {
+    viewMode = mode; $("#view-map").setAttribute("aria-pressed", String(mode === "map")); $("#view-outline").setAttribute("aria-pressed", String(mode === "outline")); render();
+    if (mode === "map") mapUI.schedule();
+  }
+  $("#view-map").addEventListener("click", () => setView("map")); $("#view-outline").addEventListener("click", () => setView("outline"));
+  $("#map-fit").addEventListener("click", () => mapUI.fit()); $("#map-in").addEventListener("click", () => mapUI.zoom(1.2)); $("#map-out").addEventListener("click", () => mapUI.zoom(1/1.2));
+  $("#close-inspector").addEventListener("click", closeInspector);
+  document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#map-inspector").hidden && viewMode === "map") { event.preventDefault(); closeInspector(); } });
+  $(".skip").addEventListener("click", (event) => { event.preventDefault(); setView("outline"); $("#outline").focus(); $("#outline").scrollIntoView({ block: "start" }); });
   window.addEventListener("hashchange", () => load());
   load();
 })();

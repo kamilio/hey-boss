@@ -964,6 +964,7 @@ fn mindmap_assets_reads_and_authoring_boundary() {
     for (path, kind) in [
         ("/mm", "text/html"),
         ("/mindmap.js", "text/javascript"),
+        ("/mindmap-map.js", "text/javascript"),
         ("/mindmap.css", "text/css"),
     ] {
         let r = web.http("GET", path, &[], b"");
