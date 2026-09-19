@@ -70,6 +70,8 @@ pub enum Operation {
     },
     View {
         node: String,
+        #[serde(default)]
+        body_mode: BodyMode,
     },
     Projects,
     Links {

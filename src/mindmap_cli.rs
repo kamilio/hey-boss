@@ -93,8 +93,13 @@ enum Action {
         #[arg(long, value_enum)]
         bodies: Option<BodyMode>,
     },
-    /// Read a single node's full live text/Markdown, without loading the whole map.
-    View { node: String },
+    /// Read one node's live text/Markdown, without loading the whole map.
+    View {
+        node: String,
+        /// Include bodies: default full; preview is up to 512 characters.
+        #[arg(long, value_enum, default_value = "full")]
+        bodies: BodyMode,
+    },
     /// List projects with maps.
     Projects,
     /// Export the nested outline and relationships as Markdown to stdout.
@@ -225,7 +230,10 @@ impl Options {
                     BodyMode::None
                 }),
             },
-            Some(Action::View { node }) => Operation::View { node: node.clone() },
+            Some(Action::View { node, bodies }) => Operation::View {
+                node: node.clone(),
+                body_mode: *bodies,
+            },
             Some(Action::Projects) => Operation::Projects,
             Some(Action::Add {
                 title,
@@ -414,6 +422,14 @@ pub fn run(options: &Options) -> Result<()> {
                     node["reference"].as_str().unwrap(),
                     node["reference_project"].as_str().unwrap()
                 );
+                if let Some(assignee) = node["assignee"].as_str() {
+                    if assignee == "human:boss" {
+                        let name = graph["boss"]["name"].as_str().unwrap_or("Boss");
+                        println!("Assigned to {name} ({assignee})");
+                    } else {
+                        println!("Assigned to {assignee}");
+                    }
+                }
             }
         } else {
             println!("This notification is not confirmed pending.");

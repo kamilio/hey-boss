@@ -495,3 +495,35 @@ Applied the harness recovery/log increment `2f91197` to the original checkout
 after checking the patch; no runtime rebuild is needed for this tool-only change.
 Native goal report remains active at 6,951 seconds used (~116 minutes): the user's
 eight-hour duration remains incomplete. No readiness notification or publication.
+
+Checkpoint continuation: added native assignment labels/search (including the
+current Boss profile), excluded hidden projects from the normal picker while
+preserving direct cross-map navigation, and added focused `view --bodies`
+preview/none/full reads. Show less now fetches current preview metadata rather
+than restoring an old initial projection. Per-node map/resource revisions reject
+rollback. Failed previews retain full text and offer a focused retry; a renamed
+resource remains visible when the original search stops matching, while newer
+search input/focus survives an in-flight read.
+
+Verification: 31 mindmap and 16 web tests passed. Actual mobile browser checks
+covered assignment search, hidden-project direct links, native metadata updates,
+preview 503/retry, and delayed preview with newer search input. The text-node
+revision test fetched revision 18 after initial revision 17, then injected an
+older preview with a stale sentinel: fresh title/full text remained, the sentinel
+was absent, the revision error appeared, and retry received focus. Evidence:
+`out/mm-text-revision-result.txt`. Cleared browser routes and restored the isolated
+demo's issue/title/body/assignment, Boss name, and long planning text afterward.
+
+The restarted endurance run did fail at round 836 / 1910.36 seconds. Its terminal
+server log is `error: unrecognized subcommand 'mm'`; return code 2. The server
+detects executable replacement and execs that path with its original arguments,
+so a replacement without mm interrupted the measurement. The currently installed
+binary supports mm again. This run is not a passed hour or a memory-failure
+diagnosis. The harness now copies its input CLI into its owned output directory
+and uses that fixed build for both reads and authoring, isolating endurance from
+concurrent installation changes. Upgrade resilience remains a separate concern.
+
+Also reproduced the unmodified XMind SDK relationship read API on existing XML
+DOM nodes using Python 3.14.7: endpoint IDs and labeled/unlabeled titles worked.
+The research guide records exact scope; legacy workbook load/create limitations
+remain documented.
