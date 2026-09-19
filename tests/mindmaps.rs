@@ -697,6 +697,20 @@ fn large_markdown_maps_have_small_utf8_safe_previews_and_full_single_node_reads(
     assert_eq!(full["node"]["body"], body);
     assert_eq!(full["node"]["body_truncated"], false);
     assert_eq!(nodes(&full).len(), 1);
+    let one_preview = f.run("Atlas", &["view", "long-0", "--bodies", "preview"]);
+    assert_eq!(one_preview["body_mode"], "preview");
+    assert_eq!(
+        one_preview["node"]["body"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        512
+    );
+    assert_eq!(one_preview["node"]["body_truncated"], true);
+    let one_omitted = f.run("Atlas", &["view", "long-0", "--bodies", "none"]);
+    assert_eq!(one_omitted["node"]["body"], "");
+    assert_eq!(one_omitted["node"]["has_body"], true);
     assert_eq!(
         db.query_row(
             "SELECT body FROM mindmap_nodes WHERE alias='long-0'",
@@ -725,10 +739,22 @@ fn node_view_resolves_current_cross_project_issues_and_pending_only_notices() {
     let g = f.run("Atlas", &["view", "Platform::api"]);
     assert_eq!(g["project"]["id"], "named:Platform");
     assert_eq!(g["node"]["body"], "Current issue details");
+    let issue_body = "🧭 Current issue details. ".repeat(1000);
+    f.issue("Platform", &["edit", "1", "--body", &issue_body]);
+    let preview_issue = f.run("Atlas", &["view", "Platform::api", "--bodies", "preview"]);
+    assert_eq!(
+        preview_issue["node"]["body"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        512
+    );
+    assert_eq!(preview_issue["node"]["resource_version"], 2);
     f.run("Atlas", &["notice", "review", "--id", "review"]);
     let inbox = inbox_fixture::Inbox::start(
         f.root.join("inbox.sock"),
-        json!([{"taskID":"review","status":"pending","title":"Review","summary":"Please review"}]),
+        json!([{"taskID":"review","status":"pending","title":"Review","summary":"🧭 Review context. ".repeat(1000)}]),
     );
     let view = || {
         success(
@@ -739,6 +765,28 @@ fn node_view_resolves_current_cross_project_issues_and_pending_only_notices() {
         )
     };
     assert_eq!(view()["node"]["state"], "pending");
+    let preview_notice = success(
+        f.cmd("Atlas", "mm", &["view", "review", "--bodies", "preview"])
+            .env("HEY_BOSS_INBOX_SOCKET", inbox.path())
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        preview_notice["node"]["body"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        512
+    );
+    let omitted_notice = success(
+        f.cmd("Atlas", "mm", &["view", "review", "--bodies", "none"])
+            .env("HEY_BOSS_INBOX_SOCKET", inbox.path())
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(omitted_notice["node"]["body"], "");
+    assert_eq!(omitted_notice["node"]["has_body"], true);
     inbox.tasks(json!([{"taskID":"review","status":"completed"}]));
     let g = view();
     assert!(g.get("node").is_none());
@@ -1422,6 +1470,20 @@ fn mirrored_issue_views_identify_the_resource_project_and_preserve_unavailable_r
     assert!(
         f.terminal("Atlas", &["view", "api"])
             .contains("Platform · issue #1 · named:Platform")
+    );
+    f.issue("Platform", &["assign-to-boss", "1"]);
+    f.issue("Platform", &["settings", "set", "--boss-name", "Maya"]);
+    let assigned = f.run("Atlas", &["view", "api"]);
+    assert_eq!(assigned["node"]["assignee"], "human:boss");
+    assert_eq!(assigned["boss"]["name"], "Maya");
+    assert!(
+        f.terminal("Atlas", &["view", "api"])
+            .contains("Assigned to Maya (human:boss)")
+    );
+    f.issue("Platform", &["unassign", "1", "--force"]);
+    assert!(
+        !f.terminal("Atlas", &["view", "api"])
+            .contains("Assigned to")
     );
     f.issue("Platform", &["delete", "1"]);
     let unavailable = f.run("Atlas", &["view", "api"]);

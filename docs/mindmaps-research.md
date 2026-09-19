@@ -49,3 +49,29 @@ hierarchy. Running `xmind.load` under the available Python 3 runtime failed in
 The SDK assumes Python 2 strings. No XMind artifact is claimed from this attempt;
 no old runtime or third-party SDK patches were installed. Markmap's real CLI
 reproduction above did produce its verified artifact.
+
+An additional read-only API reproduction succeeded on Python 3.14.7 using the
+same unmodified SDK. Passing existing DOM relationship elements with IDs bypasses
+its Python 2 creation/load paths. `getEnd1ID()` and `getEnd2ID()` returned the
+saved topic IDs; `getTitle()` returned `None` for an unlabeled relationship and
+the supplied text for a labeled one. The isolated SDK checkout remains clean.
+
+```sh
+PYTHONPATH=out/research/xmind-sdk-python python3 - <<'PY'
+from xml.dom import minidom
+from xmind.core.relationship import RelationshipElement
+
+xml = '<relationships><relationship id="r-plain" end1="api" end2="rollout"/><relationship id="r-labelled" end1="api" end2="rollout"><title>API must land first</title></relationship></relationships>'
+document = minidom.parseString(xml)
+relationships = [RelationshipElement(node) for node in document.getElementsByTagName('relationship')]
+assert relationships[0].getTitle() is None
+assert relationships[1].getTitle() == 'API must land first'
+assert all(r.getEnd1ID() == 'api' and r.getEnd2ID() == 'rollout' for r in relationships)
+PY
+```
+
+Saved input/output: `out/research/xmind-relationship-read.xml` and
+`xmind-relationship-read-result.json`. These are a DOM fragment and API result,
+not a successfully loaded/saved XMind workbook. This confirms the optional label
+in the legacy relationship read model; it does not establish current hosted APIs
+or Python 3 compatibility for its write operations.

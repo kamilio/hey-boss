@@ -347,11 +347,11 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     let mut changed = false;
     match op {
         Operation::Show { .. } => {}
-        Operation::View { node } => {
+        Operation::View { node, body_mode } => {
             let mut node = select(db, p, node, false, now, &mut touched)?;
             let project = resolve_project(db, p, node["project_id"].as_str())?;
-            live(db, &mut node, BodyMode::Full)?;
-            let result = json!({"ok":true,"project":project,"version":version(db,&project.id)?,"body_mode":"full","node":node,"nodes":[node],"external_nodes":[],"links":[]});
+            live(db, &mut node, *body_mode)?;
+            let result = json!({"ok":true,"project":project,"version":version(db,&project.id)?,"body_mode":body_mode,"node":node,"nodes":[node],"external_nodes":[],"links":[]});
             ReadBudget::default().charge(&result)?;
             return Ok(result);
         }

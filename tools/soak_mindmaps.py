@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -25,7 +26,11 @@ def main():
     if checkout / 'out' not in output.parents or args.seconds < 1:
         parser.error('Use a new directory under checkout out/ and a positive duration')
     output.mkdir(parents=True, exist_ok=False)
-    cli = args.cli.resolve(strict=True)
+    source_cli = args.cli.resolve(strict=True)
+    # Concurrent local installs trigger the server's executable reload watcher.
+    # Pin both authoring and serving to one build for this endurance measurement.
+    cli = output / 'hey-boss'
+    shutil.copy2(source_cli, cli)
     database = output / 'issues.db'
     inbox_path = output / 'inbox.sock'
     env = dict(os.environ, HEY_BOSS_ISSUE_DB=str(database), HEY_BOSS_INBOX_SOCKET=str(inbox_path))
@@ -119,7 +124,7 @@ def main():
 
         token = ''
         token = http('/api/bootstrap')['csrf']
-        sample('started', url=url, build=subprocess.check_output([str(cli), '--version'], text=True).strip())
+        sample('started', url=url, source_cli=str(source_cli), pinned_cli=str(cli), build=subprocess.check_output([str(cli), '--version'], text=True).strip())
         next_sample = started
         while time.monotonic() - started < args.seconds:
             rounds += 1

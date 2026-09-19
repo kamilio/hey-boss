@@ -1064,6 +1064,22 @@ fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_bound
             .unwrap()
             .contains("<h2>Planning</h2>")
     );
+    let single_preview = web.ok(json!({"action":"mindmap","operation":{"command":"view","node":"long","body_mode":"preview"}}));
+    assert_eq!(single_preview["body_mode"], "preview");
+    assert_eq!(
+        single_preview["node"]["body"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        512
+    );
+    assert_eq!(single_preview["node"]["body_truncated"], true);
+    let single_omitted = web.ok(
+        json!({"action":"mindmap","operation":{"command":"view","node":"long","body_mode":"none"}}),
+    );
+    assert_eq!(single_omitted["node"]["body"], "");
+    assert_eq!(single_omitted["node"]["has_body"], true);
     let edit = json!({"action":"mindmap","operation":{"command":"edit","node":"long","title":"Forbidden","body":null,"if_version":null}});
     assert_eq!(web.action(&web.project, edit, None).status, 403);
     assert_eq!(

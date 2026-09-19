@@ -4,12 +4,19 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   let csrf = "", graph = null, projects = [], generation = 0, controller = null, boot = null;
   const collapsed = new Set(), openBodies = new Set();
-  const fullBodies = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
+  const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
   const route = () => new URLSearchParams(location.hash.slice(1));
   const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
   const issueUrl = (node) => `/#${new URLSearchParams({ project: node.reference_project, issue: node.reference, ...(boot?.backend_host ? { host: boot.backend_host } : {}) })}`;
   const issueContext = (node) => `${node.reference_project !== graph.project.id ? `${node.reference_project_name || projects.find((p) => p.id === node.reference_project)?.name || node.reference_project} · ` : ""}issue #${node.reference}`;
   const nodeName = (node) => `${node.project_id !== graph.project.id ? `${node.project_name || projects.find((p) => p.id === node.project_id)?.name || node.project_id} · ` : ""}${node.title}`;
+  const assigneeName = (id) => {
+    if (!id) return "Unassigned";
+    if (id === "human:boss") return graph?.boss?.name || boot?.boss?.name || "Boss";
+    if (id.startsWith("codex:")) return `Codex · ${id.slice(6, 14)}`;
+    if (id.startsWith("claude:")) return `Claude · ${id.slice(7, 15)}`;
+    return id.replace(/^human:/, "").split("@")[0];
+  };
   const allNodes = () => new Map([...graph.nodes, ...graph.external_nodes].map((node) => [node.id, fullBodies.get(node.id) || node]));
   function relationships(node, nodes, incidents) {
     return (incidents.get(node.id) || []).map((link) => {
@@ -20,16 +27,18 @@
     }).join("");
   }
   function bodyContent(node) {
-    return `${fullBodies.has(node.id) ? `<button class="read-body" data-collapse-body="${esc(node.id)}">Show less</button>` : ""}<div class="body" id="body-${esc(node.id)}" tabindex="-1">${node.body_html || esc(node.body)}</div>${node.body_truncated ? `<button class="read-body" data-read-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>${loadingBodies.has(node.id) ? "Loading…" : "Read full text"}</button>` : ""}${bodyErrors.has(node.id) ? `<p class="body-error" role="alert">${esc(bodyErrors.get(node.id))}</p>` : ""}`;
+    const full = fullBodies.has(node.id);
+    const error = bodyErrors.has(node.id) ? `<p class="body-error" role="alert">${esc(bodyErrors.get(node.id))}</p>` : "";
+    return `${full ? `<button class="read-body" data-collapse-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>Show less</button>${error}` : ""}<div class="body" id="body-${esc(node.id)}" tabindex="-1">${node.body_html || esc(node.body)}</div>${node.body_truncated ? `<button class="read-body" data-read-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>${loadingBodies.has(node.id) ? "Loading…" : "Read full text"}</button>` : ""}${full ? "" : error}`;
   }
-  async function readFullBody(id) {
+  async function readBody(id, mode = "full") {
     if (loadingBodies.has(id) || !graph) return;
-    const ticket = generation, project = graph.project.id, signal = controller.signal;
+    const ticket = generation, project = graph.project.id, signal = controller.signal, query = $("#search").value;
     loadingBodies.set(id, ticket); bodyErrors.delete(id); render();
     try {
       let value;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const response = await fetch("/api/mm", {method:"POST",signal,headers:{"Content-Type":"application/json","X-Hey-Boss-CSRF":csrf},body:JSON.stringify({project,operation:{action:"mindmap",operation:{command:"view",node:id}},request_id:null})});
+        const response = await fetch("/api/mm", {method:"POST",signal,headers:{"Content-Type":"application/json","X-Hey-Boss-CSRF":csrf},body:JSON.stringify({project,operation:{action:"mindmap",operation:{command:"view",node:id,body_mode:mode}},request_id:null})});
         value = await response.json();
         if (ticket !== generation) return;
         if (response.status === 403 && attempt === 0) {
@@ -45,15 +54,31 @@
       if (!value.node) { await load({refresh:true}); return; }
       const current = graph.nodes.find((node) => node.id === id);
       if (!current) return;
+      const latest = fullBodies.get(id) || current;
       if (value.node.available !== current.available) { await load({refresh:true}); return; }
-      if (value.version < graph.version || (current.resource_version && value.node.resource_version < current.resource_version)) throw new Error("The outline changed while reading");
-      fullBodies.set(id,{...value.node,parent_id:current.parent_id,position:current.position,alias:current.alias}); loadingBodies.delete(id); render();
-      document.getElementById(`body-${id}`)?.focus({preventScroll:true});
+      if (value.version < Math.max(graph.version, bodyVersions.get(id) || 0) || (latest.resource_version && value.node.resource_version < latest.resource_version)) throw new Error("The outline changed while reading");
+      const fresh = {...value.node,parent_id:current.parent_id,position:current.position,alias:current.alias};
+      if (value.boss?.version >= (graph.boss?.version || 0)) graph.boss = value.boss;
+      if (mode === "preview") { graph.nodes[graph.nodes.indexOf(current)] = fresh; fullBodies.delete(id); }
+      else fullBodies.set(id, fresh);
+      bodyVersions.set(id, value.version);
+      loadingBodies.delete(id); render();
+      if (!document.getElementById(id) && query && $("#search").value === query) {
+        $("#search").value = "";
+        const nodes = allNodes(); let node = nodes.get(id);
+        while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
+        render();
+      }
+      const focus = document.getElementById(`body-${id}`) || document.getElementById(id);
+      if (focus && document.activeElement !== $("#search")) { focus.tabIndex = -1; focus.focus({preventScroll:true}); }
     } catch (error) {
       if (ticket !== generation || error.name === "AbortError") return;
-      bodyErrors.set(id,`${error.message}. Retry to load the full text.`);
+      bodyErrors.set(id,`${error.message}. ${mode === "preview" ? "Try Show less again." : "Retry to load the full text."}`);
     } finally {
-      if (loadingBodies.get(id) === ticket) { loadingBodies.delete(id); render(); }
+      if (loadingBodies.get(id) === ticket) {
+        loadingBodies.delete(id); render();
+        if (bodyErrors.has(id) && document.activeElement !== $("#search")) document.querySelector(`[data-${mode === "preview" ? "collapse" : "read"}-body="${id}"]`)?.focus({preventScroll:true});
+      }
     }
   }
   function render() {
@@ -72,7 +97,7 @@
     for (const node of graph.nodes) {
       const rel = query ? incidents.get(node.id) || [] : [];
       const display = nodes.get(node.id);
-      if (!query || [display.title, display.body, node.alias, node.kind, node.reference, node.reference_project, node.reference_project_name, ...rel.flatMap((l) => [l.kind, l.description, nodes.get(l.from)?.title, nodes.get(l.to)?.title])].join(" ").toLowerCase().includes(query)) {
+      if (!query || [display.title, display.body, display.state, display.assignee, node.kind === "issue" && display.available !== false ? assigneeName(display.assignee) : "", node.alias, node.kind, node.reference, node.reference_project, node.reference_project_name, ...rel.flatMap((l) => [l.kind, l.description, nodes.get(l.from)?.title, nodes.get(l.to)?.title])].join(" ").toLowerCase().includes(query)) {
         let current = node;
         while (current && !visible.has(current.id)) { visible.add(current.id); current = nodes.get(current.parent_id); }
       }
@@ -85,7 +110,7 @@
         const hasChildren = (children.get(node.id) || []).some((n) => visible.has(n.id)), expanded = Boolean(query) || !collapsed.has(node.id);
         const resource = node.kind === "issue" ? node.available === false ? `<span class="resource">${esc(issueContext(node))}</span>` : `<a class="resource" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))}</a>` : node.kind === "pr" ? `<a class="resource" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open PR ↗</a>` : node.kind === "notification" ? `<a class="resource" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification</a>` : "";
         const rel = relationships(node, nodes, incidents);
-        return `<li class="node" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(node.title)}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(node.title)}</span><div class="meta">${node.kind !== "text" ? `<span class="badge">${esc(node.kind)}</span>` : ""}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
+        return `<li class="node" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(node.title)}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(node.title)}</span><div class="meta">${node.kind !== "text" ? `<span class="badge">${esc(node.kind)}</span>` : ""}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.assignee ? `<span class="assignee" title="${esc(node.assignee)}">Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
       }).join("")}</ul>`;
     };
     $("#outline").innerHTML = tree() || `<p class="empty">${query ? "No matching topics or relationships." : 'No topics yet.<br>Add the first with <code>hey-boss mm add \'Topic\' --id topic</code>'}</p>`;
@@ -120,13 +145,13 @@
       if (response.status === 403 && !refresh && ticket === generation) { csrf = ""; return load({ refresh: true }); }
       if (!response.ok || !value.ok) throw new Error(value.error?.message || "Cannot load mindmap");
       if (ticket !== generation) return;
-      graph = value; fullBodies.clear(); loadingBodies.clear(); bodyErrors.clear();
+      graph = value; fullBodies.clear(); bodyVersions.clear(); loadingBodies.clear(); bodyErrors.clear();
       if (!initializedProjects.has(graph.project.id)) {
         if (graph.nodes.length > 200) graph.nodes.filter((node) => !node.parent_id).forEach((node) => collapsed.add(node.id));
         initializedProjects.add(graph.project.id);
       }
       if (!projects.some((p) => p.id === graph.project.id)) projects.push(graph.project);
-      $("#project").innerHTML = projects.map((p) => `<option value="${esc(p.id)}" ${p.id === graph.project.id ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+      $("#project").innerHTML = projects.filter((p) => p.hidden_at == null || p.id === graph.project.id).map((p) => `<option value="${esc(p.id)}" ${p.id === graph.project.id ? "selected" : ""}>${esc(p.name)}${p.hidden_at != null ? " (hidden)" : ""}</option>`).join("");
       $("#title").textContent = graph.project.name;
       $("#caption").textContent = graph.project.id;
       document.title = `${graph.project.name} · Mindmap · Hey Boss`;
@@ -145,7 +170,7 @@
   $("#refresh").addEventListener("click", () => load({ refresh: true }));
   $("#expand").addEventListener("click", () => { collapsed.clear(); render(); });
   $("#collapse").addEventListener("click", () => { if (graph) graph.nodes.forEach((n) => collapsed.add(n.id)); render(); });
-  $("#outline").addEventListener("click", (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { fullBodies.delete(less.dataset.collapseBody); render(); document.getElementById(`body-${less.dataset.collapseBody}`)?.focus({preventScroll:true}); return; } const read = event.target.closest("[data-read-body]"); if (read) { readFullBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } });
+  $("#outline").addEventListener("click", (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } });
   $("#outline").addEventListener("toggle", (event) => { const details = event.target; if (details.isConnected && details.dataset.bodyDetails) { details.open ? openBodies.add(details.dataset.bodyDetails) : openBodies.delete(details.dataset.bodyDetails); } }, true);
   $(".skip").addEventListener("click", (event) => { event.preventDefault(); $("#outline").focus(); $("#outline").scrollIntoView({ block: "start" }); });
   window.addEventListener("hashchange", () => load());

@@ -22,6 +22,13 @@ characters per body, and `--bodies full` includes complete bodies. JSON reads de
 to full bodies for compatibility; use `--bodies preview` or `none` for smaller map
 responses. `mm export` always includes complete bodies.
 
+`mm view NODE --bodies preview|none|full` uses the same body modes for a focused
+node read; full remains its default. The viewer fetches a current preview when
+you choose Show less, retaining live issue titles, assignments and state.
+Issue assignments appear in its metadata and `mm view`; search also matches
+assignment names/IDs and resource states. Hidden projects are omitted from the
+normal viewer picker, but direct references can open them with a hidden label.
+
 Map reads use a 32 MiB response budget, including rendered Markdown. A full map or
 export that exceeds the budget returns an error before printing content. Use
 previews or omitted bodies for the outline and `view NODE` for individual text.
