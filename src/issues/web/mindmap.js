@@ -9,7 +9,7 @@
   });
   const collapsed = new Set(), openBodies = new Set();
   let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
-  let detailsHTML = "", detailsNode = null;
+  let detailsHTML = "", detailsArtifacts = "", detailsNode = null;
   let relationshipPage = 0;
   let renderingIndex = null;
   let searchQuery = "", searchMatches = [], searchHit = null, mapHit = null;
@@ -108,9 +108,10 @@
     const children = graph.nodes.filter(n => n.parent_id === node.id);
     const topics = children.length ? `<section class="topic-children" aria-label="Child topics"><h3>Topics <span>${children.length}</span></h3><ul>${children.slice(0,50).map(n => `<li><button type="button" data-select-topic="${esc(n.id)}">${esc(HeyBossMap.displayTitle(nodes.get(n.id)))}</button></li>`).join("")}</ul>${children.length > 50 ? '<button type="button" data-topic-outline>View all in outline</button>' : ""}</section>` : "";
     const html = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(HeyBossMap.displayTitle(node))}</h2><div class="meta">${HeyBossMap.kindIcon(node.kind)}${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}<section id="node-artifacts"></section>${issueMetadata(node)}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<section class="topic-relationships">${pager}<ul class="relationships" aria-label="Relationships for ${esc(HeyBossMap.displayTitle(node))}">${rel}</ul></section>` : ""}</div>`;
-    if (html === detailsHTML) return;
+    const artifacts = JSON.stringify(node.artifacts || []);
+    if (html === detailsHTML && artifacts === detailsArtifacts) return;
     const same = detailsNode === node.id, focus = same ? captureFocus(container) : null;
-    container.innerHTML = html; detailsHTML = html; detailsNode = node.id;
+    container.innerHTML = html; detailsHTML = html; detailsArtifacts = artifacts; detailsNode = node.id;
     HeyBossArtifacts.mount($("#node-artifacts"), {project:node.project_id,node:node.id,csrf,artifacts:node.artifacts || []});
     if (!same) container.scrollTop = 0;
     restoreFocus(container, focus);
