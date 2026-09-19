@@ -862,6 +862,11 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
         }
     }
     nodes.extend(automatic);
+    super::artifacts::enrich_nodes(db, &mut nodes)?;
+    super::artifacts::enrich_nodes(db, &mut external)?;
+    for node in nodes.iter().chain(external.iter()) {
+        budget.charge(&node["artifacts"])?;
+    }
     Ok(
         json!({"ok":true,"project":p,"version":version(db,&p.id)?,"body_mode":mode,"nodes":nodes,"external_nodes":external,"links":links}),
     )

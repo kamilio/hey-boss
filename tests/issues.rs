@@ -1159,7 +1159,7 @@ fn concurrent_reorders_reject_stale_lists_without_losing_issue_content() {
         .as_i64()
         .unwrap()
         .to_string();
-    let mut first = f
+    let first = f
         .cmd(
             "session-a",
             &["move", "3", "--before", "1", "--if-order-version", &v],
@@ -1174,7 +1174,7 @@ fn concurrent_reorders_reject_stale_lists_without_losing_issue_content() {
         )
         .output()
         .unwrap();
-    let first_status = first.wait().unwrap();
+    let first_status = first.wait_with_output().unwrap().status;
     assert_eq!(
         usize::from(first_status.success()) + usize::from(second.status.success()),
         1
