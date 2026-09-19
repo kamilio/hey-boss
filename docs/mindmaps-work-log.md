@@ -611,3 +611,10 @@ when selecting another topic. Before/after completed-read evidence:
 `out/mm-map-focus-race-after-completed.txt` (53,051 raw Markdown characters;
 focus now remains on the newer native topic). Routes were cleared afterward.
 Complete child-topic Outline navigation now also focuses its destination.
+
+Restored native issue context on map cards: foreign references include their
+source project, assignments show the current display name, and a hover title
+exposes complete text when the card truncates it. The real browser verified
+`Platform · ISSUE #1 · open` and local `ISSUE #1 · open · Morgan`, preserving
+the existing accessible assignment name. JavaScript syntax/layout checks and
+the debug build passed.

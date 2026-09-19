@@ -405,10 +405,14 @@
         )
           continue;
         keep.add(item.id);
+        const source =
+          item.kind === "issue" && item.reference_project !== this.project.id
+            ? item.reference_project_name || item.reference_project
+            : "";
         const meta = item.project
           ? "PROJECT"
           : item.kind === "issue"
-            ? `ISSUE #${item.reference} · ${item.state || "Unavailable"}`
+            ? `${source ? `${source} · ` : ""}ISSUE #${item.reference} · ${item.state || "Unavailable"}${item.assignee ? ` · ${this.assigneeName(item.assignee)}` : ""}`
             : item.kind === "pr"
               ? "PULL REQUEST"
               : item.kind === "notification"
@@ -420,7 +424,7 @@
                     : item.alias || "TOPIC";
         const html = item.project
           ? `<div class="map-project-title">${esc(item.title)}</div><span class="map-card-meta">${meta}</span>`
-          : `<button class="map-card" data-map-node="${esc(item.id)}" aria-label="${esc(item.title)}${item.assignee ? `, assigned to ${esc(this.assigneeName(item.assignee))}` : ""}" ${item.id === this.selected ? 'aria-pressed="true"' : ""}><span class="map-card-title">${esc(item.title)}</span><span class="map-card-meta">${esc(meta)}</span></button>${item.childCount ? `<button class="map-branch" data-map-toggle="${esc(item.id)}" aria-expanded="${item.expanded}" aria-label="${item.expanded ? "Collapse" : "Expand"} ${esc(item.title)}">${item.expanded ? "−" : item.childCount}</button>` : ""}`;
+          : `<button class="map-card" data-map-node="${esc(item.id)}" title="${esc(item.title)} · ${esc(meta)}" aria-label="${esc(item.title)}${item.assignee ? `, assigned to ${esc(this.assigneeName(item.assignee))}` : ""}" ${item.id === this.selected ? 'aria-pressed="true"' : ""}><span class="map-card-title">${esc(item.title)}</span><span class="map-card-meta">${esc(meta)}</span></button>${item.childCount ? `<button class="map-branch" data-map-toggle="${esc(item.id)}" aria-expanded="${item.expanded}" aria-label="${item.expanded ? "Collapse" : "Expand"} ${esc(item.title)}">${item.expanded ? "−" : item.childCount}</button>` : ""}`;
         let card = existing;
         if (!card) {
           card = document.createElement("div");
