@@ -737,3 +737,19 @@ Wrapped-label spacing is delivered as main `2be96fd` and installed build
 `out/mm-installed-label-assets-result.json`. The 320×740 wrapped-label screenshot
 was inspected too: full unscaled 39/12-pixel line heights, no horizontal overflow.
 This stylesheet change retains all card/edge layout dimensions.
+
+Delayed text reads exposed relationship focus defects: two relationships sharing
+a destination could restore focus to the wrong description in Map, and Outline
+lost the focused link entirely. Relationships now carry their stable directional
+identity; shared focus capture/recovery preserves the specific topic control,
+relationship, body, heading or native issue summary in both views. Focus intent
+uses that identity across DOM replacement, so completing an earlier Outline read
+does not prevent a newer read from focusing its own loaded body.
+Before/after evidence: `out/mm-map-link-focus-before.txt`,
+`out/mm-map-link-focus-after.txt`, `out/mm-map-concurrent-focus-before.txt`,
+`out/mm-map-concurrent-focus-after.txt`.
+
+`tools/mindmap_focus_browser_checks.js` passes 19 assertions covering delayed
+success and synthetic 503 failures in both views, same-destination relationships,
+overlapping reads, and ordinary full/preview body focus. Mock routes are cleared
+after every case. Evidence `out/mm-map-focus-browser-result.txt`.

@@ -28,8 +28,28 @@
       const outgoing = link.from === node.id, other = nodes.get(outgoing ? link.to : link.from);
       if (!other) return "";
       const text = link.kind === "depends-on" ? (outgoing ? "Depends on" : "Required by") : link.kind === "pull-request" ? (outgoing ? "Pull request" : "Issue") : `${outgoing ? "→" : "←"} ${link.kind}`;
-      return `<li><span class="relation-kind">${esc(text)}</span> <a data-map-link href="${esc(other.resource_only && other.kind === "issue" ? issueUrl(other) : mapUrl(other.project_id, other.id))}">${esc(nodeName(other))}</a>${other.kind === "issue" ? ` <span class="description">(${esc(issueContext(other))})</span> ` : ""}${link.description ? `<span class="description">— ${esc(link.description)}</span>` : ""}${link.automatic ? ' <span class="automatic">automatic</span>' : ""}</li>`;
+      return `<li><span class="relation-kind">${esc(text)}</span> <a data-map-link data-rel-key="${esc(JSON.stringify([link.from,link.to,link.kind,Boolean(link.automatic)]))}" href="${esc(other.resource_only && other.kind === "issue" ? issueUrl(other) : mapUrl(other.project_id, other.id))}">${esc(nodeName(other))}</a>${other.kind === "issue" ? ` <span class="description">(${esc(issueContext(other))})</span> ` : ""}${link.description ? `<span class="description">— ${esc(link.description)}</span>` : ""}${link.automatic ? ' <span class="automatic">automatic</span>' : ""}</li>`;
     }).join("");
+  }
+  function captureFocus(container) {
+    const active = document.activeElement;
+    if (!container.contains(active)) return null;
+    const attribute = ["id","data-toggle","data-read-body","data-collapse-body","data-select-topic","data-topic-outline","data-rel-page","data-rel-key","href"].find(name => active.hasAttribute(name));
+    return {attribute,value:attribute ? active.getAttribute(attribute) : null,scope:active.closest(".node, #map-details > div[id]")?.id,heading:active.matches("h2[tabindex]"),summary:active.tagName === "SUMMARY" ? active.parentElement.dataset.bodyDetails : null};
+  }
+  function focusIdentity() {
+    const state = captureFocus(document.body);
+    return state?.scope && (state.attribute || state.heading || state.summary) ? JSON.stringify(state) : document.activeElement;
+  }
+  function restoreFocus(container, state) {
+    if (!state) return;
+    const owner = state.scope && document.getElementById(state.scope);
+    const scope = owner && container.contains(owner) ? owner : container;
+    const selector = state.attribute ? `[${state.attribute}="${CSS.escape(state.value)}"]` : null;
+    let target = state.heading ? scope.querySelector("h2[tabindex]") : state.summary ? scope.querySelector(`[data-body-details="${CSS.escape(state.summary)}"] > summary`) : selector ? scope.matches(selector) ? scope : scope.querySelector(selector) : null;
+    if (!target || target.disabled) target = (state.attribute === "data-rel-page" ? scope.querySelector("[data-rel-page]:not(:disabled)") : null) || scope.querySelector("h2[tabindex]") || scope;
+    if (target.tabIndex < 0) target.tabIndex = -1;
+    target.focus({preventScroll:true});
   }
   function bodyContent(node) {
     const full = fullBodies.has(node.id);
@@ -79,20 +99,16 @@
     const topics = children.length ? `<section class="topic-children" aria-label="Child topics"><h3>Topics <span>${children.length}</span></h3><ul>${children.slice(0,50).map(n => `<li><button type="button" data-select-topic="${esc(n.id)}">${esc(nodes.get(n.id).title)}</button></li>`).join("")}</ul>${children.length > 50 ? '<button type="button" data-topic-outline>View all in outline</button>' : ""}</section>` : "";
     const html = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(node.title)}</h2><div class="meta"><span class="badge">${esc(node.kind)}</span>${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<section class="topic-relationships">${pager}<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul></section>` : ""}</div>`;
     if (html === detailsHTML) return;
-    const same = detailsNode === node.id, active = same && container.contains(document.activeElement) ? document.activeElement : null;
-    const heading = active?.matches("h2[tabindex]"), id = active?.id, read = active?.dataset.readBody, less = active?.dataset.collapseBody, topic = active?.dataset.selectTopic, outline = active?.hasAttribute("data-topic-outline"), page = active?.dataset.relPage, href = active?.tagName === "A" ? active.getAttribute("href") : null;
+    const same = detailsNode === node.id, focus = same ? captureFocus(container) : null;
     container.innerHTML = html; detailsHTML = html; detailsNode = node.id;
     if (!same) container.scrollTop = 0;
-    if (active) {
-      const target = heading ? container.querySelector("h2[tabindex]") : id ? document.getElementById(id) : read ? container.querySelector(`[data-read-body="${read}"]`) : less ? container.querySelector(`[data-collapse-body="${less}"]`) : topic ? container.querySelector(`[data-select-topic="${topic}"]`) : outline ? container.querySelector("[data-topic-outline]") : page ? container.querySelector(`[data-rel-page="${page}"]`) : href ? [...container.querySelectorAll("a")].find(a => a.getAttribute("href") === href) : null;
-      (target && !target.disabled ? target : page ? container.querySelector("[data-rel-page]:not(:disabled)") : container.querySelector("h2[tabindex]"))?.focus({preventScroll:true});
-    }
+    restoreFocus(container, focus);
   }
   async function readBody(id, mode = "full") {
     if (loadingBodies.has(id) || !graph) return;
     const ticket = generation, project = graph.project.id, signal = controller.signal, query = $("#search").value;
     loadingBodies.set(id, ticket); bodyErrors.delete(id); render();
-    const readingFocus = document.activeElement;
+    const readingFocus = focusIdentity();
     try {
       let value;
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -121,7 +137,7 @@
       else fullBodies.set(id, fresh);
       bodyVersions.set(id, value.version);
       renderingIndex = null;
-      const retainReadingFocus = document.activeElement === readingFocus;
+      const retainReadingFocus = focusIdentity() === readingFocus;
       loadingBodies.delete(id); render();
       if (!document.getElementById(id) && query && $("#search").value === query) {
         $("#search").value = "";
@@ -136,7 +152,7 @@
       bodyErrors.set(id,`${error.message}. ${mode === "preview" ? "Try Show less again." : "Retry to load the full text."}`);
     } finally {
       if (loadingBodies.get(id) === ticket) {
-        const retainReadingFocus = document.activeElement === readingFocus;
+        const retainReadingFocus = focusIdentity() === readingFocus;
         loadingBodies.delete(id); render();
         if (bodyErrors.has(id) && retainReadingFocus && document.activeElement !== $("#search")) document.querySelector(`[data-${mode === "preview" ? "collapse" : "read"}-body="${id}"]`)?.focus({preventScroll:true});
       }
@@ -144,7 +160,7 @@
   }
   function render() {
     if (!graph) return;
-    const focus = document.activeElement, toggleFocus = focus?.dataset?.toggle;
+    const outlineFocus = captureFocus($("#outline"));
     const { nodes, incidents, documents } = renderingIndex ||= HeyBossMap.indexGraph([...allNodes().values()], graph.links, assigneeName);
     const query = $("#search").value.trim().toLowerCase();
     const visible = new Set(), matched = new Set();
@@ -197,7 +213,7 @@
       }).join("")}</ul>`;
     };
     $("#outline").innerHTML = tree() || `<p class="empty">${query ? "No matching topics or relationships." : 'No topics yet.<br>Add the first with <code>hey-boss mm add \'Topic\' --id topic</code>'}</p>`;
-    if (toggleFocus) [...document.querySelectorAll("[data-toggle]")].find((b) => b.dataset.toggle === toggleFocus)?.focus();
+    restoreFocus($("#outline"), outlineFocus);
   }
   function reveal() {
     const target = route().get("node"); if (!target || !graph) return;
