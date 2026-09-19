@@ -80,6 +80,43 @@
       item.y <= view.y + view.height + margin
     );
   }
+  function indexGraph(items, links, assigneeName) {
+    const nodes = new Map(items.map((node) => [node.id, node])),
+      incidents = new Map(),
+      documents = new Map();
+    for (const link of links)
+      for (const id of [link.from, link.to]) {
+        if (!incidents.has(id)) incidents.set(id, []);
+        incidents.get(id).push(link);
+      }
+    for (const node of nodes.values())
+      documents.set(
+        node.id,
+        [
+          node.title,
+          node.body,
+          node.state,
+          node.assignee,
+          node.kind === "issue" && node.available !== false
+            ? assigneeName(node.assignee)
+            : "",
+          node.alias,
+          node.kind,
+          node.reference,
+          node.reference_project,
+          node.reference_project_name,
+          ...(incidents.get(node.id) || []).flatMap((link) => [
+            link.kind,
+            link.description,
+            nodes.get(link.from)?.title,
+            nodes.get(link.to)?.title,
+          ]),
+        ]
+          .join(" ")
+          .toLowerCase(),
+      );
+    return { nodes, incidents, documents };
+  }
   class Mindmap {
     constructor(element, { select, toggle, escape }) {
       this.element = element;
@@ -490,7 +527,7 @@
       }
     }
   }
-  const api = { layout, inViewport, Mindmap };
+  const api = { layout, inViewport, indexGraph, Mindmap };
   if (typeof module !== "undefined") module.exports = api;
   else root.HeyBossMap = api;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -1,5 +1,9 @@
 const assert = require("node:assert/strict");
-const { layout, inViewport } = require("../src/issues/web/mindmap-map.js");
+const {
+  layout,
+  inViewport,
+  indexGraph,
+} = require("../src/issues/web/mindmap-map.js");
 const node = (id, parent_id = null) => ({ id, parent_id, title: id });
 const fixture = [
   node("a"),
@@ -30,6 +34,66 @@ assert(inViewport({ x: 0, y: 0 }, { x: 10, y: 10, width: 100, height: 100 }));
 assert(
   !inViewport({ x: 1000, y: 1000 }, { x: 10, y: 10, width: 100, height: 100 }),
 );
+const searchable = [
+  { id: "release", title: "Release", kind: "text", alias: "launch" },
+  {
+    id: "api",
+    title: "Shared API",
+    kind: "issue",
+    state: "open",
+    body: "Café 🧭 planning",
+    reference: "42",
+    reference_project: "named:Platform",
+    reference_project_name: "Platform",
+    assignee: "human:boss",
+  },
+];
+const dependencies = [
+  { from: "release", to: "api", kind: "depends-on", description: "API first" },
+];
+const indexed = indexGraph(searchable, dependencies, () => "Morgan");
+for (const query of ["shared api", "depends-on", "api first"])
+  assert(indexed.documents.get("release").includes(query));
+for (const query of [
+  "café",
+  "🧭",
+  "platform",
+  "42",
+  "open",
+  "morgan",
+  "human:boss",
+])
+  assert(indexed.documents.get("api").includes(query));
+assert(indexed.documents.get("release").includes("launch"));
+assert.equal(indexed.nodes.get("api"), searchable[1]);
+assert.equal(indexed.incidents.get("api")[0], dependencies[0]);
+const fresh = indexGraph(
+  [
+    searchable[0],
+    { ...searchable[1], title: "Renamed API", body: "Full loaded text" },
+  ],
+  dependencies,
+  () => "Avery",
+);
+assert(fresh.documents.get("release").includes("renamed api"));
+assert(!fresh.documents.get("release").includes("shared api"));
+assert(fresh.documents.get("api").includes("full loaded text"));
+assert(fresh.documents.get("api").includes("avery"));
+const unavailable = indexGraph(
+  [{ ...searchable[1], available: false }],
+  [
+    {
+      from: "api",
+      to: "missing",
+      kind: "related",
+      description: "Resource removed",
+    },
+  ],
+  () => "Morgan",
+);
+assert(!unavailable.documents.get("api").includes("morgan"));
+assert(unavailable.documents.get("api").includes("resource removed"));
+assert.equal(indexGraph([], [], () => "").documents.size, 0);
 const big = Array.from({ length: 10000 }, (_, i) =>
   node(`n${i}`, i < 25 ? null : `n${i % 25}`),
 );

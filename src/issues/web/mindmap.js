@@ -6,6 +6,7 @@
   const collapsed = new Set(), openBodies = new Set();
   let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
   let detailsHTML = "", detailsNode = null;
+  let renderingIndex = null;
   const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
   const route = () => new URLSearchParams(location.hash.slice(1));
   const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
@@ -112,6 +113,7 @@
       if (mode === "preview") { graph.nodes[graph.nodes.indexOf(current)] = fresh; fullBodies.delete(id); }
       else fullBodies.set(id, fresh);
       bodyVersions.set(id, value.version);
+      renderingIndex = null;
       const retainReadingFocus = document.activeElement === readingFocus;
       loadingBodies.delete(id); render();
       if (!document.getElementById(id) && query && $("#search").value === query) {
@@ -136,20 +138,11 @@
   function render() {
     if (!graph) return;
     const focus = document.activeElement, toggleFocus = focus?.dataset?.toggle;
-    const nodes = allNodes(), children = new Map(), query = $("#search").value.trim().toLowerCase();
-    for (const node of graph.nodes) { const key = node.parent_id || ""; if (!children.has(key)) children.set(key, []); children.get(key).push(node); }
-    const incidents = new Map();
-    for (const link of graph.links) {
-      for (const id of [link.from, link.to]) {
-        if (!incidents.has(id)) incidents.set(id, []);
-        incidents.get(id).push(link);
-      }
-    }
+    const { nodes, incidents, documents } = renderingIndex ||= HeyBossMap.indexGraph([...allNodes().values()], graph.links, assigneeName);
+    const query = $("#search").value.trim().toLowerCase();
     const visible = new Set(), matched = new Set();
     for (const node of graph.nodes) {
-      const rel = query ? incidents.get(node.id) || [] : [];
-      const display = nodes.get(node.id);
-      if (!query || [display.title, display.body, display.state, display.assignee, node.kind === "issue" && display.available !== false ? assigneeName(display.assignee) : "", node.alias, node.kind, node.reference, node.reference_project, node.reference_project_name, ...rel.flatMap((l) => [l.kind, l.description, nodes.get(l.from)?.title, nodes.get(l.to)?.title])].join(" ").toLowerCase().includes(query)) {
+      if (!query || documents.get(node.id).includes(query)) {
         matched.add(node.id);
         let current = node;
         while (current && !visible.has(current.id)) { visible.add(current.id); current = nodes.get(current.parent_id); }
@@ -170,6 +163,8 @@
       details(nodes, incidents, visible); return;
     }
     $("#map-details").innerHTML = ""; detailsHTML = ""; detailsNode = null;
+    const children = new Map();
+    for (const node of graph.nodes) { const key = node.parent_id || ""; if (!children.has(key)) children.set(key, []); children.get(key).push(node); }
     const tree = (parent = "") => {
       const list = (children.get(parent) || []).filter((n) => visible.has(n.id));
       if (!list.length) return "";
@@ -216,7 +211,7 @@
       if (!response.ok || !value.ok) throw new Error(value.error?.message || "Cannot load mindmap");
       if (ticket !== generation) return;
       if (graph?.project.id !== value.project.id) { selected = null; mapSearchCamera = null; mapQuery = ""; }
-      graph = value; fullBodies.clear(); bodyVersions.clear(); loadingBodies.clear(); bodyErrors.clear();
+      graph = value; renderingIndex = null; fullBodies.clear(); bodyVersions.clear(); loadingBodies.clear(); bodyErrors.clear();
       if (!initializedProjects.has(graph.project.id)) {
         if (graph.nodes.length > 200) graph.nodes.filter((node) => !node.parent_id).forEach((node) => collapsed.add(node.id));
         initializedProjects.add(graph.project.id);

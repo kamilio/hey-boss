@@ -634,3 +634,24 @@ calls took 1–1.5 ms each, excluding browser paint; the expanded update took
 measurements ranged from 4.8 to 21.9 ms. Evidence:
 `out/mm-map-10k-draw-result.txt` and `out/mm-map-10k-input-result.txt`.
 Heap readings before/after this short sequence are not a memory-leak assessment.
+
+Cached the graph's incident relationships and case-insensitive search text until
+a map/focused content read changes it. This avoids rebuilding relationship text
+on each input. TDD first failed for the missing index; regression coverage checks
+Unicode/body text, aliases, state, native project/issue context, assignment display
+names/IDs, dependency descriptions, neighboring live titles and unavailable
+resources. The same seven real-browser input measurements on 10,000 topics now
+range from 1.2 to 7.3 ms (previously 4.8–21.9 ms); local fixture observations.
+Actual full→preview reads add/remove a unique tail-text search match. Renaming
+the isolated Boss to Avery and reading another topic updates the assignee match;
+the fixture's Morgan name was restored. Evidence:
+`out/mm-map-10k-index-after.txt`, `out/mm-map-index-live-result.txt`, and
+`out/mm-map-index-boss-result.txt`.
+
+One hundred repeated large-map queries kept mounted cards at 12 maximum. Heap
+used after explicit garbage collection changed from 12,832,460 to 12,958,352
+bytes; this short controlled probe does not establish indefinite memory behavior.
+Evidence `out/mm-map-10k-heap-result.txt`. Dark-mode screenshot was inspected;
+reduced motion disables card transitions, Escape returns focus to the selected
+card, and arrow/plus keys pan/zoom the map. At 320×740, controls stay visible and
+the Zoom in button remains the top clickable element, with no page overflow.
