@@ -1052,3 +1052,28 @@ reparented are excluded. Finite runs do not establish indefinite leak freedom.
 The earlier small-fixture native hour has separate RSS evidence and is not this
 10,000-node server. Final fleet/native integration is awaiting the concurrent
 native-window/shared quick-add changes; no other installer was stopped.
+
+Completion audit after the four-hour window: the final installed Map edition
+passes 190 Chrome and 175 WebKit checks (core interactions, 126 seven-width
+controls checks, and 24 dark/light search-control checks per browser). Native
+touch is tested in Chrome via CDP; WebKit coverage is keyboard, pointer and
+rendering. The final seven served assets, including quick-issue.js and composed
+HTML, match committed Map source. Screenshots were reviewed. Evidence
+`out/mm-search-final-native-audit.json`, `out/mm-search-final-native-*.txt`,
+`out/mm-installed-shared-assets-search-final.json`.
+
+The final delivered Map build e1c44affa2e49d17 is installed on devbox and the
+second Mac. Subsequent local dashboard builds preserve the same seven Map
+assets byte-for-byte; the latest local pin 7c936a9a0676e794 was verified directly.
+This proves this Map delivery on all three machines while preserving concurrent
+dashboard work. Evidence `out/mm-delivered-fleet-check-1950.json`,
+`out/mm-installed-shared-assets-local-final.json` and
+`out/mm-completion-audit.json`. No other installer or upgrade lock was removed.
+
+The final Fly deployment command exited zero; the currently deployed service
+has a started machine, passing health check and all 15 dist files identical to
+local bytes. Evidence `out/mm-fly-final-deploy-1946.log`,
+`out/mm-fly-final-status.json`, `out/mm-fly-final-assets.json`. The viewer renderer
+is unchanged from the measured 10,000-node/20,000-link edition; performance
+measurements and their scope are recorded above. The final readiness notification
+follows the completed duration and audit.
