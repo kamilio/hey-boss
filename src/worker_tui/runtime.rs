@@ -139,7 +139,8 @@ fn event_loop(
                     app.error = Some(error);
                     // Recover the inventory if the selected worker disappeared.
                     // Keep the last good snapshot visible during ordinary outages.
-                    recover_inventory = matches!(request, Request::Refresh(Some(_)));
+                    recover_inventory =
+                        !app.owned_worker && matches!(request, Request::Refresh(Some(_)));
                     next_refresh = Instant::now() + Duration::from_secs(2);
                 }
             }
@@ -213,12 +214,10 @@ fn event_loop(
             }
             continue;
         }
-        let old_worker = app.worker_id.clone();
         match key.code {
             KeyCode::Char('q') => return Ok(Exit::Quit),
             KeyCode::Up | KeyCode::Char('k') => app.navigate(-1),
             KeyCode::Down | KeyCode::Char('j') => app.navigate(1),
-            KeyCode::Tab | KeyCode::BackTab => app.sessions_focused = !app.sessions_focused,
             KeyCode::Char('h') => {
                 app.history = !app.history;
                 app.normalize_run();
@@ -230,9 +229,6 @@ fn event_loop(
             KeyCode::PageDown => app.detail_scroll = app.detail_scroll.saturating_add(5),
             KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(5),
             _ => {}
-        }
-        if app.worker_id != old_worker {
-            next_refresh = Instant::now();
         }
     }
 }

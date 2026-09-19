@@ -27,30 +27,36 @@ token so worker supervisors can restore the terminal before shutdown or reload.
 When started by `hey-boss worker`, q / Ctrl+C stops that worker and its sessions.
 With `worker status` or the standalone executable, quitting leaves workers running.
 
-Workers appear on the left, with state and busy/total slots. The selected worker
-lists project scope and its ID to distinguish workers with similar names. It
-shows eligible issues, active sessions, optional recent attempts, and session
-activity. Selection follows worker/session IDs through refreshes. Switching
-workers hides the previous worker's sessions until fresh data arrives. Errors
-retain the last successful snapshot, display an error, and retry every two
-seconds. Deleted workers trigger an inventory refresh and selection recovery.
+Only the current worker appears. Starting a worker pins its own ID; `worker status`
+shows the latest worker, or use `--id WORKER_ID` to watch a specific one. A prominent
+AVAILABLE / BUSY badge and busy/available slot counts show its capacity. Pause and
+update states explain that existing sessions finish before pickup resumes.
+
+Active work is the default view. Press h to switch to a separate completed-attempt
+history; completed attempts never consume slots. Selection follows session IDs
+through refreshes. Main shows controller connectivity: this machine for the
+controller, connected/disconnected for fleet agents, or not configured for local
+queues. Agent connectivity uses the existing five-second heartbeat, expires after
+fifteen seconds, and shows changes waiting to sync. Unknown means status could not
+be read. Request errors retain the last successful sessions, mark connectivity
+unknown, and retry every two seconds. Deleted workers in status dashboards trigger
+an inventory refresh; an owning dashboard stays pinned to its worker.
 Session durations and claim deadlines update once per second. Requests time out
 after ten seconds. Output retention is bounded.
 
 | Key | Action |
 | --- | --- |
-| ↑/↓ or j/k | Select worker or session |
-| Tab | Switch focus |
-| h | Toggle completed attempts (up to 20 from the CLI) |
+| ↑/↓ or j/k | Select session |
+| h | Switch active work / completed attempts (up to 20 from the CLI) |
 | PgUp/PgDn | Scroll activity |
 | r | Refresh or retry |
-| p | Confirm pause; running sessions drain |
+| p | Confirm pause; existing sessions finish normally |
 | s | Confirm stop; worker sessions are stopped |
 | ? | Help |
 | Esc | Cancel confirmation or close help |
 | q or Ctrl+C | Exit dashboard; workers keep running |
 
-At narrow widths, workers stack above sessions. Below 48 columns or 12 rows,
+At narrow widths, activity is hidden so sessions remain visible. Below 48 columns or 12 rows,
 only quit keys work. Bracketed paste is ignored. Alternate-screen, cursor, and
 raw-terminal state are restored on exit, errors, panic, SIGINT, and SIGTERM.
 Queue text is stripped of terminal controls and bidi overrides.
@@ -90,7 +96,7 @@ node tests/integrated-terminal.mjs
 
 The terminal walkthrough uses the terminal-pilot SDK and a temporary synthetic
 queue. It tests history, navigation, help during slow requests, resizing,
-deleted workers, outage recovery, pasted keys, confirmation cancellation,
+outage recovery, pasted keys, confirmation cancellation,
 pause/stop, and restored terminal settings after quit and SIGTERM. It writes screenshots
 under the ignored `worker-tui/target/terminal-qa` directory. Real queues and
 workers are not changed. CI checks the Rust package and PTY walkthrough on macOS

@@ -109,17 +109,18 @@ async function waitState(expected) {
 try {
   const session = await start();
   await wait(session, "Build dashboard");
+  assert.ok(!(await session.screen()).contains("Previous attempt"), "Default must show only active work");
   await capture(session, "wide");
-  await session.press("Tab");
   await session.type("h");
   await wait(session, "Previous attempt");
+  assert.ok(!(await session.screen()).contains("Build dashboard"), "History must be separate from active work");
   await session.press("ArrowDown");
   await session.press("PageDown");
   await session.type("?");
   await wait(session, "Keyboard");
   await session.press("Escape");
   await session.resize(48, 12);
-  await wait(session, /Workers · 2 ─{28}/);
+  await wait(session, "Completed attempts");
   assert.ok((await session.screen()).contains("Previous attempt"), "Compact layout hides the selected session");
   await capture(session, "compact");
   await session.resize(30, 8);
@@ -127,6 +128,7 @@ try {
   await session.type("sp");
   assert.deepEqual(await state(), {}, "Small-screen keys must not control workers");
   await session.resize(120, 36);
+  await session.type("h");
   await wait(session, "Build dashboard");
   await ready(session);
   await writeFile(delayPath, "");
@@ -139,16 +141,7 @@ try {
   await session.press("Escape");
   await rm(delayPath);
   await ready(session);
-  await session.press("Tab");
-  await session.press("ArrowDown");
-  await wait(session, "Review dashboard");
-  await ready(session);
-  // A worker deleted between refreshes must not strand selection on its old ID.
-  await writeFile(removedPath, "");
-  await session.type("r");
-  await wait(session, "Worker was not found");
-  await wait(session, "Build dashboard");
-  await ready(session);
+  assert.ok(!(await session.screen()).contains("Reviewer"), "Other workers must stay out of the current worker dashboard");
   // Errors retain the good snapshot and recover without restarting the UI.
   await writeFile(failPath, "");
   await session.type("r");
@@ -170,7 +163,7 @@ try {
   await wait(session, "Pause worker?");
   await session.press("Enter");
   await waitState({ alpha: "pause" });
-  await wait(session, "draining");
+  await wait(session, "Finishing work before pause");
   await ready(session);
   await session.type("s");
   await wait(session, "Stop worker?");

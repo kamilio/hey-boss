@@ -2,7 +2,7 @@
 use super::{Dashboard, text};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -22,7 +22,7 @@ fn block(title: impl Into<String>, focused: bool) -> Block<'static> {
 
 fn state(w: &Value) -> &'static str {
     if w["upgrading"] == true {
-        "draining"
+        "Finishing work before update"
     } else if w["pid"].is_null() {
         if w["config"]["enabled"] == true {
             "offline"
@@ -31,18 +31,21 @@ fn state(w: &Value) -> &'static str {
         }
     } else if w["config"]["enabled"] != true {
         if w["active"].as_u64().unwrap_or(0) > 0 {
-            "draining"
+            "Finishing work before pause"
         } else {
             "paused"
         }
+    } else if w["active"].as_u64().unwrap_or(0) >= w["config"]["concurrency"].as_u64().unwrap_or(1)
+    {
+        "BUSY"
     } else {
-        "running"
+        "AVAILABLE"
     }
 }
 
 fn color(state: &str) -> Color {
     match state {
-        "running" | "completed" | "succeeded" => Color::Green,
+        "AVAILABLE" | "running" | "completed" | "succeeded" => Color::Green,
         "failed" | "error" | "offline" => Color::Red,
         _ => Color::Yellow,
     }
@@ -109,137 +112,107 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         return;
     }
     let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(5),
+        Constraint::Length(4),
+        Constraint::Min(6),
         Constraint::Length(2),
     ])
     .split(size);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    " HEY BOSS ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  Workers"),
-            ]),
-            Line::from(format!(
-                " {} · {}",
-                text(&app.snapshot["store"]["host"]),
-                text(&app.snapshot["store"]["database"])
-            )),
-        ]),
-        rows[0],
-    );
-    let wide = size.width >= 90;
-    let panels = if wide {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
-            .split(rows[1])
+    let worker = app
+        .workers()
+        .into_iter()
+        .find(|w| w["id"].as_str() == app.worker_id.as_deref());
+    let mut header = vec![];
+    if let Some(w) = worker {
+        let status = state(w);
+        let active = w["active"].as_u64().unwrap_or(0);
+        let slots = w["config"]["concurrency"].as_u64().unwrap_or(0);
+        header.push(Line::from(vec![
+            Span::raw(" HEY BOSS "),
+            Span::styled(
+                format!(" {status} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(color(status))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", text(&w["config"]["name"])),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        header.push(Line::from(format!(
+            " {active} busy · {} available / {slots} slots · {} · {}",
+            slots.saturating_sub(active),
+            scope(w),
+            text(&w["id"])
+        )));
     } else {
-        Layout::vertical([Constraint::Length(4), Constraint::Min(2)]).split(rows[1])
-    };
-    let workers = app.workers();
-    let items: Vec<ListItem> = workers
-        .iter()
-        .map(|w| {
-            let status = state(w);
-            let label = Line::from(vec![
-                Span::styled(
-                    format!("{} ", text(&w["config"]["name"])),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{status} {}/{}", w["active"], w["config"]["concurrency"]),
-                    Style::default().fg(color(status)),
-                ),
-            ]);
-            if wide {
-                ListItem::new(vec![
-                    label,
-                    Line::from(Span::styled(
-                        format!(
-                            "  {} · {}",
-                            scope(w),
-                            text(&w["id"]).chars().take(8).collect::<String>()
-                        ),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ])
-            } else {
-                ListItem::new(label)
-            }
-        })
-        .collect();
-    let mut selection = ListState::default().with_selected(
-        workers
-            .iter()
-            .position(|w| w["id"].as_str() == app.worker_id.as_deref()),
-    );
-    let workers_block = block(
-        format!("Workers · {}", workers.len()),
-        !app.sessions_focused,
-    );
-    if items.is_empty() {
-        frame.render_widget(
-            Paragraph::new(if app.pending {
-                "Connecting to queue…"
-            } else {
-                "No workers. Start: hey-boss worker"
-            })
-            .wrap(Wrap { trim: true })
-            .block(workers_block),
-            panels[0],
-        );
-    } else {
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(workers_block)
-                .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(Color::DarkGray)),
-            panels[0],
-            &mut selection,
-        );
+        header.push(Line::from(if app.pending {
+            " Connecting to queue…"
+        } else {
+            " No current worker. Start: hey-boss worker"
+        }));
+        header.push(Line::default());
     }
-    let right = if panels[1].height < 10 {
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(0),
-        ])
-        .split(panels[1])
+    let connection = if app.error.is_some() {
+        "unknown"
     } else {
-        Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Percentage(45),
-            Constraint::Min(2),
-        ])
-        .split(panels[1])
+        app.snapshot["fleet"]["controller_connection"]["state"]
+            .as_str()
+            .unwrap_or("unknown")
     };
-    let summary = if app.snapshot["worker_id"].as_str() == app.worker_id.as_deref() {
-        format!(
-            " {} busy · {} free / {} slots · {} eligible\n tags {} · {}",
-            app.snapshot["active"],
-            app.snapshot["free"],
-            app.snapshot["config"]["concurrency"],
-            app.snapshot["eligible"],
-            text(&Value::String(app.snapshot["config"]["tags"].to_string())),
-            if app.snapshot["fleet"]["role"] == "agent" {
-                "fleet replica"
+    let connection_label = match connection {
+        "local" => "Main: this machine".to_owned(),
+        "standalone" => "Main: not configured (local queue)".to_owned(),
+        state => format!("Main: {state}"),
+    };
+    header.push(Line::from(vec![
+        Span::styled(
+            format!(" {connection_label}"),
+            Style::default().fg(match connection {
+                "connected" | "local" => Color::Green,
+                "disconnected" => Color::Red,
+                _ => Color::Yellow,
+            }),
+        ),
+        Span::raw(if app.snapshot["fleet"]["role"] == "agent" {
+            format!(
+                " · {} changes waiting to sync",
+                app.snapshot["fleet"]["pending_changes"]
+                    .as_u64()
+                    .unwrap_or(0)
+            )
+        } else {
+            String::new()
+        }),
+    ]));
+    header.push(Line::from(vec![
+        Span::styled(
+            if app.history {
+                " Active "
             } else {
-                "local queue"
-            }
-        )
+                " [Active] "
+            },
+            Style::default().fg(if app.history { Color::DarkGray } else { ACCENT }),
+        ),
+        Span::styled(
+            if app.history {
+                " [History] "
+            } else {
+                " History "
+            },
+            Style::default().fg(if app.history { ACCENT } else { Color::DarkGray }),
+        ),
+        Span::raw(" · h switch"),
+    ]));
+    frame.render_widget(Paragraph::new(header), rows[0]);
+    let right = if rows[1].height < 10 {
+        Layout::vertical([Constraint::Min(3), Constraint::Length(0)]).split(rows[1])
     } else {
-        " Loading worker sessions…".into()
+        Layout::vertical([Constraint::Percentage(45), Constraint::Min(3)]).split(rows[1])
     };
-    frame.render_widget(Paragraph::new(summary), right[0]);
     let runs = app.runs();
-    let compact_sessions = right[1].height < 4;
+    let compact_sessions = right[0].height < 8;
     let items: Vec<ListItem> = runs
         .iter()
         .map(|r| {
@@ -272,18 +245,22 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
     let mut selection = ListState::default().with_selected(selected);
     let sessions_block = block(
         if app.history {
-            "Sessions + recent attempts"
+            "Completed attempts · no slots used"
         } else {
             "Active sessions"
         },
-        app.sessions_focused,
+        true,
     );
     if items.is_empty() {
         frame.render_widget(
-            Paragraph::new("No sessions to show. h: toggle history")
-                .wrap(Wrap { trim: true })
-                .block(sessions_block),
-            right[1],
+            Paragraph::new(if app.history {
+                "No completed attempts. h: active work"
+            } else {
+                "No active sessions. Waiting for eligible issues. h: history"
+            })
+            .wrap(Wrap { trim: true })
+            .block(sessions_block),
+            right[0],
         );
     } else {
         frame.render_stateful_widget(
@@ -291,7 +268,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 .block(sessions_block)
                 .highlight_symbol("› ")
                 .highlight_style(Style::default().bg(Color::DarkGray)),
-            right[1],
+            right[0],
             &mut selection,
         );
     }
@@ -327,7 +304,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             .wrap(Wrap { trim: false })
             .scroll((app.detail_scroll, 0))
             .block(block("Activity · PgUp/PgDn", false)),
-        right[2],
+        right[1],
     );
     let status = if let Some(error) = &app.error {
         format!(" {}", text(&Value::String(error.clone())))
@@ -348,10 +325,10 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                     Color::DarkGray
                 }),
             )),
-            Line::from(if wide {
-                " ↑↓/jk move  Tab focus  h history  r refresh  p pause  s stop  ? help  q quit"
+            Line::from(if size.width >= 90 {
+                " ↑↓/jk session  h active/history  r refresh  p pause  s stop  ? help  q quit"
             } else {
-                " ↑↓ move  Tab focus  ? help  q quit"
+                " ↑↓ session  h history  ? help  q quit"
             }),
         ]),
         rows[2],
@@ -361,7 +338,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             frame,
             "Keyboard",
             &format!(
-                "↑/↓ or j/k  Select worker or session\nTab        Switch between workers and sessions\nh          Show/hide completed attempts\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; running sessions drain\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C {}\nEsc / ?    Close help",
+                "↑/↓ or j/k  Select session\nh          Switch active work / completed history\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; existing sessions finish normally\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C {}\nEsc / ?    Close help",
                 if app.owned_worker {
                     "Stop this worker and its sessions"
                 } else {

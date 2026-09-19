@@ -24,7 +24,6 @@ pub struct Dashboard {
     pub owned_worker: bool,
     pub worker_id: Option<String>,
     pub run_id: Option<String>,
-    pub sessions_focused: bool,
     pub history: bool,
     pub help: bool,
     pub pending: bool,
@@ -59,7 +58,7 @@ impl Dashboard {
             .as_array()
             .map(|a| {
                 a.iter()
-                    .filter(|r| r["finished_at"].is_null() || self.history)
+                    .filter(|r| r["finished_at"].is_null() != self.history)
                     .collect()
             })
             .unwrap_or_default()
@@ -68,13 +67,14 @@ impl Dashboard {
     pub fn apply(&mut self, snapshot: Value) {
         self.snapshot = snapshot;
         let workers = self.workers();
-        if !workers
-            .iter()
-            .any(|w| w["id"].as_str() == self.worker_id.as_deref())
+        if !self.owned_worker
+            && !workers
+                .iter()
+                .any(|w| w["id"].as_str() == self.worker_id.as_deref())
         {
-            self.worker_id = workers
-                .first()
-                .and_then(|w| w["id"].as_str())
+            self.worker_id = self.snapshot["worker_id"]
+                .as_str()
+                .or_else(|| workers.first().and_then(|w| w["id"].as_str()))
                 .map(str::to_owned);
         }
         self.normalize_run();
@@ -96,19 +96,12 @@ impl Dashboard {
     }
 
     pub fn navigate(&mut self, delta: isize) {
-        let ids: Vec<String> = if self.sessions_focused {
-            self.runs()
-        } else {
-            self.workers()
-        }
-        .iter()
-        .filter_map(|v| v["id"].as_str().map(str::to_owned))
-        .collect();
-        let selected = if self.sessions_focused {
-            &mut self.run_id
-        } else {
-            &mut self.worker_id
-        };
+        let ids: Vec<String> = self
+            .runs()
+            .iter()
+            .filter_map(|v| v["id"].as_str().map(str::to_owned))
+            .collect();
+        let selected = &mut self.run_id;
         if ids.is_empty() {
             return;
         }
@@ -119,9 +112,6 @@ impl Dashboard {
         let next = at.saturating_add_signed(delta).min(ids.len() - 1);
         *selected = Some(ids[next].clone());
         self.detail_scroll = 0;
-        if !self.sessions_focused {
-            self.normalize_run();
-        }
     }
 
     pub fn confirm(&mut self, stop: bool) {
