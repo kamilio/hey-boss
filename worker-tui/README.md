@@ -8,7 +8,6 @@ during slow local or SSH requests. Only changed terminal cells are written.
 hey-boss worker                          # Start a worker with its dashboard
 hey-boss worker status                   # Watch workers without starting one
 hey-boss worker --host devbox status      # Watch an SSH host
-hey-boss worker --plain status            # One-shot text output
 hey-boss worker --json status             # Machine-readable output
 
 # Optional standalone executable using the same library:

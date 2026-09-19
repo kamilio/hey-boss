@@ -62,7 +62,7 @@ try {
   await dashboard.waitFor("Integrated builder", { scope: "screen", timeout: 12000 });
   await quit(dashboard);
   assert.ok(status().workers.find(w => w.id === live.id)?.pid);
-  const plain = execFileSync(binary, ["worker", "--plain", "status"], { cwd: temporary, env, encoding: "utf8" });
+  const plain = execFileSync(binary, ["worker", "status"], { cwd: temporary, env, encoding: "utf8" });
   assert.doesNotMatch(plain, /\x1b\[/);
   assert.ok(status().ok, "JSON status must remain machine-readable");
   await quit(worker);

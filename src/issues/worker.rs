@@ -1220,17 +1220,6 @@ pub fn serve_instance_with_history(
     json_output: bool,
     history_limit: usize,
 ) -> Result<()> {
-    serve_instance_with_display(settings, id, project, json_output, history_limit, false)
-}
-
-pub fn serve_instance_with_display(
-    settings: Settings,
-    id: Option<&str>,
-    project: Project,
-    json_output: bool,
-    history_limit: usize,
-    plain: bool,
-) -> Result<()> {
     use std::io::IsTerminal;
     // Linux current_exe() gains " (deleted)" after an atomic replacement.
     // Retain the installed path while it still names the running executable.
@@ -1270,8 +1259,7 @@ pub fn serve_instance_with_display(
     };
     let supervisor = Supervisor::start_for(path, Some(id.clone()))?;
     install_signals_for_upgrade(supervisor.stop.clone(), Some(supervisor.reload.clone()))?;
-    let tty =
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output && !plain;
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output;
     if tty {
         use crate::worker_tui::{backend::Client, runtime};
         print!(
@@ -1362,9 +1350,6 @@ pub fn serve_instance_with_display(
         ]);
         if json_output {
             command.arg("--json");
-        }
-        if plain {
-            command.arg("--plain");
         }
         return Err(command.exec().into());
     }
