@@ -141,7 +141,7 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(updated['body'], row['body'])
         self.assertEqual(updated['draft'], 0)
         self.assertIsNone(updated['plan'])
-        settings = {'project_id': PROJECT, 'prompt': None, 'prs_enabled': 0, 'version': 1, 'boss_name': 'Boss'}
+        settings = {'project_id': PROJECT, 'prompt': 'Instructions', 'prs_enabled': 0, 'version': 1, 'boss_name': 'Boss'}
         with self.agent:
             fleet.put_row(self.agent, 'project_settings', settings)
         saved = self.agent.execute('SELECT drafts_enabled,plan_template FROM project_settings WHERE project_id=?', (PROJECT,)).fetchone()
