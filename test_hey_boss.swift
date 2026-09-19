@@ -4,13 +4,16 @@ import Darwin
 import ImageIO
 import zlib
 import SQLite3
+import Carbon
 
 func audit() {
     // Preserve the last completed check in CI logs if an optimized precondition traps.
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
+    auditQuickIssue()
     auditSecretInput()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HEALTH_ONLY"] == "1" { auditMachineHealth(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
@@ -124,6 +127,34 @@ func audit() {
     print("Passed: grouping threshold, CTA dismissal, preview with local/web/unsupported links, project isolation, queued questions, Unicode answers, durable history, Markdown links")
 }
 
+func auditQuickIssue() {
+    let overview = AgentsOverview(present: false, cli: nil)
+    var opened: [URL] = []
+    overview.issuesLauncher.probe = { $0(true) }
+    overview.issuesLauncher.openURL = { opened.append($0); return true }
+    overview.showQuickIssue()
+    precondition(opened.last?.fragment == "quick-issue=1")
+    let item = overview.statusMenu.items.first { $0.action == #selector(AgentsOverview.showQuickIssue) }!
+    precondition(item.keyEquivalent == " " && item.keyEquivalentModifierMask == [.control, .option])
+    precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
+    precondition(opened.count == 2)
+    var calls = 0
+    let shortcut = QuickIssueShortcut { calls += 1 }
+    withExtendedLifetime(shortcut) {
+        var event: EventRef?
+        precondition(CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), GetCurrentEventTime(), 0, &event) == noErr)
+        defer { ReleaseEvent(event) }
+        var identity = EventHotKeyID(signature: 0x48425149, id: 1)
+        precondition(SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &identity) == noErr)
+        precondition(SendEventToEventTarget(event, GetApplicationEventTarget()) == noErr && calls == 1)
+        identity.id = 2
+        precondition(SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &identity) == noErr)
+        _ = SendEventToEventTarget(event, GetApplicationEventTarget())
+        precondition(calls == 1, "Other hotkeys must not open quick add")
+    }
+    print("Passed: quick-add menu, launch destination, global shortcut callback and unrelated hotkeys")
+}
+
 func auditInbox(root: URL, sample: Record) {
     let overview = AgentsOverview(present: false, cli: nil)
     var openedInbox = 0, openedIssues = 0, openedMindmaps = 0
@@ -162,6 +193,9 @@ func auditInbox(root: URL, sample: Record) {
     launcher.open(cli: nil); launcher.open(cli: nil, page: .mindmaps)
     ready?(true)
     precondition(urls.count == 5 && urls.last?.path == "/mm" && !launcher.launching, "Repeated menu clicks must open the latest destination without starting duplicate servers")
+    launcher.probe = { $0(true) }
+    launcher.open(cli: nil, page: .quickIssue)
+    precondition(urls.last?.fragment == "quick-issue=1" && launches == 1, "Quick add opens above the shared interface without starting another service")
     let store = try! Store(root.appendingPathComponent("inbox-dismiss.db").path)
     let ui = Interface(present: false)
     store.removeMany = { ui.remove($0) }

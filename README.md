@@ -667,3 +667,16 @@ Run `hey-boss worker --host HOST restart WORKER_ID` on the fleet supervisor mach
 The supervisor and companion remain alive. The companion stops the old worker and its owned Codex sessions, then starts a replacement with the same ID and saved settings. It acknowledges only after the replacement registers. A cross-process lock prevents reconciliation from launching a duplicate; interrupted requests replay safely and failures retry with a delay capped at five minutes. A new Stop request supersedes an unfinished restart. Restart explicitly cancels active sessions; Pause drains them. If the old worker or its sessions cannot stop, the companion reports the error and does not launch a duplicate.
 
 Worker and browser reads use WAL snapshots; migration writes run only when needed. A temporary SQLite lock during worker status refresh retries without shutting down Codex sessions. Browser discovery uses its own connection. Git identity checks avoid enumerating all worktrees for ordinary checkouts. The manual claim window starts at the first model activity, with a separate fifteen-minute wait for model startup, so a queued model does not consume the claim deadline.
+
+Quick add issues with **⌘⇧K** (Mac) or **Ctrl+Shift+K** from any web page,
+including over an open editor. On Mac, **Control+Option+Space** opens quick add
+from any application; the menu bar also has **Quick add issue…**. Enter a title
+and press Enter to create it; Escape preserves the draft for the next opening.
+The header's plus button works on touch screens.
+
+Include `@poe-code` anywhere in the title to select a known project. Names match
+without case sensitivity; use `@"Design Team"` for spaces, or a full project ID
+such as `@github.com/kamilio/poe-code` when names are ambiguous. Mentions are removed
+from the submitted title. Repeated mentions must identify the same project.
+Unknown projects and conflicting mentions show an error; email addresses stay
+unchanged, and `\@poe-code` keeps literal `@poe-code` text in the title.

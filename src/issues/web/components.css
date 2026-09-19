@@ -943,3 +943,32 @@ textarea::placeholder {
   .navigation-inner > a { gap: 5px; }
   .navigation-inner svg { width: 14px; height: 14px; }
 }
+
+/* The quick adder stays above page dialogs without disturbing their drafts. */
+#quick-issue-dialog {
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - 32px));
+  max-width: none;
+  margin: min(20vh, 160px) auto auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--solid);
+  color: var(--text);
+  box-shadow: 0 24px 80px #0004;
+}
+#quick-issue-dialog::backdrop { background: #10182855; backdrop-filter: blur(5px); }
+.quick-issue-entry { display: flex; align-items: center; gap: 14px; padding: 20px; }
+.quick-issue-entry > span { color: var(--accent); flex-shrink: 0; }
+.quick-issue-entry svg { width: 24px; height: 24px; }
+#quick-issue-title { min-width: 0; flex: 1; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text); font: inherit; font-size: 22px; box-shadow: none; outline: none; }
+#quick-issue-title::placeholder { color: var(--faint); font-size: 18px; }
+.quick-issue-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+#quick-issue-error { padding: 0 20px 14px; margin: 0; color: var(--danger); font-size: 13px; }
+#quick-issue-status { position: fixed; z-index: 100; bottom: 24px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 32px); padding: 14px 20px; background: var(--solid); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+#quick-issue-status a { color: var(--accent); }
+@media (max-width: 600px) {
+  .quick-issue-entry { padding: 16px; gap: 10px; }
+  #quick-issue-title { font-size: 18px; }
+  #quick-issue-title::placeholder { font-size: 14px; }
+}

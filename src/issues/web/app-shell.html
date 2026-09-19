@@ -50,6 +50,7 @@
           </div>
         </div>
         <div class="header-right">
+<button id="quick-issue-open" class="icon-button" type="button" aria-label="Quick add issue" title="Quick add issue (⌘⇧K / Ctrl+Shift+K)" aria-keyshortcuts="Meta+Shift+K Control+Shift+K"><span data-icon="plus"></span></button>
 <!--header-actions-->
           <span class="connection" id="connection" role="status"
             ><i></i><span>Connected</span></span
@@ -72,3 +73,19 @@
         <a id="nav-mindmaps" href="/mm"<!--mindmap-current-->><span data-icon="subtasks"></span>Mindmaps</a>
       </div>
     </nav>
+
+    <dialog id="quick-issue-dialog" aria-label="Quick add issue">
+      <form id="quick-issue-form">
+        <div class="quick-issue-entry">
+          <span data-icon="issue"></span>
+          <input id="quick-issue-title" aria-label="Issue title" placeholder="Issue title… @project to switch" autocomplete="off" maxlength="1024" />
+          <button id="quick-issue-close" type="button" class="icon-button" aria-label="Close quick add"><span data-icon="x"></span></button>
+        </div>
+        <p id="quick-issue-error" role="alert" hidden></p>
+        <div class="quick-issue-footer">
+          <span id="quick-issue-context" role="status"></span>
+          <button id="quick-issue-submit" class="button" type="submit" disabled>Create ↵</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="quick-issue-status" role="status" hidden></div>
