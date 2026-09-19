@@ -915,3 +915,34 @@ for the new Workers slot eliminated a verifier-only HTML mismatch; the five
 other shared files matched (`out/mm-installed-shared-assets-1825.json`). Final
 native installation and runtime checks remain pending while another upgrade
 owns the lock.
+
+Current-main integration audit: imported committed Supervisor terminology and
+Copy icon changes; worktree tree matched that main snapshot. All 32 native
+mindmap tests pass after import (tool session 69939, 12.39 seconds).
+
+The installed native build c8217554645fab78 passes Chrome's 40 checks (shell six,
+focus 19, native touch 15), WebKit's 25 checks (shell six, focus 19), and each
+browser's 37 navigation assertions on the 10,000-node/20,000-link fixture.
+Evidence `out/mm-installed-ui-chrome-final.txt`,
+`out/mm-installed-ui-webkit-final.txt`,
+`out/mm-installed-scale-chrome-final.txt`,
+`out/mm-installed-scale-webkit-final.txt`. These use a pinned copy of the
+installed binary and isolated databases. The subsequent installed build
+7f1bd03789658ac1 serves all six assets byte-for-byte equal to current main
+(`out/mm-installed-shared-assets-1838.json`), including the Copy icon addition.
+
+An additional exact-build browser soak started at 18:29 UTC with both interaction
+fixes included: Chrome 40 checks and WebKit 25 per cycle, deadline 19:40 UTC.
+The original older-build soaks continue separately. OS browser process RSS is
+sampled every 30 seconds until that deadline alongside native server RSS.
+Chrome descendant samples include its browser/GPU/renderers. WebKit descendants
+include its launcher only; reparented WebKit content processes are excluded.
+Summed RSS may double-count shared pages and is not JavaScript heap usage.
+These runs remain incomplete and do not prove indefinite memory behavior.
+
+A direct fleet audit showed local and second Mac current, devbox on the prior
+build. An own upgrade attempt encountered new uncommitted concurrent frontend
+changes in the source snapshot. Only that owned upgrade and its compiler children
+were interrupted; its stack confirms interruption during cargo build, before
+installation, and the public binary remained 7f1bd03789658ac1. No other installer
+was stopped. Final fleet installation and the requested duration remain pending.
