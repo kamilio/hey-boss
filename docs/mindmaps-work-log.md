@@ -753,3 +753,14 @@ Before/after evidence: `out/mm-map-link-focus-before.txt`,
 success and synthetic 503 failures in both views, same-destination relationships,
 overlapping reads, and ordinary full/preview body focus. Mock routes are cleared
 after every case. Evidence `out/mm-map-focus-browser-result.txt`.
+
+Focus recovery is installed as build `4bf651fcf86415b6`; all four served
+assets match main `59c4d08` (evidence
+`out/mm-installed-focus-assets-result.json`).
+
+Dependency descriptions already existed in SVG titles, but the edge layer's
+inherited `pointer-events:none` made them unreachable by hover. Dependency
+paths now accept pointer hits on their stroke. Actual hit testing reaches the
+path and its full description; dragging from that path still pans the map and
+preserves topic selection. Evidence `out/mm-map-edge-hit-before.txt` and
+`out/mm-map-edge-hit-after.txt`. Hierarchy edges keep their existing behavior.
