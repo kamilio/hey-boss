@@ -28,7 +28,7 @@ export default function Issues({api}){
       if(mounted.current)setError(creation.error);
      }else{
       keep({...emptyIssueDraft(),project:current.current.project});
-      if(mounted.current){setError('');setMessage(creation.status==='synced'?`Synced as issue #${creation.number}`:'Pending — saved on the server. It will sync when the supervisor reconnects.');}
+      if(mounted.current){setError('');setMessage(creation.status==='synced'?`Synced as issue #${creation.number}`:'Issue submitted. Track its delivery in Your submissions below.');}
      }
     }catch(e){
      if([400,409].includes(e.status)){
