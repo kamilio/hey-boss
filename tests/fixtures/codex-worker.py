@@ -30,6 +30,15 @@ for line in sys.stdin:
         assert params['capabilities']['experimentalApi']
     elif method == 'thread/start':
         assert params['ephemeral'] is False
+        Path('.codex-fixture-' + session + '.json').write_text(json.dumps({'turns': []}))
+        result = {'thread': {'id': session}}
+    elif method == 'thread/resume':
+        if mode == 'resume-unavailable':
+            send({'id': msg['id'], 'error': {'code': -32600, 'message': 'Saved session is locked by another writer'}})
+            continue
+        session = params['threadId']
+        saved = json.loads(Path('.codex-fixture-' + session + '.json').read_text())
+        assert saved['turns'], 'Resume must restore the previous attempt, not an empty session'
         result = {'thread': {'id': session}}
     elif method == 'thread/goal/set':
         if params.get('status') == 'active':
@@ -41,6 +50,10 @@ for line in sys.stdin:
     elif method == 'turn/start':
         started_turn = True
         text = params['input'][0]['text']
+        saved_path = Path('.codex-fixture-' + session + '.json')
+        saved = json.loads(saved_path.read_text())
+        saved['turns'].append(text)
+        saved_path.write_text(json.dumps(saved))
         if mode == 'offline-updates':
             notification = subprocess.run([os.environ['HEY_BOSS_TEST_CLI'], 'update', '--project', 'Offline worker QA', '--title', 'Issue finished', 'Worker finished without waiting for Mac', text, '--json'], capture_output=True)
             assert notification.returncode == 0, notification.stderr.decode()

@@ -1,6 +1,7 @@
 //! Worker reservations share the issue transaction and SQLite's write lock.
 use super::*;
 use crate::issues::worker::{Job, ProjectConfig, now};
+pub(super) const HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_issue_history ON worker_runs(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 type ActiveProcess = (Job, Option<u32>, Option<String>);
 
 pub(super) const SCHEMA: &str = "

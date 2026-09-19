@@ -121,6 +121,8 @@ pub(crate) struct Job {
     pub id: String,
     #[serde(default)]
     pub worker_id: String,
+    #[serde(default)]
+    pub resume_session: Option<String>,
     pub project: Project,
     pub issue: Value,
     pub comments: Vec<Value>,
@@ -797,6 +799,7 @@ pub(crate) fn preview(
     let job = Job {
         id: String::new(),
         worker_id: String::new(),
+        resume_session: None,
         project: project.clone(),
         issue,
         comments: vec![],
@@ -872,17 +875,33 @@ fn run_thread(
 ) -> Result<(String, String)> {
     c.rpc("initialize",json!({"clientInfo":{"name":"hey_boss_worker","title":"Hey Boss issue worker","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),store,job,stop)?;
     c.send(json!({"method":"initialized","params":{}}))?;
-    let result = c.rpc(
-        "thread/start",
-        json!({"cwd":job.config.cwd,"ephemeral":false}),
-        store,
-        job,
-        stop,
-    )?;
+    let (method, params) = if let Some(session) = &job.resume_session {
+        store.worker_event(&job.id, &format!("Resuming Codex session {session}"), None)?;
+        (
+            "thread/resume",
+            json!({"threadId":session,"cwd":job.config.cwd}),
+        )
+    } else {
+        (
+            "thread/start",
+            json!({"cwd":job.config.cwd,"ephemeral":false}),
+        )
+    };
+    let result = c.rpc(method, params, store, job, stop)?;
     let session = result["thread"]["id"]
         .as_str()
         .ok_or_else(|| Error::new("worker_error", "Codex did not return a session ID"))?
         .to_owned();
+    if job
+        .resume_session
+        .as_ref()
+        .is_some_and(|saved| saved != &session)
+    {
+        return Err(Error::new(
+            "worker_error",
+            "Codex resumed a different session than the saved issue session",
+        ));
+    }
     c.session = Some(session.clone());
     store.worker_attach(job, &session)?;
     store.worker_event(&job.id, &format!("Codex session {session}"), None)?;
