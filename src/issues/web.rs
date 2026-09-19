@@ -15,6 +15,7 @@ pub struct Config {
     pub actor: Option<String>,
     pub host: Option<String>,
     pub json: bool,
+    pub mindmap: bool,
 }
 enum Backend {
     Local(Mutex<Store>),
@@ -124,14 +125,21 @@ pub fn serve(config: Config) -> Result<()> {
         None,
     )?;
     app.project = serde_json::from_value(resolved["project"].clone())?;
-    let url = format!("http://{}/", app.authority);
+    let url = format!(
+        "http://{}/{}",
+        app.authority,
+        if config.mindmap { "mm" } else { "" }
+    );
     if config.json {
         println!(
             "{}",
             json!({"ok":true,"url":url,"project":app.project,"actor":app.actor.id})
         );
     } else {
-        println!("Hey Boss Issues · {url}\nPress Ctrl+C to stop.");
+        println!(
+            "Hey Boss {} · {url}\nPress Ctrl+C to stop.",
+            if config.mindmap { "Mindmaps" } else { "Issues" }
+        );
     }
     std::io::stdout().flush()?;
     let app = Arc::new(app);
@@ -323,6 +331,15 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     if request.method() == &Method::Get {
         let asset: Option<(&str, &[u8])> = match path.as_str() {
             "/" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
+            "/mm" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/mindmap.html"),
+            )),
+            "/mindmap.css" => Some(("text/css; charset=utf-8", include_bytes!("web/mindmap.css"))),
+            "/mindmap.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/mindmap.js"),
+            )),
             "/workers" => Some(("text/html; charset=utf-8", include_bytes!("web/fleet.html"))),
             "/fleet.css" => Some(("text/css; charset=utf-8", include_bytes!("web/fleet.css"))),
             "/fleet.js" => Some((
@@ -385,7 +402,14 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         }
     }
     if request.method() == &Method::Post
-        && ["/api/action", "/api/preview", "/api/inbox", "/api/fleet"].contains(&path.as_str())
+        && [
+            "/api/action",
+            "/api/preview",
+            "/api/inbox",
+            "/api/fleet",
+            "/api/mm",
+        ]
+        .contains(&path.as_str())
     {
         if header(request, "x-hey-boss-csrf") != Some(app.token.as_str()) {
             return Err(Error::new(
@@ -450,12 +474,32 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             return json_response(crate::notices::execute(&action)?);
         }
         let action: Action = serde_json::from_slice(&bytes)?;
+        if let Operation::Mindmap { operation } = &action.operation {
+            if operation.writes() {
+                return Err(Error::new(
+                    "forbidden",
+                    "Mindmaps are read-only on the web; author with hey-boss mm",
+                ));
+            }
+        } else if path == "/api/mm" {
+            return Err(Error::new(
+                "forbidden",
+                "The mindmap viewer only accepts mindmap reads",
+            ));
+        }
+
         let mut result = app.execute_at(
             Some(action.project),
             action.operation,
             action.request_id,
             action.host.as_deref(),
         )?;
+        if crate::mindmap::needs_inbox(&result) {
+            crate::mindmap::enrich_notifications(
+                &mut result,
+                crate::notices::execute(&crate::notices::Action::List),
+            );
+        }
         if let Some(issue) = result.get_mut("issue")
             && let Some(body) = issue["body"].as_str()
         {

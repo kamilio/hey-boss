@@ -823,3 +823,53 @@ fn unavailable_inbox_does_not_block_the_issue_service() {
     assert_eq!(web.http("GET", "/inbox.js", &[], b"").status, 200);
     web.ok(json!({"action":"create","title":"Issues remain available","body":"","labels":[]}));
 }
+
+#[test]
+fn mindmap_assets_reads_and_authoring_boundary() {
+    let web = Web::start();
+    for (path, kind) in [
+        ("/mm", "text/html"),
+        ("/mindmap.js", "text/javascript"),
+        ("/mindmap.css", "text/css"),
+    ] {
+        let r = web.http("GET", path, &[], b"");
+        assert_eq!(r.status, 200);
+        assert!(r.headers.contains(kind));
+    }
+    let show = json!({"action":"mindmap","operation":{"command":"show"}});
+    let r = web.action(&web.project, show.clone(), None);
+    assert_eq!(r.status, 200);
+    assert!(r.json()["nodes"].as_array().unwrap().is_empty());
+    let add = json!({"action":"mindmap","operation":{"command":"add","title":"Forbidden","body":"","kind":"text","reference":null,"reference_project":null,"alias":"forbidden","under":null,"if_version":null}});
+    let r = web.action(&web.project, add.clone(), None);
+    assert_eq!(r.status, 403);
+    assert_eq!(r.json()["error"]["code"], "forbidden");
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("X-Hey-Boss-CSRF", web.token.as_str()),
+    ];
+    for operation in [
+        add,
+        json!({"action":"create","title":"Forbidden","body":"","labels":[]}),
+    ] {
+        let body = serde_json::to_vec(
+            &json!({"project":web.project,"operation":operation,"request_id":null}),
+        )
+        .unwrap();
+        assert_eq!(web.http("POST", "/api/mm", &headers, &body).status, 403);
+    }
+    let body =
+        serde_json::to_vec(&json!({"project":web.project,"operation":show,"request_id":null}))
+            .unwrap();
+    assert_eq!(web.http("POST", "/api/mm", &headers, &body).status, 200);
+    assert_eq!(
+        web.http(
+            "POST",
+            "/api/mm",
+            &[("Content-Type", "application/json")],
+            &body
+        )
+        .status,
+        403
+    );
+}

@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "../mindmap/store.rs"]
+mod mindmap;
 #[path = "worker_registry.rs"]
 mod registry;
 #[path = "subtasks.rs"]
@@ -138,6 +140,7 @@ fn validate(r: &Request) -> Result<()> {
         return Err(Error::invalid("Issue number must be positive"));
     }
     match &r.operation {
+        Operation::Mindmap { operation } => operation.validate()?,
         Operation::Create {
             title,
             body: text,
@@ -363,7 +366,7 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
             let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if app != 0 && app != APPLICATION_ID || version > 9 {
+            if app != 0 && app != APPLICATION_ID || version > 10 {
                 return Err(Error::invalid(
                     "Incompatible issue database; use the matching hey-boss version",
                 ));
@@ -420,6 +423,10 @@ impl Store {
                 tx.execute_batch(super::fleet::SCHEMA)?;
                 subtasks::migrate_sync(&tx)?;
                 tx.pragma_update(None, "user_version", 9)?;
+            }
+            if version < 10 {
+                tx.execute_batch(mindmap::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 10)?;
             }
             tx.commit()?;
         }
@@ -481,6 +488,7 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
             | Operation::ControlWorker { .. }

@@ -89,6 +89,9 @@ pub struct Actor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Mindmap {
+        operation: crate::mindmap::Operation,
+    },
     Projects {
         #[serde(default)]
         include_hidden: bool,
@@ -258,6 +261,9 @@ pub enum Operation {
 }
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::Mindmap { operation } = self {
+            return operation.writes();
+        }
         !matches!(
             self,
             Self::Projects { .. }
@@ -281,7 +287,8 @@ impl Operation {
     }
     pub fn number(&self) -> Option<i64> {
         match self {
-            Self::Projects { .. }
+            Self::Mindmap { .. }
+            | Self::Projects { .. }
             | Self::HideProject
             | Self::RestoreProject
             | Self::Workers { .. }
