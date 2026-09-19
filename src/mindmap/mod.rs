@@ -210,10 +210,10 @@ impl Operation {
                 ..
             } => {
                 validate_kind(kind)?;
-                if let Some(text) = description {
-                    if text.len() > 16384 {
-                        return Err(Error::invalid("Link description exceeds 16 KiB"));
-                    }
+                if let Some(text) = description
+                    && text.len() > 16384
+                {
+                    return Err(Error::invalid("Link description exceeds 16 KiB"));
                 }
                 *if_version
             }
