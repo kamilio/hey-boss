@@ -1,5 +1,5 @@
 //! Pure responsive rendering; usable with any Ratatui backend.
-use crate::{Dashboard, text};
+use super::{Dashboard, text};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -331,6 +331,8 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
     );
     let status = if let Some(error) = &app.error {
         format!(" {}", text(&Value::String(error.clone())))
+    } else if app.owned_worker {
+        " Live · refresh every 2s · q / Ctrl+C stops this worker and its sessions".into()
     } else if app.pending {
         " Refreshing… navigation remains available".into()
     } else {
@@ -358,7 +360,14 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         overlay(
             frame,
             "Keyboard",
-            "↑/↓ or j/k  Select worker or session\nTab        Switch between workers and sessions\nh          Show/hide completed attempts\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; running sessions drain\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C Quit dashboard; workers keep running\nEsc / ?    Close help",
+            &format!(
+                "↑/↓ or j/k  Select worker or session\nTab        Switch between workers and sessions\nh          Show/hide completed attempts\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; running sessions drain\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C {}\nEsc / ?    Close help",
+                if app.owned_worker {
+                    "Stop this worker and its sessions"
+                } else {
+                    "Quit dashboard; workers keep running"
+                }
+            ),
         );
     }
     if let Some(c) = &app.confirmation {

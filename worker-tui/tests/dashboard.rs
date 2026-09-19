@@ -55,6 +55,35 @@ fn confirmation_captures_exact_worker_and_is_disabled_during_requests_or_errors(
 }
 
 #[test]
+fn owned_worker_footer_and_help_describe_shutdown_instead_of_detachment() {
+    let mut app = Dashboard::default();
+    app.apply(snapshot());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    for owned in [false, true] {
+        app.owned_worker = owned;
+        for help in [false, true] {
+            app.help = help;
+            terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            if owned {
+                assert!(
+                    screen.contains("stops this worker") || screen.contains("Stop this worker")
+                );
+                assert!(!screen.contains("workers keep running"));
+            } else {
+                assert!(screen.contains("workers keep running"));
+            }
+        }
+    }
+}
+
+#[test]
 fn renders_resizes_empty_states_modals_and_untrusted_text_without_panicking() {
     let mut app = Dashboard::default();
     app.apply(snapshot());

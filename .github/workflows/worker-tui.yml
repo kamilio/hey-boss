@@ -18,11 +18,13 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --release
       - run: cargo build --locked
+      - run: cargo build --locked --manifest-path ../Cargo.toml
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
       - run: npm ci
       - run: npm run test:terminal
+      - run: node tests/integrated-terminal.mjs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
