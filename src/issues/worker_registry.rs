@@ -35,18 +35,24 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
-    let row: Option<(String, bool, i64, String)> = db
+    let row: Option<(String, bool, i64, String, bool, String)> = db
         .query_row(
-            "SELECT prompt,prs_enabled,version,boss_name FROM project_settings WHERE project_id=?1",
+            "SELECT prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template FROM project_settings WHERE project_id=?1",
             [&p.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()?;
-    let (prompt, prs, version, _legacy_name) =
-        row.unwrap_or((worker::DEFAULT_PROMPT.into(), false, 0, "Boss".into()));
+    let (prompt, prs, version, _legacy_name, drafts_enabled, plan_template) = row.unwrap_or((
+        worker::DEFAULT_PROMPT.into(),
+        false,
+        0,
+        "Boss".into(),
+        true,
+        "plans/{timestamp}-{number}.md".into(),
+    ));
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"prs_enabled":prs,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"prs_enabled":prs,"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 fn directory(db: &Connection, p: &Project) -> Result<String> {
@@ -101,6 +107,7 @@ const ELIGIBLE:&str="i.state='open' AND i.deleted_at IS NULL AND i.assignee IS N
 // Finished attempts do not permanently exclude unfinished issues. Approval holds
 // still need explicit retry; other failures back off from 30 seconds to 5 minutes.
 pub(super) const PICKUP_READY: &str = "
+ AND i.draft=0
  AND NOT EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node<>(SELECT node FROM fleet_meta WHERE id=1))
  AND ((SELECT role FROM fleet_meta WHERE id=1)<>'agent' OR EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node=(SELECT node FROM fleet_meta WHERE id=1)))
  AND EXISTS(SELECT 1 FROM issue_pickup_ready ready WHERE ready.project_id=i.project_id AND ready.number=i.number)";
@@ -331,6 +338,8 @@ pub(super) fn execute(
             prompt,
             boss_name,
             prs_enabled,
+            drafts_enabled,
+            plan_template,
             if_version,
         } => {
             let defaults = project_settings(db, p)?;
@@ -342,6 +351,11 @@ pub(super) fn execute(
                 .unwrap_or_else(|| defaults["boss_name"].as_str().unwrap().into());
             super::identifier(&legacy_name, "Boss name", 64)?;
             let legacy_name = legacy_name.trim();
+            let drafts_enabled = drafts_enabled.unwrap_or(defaults["drafts_enabled"] == true);
+            let plan_template = plan_template
+                .as_deref()
+                .unwrap_or(defaults["plan_template"].as_str().unwrap());
+            crate::issues::planning::validate_template(plan_template)?;
             let prs_enabled = prs_enabled.unwrap_or(defaults["prs_enabled"] == true);
             if prompt.trim().is_empty() || prompt.len() > 32000 {
                 return Err(Error::invalid("Project prompt must contain 1–32000 bytes"));
@@ -353,7 +367,7 @@ pub(super) fn execute(
             if let Some(name) = boss_name {
                 crate::issues::global_settings::configure(db, name, None)?;
             }
-            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name",params![p.id,prompt,prs_enabled,v+1,legacy_name])?;
+            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,plan_template=excluded.plan_template",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,plan_template])?;
             project_settings(db, p)
         }
         Operation::PullRequests { number }

@@ -3,6 +3,7 @@ mod discovery;
 mod fleet;
 mod global_settings;
 pub mod identity;
+pub mod planning;
 pub mod remote;
 mod store;
 pub mod web;
@@ -137,6 +138,10 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boss_name: Option<String>,
         prs_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drafts_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_template: Option<String>,
         if_version: Option<i64>,
     },
     PullRequests {
@@ -224,6 +229,8 @@ pub enum Operation {
         offset: u32,
     },
     Create {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        draft: bool,
         title: String,
         body: String,
         labels: Vec<String>,
@@ -231,12 +238,25 @@ pub enum Operation {
         at_top: bool,
     },
     Edit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft: Option<bool>,
         number: i64,
         title: Option<String>,
         body: Option<String>,
         add_labels: Vec<String>,
         remove_labels: Vec<String>,
         if_version: Option<i64>,
+    },
+    BindPlan {
+        number: i64,
+        plan: planning::Plan,
+        if_version: i64,
+    },
+    ReadPlan {
+        plan: planning::Plan,
+    },
+    Undraft {
+        number: i64,
     },
     Claim {
         number: i64,
@@ -293,6 +313,7 @@ impl Operation {
                 | Self::WorkerRun { .. }
                 | Self::Whoami
                 | Self::List { .. }
+                | Self::ReadPlan { .. }
                 | Self::View { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
@@ -323,6 +344,7 @@ impl Operation {
             | Self::WorkerControl { .. }
             | Self::Whoami
             | Self::List { .. }
+            | Self::ReadPlan { .. }
             | Self::Create { .. } => None,
             Self::PullRequests { number }
             | Self::AddPullRequest { number, .. }
@@ -335,6 +357,8 @@ impl Operation {
             | Self::RemoveSubtask { number, .. }
             | Self::History { number, .. }
             | Self::Edit { number, .. }
+            | Self::BindPlan { number, .. }
+            | Self::Undraft { number }
             | Self::Claim { number, .. }
             | Self::AssignBoss { number, .. }
             | Self::Unassign { number, .. }

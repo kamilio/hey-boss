@@ -838,6 +838,11 @@ fn prompt(job: &Job) -> (String, bool, String) {
     } else {
         rendered
     };
+    let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
+        format!("{instructions}\n\nPlan document: {path}")
+    } else {
+        instructions
+    };
     let objective = instructions.trim().chars().take(4000).collect();
     (instructions, goal, objective)
 }

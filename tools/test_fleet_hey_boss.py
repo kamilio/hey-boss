@@ -53,6 +53,25 @@ class FleetTests(unittest.TestCase):
         self.agent.close()
         self.temporary.cleanup()
 
+    def test_drafts_are_not_allocated_and_project_settings_replicate(self):
+        with self.main:
+            self.main.execute("DELETE FROM fleet_allocations")
+            self.main.execute("UPDATE issues SET draft=1 WHERE project_id=?", (PROJECT,))
+            self.main.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,drafts_enabled,plan_template) VALUES(?,'prompt',0,1,0,'plans/{timestamp}.md')", (PROJECT,))
+            fleet.allocate(self.main, 'agent', self.workers)
+        self.assertEqual(self.main.execute('SELECT count(*) FROM fleet_allocations').fetchone()[0], 0)
+        with self.main:
+            snapshot = fleet.export_snapshot(self.main, 'agent')
+        with self.agent:
+            fleet.apply_pull(self.agent, 'agent', snapshot, [])
+        self.assertEqual(self.agent.execute('SELECT draft FROM issues WHERE project_id=?', (PROJECT,)).fetchone()[0], 1)
+        settings = self.agent.execute('SELECT drafts_enabled,plan_template FROM project_settings WHERE project_id=?', (PROJECT,)).fetchone()
+        self.assertEqual(tuple(settings), (0,'plans/{timestamp}.md'))
+        with self.main:
+            self.main.execute('UPDATE issues SET draft=0 WHERE project_id=?', (PROJECT,))
+            fleet.allocate(self.main, 'agent', self.workers)
+        self.assertEqual(self.main.execute('SELECT count(*) FROM fleet_allocations').fetchone()[0], 1)
+
     def test_supervisor_status_preserves_existing_saved_state(self):
         with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[]):
             supervisor = fleet.Supervisor(self.main_path, 'main')

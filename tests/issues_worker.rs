@@ -1469,3 +1469,20 @@ fn fleet_supervisor_command_accepts_the_old_name() {
         assert!(String::from_utf8_lossy(&output.stdout).contains(canonical));
     }
 }
+
+#[test]
+fn worker_does_not_reserve_drafts_and_picks_up_after_undrafting() {
+    let f = Fixture::new("draft-pickup");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    f.cli(&["edit", "1", "--draft"]);
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["config"]["enabled"] == true && s["active"] == 0);
+    assert_eq!(status["eligible"], 0);
+    assert!(status["runs"].as_array().unwrap().is_empty());
+    f.cli(&["undraft", "1"]);
+    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let result = f.command(&["edit", "1", "--draft"]).output().unwrap();
+    assert_eq!(result.status.code(), Some(4));
+    worker.stop();
+}

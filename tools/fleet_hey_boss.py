@@ -29,8 +29,8 @@ TABLES = {'projects': ['id'], 'agents': ['id'], 'issues': ['project_id', 'number
           'issue_subtasks': ['project_id', 'child_number'], 'comments': ['id'], 'events': ['id'], 'project_settings': ['project_id'],
           'global_settings': ['id'], 'issue_pull_requests': ['project_id', 'issue_number', 'url']}
 APPEND = {'comments', 'events'}
-READY_WORK_SQL = "EXISTS(SELECT 1 FROM issue_pickup_ready ready WHERE ready.project_id=i.project_id AND ready.number=i.number)"
-ALLOCATED_WORK_SQL = "(EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL) OR " + READY_WORK_SQL + ")"
+READY_WORK_SQL = "i.draft=0 AND EXISTS(SELECT 1 FROM issue_pickup_ready ready WHERE ready.project_id=i.project_id AND ready.number=i.number)"
+ALLOCATED_WORK_SQL = "(EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL) OR (" + READY_WORK_SQL + "))"
 STATE = pathlib.Path(os.environ.get('HEY_BOSS_FLEET_STATE', pathlib.Path.home() / '.local/share/hey-boss'))
 DESIRED = pathlib.Path(os.environ.get('HEY_BOSS_FLEET_DESIRED', pathlib.Path.home() / '.hey-boss/fleet.json'))
 BINARY = pathlib.Path(os.environ.get('HEY_BOSS_FLEET_BINARY', sys.argv[0])).resolve()
