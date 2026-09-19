@@ -125,6 +125,9 @@ def apply(source, binary, expected):
                      str(source / 'hey_boss_daemon.swift'), '-o', str(directory / 'daemon')])
                 run(['/usr/bin/swift', str(source / 'package_hey_boss.swift'), str(directory / 'daemon'), str(staged_app)])
                 run(['/usr/bin/codesign', '--verify', '--strict', str(staged_app)])
+            # Run the new schema code against this installation's real state
+            # pointer before publishing the CLI or restarting any services.
+            run([str(built), 'issue', 'migrate', '--installation', str(binary)], env=environment)
             backup = state / 'upgrade-backups'
             backup.mkdir(mode=0o700, exist_ok=True)
             previous = backup / 'hey-boss.previous'

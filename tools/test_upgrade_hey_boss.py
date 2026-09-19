@@ -110,6 +110,30 @@ class UpgradeTests(unittest.TestCase):
                     upgrade.apply(root, binary, '1234567890abcdef')
             self.assertEqual(binary.read_text(), 'previous binary')
 
+    def test_migration_failure_prevents_binary_replacement_and_service_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source, binary = root / 'source', root / 'bin/hey-boss'
+            self.source(source)
+            binary.parent.mkdir()
+            binary.write_text('previous binary')
+            built = root / '.cache/hey-boss/build/release/hey-boss'
+            built.parent.mkdir(parents=True)
+            built.write_text('replacement binary')
+            commands = []
+            def run(command, **kwargs):
+                commands.append(command)
+                if 'migrate' in command:
+                    self.assertEqual(command[0], str(built))
+                    self.assertEqual(command[-1], str(binary))
+                    self.assertEqual(binary.read_text(), 'previous binary')
+                    raise RuntimeError('migration failed; retry')
+            with patch.dict(os.environ, HOME=directory), patch.object(upgrade, 'run', side_effect=run), patch.object(upgrade, 'desktop_app', return_value=None), patch.object(upgrade, 'installed_id', return_value='1234567890abcdef'):
+                with self.assertRaisesRegex(RuntimeError, 'migration failed'):
+                    upgrade.apply(source, binary, '1234567890abcdef')
+            self.assertEqual(binary.read_text(), 'previous binary')
+            self.assertFalse(any('launchctl' in command[0] or 'systemctl' in command[0] for command in commands))
+
     def test_successful_upgrade_installs_shortcut(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
