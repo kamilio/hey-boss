@@ -1,47 +1,67 @@
+mod agent_permissions;
+mod autoconnect;
+mod broker;
+mod companion;
+mod health_cli;
+mod issue_cli;
+mod secret_cli;
+mod upgrade_cli;
+mod worker_cli;
 use clap::{Args, Parser, Subcommand};
-use hey_boss::{Client, Request};
+use hey_boss::{Client, Request, Severity, resolve_icon_file};
 use std::os::fd::AsRawFd;
 
-fn initialize(executable: &std::path::Path) {
+fn initialize(executable: &std::path::Path) -> std::io::Result<()> {
+    agent_permissions::configure_pending(executable)?;
     let pending = executable.with_file_name("hey-boss.setup");
     if !pending.exists() {
-        return;
+        return Ok(());
     }
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(executable.with_file_name("hey-boss.setup.lock"))
-        .unwrap();
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    if pending.exists() {
-        let configuration = std::fs::read_to_string(&pending).unwrap();
-        let arguments: Vec<_> = configuration.lines().collect();
-        assert_eq!(arguments.len(), 5);
-        assert!(
-            std::process::Command::new(arguments[0])
-                .args(&arguments[1..])
-                .status()
-                .unwrap()
-                .success()
-        );
-        std::fs::remove_file(pending).unwrap();
+        .open(executable.with_file_name("hey-boss.setup.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    if pending.exists() {
+        let configuration = std::fs::read_to_string(&pending)?;
+        let arguments: Vec<_> = configuration.lines().collect();
+        if arguments.len() != 5 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid setup configuration",
+            ));
+        }
+        if !std::process::Command::new(arguments[0])
+            .args(&arguments[1..])
+            .status()?
+            .success()
+        {
+            return Err(std::io::Error::other("Setup failed"));
+        }
+        std::fs::remove_file(pending)?;
+    }
+    Ok(())
 }
 
 #[derive(Parser)]
 #[command(
     name = "hey-boss",
-    version,
-    about = "Native Mac project updates, notifications, and questions",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("HEY_BOSS_BUILD_ID"), ")"),
+    about = "Project issues, native Mac updates, notifications, and questions",
     after_help = r#"Use --project and --title when creating an item. Keep summaries short;
 put the details in Markdown. Ask only when requested or an answer is essential.
 
 Questions: --sync waits; --async returns a Task ID. Use wait for the answer.
 Save Task IDs and hide cards when they become obsolete.
+Issues infer the project from Git or the directory. Use issue create --title TITLE --body MARKDOWN.
 
 Examples:
+  hey-boss issue list
+  hey-boss issue claim 12
   hey-boss update --project Atlas --title Analysis 'Report ready' '# Findings'
   hey-boss alert --project Atlas --title Build 'Checks passed' --autoclose 10
   hey-boss ask --project Atlas --title Format 'Which format?' '' --option PDF --option Markdown --async
@@ -66,6 +86,15 @@ struct Output {
 
 #[derive(Args)]
 struct Metadata {
+    /// Related issue number; only records a relationship.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    issue: Option<i64>,
+    /// Full issue project ID (defaults to this Git repository/directory).
+    #[arg(long, requires = "issue")]
+    issue_project: Option<String>,
+    /// SSH host owning the related issue.
+    #[arg(long, requires = "issue")]
+    issue_host: Option<String>,
     #[arg(long, help = "Short project name shown in the heading; required")]
     project: String,
     #[arg(
@@ -73,13 +102,132 @@ struct Metadata {
         help = "Short title describing this update or question; required"
     )]
     title: String,
+    #[arg(
+        long,
+        value_enum,
+        help = "Subtle status badge (default: neutral); warning needs attention, error means failure"
+    )]
+    severity: Option<Severity>,
+    #[arg(
+        long,
+        conflicts_with = "icon_file",
+        help = "SF Symbol name or alias: info, success, warning, error, build, code, test, review, deploy, docs, folder, bell, question"
+    )]
+    icon: Option<String>,
+    #[arg(long, value_name = "PATH", conflicts_with = "icon", value_parser = parse_icon_file, help = "Local PNG, JPEG, TIFF, ICNS, or PDF icon up to 4 MiB; retains its colors")]
+    icon_file: Option<std::path::PathBuf>,
+}
+
+fn read_markdown_file(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    const LIMIT: u64 = 2 * 1024 * 1024;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "Markdown path must be a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(std::io::Error::other(
+            "Rendered Markdown source exceeds 2 MiB",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("Markdown file must be UTF-8"))
+}
+
+fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
+    resolve_icon_file(value)
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Automatic controller, durable replicas, connected agents, and worker signals.
+    Fleet {
+        #[command(subcommand)]
+        action: hey_boss::fleet::Action,
+    },
+    /// Request one or two secrets without history or agent-visible output.
+    Secret(secret_cli::Options),
+    /// Project issues, Markdown comments, and atomic agent claims in SQLite.
+    #[command(visible_alias = "issues")]
+    Issue(issue_cli::Options),
+    /// Global profile settings shared across all projects.
+    Settings(issue_cli::GlobalOptions),
+    /// Run an independent Codex issue worker with its own slots and tag filter.
+    Worker(worker_cli::Options),
+    /// Machine health, orphan process harvesting, and safe worktree cleanup.
+    Health {
+        /// Run on a configured SSH client (macOS or Linux).
+        #[arg(long, global = true)]
+        host: Option<String>,
+        #[command(subcommand)]
+        action: health_cli::Action,
+    },
+    /// Allow hey-boss globally in Codex and Claude Code, preserving existing settings.
+    ConfigureAgents {
+        /// Installed executable path to allow (repeatable; defaults to this executable).
+        #[arg(long, value_name = "PATH")]
+        binary: Vec<std::path::PathBuf>,
+    },
+    /// Control a loaded Codex thread on its configured owning server (JSON stdin/output).
+    AgentControl {
+        #[arg(long)]
+        thread: String,
+        #[arg(value_parser = ["inspect", "enable-goal", "disable-goal", "steer"])]
+        action: String,
+    },
+    /// Invoke a versioned two-way desktop action; returns a JSON result.
+    Action {
+        method: String,
+        #[arg(long, default_value = "{}")]
+        params: String,
+        #[arg(long)]
+        request_id: Option<String>,
+    },
+    /// Open a website on the connected Mac or send HTTP requests to its session.
+    Browser {
+        #[command(subcommand)]
+        action: BrowserAction,
+    },
+    #[command(hide = true)]
+    RenderMarkdown {
+        input: std::path::PathBuf,
+        output: std::path::PathBuf,
+        #[arg(long)]
+        source_map: bool,
+    },
+    /// List running Codex/Claude processes and matched session activity.
+    Agents {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the web Inbox; --json lists notices without opening a browser.
+    Inbox {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the native agent overview window.
+    Overview {
+        /// Print the running overview's local/server snapshots and current view as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install or connect the remote server companion over SSH.
+    Companion {
+        #[command(subcommand)]
+        action: companion::Action,
+    },
+    /// Upgrade this installation and every registered companion from one source build.
+    Upgrade(upgrade_cli::Options),
     #[command(
         about = "Post a short update with a Markdown preview",
-        after_help = r#"Keep SUMMARY to one short sentence. MARKDOWN is the full report text, not a file path.
+        after_help = r#"Keep SUMMARY to one short sentence. MARKDOWN is inline text; use --file PATH to load a Markdown document instead.
 Headings, emphasis, lists, code, and http/https/file links are supported.
 Read update opens the document and dismisses the card. History is kept. Returns a Task ID immediately.
 
@@ -96,7 +244,27 @@ Example (zsh/bash):
             value_name = "MARKDOWN",
             help = "Full Markdown text opened by Read update"
         )]
-        content: String,
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        content: Option<String>,
+        #[arg(
+            long,
+            help = "Enable document comments; status includes feedback and wait completes when review finishes"
+        )]
+        comments: bool,
+        #[arg(
+            long,
+            requires = "comments",
+            help = "Wait until the enabled review is finished or cancelled"
+        )]
+        sync: bool,
+        #[arg(
+            long,
+            alias = "markdown-file",
+            value_name = "PATH",
+            conflicts_with = "content",
+            help = "Review Markdown, source/text (1 MiB), or PNG/JPEG/GIF/WebP images (4 MiB); snapshot file contents"
+        )]
+        file: Option<std::path::PathBuf>,
         #[command(flatten)]
         output: Output,
     },
@@ -137,6 +305,7 @@ Examples:
 accepts free text. Repeat --option for choices. Pass '' for an empty description.
 --sync waits for the answer. --async returns a Task ID immediately;
 continue independent work, then use wait to receive the answer. status checks once.
+Close all cancels unanswered questions: status is cancelled with no result.
 Interrupting wait leaves the question available. hide does not dismiss questions.
 
 Examples:
@@ -207,16 +376,27 @@ Examples:
     },
     #[command(
         about = "Check a task",
-        after_help = "pending = queued or displayed; ok = completed. An answered question includes result.\nUse wait for a question answer instead of polling status.\n\nExample:\n  hey-boss status '<task_id>'"
+        after_help = "pending = queued or displayed; ok = completed; cancelled = question dismissed by Close all.\nAn answered question includes result; cancellation has no result and is not approval.\nUse wait for a question answer instead of polling status.\n\nExample:\n  hey-boss status '<task_id>'"
     )]
     Status {
         task_id: String,
+        #[arg(
+            long,
+            conflicts_with = "async",
+            help = "Wait for available review comments or an answer"
+        )]
+        sync: bool,
+        #[arg(
+            long,
+            help = "Return current state and available comments immediately (default)"
+        )]
+        r#async: bool,
         #[command(flatten)]
         output: Output,
     },
     #[command(
         about = "Wait for an answer",
-        after_help = "Questions only; not alerts or updates. Returns immediately if already answered.\nOtherwise waits until answered. Ctrl+C stops this caller; the question\nremains available for a later wait. Returns the answer and Task ID.\n\nExample:\n  hey-boss wait '<task_id>'"
+        after_help = "Questions only; not alerts or updates. Returns immediately if answered or cancelled.\nOtherwise waits for an answer or Close all. Cancellation returns status cancelled\nwithout a result; it is not an answer or approval. Ctrl+C stops this caller and\nleaves the question available for a later wait.\n\nExample:\n  hey-boss wait '<task_id>'"
     )]
     Wait {
         task_id: String,
@@ -226,22 +406,74 @@ Examples:
 }
 
 impl Cli {
-    fn into_request(self) -> (Request, Output) {
-        let (project, title) = match &self.command {
+    fn into_request(self) -> std::io::Result<(Request, Output)> {
+        let invalid =
+            |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+        let mut issue = None;
+        let (project, title, severity, icon, icon_path) = match &self.command {
             Command::Update { metadata, .. }
             | Command::Alert { metadata, .. }
             | Command::Ask { metadata, .. }
             | Command::Prompt { metadata, .. }
             | Command::Approval { metadata, .. } => {
-                assert!(
-                    !metadata.project.trim().is_empty() && !metadata.title.trim().is_empty(),
-                    "creation project and title must not be blank"
-                );
-                (Some(metadata.project.clone()), Some(metadata.title.clone()))
+                if metadata.project.trim().is_empty() || metadata.title.trim().is_empty() {
+                    return Err(invalid("creation project and title must not be blank"));
+                }
+                if let Some(number) = metadata.issue {
+                    let project = if let Some(project) = &metadata.issue_project {
+                        project.clone()
+                    } else {
+                        let cwd = std::env::current_dir()?;
+                        let machine =
+                            hey_boss::issues::identity::machine().map_err(std::io::Error::other)?;
+                        hey_boss::issues::identity::project(&cwd, &machine)
+                            .map_err(std::io::Error::other)?
+                            .id
+                    };
+                    let reference = hey_boss::notices::IssueReference {
+                        project,
+                        number,
+                        host: metadata.issue_host.clone().or_else(|| {
+                            std::env::var("HEY_BOSS_ISSUE_HOST")
+                                .ok()
+                                .filter(|s| !s.is_empty())
+                        }),
+                    };
+                    reference.validate().map_err(std::io::Error::other)?;
+                    issue = Some(reference);
+                }
+                (
+                    Some(metadata.project.clone()),
+                    Some(metadata.title.clone()),
+                    metadata.severity,
+                    metadata.icon.clone(),
+                    metadata.icon_file.clone(),
+                )
             }
-            Command::Hide { .. } | Command::Status { .. } | Command::Wait { .. } => (None, None),
+            Command::Secret(_)
+            | Command::Issue(_)
+            | Command::Settings(_)
+            | Command::Fleet { .. }
+            | Command::Worker(_)
+            | Command::Upgrade(_)
+            | Command::Health { .. }
+            | Command::ConfigureAgents { .. }
+            | Command::AgentControl { .. }
+            | Command::Action { .. }
+            | Command::Browser { .. }
+            | Command::RenderMarkdown { .. }
+            | Command::Companion { .. }
+            | Command::Agents { .. }
+            | Command::Inbox { .. }
+            | Command::Overview { .. } => {
+                unreachable!()
+            }
+            Command::Hide { .. } | Command::Status { .. } | Command::Wait { .. } => {
+                (None, None, None, None, None)
+            }
         };
         let mut request = Request {
+            issue,
             command: String::new(),
             question: None,
             project,
@@ -253,18 +485,63 @@ impl Cli {
             link_label: None,
             task_id: None,
             sync: false,
+            comments_enabled: false,
+            attachment: None,
+            document_name: None,
             origin: None,
+            severity,
+            icon,
+            icon_path,
         };
         let output = match self.command {
+            Command::Secret(_)
+            | Command::Issue(_)
+            | Command::Settings(_)
+            | Command::Fleet { .. }
+            | Command::Worker(_)
+            | Command::Upgrade(_)
+            | Command::Health { .. }
+            | Command::ConfigureAgents { .. }
+            | Command::AgentControl { .. }
+            | Command::Action { .. }
+            | Command::Browser { .. }
+            | Command::RenderMarkdown { .. }
+            | Command::Companion { .. }
+            | Command::Agents { .. }
+            | Command::Inbox { .. }
+            | Command::Overview { .. } => {
+                unreachable!()
+            }
             Command::Update {
                 summary,
                 content,
+                file,
+                comments,
+                sync,
                 output,
                 ..
             } => {
                 request.command = "update".into();
+                request.comments_enabled = comments;
+                request.sync = sync;
                 request.description = Some(summary);
-                request.question = Some(content);
+                request.question = Some(match file {
+                    Some(path) => {
+                        let (content, attachment) = hey_boss::document::read_file(&path)?;
+                        request.attachment = attachment;
+                        request.document_name = path.file_name().map(|name| {
+                            name.to_string_lossy()
+                                .chars()
+                                .filter(|c| !c.is_control())
+                                .take(256)
+                                .collect()
+                        });
+                        content
+                    }
+                    None => {
+                        content.ok_or_else(|| invalid("provide Markdown text or --file PATH"))?
+                    }
+                });
                 output
             }
             Command::Alert {
@@ -275,16 +552,26 @@ impl Cli {
                 output,
                 ..
             } => {
-                if let Some(seconds) = autoclose {
-                    assert!(seconds.is_finite() && seconds > 0.0);
+                if autoclose.is_some_and(|seconds| {
+                    !seconds.is_finite() || seconds <= 0.0 || seconds > 31_536_000.0
+                }) {
+                    return Err(invalid(
+                        "autoclose must be positive and at most 31536000 seconds",
+                    ));
                 }
                 if let Some(url) = &link_url {
-                    assert!(
-                        ["https://", "http://", "file://"]
-                            .iter()
-                            .any(|prefix| url.starts_with(prefix))
-                    );
-                    assert!(!link_label.as_ref().unwrap().trim().is_empty());
+                    if !["https://", "http://", "file://"]
+                        .iter()
+                        .any(|prefix| url.starts_with(prefix))
+                    {
+                        return Err(invalid("link URL must use https, http, or file"));
+                    }
+                    if link_label
+                        .as_ref()
+                        .is_none_or(|label| label.trim().is_empty())
+                    {
+                        return Err(invalid("link label must not be blank"));
+                    }
                 }
                 request.command = "alert".into();
                 request.question = Some(message);
@@ -338,8 +625,14 @@ impl Cli {
                 request.task_id = Some(task_id);
                 output
             }
-            Command::Status { task_id, output } => {
+            Command::Status {
+                task_id,
+                output,
+                sync,
+                ..
+            } => {
                 request.command = "status".into();
+                request.sync = sync;
                 request.task_id = Some(task_id);
                 output
             }
@@ -349,33 +642,423 @@ impl Cli {
                 output
             }
         };
-        (request, output)
+        Ok((request, output))
     }
 }
 
+#[derive(Subcommand)]
+enum BrowserAction {
+    Open {
+        url: String,
+    },
+    Request {
+        session: String,
+        #[arg(long, default_value = "/")]
+        path: String,
+        #[arg(long, default_value = "GET")]
+        method: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long, default_value = "{}")]
+        headers: String,
+    },
+    Close {
+        session: String,
+    },
+}
+fn desktop_action(
+    method: &str,
+    params: serde_json::Value,
+    id: Option<&str>,
+) -> std::io::Result<()> {
+    let executable = std::env::current_exe()?.canonicalize()?;
+    initialize(&executable)?;
+    let state = std::fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
+    let request: Request = serde_json::from_value(
+        serde_json::json!({"command":"action", "sync":false,
+        "question":serde_json::json!({"version":1,"id":id.map(str::to_owned).unwrap_or_else(||format!("action-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos())),"method":method,"params":params}).to_string()}),
+    )?;
+    let response =
+        Client::new(std::path::Path::new(&state).join("daemon.sock")).try_send(&request)?;
+    println!("{}", response.result.as_deref().unwrap_or("{}"));
+    if response.status.as_deref() != Some("ok") {
+        let detail = response
+            .result
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value["error"]["message"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "desktop action failed".into());
+        return Err(std::io::Error::other(detail));
+    }
+    Ok(())
+}
+
 fn main() {
-    let (request, output) = Cli::parse().into_request();
-    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-    initialize(&executable);
+    if let Err(error) = run() {
+        eprintln!("hey-boss: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> std::io::Result<()> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Command::Upgrade(options) => return upgrade_cli::run(options),
+        Command::Fleet { action } => return hey_boss::fleet::run(action),
+        Command::Secret(options) => return secret_cli::run(options),
+        Command::Worker(options) => {
+            if let Err(error) = worker_cli::run(options) {
+                eprintln!("hey-boss worker: {error}");
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Settings(options) => {
+            if let Err(error) = issue_cli::run_global(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss settings: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Issue(options) => {
+            if let Err(error) = issue_cli::run(options) {
+                if options.json_output() {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss issue: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Health {
+            action: health_cli::Action::Open,
+            host: None,
+        } => {
+            let executable = std::env::current_exe()?.canonicalize()?;
+            initialize(&executable)?;
+            let state = std::fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
+            let request: Request =
+                serde_json::from_value(serde_json::json!({"command":"health", "sync":false}))?;
+            let reply = Client::new(std::path::Path::new(state.trim()).join("daemon.sock"))
+                .try_send(&request)?;
+            if reply.status.as_deref() != Some("ok") {
+                return Err(std::io::Error::other(
+                    "Install the updated daemon to open Machine Health",
+                ));
+            }
+            return Ok(());
+        }
+        Command::Health { action, host } => {
+            return match host {
+                Some(host) => health_cli::run_remote(host, action),
+                None => health_cli::run(action),
+            };
+        }
+        Command::ConfigureAgents { binary } => {
+            if binary.is_empty()
+                && agent_permissions::configure_pending(&std::env::current_exe()?.canonicalize()?)?
+            {
+                return Ok(());
+            }
+            return agent_permissions::configure(binary);
+        }
+        Command::AgentControl { thread, action } => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin().take(32769).read_to_end(&mut bytes)?;
+            let result = if bytes.len() > 32768 {
+                Err(std::io::Error::other("Control input exceeds limit"))
+            } else {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(std::io::Error::from)
+                    .and_then(|input| hey_boss::agent_control::run(thread, action, &input))
+            };
+            println!(
+                "{}",
+                match result {
+                    Ok(value) => value,
+                    Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+                }
+            );
+            return Ok(());
+        }
+        Command::Action {
+            method,
+            params,
+            request_id,
+        } => return desktop_action(method, serde_json::from_str(params)?, request_id.as_deref()),
+        Command::Browser { action } => {
+            return match action {
+                BrowserAction::Open { url } => {
+                    desktop_action("browser.open", serde_json::json!({"url":url}), None)
+                }
+                BrowserAction::Close { session } => desktop_action(
+                    "browser.close",
+                    serde_json::json!({"session":session}),
+                    None,
+                ),
+                BrowserAction::Request {
+                    session,
+                    path,
+                    method,
+                    body,
+                    headers,
+                } => desktop_action(
+                    "browser.request",
+                    serde_json::json!({"session":session,"path":path,"method":method,"body":body,"headers":serde_json::from_str::<serde_json::Value>(headers)?}),
+                    None,
+                ),
+            };
+        }
+        _ => {}
+    }
+    if let Command::RenderMarkdown {
+        input,
+        output,
+        source_map,
+    } = &cli.command
+    {
+        let markdown = read_markdown_file(input)?;
+        return std::fs::write(
+            output,
+            if *source_map {
+                hey_boss::markdown::render_review_document(&markdown)
+            } else {
+                hey_boss::markdown::render_document(&markdown)
+            },
+        );
+    }
+    if let Command::Agents { json } = &cli.command {
+        let snapshot = hey_boss::agents::scan();
+        if *json {
+            println!("{}", serde_json::to_string(&snapshot)?);
+        } else {
+            println!(
+                "{} · {} sessions/processes",
+                snapshot.host,
+                snapshot.agents.len()
+            );
+            for agent in snapshot.agents {
+                println!(
+                    "{} · PID {} · {} · {}\n  {}",
+                    agent.kind,
+                    agent.pid,
+                    agent.state,
+                    agent.cwd.as_deref().unwrap_or("Unknown project"),
+                    agent.task.as_deref().unwrap_or("Task unavailable")
+                );
+            }
+        }
+        return Ok(());
+    }
+    if let Command::Overview { json } | Command::Inbox { json } = &cli.command {
+        let executable = std::env::current_exe()?.canonicalize()?;
+        initialize(&executable)?;
+        let state = std::fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
+        if !executable.with_file_name("hey-boss.companion").exists() {
+            hey_boss::require_protocol(std::path::Path::new(&state))?;
+        }
+        let mut request: Request =
+            serde_json::from_value(serde_json::json!({"command":if matches!(cli.command,Command::Inbox { .. }) { if *json { "inbox_list" } else { "inbox" } } else if *json { "overview_snapshot" } else { "overview" },"sync":false}))
+                .map_err(std::io::Error::other)?;
+        request.origin = None;
+        let result = Client::new(std::path::Path::new(&state).join("daemon.sock"))
+            .try_send(&request)
+            .unwrap_or_else(|error| {
+                eprintln!("hey-boss: daemon unavailable or request failed: {error}");
+                std::process::exit(1);
+            });
+        if *json {
+            let content = result
+                .result
+                .as_deref()
+                .ok_or_else(|| std::io::Error::other("Overview response has no snapshot"))?;
+            let snapshot: serde_json::Value =
+                serde_json::from_str(content).map_err(std::io::Error::other)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snapshot).map_err(std::io::Error::other)?
+            );
+        } else {
+            println!("{}", result.status.unwrap_or_else(|| "ok".into()));
+        }
+        return Ok(());
+    }
+    if let Command::Companion { action } = &cli.command {
+        if let Err(error) = companion::run(action) {
+            eprintln!("Companion: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    let (request, output) = cli.into_request()?;
+    let executable = std::env::current_exe()?.canonicalize()?;
+    initialize(&executable)?;
     let config = executable.with_file_name("hey-boss.state");
-    let state = std::fs::read_to_string(config).unwrap();
-    let result = Client::new(std::path::Path::new(&state).join("daemon.sock")).send(&request);
+    let state = std::fs::read_to_string(config)?;
+    if executable.with_file_name("hey-boss.companion").exists() && request.icon_path.is_some() {
+        eprintln!("Remote companion supports --icon; --icon-file requires a file on the Mac.");
+        std::process::exit(1);
+    }
+    if executable.with_file_name("hey-boss.companion").exists()
+        && !std::path::Path::new(&state).join("daemon.sock").exists()
+    {
+        eprintln!("hey-boss is disconnected; connect the companion from your Mac first.");
+        std::process::exit(1);
+    }
+    let result = Client::new(std::path::Path::new(&state).join("daemon.sock"))
+        .try_send(&request)
+        .unwrap_or_else(|error| {
+            eprintln!("hey-boss: daemon unavailable or request failed: {error}");
+            std::process::exit(1);
+        });
     if output.json {
-        println!("{}", serde_json::to_string(&result).unwrap());
+        println!("{}", serde_json::to_string(&result)?);
     } else {
         println!("Task ID: {}", result.task_id);
         if let Some(status) = result.status {
             println!("Status: {status}");
         }
+        if let Some(name) = result.document_name {
+            println!("Document: {name}");
+        }
+        if let Some(review) = result.review_status {
+            println!("Review: {review}");
+        }
+        if let Some(comments) = result.comments {
+            for comment in comments {
+                if let Some(selection) = comment.selection {
+                    println!("\nLines: {}–{}", selection.line_start, selection.line_end);
+                    println!("Source:\n{}", selection.source_text);
+                }
+                if let Some(quote) = comment.quote {
+                    println!("\nOn: {quote}");
+                }
+                println!("Comment: {}", comment.text);
+            }
+        }
         if let Some(answer) = result.result {
             println!("Result: {answer}");
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_options_reach_every_creation_command() {
+        for args in [
+            vec!["alert", "Ready"],
+            vec!["update", "Summary", "Content"],
+            vec!["ask", "Proceed?", "Details", "--async"],
+            vec!["prompt", "Name?", "Details"],
+            vec!["approval", "Proceed?", "Details"],
+        ] {
+            for severity in ["neutral", "info", "success", "warning", "error"] {
+                let mut input = vec!["hey-boss"];
+                input.extend(args.iter().copied());
+                input.extend([
+                    "--project",
+                    "Atlas",
+                    "--title",
+                    "Review",
+                    "--severity",
+                    severity,
+                    "--icon",
+                    "hammer.fill",
+                ]);
+                let (request, _) = Cli::try_parse_from(input).unwrap().into_request().unwrap();
+                let wire = serde_json::to_value(request).unwrap();
+                assert_eq!(wire["severity"], severity);
+                assert_eq!(wire["icon"], "hammer.fill");
+                assert!(wire.get("icon_path").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_appearance_is_rejected_during_parsing() {
+        let base = [
+            "hey-boss",
+            "alert",
+            "Ready",
+            "--project",
+            "Atlas",
+            "--title",
+            "Review",
+        ];
+        for extra in [
+            vec!["--severity", "urgent"],
+            vec!["--icon-file", "/missing/icon.png"],
+            vec!["--icon", "build", "--icon-file", "/missing/icon.png"],
+        ] {
+            let mut input = base.to_vec();
+            input.extend(extra);
+            assert!(Cli::try_parse_from(input).is_err());
+        }
+    }
+
+    #[test]
+    fn local_icons_are_canonical_readable_files() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("out")
+            .join(format!("icons-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let base = [
+            "hey-boss",
+            "alert",
+            "Ready",
+            "--project",
+            "Atlas",
+            "--title",
+            "Review",
+            "--icon-file",
+        ];
+        for extension in ["png", "PNG", "jpg", "jpeg", "tif", "tiff", "icns", "pdf"] {
+            let path = root.join(format!("icon.{extension}"));
+            std::fs::write(&path, b"decoded by AppKit").unwrap();
+            let relative = path.strip_prefix(std::env::current_dir().unwrap()).unwrap();
+            let mut input = base.to_vec();
+            input.push(relative.to_str().unwrap());
+            let (request, _) = Cli::try_parse_from(input).unwrap().into_request().unwrap();
+            assert_eq!(request.icon_path, Some(path.canonicalize().unwrap()));
+            assert!(request.icon.is_none());
+        }
+        let target = root.join("extensionless");
+        let alias = root.join("alias.png");
+        std::fs::write(&target, b"image").unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let resolved = parse_icon_file(alias.to_str().unwrap()).unwrap();
+        assert_eq!(resolve_icon_file(&resolved).unwrap(), resolved);
+        let boundary = root.join("boundary.png");
+        let file = std::fs::File::create(&boundary).unwrap();
+        file.set_len(4 * 1024 * 1024).unwrap();
+        assert!(parse_icon_file(boundary.to_str().unwrap()).is_ok());
+        file.set_len(4 * 1024 * 1024 + 1).unwrap();
+        assert_eq!(
+            parse_icon_file(boundary.to_str().unwrap()).unwrap_err(),
+            "icon file must be at most 4 MiB"
+        );
+        let mut oversized_input = base.to_vec();
+        oversized_input.push(boundary.to_str().unwrap());
+        assert!(Cli::try_parse_from(oversized_input).is_err());
+        let directory = root.join("directory.png");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(parse_icon_file(directory.to_str().unwrap()).is_err());
+        let unsupported = root.join("icon.svg");
+        std::fs::write(&unsupported, "<svg/>").unwrap();
+        assert!(parse_icon_file(unsupported.to_str().unwrap()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn concurrent_first_commands_register_once() {
@@ -402,14 +1085,14 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    initialize(&executable);
+                    initialize(&executable).unwrap();
                 })
             })
             .collect();
         for worker in workers {
             worker.join().unwrap();
         }
-        initialize(&root.join("hey-boss"));
+        initialize(&root.join("hey-boss")).unwrap();
         assert_eq!(std::fs::read_to_string(calls).unwrap(), "registered\n");
         assert!(!root.join("hey-boss.setup").exists());
         std::fs::remove_dir_all(root).unwrap();
@@ -449,7 +1132,7 @@ mod tests {
             let mut input = vec!["hey-boss"];
             input.extend(args);
             input.extend(["--project", "Atlas", "--title", "Review", "--json"]);
-            let (request, output) = Cli::try_parse_from(input).unwrap().into_request();
+            let (request, output) = Cli::try_parse_from(input).unwrap().into_request().unwrap();
             let wire = serde_json::to_value(request).unwrap();
             assert_eq!(wire["project"], "Atlas");
             assert_eq!(wire["title"], "Review");
@@ -473,8 +1156,31 @@ mod tests {
                     title,
                 ])
                 .unwrap();
-                assert!(std::panic::catch_unwind(|| cli.into_request()).is_err());
+                assert!(cli.into_request().is_err());
             }
+        }
+    }
+
+    #[test]
+    fn invalid_alert_values_return_errors() {
+        for args in [
+            vec!["--autoclose", "NaN"],
+            vec!["--autoclose", "0"],
+            vec!["--autoclose", "1e308"],
+            vec!["--link-url", "javascript:alert(1)", "--link-label", "Open"],
+            vec!["--link-url", "https://example.com", "--link-label", " "],
+        ] {
+            let mut input = vec![
+                "hey-boss",
+                "alert",
+                "Ready",
+                "--project",
+                "Atlas",
+                "--title",
+                "Build",
+            ];
+            input.extend(args);
+            assert!(Cli::try_parse_from(input).unwrap().into_request().is_err());
         }
     }
 
@@ -483,7 +1189,8 @@ mod tests {
         for command in ["status", "hide", "wait"] {
             let (request, _) = Cli::try_parse_from(["hey-boss", command, "task-1"])
                 .unwrap()
-                .into_request();
+                .into_request()
+                .unwrap();
             assert_eq!(request.command, command);
             assert_eq!(request.task_id.as_deref(), Some("task-1"));
             assert!(request.project.is_none());
@@ -517,7 +1224,159 @@ mod tests {
             };
             assert_eq!(metadata.project, "Atlas");
             assert_eq!(summary, "Report ready");
-            assert_eq!(content, "# Report\n\n**Done**");
+            assert_eq!(content.as_deref(), Some("# Report\n\n**Done**"));
         }
+    }
+    #[test]
+    fn markdown_file_input_snapshots_unicode_and_rejects_invalid_inputs() {
+        let directory =
+            std::env::temp_dir().join(format!("hb-markdown-file-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("report.md");
+        std::fs::write(&path, "# Report 🌍\n\n| A | B |\n|---|---|\n|one|two|").unwrap();
+        let args = [
+            "hey-boss",
+            "update",
+            "--project",
+            "Atlas",
+            "--title",
+            "Migration",
+            "Ready for review",
+            "--file",
+            path.to_str().unwrap(),
+        ];
+        let (request, _) = Cli::try_parse_from(args).unwrap().into_request().unwrap();
+        std::fs::write(&path, "changed later").unwrap();
+        assert!(request.question.unwrap().contains("Report 🌍"));
+        assert!(Cli::try_parse_from(args.into_iter().chain(["inline content"])).is_err());
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(Cli::try_parse_from(args).unwrap().into_request().is_err());
+        std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(Cli::try_parse_from(args).unwrap().into_request().is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(Cli::try_parse_from(args).unwrap().into_request().is_err());
+        assert!(read_markdown_file(&directory).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn comments_enabled_reviews_support_sync_and_async_status() {
+        let (review, _) = Cli::try_parse_from([
+            "hey-boss",
+            "update",
+            "--project",
+            "Atlas",
+            "--title",
+            "Review",
+            "Ready",
+            "# Report",
+            "--comments",
+            "--sync",
+        ])
+        .unwrap()
+        .into_request()
+        .unwrap();
+        assert!(review.comments_enabled && review.sync);
+        for (flag, sync) in [("--sync", true), ("--async", false)] {
+            let (request, _) = Cli::try_parse_from(["hey-boss", "status", "task", flag])
+                .unwrap()
+                .into_request()
+                .unwrap();
+            assert_eq!(request.command, "status");
+            assert_eq!(request.sync, sync);
+        }
+        assert!(
+            Cli::try_parse_from([
+                "hey-boss",
+                "update",
+                "--project",
+                "Atlas",
+                "--title",
+                "Review",
+                "Ready",
+                "# Report",
+                "--sync"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn notice_issue_relationship_flags_are_independent_of_notification_behavior() {
+        let (request, _) = Cli::try_parse_from([
+            "hey-boss",
+            "alert",
+            "Build ready",
+            "--project",
+            "Atlas",
+            "--title",
+            "Build",
+            "--issue",
+            "7",
+            "--issue-project",
+            "github.com/example/repo",
+            "--issue-host",
+            "devbox",
+        ])
+        .unwrap()
+        .into_request()
+        .unwrap();
+        let issue = request.issue.unwrap();
+        assert_eq!(issue.number, 7);
+        assert_eq!(issue.project, "github.com/example/repo");
+        assert_eq!(issue.host.as_deref(), Some("devbox"));
+        assert_eq!(request.command, "alert");
+        assert_eq!(request.project.as_deref(), Some("Atlas"));
+        assert!(request.link_url.is_none());
+        assert!(!request.sync);
+        assert!(
+            Cli::try_parse_from([
+                "hey-boss",
+                "alert",
+                "Ready",
+                "--project",
+                "Atlas",
+                "--title",
+                "Build",
+                "--issue",
+                "0"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hey-boss",
+                "alert",
+                "Ready",
+                "--project",
+                "Atlas",
+                "--title",
+                "Build",
+                "--issue-project",
+                "other"
+            ])
+            .is_err()
+        );
+        let (inferred, _) = Cli::try_parse_from([
+            "hey-boss",
+            "update",
+            "Ready",
+            "# Markdown",
+            "--project",
+            "Atlas",
+            "--title",
+            "Build",
+            "--issue",
+            "1",
+        ])
+        .unwrap()
+        .into_request()
+        .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let machine = hey_boss::issues::identity::machine().unwrap();
+        assert_eq!(
+            inferred.issue.unwrap().project,
+            hey_boss::issues::identity::project(&cwd, &machine)
+                .unwrap()
+                .id
+        );
     }
 }
