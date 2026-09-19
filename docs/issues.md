@@ -630,7 +630,10 @@ The versioned bidirectional JSON protocol and invariants are documented in
 
 Subtasks are ordinary issues linked to one parent in the same project. Each keeps
 its own Markdown, assignee, labels, PR links, lifecycle and position in the queue.
-Use the parent's **Subtasks** card to create a child or add an existing issue.
+Use **Add subtask** beside Edit, or press **Shift+N** while viewing an issue, to
+create a child. The shortcut stays inactive while typing or using a dialog.
+The **Subtasks** card appears only when children are linked; use **Add existing**
+there to link another issue.
 Children link back to their parent; the issue list shows completion progress.
 Unlinking keeps the issue and its subtree. Closing, deleting or reopening a parent
 does not change its children. Deleted children are excluded from progress but can

@@ -2,15 +2,22 @@
 async page => {
  const checks=[],errors=[],check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name)};
  page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept().catch(()=>{}));
- await page.reload();await page.waitForFunction(()=>model.csrf&&model.project);
- const origin=await page.evaluate(()=>location.origin);
+ await page.reload({waitUntil:"domcontentloaded"});await page.waitForFunction(()=>model.csrf&&model.project);
  const project=await page.evaluate(async()=>{const r=await api({action:'create',title:'Ship the feature',body:'## Parent plan',labels:['ready']},'Subtask QA '+crypto.randomUUID());return r.project.id});
- const go=async number=>{await page.goto(origin+'/#project='+encodeURIComponent(project)+(number?'&issue='+number:''));await page.waitForFunction(({project,number})=>model.project?.id===project&&(number?model.detail?.issue.number===number:!!model.signature),{project,number})};
+ const go=async number=>{await page.evaluate(async({project,number})=>{saveComment();history.pushState(null,"",routeHash({...model.route,project,issue:number||null,view:"issues"}));await renderRoute();},{project,number});await page.waitForFunction(({project,number})=>model.project?.id===project&&(number?model.detail?.issue.number===number:!!model.signature),{project,number})};
  const act=async operation=>page.evaluate(async({project,operation})=>await api(operation,project),{project,operation});
  const order=()=>page.locator('#subtask-list > li').evaluateAll(rows=>rows.map(r=>Number(r.dataset.issueNumber)));
  const load=async()=>{await page.locator('[data-reload]').click();await page.waitForFunction(()=>!document.querySelector('[data-reload]')&&model.detail)};
  await page.setViewportSize({width:1440,height:1000});await go(1);
- check(await page.locator('.subtasks-empty').innerText()==='No subtasks yet.','Empty parent has a clear subtask card');
+ check(await page.locator('.subtasks-card').count()===0,'Empty parent has no subtask section');
+ check(await page.locator('[data-create-subtask]').innerText()==='Add subtask','Empty parent has a compact add action');
+ check(await page.locator('[data-create-subtask]').getAttribute('aria-keyshortcuts')==='Shift+N','Add action advertises its keyboard shortcut');
+ await page.locator('#comment-body').focus();await page.keyboard.press('Shift+N');
+ check(await page.locator('#editor-dialog').isHidden(),'Subtask shortcut does not interrupt typing');
+ await page.locator('[data-create-subtask]').focus();await page.keyboard.press('Shift+N');
+ check(await page.locator('#editor-title').innerText()==='New subtask','Shift+N opens the subtask editor');
+ await page.keyboard.press('Escape');
+ check(await page.locator('[data-create-subtask]').evaluate(el=>el===document.activeElement),'Closing the editor restores the add action focus');
  await page.locator('#comment-body').fill('Keep my parent comment draft');
  await page.locator('[data-create-subtask]').click();check(await page.locator('#editor-title').innerText()==='New subtask','Create uses the Markdown issue editor');
  await page.locator('#editor-subject').fill('Implement the first piece');await page.locator('#editor-body').fill('## Child plan\n\n- [ ] Verify the result');await page.locator('#editor-submit').click();
@@ -60,9 +67,12 @@ async page => {
  check((await act({action:'view',number:4})).issue.parent.number===3,'Unlink preserves the child subtree');
  await act({action:'delete',number:2,force:false});await page.locator('[data-reload]').waitFor();await load();
  check(await page.locator('.deleted-subtasks summary').innerText()==='1 deleted subtask','Deleted relationships stay available to unlink');
- check(await page.locator('.subtasks-empty').isVisible(),'Deleted children are excluded from visible progress');
+ check(await page.locator('.subtask-progress-line').count()===0,'Deleted children are excluded from visible progress');
+ check(await page.locator('.subtasks-empty').count()===0,'Deleted-only relationships do not show an empty state');
  await page.locator('.deleted-subtasks summary').click();await page.locator('[data-unlink-subtask="2"]').click();await page.waitForFunction(()=>model.detail?.subtasks.length===0);
  check((await act({action:'view',number:2})).issue.parent===null,'Deleted child can be unlinked without restoration');
+ check(await page.locator('.subtasks-card').count()===0,'Unlinking the last child removes the subtask section');
+ check(await page.locator('[data-create-subtask]').evaluate(el=>el===document.activeElement),'Unlinking the last child restores focus to the add action');
  await act({action:'create_subtask',number:1,title:('Long child 😀 '+ 'text ').repeat(15),body:'## Long title control',labels:[],at_top:false,if_version:null});await go(1);
  for(const width of [320,390,768]){await page.setViewportSize({width,height:844});check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Subtask card fits '+width+'px');}
  await page.locator('[data-add-existing-subtask]').click();await page.waitForSelector('[data-existing-subtask="4"]');check(await page.locator('#subtask-picker-dialog').evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight}),'Picker fits narrow screens');await page.keyboard.press('Escape');check(await page.locator('[data-add-existing-subtask]').evaluate(el=>el===document.activeElement),'Closing picker restores visible focus');

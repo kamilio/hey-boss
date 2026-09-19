@@ -17,7 +17,8 @@ const IssueSubtasks = (() => {
   function card(value) {
     const issue = value.issue, children = value.subtasks || [], p = issue.subtasks;
     const visible = children.filter(c => !c.deleted_at), deleted = children.filter(c => c.deleted_at), editable = !issue.deleted_at;
-    return `<section class="subtasks-card" aria-labelledby="subtasks-heading"><div class="subtasks-heading"><h2 id="subtasks-heading" tabindex="-1">${icon("subtasks")}Subtasks${visible.length ? `<span>${p.closed}/${p.total}</span>` : ""}</h2>${editable ? '<div class="subtask-actions"><button type="button" class="button small" data-add-existing-subtask>Add existing</button><button type="button" class="button small" data-create-subtask>'+icon("plus")+'New subtask</button></div>' : ""}</div>${visible.length ? `<div class="subtask-progress-line"><progress value="${p.closed}" max="${p.total}" aria-label="${p.closed} of ${p.total} subtasks closed"></progress><span>${p.closed} of ${p.total} closed</span></div><ul id="subtask-list" class="subtask-list">${visible.map(c => row(c,editable)).join("")}</ul>${p.open_descendants > p.total - p.closed ? `<p class="subtask-descendants">${p.open_descendants} open ${p.open_descendants===1?"issue":"issues"} across all levels</p>` : ""}` : '<p class="subtasks-empty">No subtasks yet.</p>'}${deleted.length ? `<details class="deleted-subtasks"><summary>${deleted.length} deleted ${deleted.length === 1 ? "subtask" : "subtasks"}</summary><ul class="subtask-list">${deleted.map(c => row(c,false,true)).join("")}</ul></details>` : ""}</section>`;
+    if (!children.length) return "";
+    return `<section class="subtasks-card" aria-labelledby="subtasks-heading"><div class="subtasks-heading"><h2 id="subtasks-heading" tabindex="-1">${icon("subtasks")}Subtasks${visible.length ? `<span>${p.closed}/${p.total}</span>` : ""}</h2>${editable ? '<div class="subtask-actions"><button type="button" class="button small" data-add-existing-subtask>Add existing</button></div>' : ""}</div>${visible.length ? `<div class="subtask-progress-line"><progress value="${p.closed}" max="${p.total}" aria-label="${p.closed} of ${p.total} subtasks closed"></progress><span>${p.closed} of ${p.total} closed</span></div><ul id="subtask-list" class="subtask-list">${visible.map(c => row(c,editable)).join("")}</ul>${p.open_descendants > p.total - p.closed ? `<p class="subtask-descendants">${p.open_descendants} open ${p.open_descendants===1?"issue":"issues"} across all levels</p>` : ""}` : ""}${deleted.length ? `<details class="deleted-subtasks"><summary>${deleted.length} deleted ${deleted.length === 1 ? "subtask" : "subtasks"}</summary><ul class="subtask-list">${deleted.map(c => row(c,false,true)).join("")}</ul></details>` : ""}</section>`;
   }
   function signature(value) {
     const parent = value.issue.parent;
@@ -85,7 +86,7 @@ const IssueSubtasks = (() => {
     const project=model.project.id,parent=model.detail.issue,child=(model.detail.subtasks||[]).find(c=>c.number===number),route=model.sequence;
     try {
       await mutate({action:"remove_subtask",number:parent.number,child:number,if_version:parent.version,if_child_version:child.version},project);
-      if(route!==model.sequence)return;await renderRoute();$("#subtasks-heading")?.focus({preventScroll:true});toast(`Subtask unlinked. Issue #${number} is preserved.`);
+      if(route!==model.sequence)return;await renderRoute();($("#subtasks-heading") || $("[data-create-subtask]"))?.focus({preventScroll:true});toast(`Subtask unlinked. Issue #${number} is preserved.`);
     } catch(error){toast(error.message,true);}finally{busy=false;button.disabled=false;}
   }
   function init() {
