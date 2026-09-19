@@ -41,7 +41,7 @@ async function quit(session) {
 }
 try {
   await writeFile(path.join(temporary, "mode.txt"), "delay");
-  execFileSync(binary, ["issue", "--project", "Worker fixture", "create", "--title", "Fixture dashboard activity", "--body", "Synthetic terminal QA"], { cwd: temporary, env });
+  execFileSync(binary, ["issue", "--project", "Worker fixture", "--agent", "human:terminal-tui-qa", "create", "--title", "Fixture dashboard activity", "--body", "Synthetic terminal QA"], { cwd: temporary, env });
   const worker = await start(["--name", "Integrated builder", "--project", "Worker fixture", "--directory", temporary]);
   await worker.waitFor("HEY BOSS", { scope: "screen", timeout: 12000 });
   await worker.waitFor("Integrated builder", { scope: "screen", timeout: 12000 });
