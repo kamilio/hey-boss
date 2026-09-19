@@ -1,0 +1,72 @@
+// Run through playwright-cli against an isolated issue web server.
+async page => {
+  page.setDefaultTimeout(10000);
+  const origin = await page.evaluate(() => location.origin), checks = [];
+  const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
+  await page.waitForFunction(() => model.csrf && model.project);
+  const project = await page.evaluate(async () => {
+    const name = 'QA ' + crypto.randomUUID().slice(0,8);
+    return (await api({action:'create', title:'Existing', body:'', labels:[]}, name)).project.id;
+  });
+  await page.goto(origin + '/#project=' + encodeURIComponent(project));
+  await page.waitForFunction(project => model.project?.id === project, project);
+  const order = async expected => {
+    await page.waitForFunction(expected => JSON.stringify(model.issues.map(i => i.number)) === JSON.stringify(expected), expected);
+  };
+  await page.locator('#new-issue').click();
+  check(!await page.locator('#editor-bottom').isChecked(), 'Editor defaults to top');
+  await page.locator('#editor-subject').fill('Bottom from editor');
+  await page.keyboard.press('Meta+Shift+B');
+  check(await page.locator('#editor-bottom').isChecked(), 'Mac shortcut toggles while typing');
+  await page.locator('#editor-cancel').click();
+  await page.locator('#new-issue').click();
+  check(await page.locator('#editor-bottom').isChecked(), 'Unsent editor draft retains placement');
+  await page.locator('#editor-submit').click();
+  await page.waitForFunction(() => !model.editor);
+  await order([1,2]);
+  check(await page.locator('.issue-created').getAttribute('data-issue-number') === '2', 'Bottom creation is highlighted');
+  await page.locator('#new-issue').click();
+  check(!await page.locator('#editor-bottom').isChecked(), 'Next editor issue defaults to top');
+  await page.locator('#editor-subject').fill('Top from editor');
+  await page.locator('#editor-submit').click();
+  await page.waitForFunction(() => !model.editor);
+  await order([3,1,2]); checks.push('Editor creates at selected queue end');
+  await page.locator('[data-issue-number="3"] .issue-title').click();
+  await page.locator('[data-edit]').click();
+  check(!await page.locator('#editor-bottom-control').isVisible(), 'Placement is hidden when editing');
+  await page.keyboard.press('Control+Shift+B');
+  check(!await page.locator('#editor-bottom').isChecked(), 'Editing shortcut does not change placement');
+  await page.locator('#editor-cancel').click();
+  await page.goto(origin + '/#project=' + encodeURIComponent(project));
+  await page.waitForFunction(() => model.csrf && model.project);
+  const quick = async () => {
+    await page.locator('#quick-issue-open').click();
+    await page.waitForFunction(() => document.querySelector('#quick-issue-context').textContent.startsWith('Create in'));
+  };
+  await quick();
+  check(!await page.locator('#quick-issue-bottom').isChecked(), 'Quick Add defaults to top');
+  await page.locator('#quick-issue-title').fill('Bottom from Quick Add');
+  await page.keyboard.press('Control+Shift+B');
+  check(await page.locator('#quick-issue-bottom').isChecked(), 'Control shortcut toggles Quick Add');
+  await page.keyboard.press('Escape'); await quick();
+  check(await page.locator('#quick-issue-bottom').isChecked(), 'Unsent Quick Add draft retains placement');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => !document.querySelector('#quick-issue-dialog').open);
+  await order([3,1,2,4]); checks.push('Quick Add appends selected issue');
+  await quick();
+  check(!await page.locator('#quick-issue-bottom').isChecked(), 'Next Quick Add issue defaults to top');
+  await page.locator('#quick-issue-title').fill('Top from Quick Add');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => !document.querySelector('#quick-issue-dialog').open);
+  await order([5,3,1,2,4]); checks.push('Quick Add retains default prepend');
+  await page.reload(); await order([5,3,1,2,4]); checks.push('Selected order survives reload');
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('#new-issue').click();
+  check(await page.locator('#editor-bottom-control').isVisible(), 'Mobile editor exposes placement');
+  await page.screenshot({path:'output/playwright/issue31-editor-mobile.png'});
+  await page.locator('#editor-cancel').click(); await quick();
+  check(await page.locator('#quick-issue-bottom').isVisible(), 'Mobile Quick Add exposes placement');
+  check(await page.locator('#quick-issue-dialog').evaluate(el => el.scrollWidth <= el.clientWidth && el.getBoundingClientRect().right <= innerWidth), 'Quick Add fits mobile without horizontal overflow');
+  await page.screenshot({path:'output/playwright/issue31-quick-mobile.png'});
+  return {passed:checks.length, checks};
+}

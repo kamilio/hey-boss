@@ -45,6 +45,7 @@ const HeyBossQuickIssue = (() => {
       error = document.getElementById("quick-issue-error"),
       context = document.getElementById("quick-issue-context"),
       submit = document.getElementById("quick-issue-submit"),
+      bottom = document.getElementById("quick-issue-bottom"),
       status = document.getElementById("quick-issue-status");
     let projects = [], current = null, csrf, host, ready = false, saving = false,
       sequence = 0, pending = null, previousFocus, statusTimer;
@@ -122,6 +123,11 @@ const HeyBossQuickIssue = (() => {
       }
       // A modal can be opened above another form without sending its shortcuts.
       if (!dialog.open) return;
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "b") {
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (!event.repeat && !event.isComposing && !saving) bottom.checked = !bottom.checked;
+        return;
+      }
       if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); close(); }
       else if (event.key === "Enter" && event.target === input) {
         event.preventDefault(); event.stopImmediatePropagation();
@@ -133,14 +139,14 @@ const HeyBossQuickIssue = (() => {
       if (!ready || saving) return;
       let parsed;
       try { parsed = parse(input.value, projects, current); } catch (e) { fail(e.message); input.focus(); return; }
-      const operation = {action:"create", title:parsed.title, body:"", labels:[], at_top:true};
+      const operation = {action:"create", title:parsed.title, body:"", labels:[], at_top:!bottom.checked};
       const key = JSON.stringify([host, parsed.project.id, operation]);
       if (pending?.key !== key) pending = {key, id:crypto.randomUUID()};
-      saving = true; input.disabled = true; submit.disabled = true; error.hidden = true; context.textContent = "Creating…";
+      saving = true; input.disabled = true; bottom.disabled = true; submit.disabled = true; error.hidden = true; context.textContent = "Creating…";
       try {
         const value = await post(operation, parsed.project.id, pending.id);
         const savedHost = host;
-        pending = null; input.value = ""; saving = false; close();
+        pending = null; input.value = ""; bottom.checked = false; saving = false; close();
         const link = document.createElement("a");
         link.href = `/#${new URLSearchParams({project:value.project.id, issue:value.issue.number, ...(savedHost ? {host:savedHost} : {})})}`;
         link.textContent = `Created #${value.issue.number} in ${value.project.name}`;
@@ -148,7 +154,7 @@ const HeyBossQuickIssue = (() => {
         clearTimeout(statusTimer); statusTimer = setTimeout(() => status.hidden = true, 10000);
         window.dispatchEvent(new CustomEvent("hey-boss-issue-created", {detail:value}));
       } catch (e) { fail(`${e.message} Your title is preserved; retry to submit safely.`); }
-      finally { saving = false; input.disabled = false; if (dialog.open) { preview(); error.hidden = false; input.focus(); } }
+      finally { saving = false; input.disabled = false; bottom.disabled = false; if (dialog.open) { preview(); error.hidden = false; input.focus(); } }
     };
   }
   if (typeof document !== "undefined") init();

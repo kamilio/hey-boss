@@ -686,7 +686,7 @@ fn web_reordering_shares_cli_order_and_rejects_stale_changes() {
 }
 
 #[test]
-fn ui_creation_prepends_atomically_and_cli_creation_still_appends() {
+fn ui_creation_uses_selected_end_atomically_and_cli_creation_still_appends() {
     let web = Web::start();
     web.ok(json!({"action":"create","title":"First","body":"","labels":[],"at_top":true}));
     let cli_create = |title: &str| {
@@ -728,6 +728,15 @@ fn ui_creation_prepends_atomically_and_cli_creation_still_appends() {
         created.json()
     );
     cli_create("CLI fifth");
+    let append =
+        json!({"action":"create","title":"UI bottom","body":"","labels":[],"at_top":false});
+    let appended = web.action(&web.project, append.clone(), Some("ui-bottom-create"));
+    assert_eq!(appended.status, 200);
+    assert_eq!(
+        web.action(&web.project, append, Some("ui-bottom-create"))
+            .json(),
+        appended.json()
+    );
     let result = web.ok(list);
     assert_eq!(
         result["issues"]
@@ -736,11 +745,11 @@ fn ui_creation_prepends_atomically_and_cli_creation_still_appends() {
             .iter()
             .map(|i| i["number"].as_i64().unwrap())
             .collect::<Vec<_>>(),
-        vec![4, 3, 2, 1, 5]
+        vec![4, 3, 2, 1, 5, 6]
     );
     assert_eq!(
         result["order_version"].as_i64().unwrap(),
-        before["order_version"].as_i64().unwrap() + 3
+        before["order_version"].as_i64().unwrap() + 4
     );
     assert_eq!(
         web.ok(json!({"action":"view","number":3}))["issue"]["body"],
@@ -752,9 +761,7 @@ fn ui_creation_prepends_atomically_and_cli_creation_still_appends() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(unique, 5);
-    let script = String::from_utf8(web.http("GET", "/app.js", &[], b"").body).unwrap();
-    assert!(script.contains("at_top: true"));
+    assert_eq!(unique, 6);
 }
 
 #[test]

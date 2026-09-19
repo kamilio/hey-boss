@@ -150,7 +150,8 @@ Test against an isolated DB. Approval requests block for manual resumption.
 
 Web drag-and-drop, filtered/paginated CLI lists, and worker pickup share a persistent
 project queue order. Use `hey-boss issue move NUMBER --before OTHER`, `--after OTHER`,
-or omit the anchor to move to the end. UI-created issues go to the top;
+or omit the anchor to move to the end. UI-created issues go to the top by default;
+the editor and Quick Add offer **Add to bottom** (⌘⇧B / Ctrl+Shift+B).
 CLI-created issues append. Lifecycle changes keep
 position. Each worker reserves from fresh ordered SQLite data, respecting tags
 and claims. Concurrent browser moves reject stale queue revisions and refresh.

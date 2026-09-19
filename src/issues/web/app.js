@@ -1117,6 +1117,7 @@ function editorValues() {
     body: $("#editor-body").value,
     labels: editorTags.values().join(", "),
     draft: $("#editor-draft").checked,
+    bottom: $("#editor-bottom").checked,
     version: model.editor?.version,
     parentVersion: model.editor?.parent?.version,
   };
@@ -1143,6 +1144,8 @@ function openEditor(issue = null, options = {}) {
   $("#editor-subject").value = draft?.title ?? issue?.title ?? "";
   $("#editor-body").value = draft?.body ?? issue?.body ?? "";
   $("#editor-draft").checked = draft?.draft ?? issue?.draft ?? false;
+  $("#editor-bottom").checked = draft?.bottom ?? false;
+  $("#editor-bottom-control").hidden = !!issue;
   $("#editor-draft-control").hidden = !!options.parent;
   $("#editor-draft").disabled = true;
   const editor = model.editor;
@@ -1287,7 +1290,7 @@ $("#editor-form").onsubmit = async (e) => {
         title: values.title,
         body: values.body,
         labels,
-        at_top: true,
+        at_top: !values.bottom,
         ...(!ctx.parent && values.draft ? {draft:true} : {}),
       };
   editorBusy(true);
@@ -1429,6 +1432,14 @@ $("#add-project").onclick = async () => {
   openEditor();
 };
 document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "b" && $("#editor-dialog").open && !$("#confirm-dialog").open && !model.editor?.number) {
+    e.preventDefault();
+    if (!e.repeat && !e.isComposing && !model.editor?.busy) {
+      $("#editor-bottom").checked = !$("#editor-bottom").checked;
+      saveEditor();
+    }
+    return;
+  }
   if (
     e.key === "Escape" &&
     $("#editor-dialog").open &&
@@ -1596,6 +1607,7 @@ async function changePullRequest(action, url) {
 window.addEventListener("hey-boss-issue-created", () => refresh(false));
 
 $("#editor-draft").onchange = saveEditor;
+$("#editor-bottom").onchange = saveEditor;
 document.addEventListener("change", async event => {
   const toggle = event.target;
   if (!toggle.matches("[data-draft-toggle]")) return;
