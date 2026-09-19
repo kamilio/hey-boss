@@ -590,3 +590,24 @@ the nearest root's screen position. The real browser retains that root with
 `out/mm-map-global-expand-before.txt`, `out/mm-map-global-expand-after.txt`.
 Closing details whose card is hidden now returns focus to a visible ancestor
 or to the map surface.
+
+Native omitted-body reads now project only metadata and body presence, using
+SQLite octet_length so NUL-only bodies are still counted. Regression tests were
+added before the change; the current suite passed 32 map + 18 web tests, with the
+expanded Boss-assignment/closed-state case also passing separately. The synthetic
+fixture explicitly closes its own Boss-assigned issue with --force. Full/preview
+text behavior is preserved. A 500-issue/72,501-byte-body benchmark had local
+omitted-body medians of 0.143 seconds before and 0.133 after; no large speed claim.
+The research guide records the official SQLite function behavior and a real
+3.53.4 NUL reproduction. Feature commit `91fc2af` is applied to original main;
+installation of this increment is pending.
+
+Reproduced an asynchronous details-focus regression with a completed, delayed
+full note read: selecting a different native issue before completion retained
+selection/search but lost the newer heading focus. The inspector now preserves
+unchanged DOM, retains focus when updating the same topic, and starts at the top
+when selecting another topic. Before/after completed-read evidence:
+`out/mm-map-focus-race-before-completed.txt` and
+`out/mm-map-focus-race-after-completed.txt` (53,051 raw Markdown characters;
+focus now remains on the newer native topic). Routes were cleared afterward.
+Complete child-topic Outline navigation now also focuses its destination.
