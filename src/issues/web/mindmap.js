@@ -287,7 +287,8 @@
   $("#refresh").addEventListener("click", () => load({ refresh: true }));
   $("#expand").addEventListener("click", () => branches(true));
   $("#collapse").addEventListener("click", () => branches(false));
-  const bodyClick = (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } };
+  // Safari does not focus mouse-clicked buttons; anchor each read before rendering.
+  const bodyClick = (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { less.focus({preventScroll:true}); readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { read.focus({preventScroll:true}); readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } };
   $("#outline").addEventListener("click", bodyClick); $("#map-details").addEventListener("click", bodyClick);
   $("#map-details").addEventListener("click", event => {
     const page = event.target.closest("[data-rel-page]");
