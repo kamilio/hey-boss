@@ -1543,3 +1543,5 @@ async function changePullRequest(action, url) {
     if (button) button.disabled = false;
   }
 }
+
+window.addEventListener("hey-boss-issue-created", () => refresh(false));

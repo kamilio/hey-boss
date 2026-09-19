@@ -6,6 +6,7 @@ import WebKit
 import Darwin
 import QuartzCore
 import IOKit
+import Carbon
 
 /// Only aggregate input idle time is sampled. No keys, cursor positions or app
 /// contents are recorded or sent to the hub.
@@ -3558,12 +3559,41 @@ final class AgentControlPanel: NSStackView {
     }
 }
 
+/// A registered hotkey works in other apps without monitoring their keystrokes
+/// or requiring Accessibility permissions. Control+Option+Space avoids Spotlight.
+final class QuickIssueShortcut {
+    private var hotKey: EventHotKeyRef?
+    private var handler: EventHandlerRef?
+    let open: () -> Void
+    init(open: @escaping () -> Void) {
+        self.open = open
+        var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var identity = EventHotKeyID()
+            guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identity) == noErr,
+                  identity.signature == 0x48425149, identity.id == 1 else { return OSStatus(eventNotHandledErr) }
+            Unmanaged<QuickIssueShortcut>.fromOpaque(context).takeUnretainedValue().open()
+            return noErr
+        }, 1, &event, context, &handler)
+        guard installed == noErr else { return }
+        let status = RegisterEventHotKey(UInt32(kVK_Space), UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x48425149, id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        if status != noErr { NSLog("Hey Boss quick-add shortcut unavailable (%d); use the menu or browser shortcut.", status) }
+    }
+    deinit {
+        if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let handler { RemoveEventHandler(handler) }
+    }
+}
+
 /// Opens the normal browser, reusing or starting the local issue service.
 final class IssuesLauncher {
     enum Page: String {
         case issues = "/"
         case inbox = "/#view=inbox"
         case mindmaps = "/mm"
+        case quickIssue = "/#quick-issue=1"
     }
     let url = URL(string: "http://127.0.0.1:4781/")!
     var destination = URL(string: "http://127.0.0.1:4781/")!
@@ -3622,6 +3652,8 @@ final class IssuesLauncher {
 }
 
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate {
+    lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in self?.showQuickIssue() }
+    @objc func showQuickIssue() { issuesLauncher.open(cli: cli, page: .quickIssue) }
     var openInbox: (() -> Void)?
     @objc func showInbox() { if let openInbox { openInbox() } else { issuesLauncher.open(cli:cli,page:.inbox) } }
     var openIssues: (() -> Void)?
@@ -3825,6 +3857,10 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         let menu = statusMenu
         activityMenuItem.isEnabled = false
+        let quickAdd = NSMenuItem(title: "Quick add issue…", action: #selector(showQuickIssue), keyEquivalent: " ")
+        quickAdd.keyEquivalentModifierMask = [.control, .option]
+        quickAdd.target = self
+        menu.addItem(quickAdd)
         menu.addItem(activityMenuItem)
         menu.addItem(.separator())
         inboxMenuItem.action = #selector(showInbox)
@@ -4645,6 +4681,7 @@ struct Daemon {
         app.setActivationPolicy(.accessory)
         let ui = Interface(present: true)
         let overview = AgentsOverview()
+        _ = overview.quickIssueShortcut
         let secrets = SecretPrompts()
         let actions = DesktopActions(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"])
         guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_STATE_DIR"] else {
