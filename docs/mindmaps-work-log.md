@@ -481,3 +481,17 @@ did not yet model this recovery. Added a single bootstrap/token retry for its
 read commands only; intentional forbidden authoring requests are never retried.
 The failed run was stopped cleanly. A fresh run is required; its earlier samples
 do not establish a completed one-hour result.
+
+The corrected 30-second preflight passed 13 complete cycles and clean shutdown.
+Started the new one-hour installed run under
+`out/mm-soak-hour-recovery-20260919` on build `a9e607b2412ce7d6`, port 59210.
+At round 8 / 17.23 seconds, an intentional stale-token probe successfully fetched
+bootstrap and retried the read; subsequent cycles continue. Its first RSS sample
+was 12,496 KiB. The one-hour outcome remains pending. Active tool session: 55313;
+earlier hour session 61260 is terminal (failed), and preflight session 3273 is
+terminal (passed). Do not restart the active run on tool yield/timeout alone.
+
+Applied the harness recovery/log increment `2f91197` to the original checkout
+after checking the patch; no runtime rebuild is needed for this tool-only change.
+Native goal report remains active at 6,951 seconds used (~116 minutes): the user's
+eight-hour duration remains incomplete. No readiness notification or publication.
