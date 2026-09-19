@@ -1,0 +1,74 @@
+    <header class="app-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="Hey Boss"
+          ><img src="/icon.png" alt="" width="30" height="30" /><span
+            >Hey Boss</span
+          ></a
+        >
+        <span class="header-divider" aria-hidden="true"></span>
+        <div class="project-control">
+          <button
+            id="project-trigger"
+            class="project-trigger"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="project-menu"
+          >
+            <span class="project-glyph" data-icon="folder"></span
+            ><span id="project-name">Projects</span
+            ><span data-icon="chevrons"></span>
+          </button>
+          <div
+            id="project-menu"
+            class="popover project-menu"
+            role="dialog"
+            aria-label="Switch project"
+            hidden
+          >
+            <div class="popover-search">
+              <span data-icon="search"></span
+              ><input
+                id="project-search"
+                type="search"
+                aria-label="Find a project"
+                placeholder="Find a project…"
+                autocomplete="off"
+              />
+            </div>
+            <div class="menu-caption" id="project-sort-label">
+              RECENT ACTIVITY
+            </div>
+            <div id="project-options"></div>
+            <button
+              id="toggle-hidden-projects"
+              class="add-project"
+              type="button"
+            >
+              Hidden projects
+            </button>
+<!--project-action-->
+          </div>
+        </div>
+        <div class="header-right">
+<!--header-actions-->
+          <span class="connection" id="connection" role="status"
+            ><i></i><span>Connected</span></span
+          >
+<!--profile-->
+        </div>
+      </div>
+    </header>
+    <nav class="app-navigation" aria-label="Main navigation">
+      <div class="navigation-inner">
+        <a id="nav-inbox" href="/#view=inbox"
+          ><span data-icon="inbox"></span>Inbox<span
+            id="inbox-unread"
+            class="tab-count"
+            hidden
+          ></span
+        ></a>
+        <a id="nav-issues" href="/"><span data-icon="issue"></span>Issues</a>
+        <a href="/workers">Workers</a>
+        <a id="nav-mindmaps" href="/mm"<!--mindmap-current-->>Mindmaps</a>
+      </div>
+    </nav>

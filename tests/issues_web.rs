@@ -931,6 +931,37 @@ fn unavailable_inbox_does_not_block_the_issue_service() {
 }
 
 #[test]
+fn issues_and_mindmaps_share_shell_and_project_picker_components() {
+    let web = Web::start();
+    for path in ["/", "/mm"] {
+        let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
+        for component in [
+            "/components.css",
+            "/components.js",
+            "class=\"app-header\"",
+            "id=\"project-trigger\"",
+            "id=\"project-search\"",
+            "id=\"project-options\"",
+            "class=\"app-navigation\"",
+        ] {
+            assert!(
+                html.contains(component),
+                "Missing shared {component} on {path}"
+            );
+        }
+        assert!(!html.contains("<select id=\"project\""));
+    }
+    for (path, kind) in [
+        ("/components.js", "text/javascript"),
+        ("/components.css", "text/css"),
+    ] {
+        let reply = web.http("GET", path, &[], b"");
+        assert_eq!(reply.status, 200);
+        assert!(reply.headers.contains(kind));
+    }
+}
+
+#[test]
 fn main_navigation_includes_mindmaps_on_every_page() {
     let web = Web::start();
     for path in ["/", "/workers", "/mm"] {
