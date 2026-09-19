@@ -1,5 +1,6 @@
 pub mod agent_control;
 pub mod agents;
+pub mod artifacts;
 pub mod document;
 pub mod fleet;
 pub mod health;

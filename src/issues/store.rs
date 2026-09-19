@@ -18,6 +18,9 @@ mod subtasks;
 #[path = "worker_store.rs"]
 mod workers;
 
+#[path = "artifacts.rs"]
+mod artifacts;
+
 const APPLICATION_ID: i64 = 0x48424953;
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
 const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan";
@@ -159,6 +162,7 @@ fn validate(r: &Request) -> Result<()> {
         Operation::ResolveComment { comment_id, .. } if *comment_id <= 0 => {
             return Err(Error::invalid("Comment ID must be positive"));
         }
+        Operation::Artifact { operation } => operation.validate()?,
         Operation::Mindmap { operation } => operation.validate()?,
         Operation::Create {
             title,
@@ -487,6 +491,7 @@ impl Store {
             registry::migrate_runtime(&tx)?;
             tx.commit()?;
         }
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
         Ok(Self { db })
     }
 
@@ -579,6 +584,13 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::Artifact { operation } => artifacts::execute(
+                &tx,
+                &project,
+                operation,
+                actor.map(|a| a.id.as_str()).unwrap_or(""),
+                now,
+            )?,
             Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
@@ -804,7 +816,7 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"comments":comments,"more_comments":more,"assignee_agent":assignee})
+                json!({"ok":true,"project":project,"issue":issue,"comments":comments,"more_comments":more,"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
             }
             Operation::History {
                 number,
@@ -875,7 +887,9 @@ impl Store {
                 }
             }
         }
-        subtasks::enrich(&tx, &project.id, &mut result)?;
+        if !matches!(r.operation, Operation::Artifact { .. }) {
+            subtasks::enrich(&tx, &project.id, &mut result)?;
+        }
         if matches!(r.operation, Operation::Claim { .. }) {
             result["instructions"] = json!(registry::claim_instructions(
                 &tx,
