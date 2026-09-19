@@ -442,6 +442,13 @@ func auditAppearance(root: URL, sample: Record) {
     try! FileManager.default.removeItem(at: customFile)
     let restored = (try! saved.get(problem.taskID))
     precondition(restored.visualSeverity == .error && restored.iconData == problem.iconData)
+    let inbox = try! saved.inboxRows()
+    precondition(inbox.count == 1)
+    precondition(inbox[0]["severity"] as? String == "error")
+    precondition(inbox[0]["icon"] as? String == problem.icon)
+    precondition(inbox[0]["iconData"] as? String == problem.iconData!.base64EncodedString())
+    precondition(inbox[0]["question"] == nil && inbox[0]["attachment"] == nil)
+
     precondition(IconBadge(restored, frame: NSRect(x: 0, y: 0, width: 32, height: 32)).usesCustomImage)
     var regular = sample
     regular.severity = "info"
