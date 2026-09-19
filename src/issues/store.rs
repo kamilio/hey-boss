@@ -19,6 +19,56 @@ mod subtasks;
 mod workers;
 
 const APPLICATION_ID: i64 = 0x48424953;
+const SCHEMA_VERSION: i64 = 12;
+// These additive migrations shipped independently. Verify the actual columns,
+// not just user_version, so a partial upgrade can be repaired without data loss.
+const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    ("issues", "draft", "INTEGER NOT NULL DEFAULT 0"),
+    ("issues", "plan", "TEXT"),
+    (
+        "project_settings",
+        "drafts_enabled",
+        "INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "project_settings",
+        "plan_template",
+        "TEXT NOT NULL DEFAULT 'plans/{timestamp}-{number}.md'",
+    ),
+    ("mindmap_nodes", "display_label", "TEXT"),
+];
+
+fn missing_additive_columns(
+    db: &Connection,
+) -> Result<Vec<(&'static str, &'static str, &'static str)>> {
+    let mut missing = Vec::new();
+    for table in ["issues", "project_settings", "mindmap_nodes"] {
+        let mut statement = db.prepare("SELECT name FROM pragma_table_info(?1)")?;
+        let columns = statement
+            .query_map([table], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        for &(target, column, definition) in ADDITIVE_COLUMNS {
+            if target == table && !columns.contains(column) {
+                missing.push((target, column, definition));
+            }
+        }
+    }
+    Ok(missing)
+}
+
+fn migration_error(error: Error, path: &Path) -> Error {
+    if error.code == "invalid_input" {
+        return error;
+    }
+    Error::new(
+        "migration_error",
+        format!(
+            "Could not migrate issue database {}: {}. No migration changes were committed; resolve the cause and retry with this hey-boss build. Preserve the store; do not delete or recreate it.",
+            path.display(),
+            error.message
+        ),
+    )
+}
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
 const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan";
 
@@ -384,87 +434,97 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if app != 0 && app != APPLICATION_ID || version > 12 || version > 0 && app != APPLICATION_ID
+        if app != 0 && app != APPLICATION_ID
+            || version > SCHEMA_VERSION
+            || version > 0 && app != APPLICATION_ID
         {
             return Err(Error::invalid(
                 "Incompatible issue database; use the matching hey-boss version",
             ));
         }
-        if version < 12 {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-            let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if app != 0 && app != APPLICATION_ID || version > 12 {
-                return Err(Error::invalid(
-                    "Incompatible issue database; use the matching hey-boss version",
-                ));
-            }
-            if version == 0 {
-                let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
-                if tables != 0 {
+        // Healthy opens never take a writer lock. Recheck under the lock before
+        // repairing, since another startup may have completed the migration.
+        let needs_repair = version >= 10
+            && !missing_additive_columns(&db)
+                .map_err(|e| migration_error(e, path))?
+                .is_empty();
+        if version < SCHEMA_VERSION || needs_repair {
+            let mut migrate = || -> Result<()> {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+                let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                if app != 0 && app != APPLICATION_ID || version > SCHEMA_VERSION {
+                    return Err(Error::invalid(
+                        "Incompatible issue database; use the matching hey-boss version",
+                    ));
+                }
+                if version == 0 {
+                    let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
+                    if tables != 0 {
+                        return Err(Error::invalid("Refusing to use a non-issue database"));
+                    }
+                    tx.execute_batch(SCHEMA)?;
+                    tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+                    tx.pragma_update(None, "user_version", 1)?;
+                } else if app != APPLICATION_ID {
                     return Err(Error::invalid("Refusing to use a non-issue database"));
                 }
-                tx.execute_batch(SCHEMA)?;
-                tx.pragma_update(None, "application_id", APPLICATION_ID)?;
-                tx.pragma_update(None, "user_version", 1)?;
-            } else if app != APPLICATION_ID {
-                return Err(Error::invalid("Refusing to use a non-issue database"));
-            }
-            if version < 2 {
-                tx.execute_batch("ALTER TABLE projects ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+                if version < 2 {
+                    tx.execute_batch("ALTER TABLE projects ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
                     ALTER TABLE projects ADD COLUMN activity_at INTEGER NOT NULL DEFAULT 0;
                     ALTER TABLE projects ADD COLUMN hidden_at INTEGER;
                     UPDATE projects SET created_at=coalesce((SELECT min(created_at) FROM issues WHERE project_id=projects.id),0);
                     UPDATE projects SET activity_at=coalesce((SELECT max(updated_at) FROM issues WHERE project_id=projects.id),created_at);
                     CREATE INDEX project_activity ON projects(hidden_at,activity_at DESC);")?;
-                tx.pragma_update(None, "user_version", 2)?;
-            }
-            if version < 3 {
-                tx.execute_batch(workers::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 3)?;
-            }
-            if version < 4 {
-                tx.execute_batch(registry::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 4)?;
-            }
-            if version < 5 {
-                tx.execute_batch("ALTER TABLE issues ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+                    tx.pragma_update(None, "user_version", 2)?;
+                }
+                if version < 3 {
+                    tx.execute_batch(workers::SCHEMA)?;
+                    tx.pragma_update(None, "user_version", 3)?;
+                }
+                if version < 4 {
+                    tx.execute_batch(registry::SCHEMA)?;
+                    tx.pragma_update(None, "user_version", 4)?;
+                }
+                if version < 5 {
+                    tx.execute_batch("ALTER TABLE issues ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
                     UPDATE issues SET sort_order=number;
                     ALTER TABLE projects ADD COLUMN issue_order_version INTEGER NOT NULL DEFAULT 0;
                     CREATE INDEX issue_sort_order ON issues(project_id,sort_order,number);
                     CREATE INDEX worker_sort_order ON issues(sort_order,created_at,project_id,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;")?;
-                tx.pragma_update(None, "user_version", 5)?;
-            }
-            if version < 6 {
-                tx.execute_batch("ALTER TABLE project_settings ADD COLUMN boss_name TEXT NOT NULL DEFAULT 'Boss';")?;
-                tx.pragma_update(None, "user_version", 6)?;
-            }
-            if version < 7 {
-                tx.execute_batch(super::global_settings::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 7)?;
-            }
-            if version < 8 {
-                tx.execute_batch(subtasks::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 8)?;
-            }
-            if version < 9 {
-                tx.execute_batch(super::fleet::SCHEMA)?;
-                subtasks::migrate_sync(&tx)?;
-                tx.pragma_update(None, "user_version", 9)?;
-            }
-            if version < 10 {
-                tx.execute_batch(mindmap::SCHEMA)?;
-                tx.pragma_update(None, "user_version", 10)?;
-            }
-            if version < 11 {
-                tx.execute_batch("ALTER TABLE issues ADD COLUMN draft INTEGER NOT NULL DEFAULT 0; ALTER TABLE issues ADD COLUMN plan TEXT; ALTER TABLE project_settings ADD COLUMN drafts_enabled INTEGER NOT NULL DEFAULT 1; ALTER TABLE project_settings ADD COLUMN plan_template TEXT NOT NULL DEFAULT 'plans/{timestamp}-{number}.md';")?;
-                tx.pragma_update(None, "user_version", 11)?;
-            }
-            if version < 12 {
-                tx.execute_batch("ALTER TABLE mindmap_nodes ADD COLUMN display_label TEXT;")?;
-                tx.pragma_update(None, "user_version", 12)?;
-            }
-            tx.commit()?;
+                    tx.pragma_update(None, "user_version", 5)?;
+                }
+                if version < 6 {
+                    tx.execute_batch("ALTER TABLE project_settings ADD COLUMN boss_name TEXT NOT NULL DEFAULT 'Boss';")?;
+                    tx.pragma_update(None, "user_version", 6)?;
+                }
+                if version < 7 {
+                    tx.execute_batch(super::global_settings::SCHEMA)?;
+                    tx.pragma_update(None, "user_version", 7)?;
+                }
+                if version < 8 {
+                    tx.execute_batch(subtasks::SCHEMA)?;
+                    tx.pragma_update(None, "user_version", 8)?;
+                }
+                if version < 9 {
+                    tx.execute_batch(super::fleet::SCHEMA)?;
+                    subtasks::migrate_sync(&tx)?;
+                    tx.pragma_update(None, "user_version", 9)?;
+                }
+                if version < 10 {
+                    tx.execute_batch(mindmap::SCHEMA)?;
+                    tx.pragma_update(None, "user_version", 10)?;
+                }
+                for (table, column, definition) in missing_additive_columns(&tx)? {
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+                    ))?;
+                }
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                tx.commit()?;
+                Ok(())
+            };
+            migrate().map_err(|e| migration_error(e, path))?;
         }
         let journal: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
         if !journal.eq_ignore_ascii_case("wal") {

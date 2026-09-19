@@ -272,7 +272,14 @@ machines skip compilation even when package versions are unchanged. Each host
 needs Python 3, Rust, and a working unattended SSH connection. Desktop upgrades
 also need the Xcode command-line tools. Builds use a persistent cache, replacements
 are staged beside the installed executable, and failed verification restores the
-previous binary. The existing state, issue databases, and running workers are
+previous binary. Before replacing the CLI or restarting services, the staged
+build opens this installation's issue store and commits required schema changes
+atomically. Startup also reconciles missing draft, plan, project planning, and
+mindmap label columns without overwriting existing values. A failed migration
+keeps the installed CLI and services in place and reports the store and cause;
+resolve that cause and retry rather than deleting the store. Committed schema
+changes are retained if a later installation step fails, so recovery must use a
+build that supports the migrated schema. The existing state, issue databases, and running workers are
 preserved. The desktop daemon and managed companion brokers restart after an
 upgrade. Updated workers drain their active sessions and then restart with the
 same ID and settings before picking up more issues. Workers started before this
