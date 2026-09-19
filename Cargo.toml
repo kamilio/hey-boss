@@ -14,6 +14,8 @@ categories = ["command-line-utilities"]
 include = ["src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**"]
 
 [dependencies]
+crossterm = "0.28"
+ratatui = "0.29"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }

@@ -1209,6 +1209,17 @@ pub fn serve_instance_with_history(
     json_output: bool,
     history_limit: usize,
 ) -> Result<()> {
+    serve_instance_with_display(settings, id, project, json_output, history_limit, false)
+}
+
+pub fn serve_instance_with_display(
+    settings: Settings,
+    id: Option<&str>,
+    project: Project,
+    json_output: bool,
+    history_limit: usize,
+    plain: bool,
+) -> Result<()> {
     use std::io::IsTerminal;
     // Linux current_exe() gains " (deleted)" after an atomic replacement.
     // Retain the installed path while it still names the running executable.
@@ -1248,23 +1259,36 @@ pub fn serve_instance_with_history(
     };
     let supervisor = Supervisor::start_for(path, Some(id.clone()))?;
     install_signals_for_upgrade(supervisor.stop.clone(), Some(supervisor.reload.clone()))?;
-    struct Screen(bool);
-    impl Drop for Screen {
-        fn drop(&mut self) {
-            if self.0 {
-                print!("\x1b[?1049l");
-                let _ = std::io::stdout().flush();
-            }
-        }
-    }
-    let tty = std::io::stdout().is_terminal() && !json_output;
-    let _screen = Screen(tty);
+    let tty =
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output && !plain;
     if tty {
-        print!("\x1b[?1049h");
+        use crate::worker_tui::{backend::Client, runtime};
+        print!(
+            "\x1b]0;{}\x07",
+            terminal_title(&json!(settings.projects), &projects["projects"])
+        );
+        let exit = runtime::run(
+            runtime::Options {
+                client: Client {
+                    binary: reload_executable.clone(),
+                    host: None,
+                    directory: Some(std::env::current_dir()?),
+                    timeout: Duration::from_secs(10),
+                },
+                id: Some(id.clone()),
+                history: history_limit > 0,
+                owned_worker: true,
+            },
+            supervisor.stop.clone(),
+        )
+        .map_err(|e| Error::new("worker_error", e.to_string()))?;
+        if exit == runtime::Exit::Quit {
+            supervisor.reload.store(false, Ordering::Relaxed);
+        }
     }
     let mut last = String::new();
     let mut heartbeat = Instant::now() - Duration::from_secs(30);
-    while !supervisor.stop.load(Ordering::Relaxed) {
+    while !tty && !supervisor.stop.load(Ordering::Relaxed) {
         let value = store.execute(&super::Request {
             version: 1,
             project: project.clone(),
@@ -1290,17 +1314,11 @@ pub fn serve_instance_with_history(
         value["upgrading"] =
             json!(supervisor.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
         let signature = serde_json::to_string(&value)?;
-        if tty || signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
-            if tty {
-                print!(
-                    "\x1b]0;{}\x07",
-                    terminal_title(&value["config"]["projects"], &projects["projects"])
-                );
-            }
+        if signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
             if json_output {
                 println!("{value}");
             } else {
-                print_status_with_history(&value, tty, history_limit);
+                print_status_with_history(&value, false, history_limit);
                 println!("Ctrl+C stops this worker's Codex sessions.");
             }
             std::io::stdout().flush()?;
@@ -1323,7 +1341,6 @@ pub fn serve_instance_with_history(
     retry_database_busy(|| store.unregister_worker(&id))?;
     if reload {
         drop(_registration);
-        drop(_screen);
         let mut command = Command::new(reload_executable);
         command.args([
             "worker",
@@ -1334,6 +1351,9 @@ pub fn serve_instance_with_history(
         ]);
         if json_output {
             command.arg("--json");
+        }
+        if plain {
+            command.arg("--plain");
         }
         return Err(command.exec().into());
     }

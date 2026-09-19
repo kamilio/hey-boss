@@ -9,6 +9,8 @@ pub mod markdown;
 pub mod mindmap;
 pub mod notices;
 pub mod syntax;
+/// Shared worker terminal library, also available as the standalone worker-tui crate.
+pub mod worker_tui;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::Shutdown;
