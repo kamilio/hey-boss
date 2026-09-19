@@ -223,15 +223,30 @@ pub struct Supervisor {
     reload: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
+
+/// Lifecycle writes must finish even when another SQLite writer outlasts the
+/// connection's busy timeout. Retry only contention, preserving other errors.
+pub fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    loop {
+        match operation() {
+            Err(error) if error.code == "database_busy" => {
+                eprintln!("Worker database temporarily busy: {error}; waiting for the writer");
+                thread::sleep(Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Supervisor {
     pub fn start(path: PathBuf) -> Result<Self> {
         Self::start_for(path, None)
     }
     pub fn start_for(path: PathBuf, worker_id: Option<String>) -> Result<Self> {
         let machine = identity::machine()?;
-        let mut store = Store::open(&path)?;
+        let mut store = retry_database_busy(|| Store::open(&path))?;
         // Never free a slot until the old owned process has actually stopped.
-        recover(&mut store, &machine)?;
+        retry_database_busy(|| recover(&mut store, &machine))?;
         let stop = Arc::new(AtomicBool::new(false));
         let upgrading = Arc::new(AtomicBool::new(false));
         let reload = Arc::new(AtomicBool::new(false));
@@ -327,7 +342,9 @@ impl Supervisor {
             }
             for (id, handle) in handles {
                 let _ = handle.join();
-                if let Err(e) = finalize_abandoned(&mut store, &machine, &id) {
+                if let Err(e) =
+                    retry_database_busy(|| finalize_abandoned(&mut store, &machine, &id))
+                {
                     eprintln!("Worker recovery: {e}");
                 }
             }
@@ -676,7 +693,7 @@ impl Drop for Codex {
 }
 
 fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
-    let mut store = match Store::open(path) {
+    let mut store = match retry_database_busy(|| Store::open(path)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Worker {}: {e}", job.id);
@@ -704,7 +721,7 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
                 .into(),
         ),
     };
-    if let Err(e) = store.worker_finish(&job, &state, &summary) {
+    if let Err(e) = retry_database_busy(|| store.worker_finish(&job, &state, &summary)) {
         eprintln!("Worker {} could not finalize: {e}", job.id)
     }
 }
@@ -1198,19 +1215,21 @@ pub fn serve_instance_with_history(
     let reload_executable = std::env::current_exe()?.canonicalize()?;
     let path = super::database_path()?;
     let machine = identity::machine()?;
-    let mut store = Store::open(&path)?;
+    let mut store = retry_database_busy(|| Store::open(&path))?;
     // Ensure the caller's project exists before registration/selection.
-    let projects = store.execute(&super::Request {
-        version: 1,
-        project: project.clone(),
-        project_override: None,
-        actor: None,
-        operation: super::Operation::Projects {
-            include_hidden: true,
-        },
-        request_id: None,
+    let projects = retry_database_busy(|| {
+        store.execute(&super::Request {
+            version: 1,
+            project: project.clone(),
+            project_override: None,
+            actor: None,
+            operation: super::Operation::Projects {
+                include_hidden: true,
+            },
+            request_id: None,
+        })
     })?;
-    let id = store.register_worker(id, &settings, &machine)?;
+    let id = retry_database_busy(|| store.register_worker(id, &settings, &machine))?;
     crate::fleet::record_local_worker(&id, Some(&settings), "running")?;
     struct Registration {
         path: PathBuf,
@@ -1218,8 +1237,8 @@ pub fn serve_instance_with_history(
     }
     impl Drop for Registration {
         fn drop(&mut self) {
-            if let Ok(store) = Store::open(&self.path) {
-                let _ = store.unregister_worker(&self.id);
+            if let Ok(store) = retry_database_busy(|| Store::open(&self.path)) {
+                let _ = retry_database_busy(|| store.unregister_worker(&self.id));
             }
         }
     }
@@ -1301,7 +1320,7 @@ pub fn serve_instance_with_history(
     if !reload && !store.worker_shutdown_requested(&id)? {
         crate::fleet::record_local_worker(&id, None, "stop")?;
     }
-    store.unregister_worker(&id)?;
+    retry_database_busy(|| store.unregister_worker(&id))?;
     if reload {
         drop(_registration);
         drop(_screen);

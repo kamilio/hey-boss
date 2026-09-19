@@ -96,7 +96,12 @@ pub fn run(o: &Options) -> Result<()> {
     let base = issues::identity::project(&cwd, &machine)?;
     let controller = format!("worker-controller:{machine}:{}", std::process::id());
     let actor = issues::identity::resolve(Some(&controller), &machine, &cwd)?;
-    let mut store = Store::open(&issues::database_path()?)?;
+    let path = issues::database_path()?;
+    let mut store = if o.action.is_none() {
+        issues::worker::retry_database_busy(|| Store::open(&path))?
+    } else {
+        Store::open(&path)?
+    };
     let request = |operation, override_id| Request {
         version: 1,
         project: base.clone(),
