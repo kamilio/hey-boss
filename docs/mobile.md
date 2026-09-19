@@ -39,6 +39,34 @@ when configured. Its durable SQLite outbox retries interrupted publication. A
 five-second sync retrieves phone outcomes and acknowledges only after local save.
 No agent inventory scans are introduced by mobile sync.
 
+## Create project issues from your phone
+
+Open **Issues** in the paired Fly app, select a registered project, and enter a
+title, optional description, and comma-separated labels. Creations use the same
+pairing session as the Inbox and are recorded as Boss in the normal issue queue.
+The phone can reach Fly over cellular; no direct connection to the Mac is needed.
+
+The fleet supervisor publishes its registered projects and delivers creations
+every five seconds, using the existing `mobile.json` beside its authoritative
+`issues.db`. Run `hey-boss fleet setup` if the supervisor is not installed. Only
+the supervisor consumes this queue; companions receive issues through fleet sync.
+Upgrade the CLI with `hey-boss upgrade --source /path/to/hey-boss` and deploy the
+mobile app with `flyctl deploy --ha=false` from `mobile/`.
+
+**Pending** means the submission is saved on the phone or accepted into Fly's
+persistent SQLite queue, as indicated on screen. Accepted submissions survive an
+offline supervisor and Fly restarts. **Synced** includes the authoritative issue
+number and means workers can pick it up. **Error** includes the validation or
+project error and an **Edit saved draft** action with the full original content.
+Project choices remain available from the last supervisor sync while it is offline.
+
+Unsubmitted and uncertain drafts persist in browser storage. Uncertain submissions
+keep their fields locked and retry the same request ID after reconnect/reload;
+they cannot accidentally become a second creation. Fly and the native issue store
+both deduplicate that ID, including when a successful delivery acknowledgment is
+lost. Validation failures keep the draft editable. If browser storage is full,
+submission stops before sending and explains how to retry.
+
 ## Quiet notification routing
 
 Default routing is **When I’m away**, with a two-minute input-idle threshold.
