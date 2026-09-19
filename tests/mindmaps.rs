@@ -1433,3 +1433,32 @@ fn mirrored_issue_views_identify_the_resource_project_and_preserve_unavailable_r
             .contains("(unavailable)")
     );
 }
+
+#[test]
+fn markdown_export_keeps_relationship_labels_and_descriptions_literal() {
+    let f = Fixture::new();
+    let project = "Atlas **release**";
+    let source = f.run(project, &["add", "Topic *literal* [draft]"]);
+    let target = f.run(project, &["add", "Review <scope> & `plan`"]);
+    f.run(
+        project,
+        &[
+            "link",
+            source["node"]["id"].as_str().unwrap(),
+            target["node"]["id"].as_str().unwrap(),
+            "--why",
+            "Wait for **approval**, then [ship](https://example.com)",
+        ],
+    );
+    let exported = f.terminal(project, &["export"]);
+    let html = hey_boss::markdown::render_fragment(&exported);
+    assert!(html.contains("Atlas **release**</h1>"));
+    assert!(html.contains("Topic *literal* [draft] → Review &lt;scope&gt; &amp; `plan` [related] — Wait for **approval**, then [ship](<a href=\"https://example.com\">https://example.com</a>)"), "{html}");
+    assert!(!html.contains("<em>literal</em>"));
+    assert!(!html.contains("<strong>approval</strong>"));
+    assert!(!html.contains(">ship</a>"));
+    assert!(
+        f.terminal(project, &["links"])
+            .contains("Wait for **approval**, then [ship](https://example.com)")
+    );
+}
