@@ -764,3 +764,22 @@ paths now accept pointer hits on their stroke. Actual hit testing reaches the
 path and its full description; dragging from that path still pans the map and
 preserves topic selection. Evidence `out/mm-map-edge-hit-before.txt` and
 `out/mm-map-edge-hit-after.txt`. Hierarchy edges keep their existing behavior.
+
+Dependency hover is installed build `158c0c15c7760114`, with all four served
+assets matching main `055737a` (`out/mm-installed-hover-assets-result.json`).
+A separate pinned installed-build focus endurance run is active until 19:40 UTC
+under `out/mm-focus-ui-soak-20260919`; it covers the current focus recovery,
+while the existing older-build large-map endurance remains independent.
+
+Fit previously placed the rightmost cards behind an open desktop inspector.
+It now fits within the space beside details, uses the whole map after closing
+details, and retains the phone overlay camera behavior. A stale inspector from
+a preceding project does not reserve space when selection is cleared. Regression
+assertions failed before both fixes and pass afterward in the CI layout script.
+Actual-browser checks passed eight assertions at 1280, 900 and 390 pixels wide;
+the phone overlay test dispatches Fit programmatically because the open details
+intentionally covers the map controls. Evidence:
+`out/mm-map-fit-inspector-before.txt`, `out/mm-map-fit-inspector-final.txt`,
+`out/mm-map-fit-test-before.txt`, `out/mm-map-fit-stale-test-before.txt`.
+The 30 general browser assertions also passed with the Fit adjustment on the
+10,000-node/20,000-link fixture (`out/mm-map-scale-fit-checks.txt`).

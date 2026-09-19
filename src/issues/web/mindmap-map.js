@@ -343,14 +343,20 @@
     fit() {
       if (!this.data) return;
       const box = this.element.getBoundingClientRect(),
-        d = this.data;
+        d = this.data,
+        inspector = document.getElementById("map-inspector"),
+        reserved =
+          box.width > 700 && this.selected && inspector && !inspector.hidden
+            ? inspector.offsetWidth + 28
+            : 0,
+        width = box.width - reserved;
       const scale = Math.max(
         0.18,
-        Math.min(1, (box.width - 100) / d.width, (box.height - 100) / d.height),
+        Math.min(1, (width - 100) / d.width, (box.height - 100) / d.height),
       );
       this.camera = {
         scale,
-        x: (box.width - d.width * scale) / 2,
+        x: (width - d.width * scale) / 2,
         y: (box.height - d.height * scale) / 2,
       };
       this.schedule();
