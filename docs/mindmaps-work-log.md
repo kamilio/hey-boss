@@ -831,3 +831,24 @@ Evidence `out/mm-map-shared-scale-integration.txt` (before),
 `out/mm-map-shared-scale-integration-after.txt` (partial),
 `out/mm-map-shared-scale-integration-final.txt` (pass). The adjustment is scoped
 to the mindmap stylesheet; concurrent shared-theme files remain intact.
+
+Imported committed main's shared UI into the worktree. The CSS merge conflict
+was resolved with that main snapshot, which already contained our spacing/hover
+changes; the entire merged index was verified equal to MERGE_HEAD before commit.
+All 34 general browser checks pass against the actual native shared-UI server,
+without asset mocks (`out/mm-map-shared-native-scale-checks.txt`).
+
+Project-picker Escape bubbled to the viewer's global handler, also closing topic
+details and taking focus away from the restored picker trigger. The viewer now
+respects handled keyboard events (`defaultPrevented`). A proper baseline
+renderer reproduction fails while preserving the selected inspector; current
+code passes six checks: picker search focus, picker closes, topic remains open,
+trigger focus restored, a second unhandled Escape closes details, card focus
+restored. Evidence `out/mm-map-project-picker-escape-baseline.txt` and
+`out/mm-map-project-picker-escape-after.txt`; reusable
+`tools/mindmap_shell_browser_checks.js`. The first harness attempt retained
+Outline across same-document navigation and is not counted as bug evidence.
+The 19 focused-read checks also pass current shared UI
+(`out/mm-map-shared-native-focus-retry.txt`). Its first reload timed out with
+a pending local icon request during fixture replacement; that run remains
+unsuccessful evidence, not a pass.
