@@ -717,3 +717,17 @@ enabled keyboard focus. Evidence `out/mm-map-relationship-browser-result.txt`.
 The independent older-build UI endurance run continues; its native RSS samples
 vary rather than grow monotonically in early large-map samples. No indefinite
 memory conclusion yet.
+
+Dense-hub changes are applied to original main as `e1e56bd` and installed as
+build `6f91add4c986dc52`. Both the 30 general and 60 dense browser checks pass
+on the latest debug code; four focused web boundary/asset checks pass on main.
+Installed served assets and skill copies match current-main source, and the
+NUL/Unicode focused-read smoke remains correct. Evidence:
+`out/mindmap-installed-dense-20260919/result.json`.
+
+Wrapped card titles were shrinking below two full line boxes: a 19.5-pixel line
+height had only 35.17 pixels for two lines, and 12-pixel metadata shrank to 10.83.
+Adjusted internal spacing/padding while retaining the 84-pixel card geometry.
+The real browser now gives 39 pixels to the two title lines and 12 to metadata;
+before/after dark screenshots were inspected. Evidence:
+`out/mm-map-wrapped-title-before.txt`, `out/mm-map-wrapped-title-after.txt`.
