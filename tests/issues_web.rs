@@ -1263,10 +1263,15 @@ fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
         [plan.to_string()],
     )
     .unwrap();
-    assert_ne!(
-        w.action(&w.project, json!({"action":"undraft","number":1}), None)
-            .status,
-        200
+    let failed = w.action(&w.project, json!({"action":"undraft","number":1}), None);
+    assert_ne!(failed.status, 200);
+    let message = failed.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("plan.md") && message.contains("retry undrafting"),
+        "{message}"
     );
     assert_eq!(
         w.ok(json!({"action":"view","number":1}))["issue"]["draft"],
