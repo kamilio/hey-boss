@@ -35,8 +35,8 @@ pub struct Options {
     claim_timeout: Option<u32>,
     #[arg(long)]
     json: bool,
-    /// Finished attempts shown separately from active sessions (0 hides history).
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=20))]
+    /// Finished-attempt history (0 starts with active work only).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=20))]
     history: u8,
     #[command(subcommand)]
     action: Option<Action>,

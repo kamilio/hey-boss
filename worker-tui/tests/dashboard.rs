@@ -14,14 +14,15 @@ fn snapshot() -> serde_json::Value {
 }
 
 #[test]
-fn navigation_preserves_identity_across_reordering_and_hides_stale_runs() {
+fn navigation_preserves_session_and_worker_identity_across_reordering() {
     let mut app = Dashboard::default();
     app.apply(snapshot());
     assert_eq!(app.run_id.as_deref(), Some("live"));
     assert_eq!(app.runs().len(), 1);
     app.history = true;
-    assert_eq!(app.runs().len(), 2);
-    app.sessions_focused = true;
+    assert_eq!(app.runs().len(), 1);
+    assert_eq!(app.runs()[0]["id"], "done");
+    app.normalize_run();
     app.navigate(1);
     assert_eq!(app.run_id.as_deref(), Some("done"));
     app.history = false;
@@ -31,10 +32,9 @@ fn navigation_preserves_identity_across_reordering_and_hides_stale_runs() {
     reordered["workers"].as_array_mut().unwrap().reverse();
     app.apply(reordered);
     assert_eq!(app.worker_id.as_deref(), Some("a"));
-    app.sessions_focused = false;
     app.navigate(-1);
-    assert_eq!(app.worker_id.as_deref(), Some("b"));
-    assert!(app.runs().is_empty());
+    assert_eq!(app.worker_id.as_deref(), Some("a"));
+    assert_eq!(app.run_id.as_deref(), Some("live"));
 }
 
 #[test]
@@ -144,9 +144,14 @@ fn live_timers_advance_but_finished_attempts_keep_their_duration() {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(screen.contains(elapsed));
         assert!(screen.contains("history · 1m00s"));
-        assert!(screen.contains(&format!("Manual claim deadline: {claim}")));
+        app.history = false;
+        app.normalize_run();
+        let active = self::screen(&app);
+        assert!(active.contains(elapsed));
+        assert!(active.contains(&format!("Manual claim deadline: {claim}")));
+        app.history = true;
+        app.normalize_run();
     }
 }
 
@@ -164,5 +169,86 @@ fn smallest_supported_layout_keeps_the_selected_session_visible() {
         .map(|c| c.symbol())
         .collect();
     assert!(screen.contains("#6 running · Build dashboard"));
+    assert!(screen.contains("AVAILABLE"));
+    assert!(screen.contains("1 busy · 1 available / 2 slots"));
     assert!(screen.contains("? help  q quit"));
+}
+
+fn screen(app: &Dashboard) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| ui::render(frame, app)).unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect()
+}
+
+#[test]
+fn dashboard_shows_only_current_worker_and_separates_history() {
+    let mut app = Dashboard::default();
+    app.apply(snapshot());
+    let active = screen(&app);
+    assert!(active.contains("Builder 🚀"));
+    assert!(!active.contains("Review"));
+    assert!(active.contains("AVAILABLE"));
+    assert!(active.contains("1 busy"));
+    assert!(active.contains("1 available"));
+    assert!(!active.contains("Previous attempt"));
+    app.history = true;
+    app.normalize_run();
+    let history = screen(&app);
+    assert!(history.contains("Completed attempts"));
+    assert!(history.contains("Previous attempt"));
+    assert!(!history.contains("Build dashboard"));
+}
+
+#[test]
+fn busy_and_finishing_states_use_plain_language() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["workers"][0]["active"] = json!(2);
+    app.apply(value.clone());
+    assert!(screen(&app).contains("BUSY"));
+    value["workers"][0]["config"]["enabled"] = json!(false);
+    app.apply(value.clone());
+    assert!(screen(&app).contains("Finishing work before pause"));
+    value["workers"][0]["upgrading"] = json!(true);
+    app.apply(value);
+    assert!(screen(&app).contains("Finishing work before update"));
+    assert!(!screen(&app).contains("draining"));
+}
+
+#[test]
+fn controller_connectivity_remains_visible_with_stale_sessions() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["fleet"] = json!({"role":"agent", "pending_changes":3,
+        "controller_connection":{"state":"connected", "last_sync":1}});
+    app.apply(value.clone());
+    assert!(screen(&app).contains("Main: connected"));
+    value["fleet"]["controller_connection"]["state"] = json!("disconnected");
+    app.apply(value);
+    assert!(screen(&app).contains("Main: disconnected"));
+    assert!(screen(&app).contains("3 changes waiting to sync"));
+    app.error = Some("Queue unavailable".into());
+    assert!(screen(&app).contains("Main: unknown"));
+    assert!(screen(&app).contains("Build dashboard"));
+}
+
+#[test]
+fn initial_selection_uses_status_worker_and_owned_dashboard_stays_pinned() {
+    let mut value = snapshot();
+    value["worker_id"] = json!("b");
+    let mut app = Dashboard::default();
+    app.apply(value);
+    assert_eq!(app.worker_id.as_deref(), Some("b"));
+    app.owned_worker = true;
+    app.apply(snapshot());
+    assert_eq!(app.worker_id.as_deref(), Some("b"));
+    assert!(app.runs().is_empty());
+    app.apply(json!({"worker_id":"a", "workers":[{"id":"a"}], "runs":[]}));
+    assert_eq!(app.worker_id.as_deref(), Some("b"));
 }

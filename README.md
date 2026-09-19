@@ -2,7 +2,7 @@
 
 Licensed under [MIT](LICENSE).
 
-The [worker terminal dashboard](worker-tui/README.md) shows live sessions,
+The [worker terminal dashboard](worker-tui/README.md) shows the current worker, live sessions,
 activity, queue state, and worker controls. Run `hey-boss worker` to start a worker
 with the dashboard, or `hey-boss worker status` to watch existing workers.
 It is included in normal installations and SSH companion upgrades. The dashboard
@@ -61,12 +61,14 @@ them from **Hidden projects** at any time; their issues and history remain intac
 
 Codex workers launch from the CLI: `hey-boss worker --concurrency 2 --tag ready`.
 Each worker owns its concurrency and filters, uses its current directory, and
-shows slots, pickup stages, active Codex sessions, and three recent attempts in
-separate terminal sections. `--history 0` hides finished attempts; `--history 20`
-shows more history. Concurrency limits active sessions only. Open, unassigned
+shows only that worker, with prominent availability and busy/free slot counts.
+Active work is the default; h switches to a separate completed-attempt history.
+`--history 20` starts in history. In plain terminal output, finished attempts
+appear separately only when `--history` is supplied. Concurrency limits active
+sessions only. Open, unassigned
 issues retry after unsuccessful attempts with a delay of 30 seconds to five
 minutes; approval requests remain on hold until explicitly retried.
-The terminal identifies the queue host, database, and selected projects.
+The dashboard identifies selected projects and connectivity to the main machine.
 Run `hey-boss fleet setup --source /path/to/hey-boss` once on the main machine
 to manage the existing SSH machine inventory automatically. The controller
 installs agents, mirrors issue queues, distributes saved worker configurations,

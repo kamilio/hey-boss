@@ -55,7 +55,7 @@ try {
   await worker.waitFor("Keyboard", { scope: "screen", timeout: 1000 });
   await worker.press("Escape");
   await worker.resize(48, 12);
-  await worker.waitFor("Sessions + recent attempts", { scope: "screen", timeout: 1000 });
+  await worker.waitFor("Active sessions", { scope: "screen", timeout: 1000 });
   await worker.resize(120, 36);
   // Status is a dashboard too, but quitting it must leave the worker running.
   const dashboard = await start(["status"]);
