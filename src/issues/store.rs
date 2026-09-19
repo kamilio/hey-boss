@@ -436,6 +436,32 @@ impl Store {
         Ok(Self { db })
     }
 
+    /// Resolve notification headings through the same project registry as issues.
+    /// Register first use without changing issue ownership or hidden-project state.
+    pub fn notification_project(
+        &mut self,
+        detected: &Project,
+        override_id: Option<&str>,
+    ) -> Result<Project> {
+        if let Some(value) = override_id {
+            identifier(value, "project override", 8192)?;
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let project = resolve_project(&tx, detected, override_id)?;
+        identifier(&project.id, "project ID", 8192)?;
+        identifier(&project.name, "project name", 1024)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3)
+            ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)", params![project.id,project.name,now])?;
+        tx.commit()?;
+        Ok(project)
+    }
+
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
         validate(r)?;
         let write = r.operation.writes();
