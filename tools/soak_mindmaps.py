@@ -100,13 +100,20 @@ def main():
                 assert time.monotonic() < deadline, 'Server startup timed out'
                 time.sleep(.1)
 
-        def http(path, payload=None, expected=200):
+        def http(path, payload=None, expected=200, reconnect=True):
+            nonlocal token
             request = urllib.request.Request(url + path, data=None if payload is None else json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'X-Hey-Boss-CSRF': token})
             try:
                 with urllib.request.urlopen(request, timeout=25) as reply:
                     status, raw = reply.status, reply.read()
             except urllib.error.HTTPError as error:
                 status, raw = error.code, error.read()
+            if status == 403 and expected == 200 and reconnect and payload is not None:
+                operation = payload.get('operation', {}).get('operation', {})
+                if operation.get('command') in ['show', 'view', 'links', 'projects']:
+                    token = http('/api/bootstrap')['csrf']
+                    sample('reconnected')
+                    return http(path, payload, expected, reconnect=False)
             assert status == expected, (path, status, raw[:500])
             return json.loads(raw)
 
@@ -123,6 +130,9 @@ def main():
             command('mm', 'Atlas', 'link', 'implementation', 'Platform::api', '--kind', 'depends-on', '--why', why)
             command('issue', 'Atlas', 'edit', '1', '--title', f'Implementation round {rounds}')
             state.update(pending=rounds % 2 == 0, available=rounds % 5 != 0)
+            if rounds == 8:
+                token = 'synthetic-stale-token'
+                sample('token_recovery_probe')
             request = lambda operation: {'project': 'named:Atlas', 'operation': {'action': 'mindmap', 'operation': operation}, 'request_id': None}
             graph = http('/api/mm', request({'command': 'show', 'body_mode': 'preview'}))
             by_alias = {node.get('alias'): node for node in graph['nodes']}
