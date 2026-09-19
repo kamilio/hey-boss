@@ -75,3 +75,28 @@ Saved input/output: `out/research/xmind-relationship-read.xml` and
 not a successfully loaded/saved XMind workbook. This confirms the optional label
 in the legacy relationship read model; it does not establish current hosted APIs
 or Python 3 compatibility for its write operations.
+
+## Native body-free metadata reads
+
+SQLite's [octet_length documentation](https://www.sqlite.org/lang_corefunc.html#octet_length)
+states that a text/blob table column's byte length comes from metadata without
+reading its content. This also counts an initial NUL byte correctly. A real,
+unmodified Python/SQLite 3.53.4 reproduction:
+
+```sh
+python3 -c 'import sqlite3; c=sqlite3.connect(":memory:"); print(c.execute("SELECT sqlite_version(),length(char(0)),octet_length(char(0))").fetchone())'
+# ('3.53.4', 0, 1)
+```
+
+Rust's bundled SQLite source is 3.53.2 and supports the same function. Native
+`--bodies none` projections now read title/state/assignment/revision and this
+body-presence metadata. Full and preview native reads retain the original text
+path, including embedded NULs and Unicode. The CLI regression covers empty/NUL
+bodies, exact 512/513-character boundaries, assignment and closed-state metadata.
+
+`tools/benchmark_mindmap_issues.py` reproduces an isolated 500-issue fixture with
+72,501-byte bodies beginning with NUL and five CLI samples per body mode. Local
+before/after omitted-body medians were 0.143 and 0.133 seconds; this is a modest
+fixture observation with concurrent development, rather than a broad speed claim.
+Result artifacts: `out/mm-native-projection-before.json` and
+`out/mm-native-projection-after.json`.

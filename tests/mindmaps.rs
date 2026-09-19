@@ -800,6 +800,70 @@ fn node_view_resolves_current_cross_project_issues_and_pending_only_notices() {
 }
 
 #[test]
+fn native_issue_body_modes_preserve_null_bytes_unicode_and_live_revisions() {
+    let f = Fixture::new();
+    f.issue("Atlas", &["create", "--title", "Native planning"]);
+    f.run("Atlas", &["issue", "1", "--id", "native"]);
+    f.issue("Atlas", &["assign-to-boss", "1"]);
+    for body in [
+        String::new(),
+        "\0".to_owned(),
+        "Small\0native body".to_owned(),
+        "🧭".repeat(512),
+        "🧭".repeat(513),
+        format!("é{}", "🧭".repeat(600)),
+        format!("{}\0more", "a".repeat(511)),
+    ] {
+        let mut child = f
+            .cmd("Atlas", "issue", &["edit", "1", "--body", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        let edited = success(child.wait_with_output().unwrap());
+        for mode in ["none", "preview", "full"] {
+            let result = f.run("Atlas", &["view", "native", "--bodies", mode]);
+            let expected = match mode {
+                "none" => String::new(),
+                "preview" => body.chars().take(512).collect(),
+                _ => body.clone(),
+            };
+            assert_eq!(result["node"]["body"], expected);
+            assert_eq!(result["node"]["has_body"], !body.is_empty());
+            assert_eq!(
+                result["node"]["body_truncated"],
+                if mode == "none" {
+                    !body.is_empty()
+                } else {
+                    mode == "preview" && body.chars().count() > 512
+                }
+            );
+            assert_eq!(
+                result["node"]["resource_version"],
+                edited["issue"]["version"]
+            );
+            assert_eq!(result["node"]["title"], "Native planning");
+            assert_eq!(result["node"]["state"], "open");
+            assert_eq!(result["node"]["assignee"], "human:boss");
+        }
+    }
+    let closed = f.issue("Atlas", &["close", "1", "--force"]);
+    let omitted = f.run("Atlas", &["view", "native", "--bodies", "none"]);
+    assert_eq!(omitted["node"]["state"], "closed");
+    assert!(omitted["node"]["assignee"].is_null());
+    assert_eq!(
+        omitted["node"]["resource_version"],
+        closed["issue"]["version"]
+    );
+}
+
+#[test]
 fn terminal_outline_defaults_to_titles_but_view_and_export_keep_bodies() {
     let f = Fixture::new();
     f.run(

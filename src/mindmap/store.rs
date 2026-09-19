@@ -644,14 +644,36 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
 }
 fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
     if node["kind"] == "issue" {
-        let project = node["reference_project"].as_str().unwrap();
+        let project = node["reference_project"].as_str().unwrap().to_owned();
         let name: Option<String> = db
-            .query_row("SELECT name FROM projects WHERE id=?1", [project], |r| {
+            .query_row("SELECT name FROM projects WHERE id=?1", [&project], |r| {
                 r.get(0)
             })
             .optional()?;
         node["reference_project_name"] = json!(name.unwrap_or_else(|| project.to_owned()));
         let number = node["reference"].as_str().unwrap().parse().unwrap();
+        if mode == BodyMode::None {
+            // octet_length reads the column's byte count from metadata and also
+            // handles bodies beginning with NUL, unlike SQL text length/substr.
+            let issue = db.query_row(
+                "SELECT title,state,assignee,version,octet_length(body)>0 FROM issues WHERE project_id=?1 AND number=?2 AND deleted_at IS NULL",
+                params![project,number],
+                |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,i64>(3)?,r.get::<_,bool>(4)?)),
+            ).optional()?;
+            if let Some((title, state, assignee, version, has_body)) = issue {
+                node["title"] = json!(title);
+                node["body"] = json!("");
+                node["has_body"] = json!(has_body);
+                node["state"] = json!(state);
+                node["assignee"] = json!(assignee);
+                node["resource_version"] = json!(version);
+            } else {
+                node["available"] = json!(false);
+                node["state"] = json!("unavailable");
+            }
+            project_body(node, mode);
+            return Ok(());
+        }
         match get_issue(
             db,
             node["reference_project"].as_str().unwrap(),
