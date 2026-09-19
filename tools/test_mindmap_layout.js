@@ -4,7 +4,16 @@ const {
   inViewport,
   indexGraph,
   Mindmap,
+  displayTitle,
 } = require("../src/issues/web/mindmap-map.js");
+const pr = (reference, title = reference) => ({ kind: "pr", reference, title });
+assert.equal(displayTitle(pr("https://github.com/example/repo/pull/123")), "#123");
+assert.equal(displayTitle(pr("https://github.com/example/repo/pull/123/")), "#123");
+assert.equal(displayTitle(pr("https://gitlab.example/team/repo/-/merge_requests/42?view=changes")), "#42");
+assert.equal(displayTitle(pr("https://github.com/example/repo/pull/123", "Fix reconnect")), "Fix reconnect");
+assert.equal(displayTitle(pr("https://review.example/changes/topic")), "review.example · topic");
+assert.equal(displayTitle(pr("https://review.example:invalid/changes/topic")), "Pull request");
+assert.equal(displayTitle({kind: "text", title: "topic"}), "topic");
 const node = (id, parent_id = null) => ({ id, parent_id, title: id });
 const fixture = [
   node("a"),
@@ -95,6 +104,17 @@ const unavailable = indexGraph(
 assert(!unavailable.documents.get("api").includes("morgan"));
 assert(unavailable.documents.get("api").includes("resource removed"));
 assert.equal(indexGraph([], [], () => "").documents.size, 0);
+const prSearch = indexGraph(
+  [
+    { id: "pr-0", ...pr("https://github.com/example/repo/pull/123") },
+    { id: "owner", title: "Owner" },
+  ],
+  [{ from: "owner", to: "pr-0", kind: "pull-request" }],
+  () => "",
+);
+assert(prSearch.documents.get("pr-0").includes("#123"));
+assert(prSearch.documents.get("pr-0").includes("https://github.com/example/repo/pull/123"));
+assert(prSearch.documents.get("owner").includes("#123"));
 // Fit must leave the complete graph in the usable desktop area beside details.
 const inspector = { hidden: false, offsetWidth: 340 };
 global.document = { getElementById: () => inspector };
