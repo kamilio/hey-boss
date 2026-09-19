@@ -6,7 +6,7 @@ jobs:
   macos:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - run: cargo test --locked
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py
       - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py
@@ -26,7 +26,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       # The runner owns non-dumpable processes. Health cleanup deliberately refuses
       # to proceed without a complete procfs inspection, so its real-process tests
       # need permission to inspect those processes. Keep other tests unprivileged.
