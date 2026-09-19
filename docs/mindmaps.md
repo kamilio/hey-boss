@@ -22,6 +22,13 @@ characters per body, and `--bodies full` includes complete bodies. JSON reads de
 to full bodies for compatibility; use `--bodies preview` or `none` for smaller map
 responses. `mm export` always includes complete bodies.
 
+Map reads use a 32 MiB response budget, including rendered Markdown. A full map or
+export that exceeds the budget returns an error before printing content. Use
+previews or omitted bodies for the outline and `view NODE` for individual text.
+When relationship descriptions make the whole map too large, `links NODE` reads
+only that node and its relationship endpoints, with bodies omitted. Mutations
+remain available and never remove content to meet a read budget.
+
 The default project is the current Git repository, shared across worktrees. `--project Atlas` selects an unambiguous project name or a full project ID. `HEY_BOSS_ISSUE_PROJECT` is honored in worker sessions. `--host devbox` / `HEY_BOSS_ISSUE_HOST` use the authoritative SSH issue store, with no local fallback. Both machines need a CLI version with mindmap support.
 
 ## References and links
@@ -77,7 +84,9 @@ original alias has changed.
 
 ## Automation and concurrency
 
-All commands support `--json`. Reads return the live projected map. Mutations return
+All commands support `--json`. `show` returns the live projected map, `view` returns
+one full node, and `links NODE` returns a node and its relationship endpoints with
+bodies omitted. Mutations return
 compact saved node metadata, the changed link when applicable, and affected project
 versions; use `show` to read the complete current map. Mutations do not read the Inbox,
 so adding or linking notice references works while the desktop app is unavailable.

@@ -231,3 +231,37 @@ After integration: 23 mindmap, 16 HTTP and 37 issue tests pass. Formatting, whit
 and JavaScript syntax checks pass. Browser focus navigation from a search with no
 matches revealed the requested last topic, cleared the obstructing search and focused
 the target while Connected. Installation and the final duration/audit remain pending.
+
+## Bounded projection responses and focused relationships
+
+Reads now have a 32 MiB serialized-response budget, with space reserved for envelopes
+and metadata. Values are charged incrementally while projecting nodes and links,
+including automatic relationships, before collecting arbitrarily large responses.
+The counter writes to a byte-counting sink instead of allocating another serialized
+copy. Oversized full-body reads return an explicit error directing the caller to
+previews, omitted bodies, single-node text or focused relationship reads. No content
+is removed or changed to satisfy the budget.
+
+`links NODE` now fetches only the selected node and incident relationships/endpoints,
+with bodies omitted. Automatic issue/PR edges retain the same authoritative endpoints;
+focused issue reads still reuse explicit saved PRs. General `links` omits bodies too.
+Notification enrichment follows the budget and propagates size errors through both
+CLI and HTTP. It still reads only pending Inbox state.
+
+25 mindmap and 16 HTTP tests pass. New evidence covers a full-body Unicode map above
+the budget, a 2,100-link fixture with maximum-size descriptions, and 30 pending notices
+with large live summaries. Previews and individual text reads remain available, focused
+relationships remain available when a complete description-heavy map cannot fit, and
+mutations continue preserving all saved nodes and descriptions. Focused automatic PR
+relationships are compared against full projection. The large Inbox case exposed and
+fixed macOS nonblocking flag inheritance in the synthetic bridge; the fixture now uses
+blocking accepted streams and avoids a second destructor panic during test failure.
+
+Post-change isolated debug benchmark, 2,500 nodes/5,000 links: 1,472,642 response bytes,
+three samples 0.242/0.250/0.282 seconds (median 0.250). These are local observations,
+not a release performance guarantee. Formatting and whitespace checks pass; the
+existing-project read-under-writer-lock issue regression passes after the changes.
+
+Next audit items include project-revision behavior when both link endpoints belong
+to projects other than the invoking project, installation/delivery reconciliation,
+and final requirement checks. The requested eight-hour goal remains active.

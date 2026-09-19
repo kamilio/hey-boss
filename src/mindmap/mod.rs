@@ -3,6 +3,36 @@ use crate::issues::{BODY_LIMIT, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+const READ_LIMIT: usize = 32 * 1024 * 1024;
+/// Count serialized bytes without allocating another copy of a large map.
+pub(crate) struct ReadBudget {
+    bytes: usize,
+}
+impl Default for ReadBudget {
+    fn default() -> Self {
+        Self { bytes: 64 * 1024 }
+    }
+}
+impl std::io::Write for ReadBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > READ_LIMIT.saturating_sub(self.bytes) {
+            return Err(std::io::Error::other("Mindmap response exceeds 32 MiB"));
+        }
+        self.bytes += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl ReadBudget {
+    pub(crate) fn charge(&mut self, value: &Value) -> Result<()> {
+        serde_json::to_writer(self, value).map_err(|_| Error::invalid(
+            "Mindmap response exceeds 32 MiB; use show --bodies preview or none, view NODE for full text, or links NODE for one topic's relationships"
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum BodyMode {
@@ -222,7 +252,15 @@ fn validate_kind(kind: &str) -> Result<()> {
 
 /// Decorate a graph with a fresh pending-only desktop Inbox snapshot. Failure is
 /// explicit and never makes a saved notification look resolved.
-pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
+pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) -> Result<()> {
+    let mut budget = ReadBudget::default();
+    for field in ["nodes", "external_nodes", "links"] {
+        if let Some(items) = graph[field].as_array() {
+            for item in items.iter().filter(|item| item["kind"] != "notification") {
+                budget.charge(item)?;
+            }
+        }
+    }
     let mode = serde_json::from_value(graph["body_mode"].clone()).unwrap_or(BodyMode::Full);
     let tasks = match snapshot {
         Ok(value) => match value.get("tasks").and_then(Value::as_array) {
@@ -256,6 +294,7 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
                     project_body(node, mode);
                     node["state"] = json!("pending");
                     node["available"] = json!(true);
+                    budget.charge(node)?;
                 } else {
                     hidden.insert(node["id"].as_str().unwrap_or("").to_owned());
                 }
@@ -333,6 +372,7 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
             graph["selected_node_id"] = selected_id;
         }
     }
+    ReadBudget::default().charge(graph)
 }
 
 pub fn needs_inbox(graph: &Value) -> bool {

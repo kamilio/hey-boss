@@ -179,3 +179,6 @@ Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
 `mm view NODE` for one full live node, `show --bodies preview|none|full` to control
 map body size, and `export` for complete Markdown. The viewer loads 512-character
 previews and fetches full bodies on demand; search covers previews and loaded text.
+Reads have a 32 MiB response budget. If a complete map exceeds it, use preview/none
+bodies, `view NODE` for text, or `links NODE` for a focused read with bodies omitted.
+Mutations retain all saved content regardless of read size.
