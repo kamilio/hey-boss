@@ -574,7 +574,10 @@ shows where it will move; Escape cancels. Focus a grip and press Up or Down for
 keyboard ordering. Touch dragging is supported, with larger mobile handles and
 edge scrolling. Filters retain the shared order; moving a filtered issue relative
 to another keeps the other hidden issues in their relative order. New issues
-created in the UI go to the top; CLI-created issues append to the end. Creating
+created in the UI go to the top by default; check **Add to bottom** in the editor
+or Quick Add to append instead. Press **⌘⇧B / Ctrl+Shift+B** while composing to
+toggle placement. Unsent drafts retain the choice; the next issue defaults to top.
+CLI-created issues append to the end. Creating
 in the UI keeps you on the list and highlights the new row for four seconds.
 Matching filters remain; filters that exclude the new issue reset to reveal it. Closing,
 deleting, reopening, and restoring retain position.
@@ -661,7 +664,8 @@ hey-boss issue subtask remove 12 15
 usual `--request-id`. Link/unlink accept `--if-version` for the parent and
 `--if-child-version` for the child. A child is created and linked atomically; failed
 link validation rolls back its number, queue position, revisions and history.
-Web-created children prepend; CLI-created children append. Dragging or using the
+Web-created children prepend by default; **Add to bottom** appends instead.
+CLI-created children append. Dragging or using the
 arrow keys on a child handle updates the shared project queue, which governs
 web, CLI and worker order.
 

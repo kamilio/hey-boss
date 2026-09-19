@@ -963,7 +963,15 @@ textarea::placeholder {
 .quick-issue-entry svg { width: 24px; height: 24px; }
 #quick-issue-title { min-width: 0; flex: 1; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text); font: inherit; font-size: 22px; box-shadow: none; outline: none; }
 #quick-issue-title::placeholder { color: var(--faint); font-size: 18px; }
-.quick-issue-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.quick-issue-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.issue-placement { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.issue-placement input { margin: 0; accent-color: var(--accent); }
+.issue-placement kbd { font-size: 10px; }
+.issue-placement[hidden] { display: none; }
+@media (max-width: 600px) {
+  .issue-placement kbd { display: none; }
+  #quick-issue-context { flex-basis: 100%; }
+}
 #quick-issue-error { padding: 0 20px 14px; margin: 0; color: var(--danger); font-size: 13px; }
 #quick-issue-status { position: fixed; z-index: 100; bottom: 24px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 32px); padding: 14px 20px; background: var(--solid); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
 #quick-issue-status a { color: var(--accent); }
