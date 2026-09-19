@@ -7,7 +7,7 @@
   });
   let projects = [], defaultProject;
   function projectContext() {
-    const id = new URLSearchParams(location.hash.slice(1)).get("project");
+    const id = HeyBossUI.projectId(defaultProject.id);
     picker.update(projects, projects.find(p => p.id === id) || defaultProject);
   }
   addEventListener("hashchange", projectContext);

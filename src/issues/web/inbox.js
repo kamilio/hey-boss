@@ -112,6 +112,7 @@ const issueReferenceRoute = (issue) =>
   });
 const noticeDraftKey = (task, type) => `hey-boss-inbox:${task.taskID}:${type}`;
 function updateAppNavigation() {
+  HeyBossUI.projectNavigation(model.route.project);
   for (const [selector, view] of [
     ["#nav-inbox", "inbox"],
     ["#nav-issues", "issues"],

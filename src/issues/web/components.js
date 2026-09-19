@@ -88,6 +88,29 @@ function date(at) {
   return `<time datetime="${new Date(at).toISOString()}" title="${esc(new Date(at).toLocaleString())}">${relative(at)}</time>`;
 }
 
+  // Share only the project ID across pages, including private HTTPS access.
+  // Keep the existing key so desktop selections survive the upgrade.
+  function projectId(fallback) {
+    const explicit = new URLSearchParams(location.hash.slice(1)).get("project");
+    if (explicit) return explicit;
+    try {
+      const saved = JSON.parse(localStorage.getItem("hey-boss-issues-project"));
+      if (typeof saved === "string" && saved) return saved;
+    } catch {}
+    return fallback;
+  }
+  function projectNavigation(project) {
+    const hash = new URLSearchParams({project});
+    $("#nav-mindmaps").href = `/mm#${hash}`;
+    $("#nav-workers").href = `/workers#${hash}`;
+    if (location.pathname !== "/") {
+      $("#nav-issues").href = `/#${hash}`;
+      $("#nav-inbox").href = `/#${new URLSearchParams({project, view:"inbox"})}`;
+    }
+    $(".brand").href = `/#${hash}`;
+    try { localStorage.setItem("hey-boss-issues-project", JSON.stringify(project)); } catch {}
+  }
+
   class ProjectPicker {
     constructor({onSelect, onVisibility}) {
       this.onSelect = onSelect; this.onVisibility = onVisibility;
@@ -124,9 +147,7 @@ function date(at) {
       this.projects = projects; this.project = project;
       $("#project-name").textContent = project?.name || "Projects";
       if (project) {
-        const hash = new URLSearchParams({project:project.id});
-        $("#nav-mindmaps").href = `/mm#${hash}`;
-        if (location.pathname !== "/") $("#nav-issues").href = `/#${hash}`;
+        projectNavigation(project.id);
       }
       if (!$("#project-menu").hidden) this.render();
     }
@@ -170,5 +191,5 @@ function date(at) {
     }
 
   }
-  return {icon, icons, relative, date, ProjectPicker};
+  return {icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();
