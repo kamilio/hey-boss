@@ -1462,3 +1462,85 @@ fn markdown_export_keeps_relationship_labels_and_descriptions_literal() {
             .contains("Wait for **approval**, then [ship](https://example.com)")
     );
 }
+
+#[test]
+fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Preserved local note", "--id", "note"]);
+    let before = f.run("Atlas", &["show"]);
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    db.execute(
+        "UPDATE fleet_meta SET role='agent',node='synthetic-replica' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    for args in [
+        vec!["show"],
+        vec!["view", "note"],
+        vec!["projects"],
+        vec!["add", "Unsynchronized topic"],
+        vec!["edit", "note", "--title", "Unsynchronized edit"],
+        vec!["remove", "note"],
+    ] {
+        let error = f.fail("Atlas", &args, 2);
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--host CONTROLLER")
+        );
+    }
+    // Exercise the actual CLI/RPC transport against a separate authoritative DB.
+    use std::os::unix::fs::PermissionsExt;
+    let controller = Fixture::new();
+    controller.run("Atlas", &["add", "Authoritative outline", "--id", "root"]);
+    let bin = f.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$MM_CONTROLLER_DB\"\nexec \"$MM_TEST_BINARY\" issue rpc\n").unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let remote = |args: &[&str]| {
+        let mut cmd = f.cmd("Atlas", "mm", args);
+        cmd.args(["--host", "controller.test"])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("MM_CONTROLLER_DB", controller.root.join("issues.db"))
+            .env("MM_TEST_BINARY", env!("CARGO_BIN_EXE_hey-boss"));
+        cmd.output().unwrap()
+    };
+    let graph = success(remote(&["show"]));
+    assert_eq!(nodes(&graph).len(), 1);
+    assert_eq!(nodes(&graph)[0]["title"], "Authoritative outline");
+    success(remote(&[
+        "add",
+        "Remote authorship",
+        "--under",
+        "root",
+        "--id",
+        "remote",
+        "--request-id",
+        "remote-one",
+    ]));
+    assert_eq!(nodes(&controller.run("Atlas", &["show"])).len(), 2);
+    std::fs::write(&ssh, "#!/bin/sh\nexit 255\n").unwrap();
+    let failed = remote(&["add", "Failed remote write"]);
+    assert_eq!(failed.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No local fallback")
+    );
+    db.execute("UPDATE fleet_meta SET role='controller' WHERE id=1", [])
+        .unwrap();
+    let after = f.run("Atlas", &["show"]);
+    assert_eq!(after["nodes"], before["nodes"]);
+    assert_eq!(after["version"], before["version"]);
+    f.run(
+        "Atlas",
+        &["edit", "note", "--title", "Controller authorship"],
+    );
+}

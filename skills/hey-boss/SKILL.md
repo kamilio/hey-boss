@@ -153,6 +153,8 @@ uncertain retries. Fleet journals retain offline edits and conflicting payloads.
 `hey-boss mm` shows a project's nested outline. Author from the CLI; `mm web` is a
 read-only viewer. `--project`, `--host`, `--agent`, `--json`, `--request-id` and
 mutation `--if-version` follow issue conventions. Use an isolated issue DB in tests.
+Mindmaps are not replicated to fleet agents; use `--host CONTROLLER` (or
+`HEY_BOSS_ISSUE_HOST`) there for authoritative reads/edits and the web viewer.
 
 ```sh
 hey-boss mm add 'Release' --id release

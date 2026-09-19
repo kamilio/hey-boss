@@ -316,6 +316,15 @@ fn expected(op: &Operation) -> Option<i64> {
 }
 
 pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) -> Result<Value> {
+    let replica: bool =
+        db.query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get(0)
+        })?;
+    if replica {
+        return Err(Error::invalid(
+            "Mindmaps are not replicated on fleet agents; use --host CONTROLLER (or HEY_BOSS_ISSUE_HOST) to read and author the authoritative map",
+        ));
+    }
     if let Some(expected) = expected(op) {
         if expected != version(db, &p.id)? {
             return Err(Error::conflict(
