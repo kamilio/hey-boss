@@ -7,6 +7,11 @@ use std::collections::BTreeSet;
 use std::io::Read;
 
 pub(super) const SCHEMA: &str = include_str!("schema.sql");
+// Additive lookup indexes also apply to databases created by early feature builds.
+pub(super) const INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS mindmap_reference_lookup ON mindmap_nodes(kind,reference_project,reference,project_id);
+CREATE INDEX IF NOT EXISTS issue_pr_canonical_url ON issue_pull_requests(rtrim(url,'/'),project_id,issue_number);
+";
 const COLUMNS: &str = "id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at";
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(
@@ -39,6 +44,7 @@ fn canonical_ref(
     kind: &str,
     reference: &str,
     ref_project: Option<&str>,
+    verify_issue: bool,
 ) -> Result<(String, String)> {
     crate::issues::identifier(reference, "resource reference", 2048)?;
     match kind {
@@ -50,7 +56,9 @@ fn canonical_ref(
                 return Err(Error::invalid("Issue number must be positive"));
             }
             let target = resolve_project(db, p, ref_project)?;
-            get_issue(db, &target.id, number, false)?;
+            if verify_issue {
+                get_issue(db, &target.id, number, false)?;
+            }
             Ok((number.to_string(), target.id))
         }
         "pr" => {
@@ -109,7 +117,7 @@ fn insert(
     }
     let (reference, ref_project) = match reference {
         Some(r) => {
-            let (r, p) = canonical_ref(db, p, kind, r, ref_project)?;
+            let (r, p) = canonical_ref(db, p, kind, r, ref_project, true)?;
             (Some(r), Some(p))
         }
         None => (None, None),
@@ -144,8 +152,14 @@ fn select(
     touched: &mut BTreeSet<String>,
 ) -> Result<Value> {
     crate::issues::identifier(selector, "node selector", 16384)?;
-    let qualified = selector.contains("::");
-    let (p, selector) = if let Some((project, selector)) = selector.split_once("::") {
+    // Typed references may themselves contain :: (IPv6 URLs or task IDs).
+    // Qualification precedes the type prefix; never split inside a resource.
+    let qualified = !["pr:", "issue:", "notice:"]
+        .iter()
+        .any(|prefix| selector.starts_with(prefix))
+        && selector.contains("::");
+    let (p, selector) = if qualified {
+        let (project, selector) = selector.split_once("::").unwrap();
         (resolve_project(db, p, Some(project))?, selector)
     } else {
         (p.clone(), selector)
@@ -173,7 +187,7 @@ fn select(
                 .map(|r| ("notification", r))
         });
     if let Some((kind, r)) = typed {
-        let (reference, ref_project) = canonical_ref(db, &p, kind, r, None)?;
+        let (reference, ref_project) = canonical_ref(db, &p, kind, r, None, false)?;
         let found=db.query_row(&format!("SELECT {COLUMNS} FROM mindmap_nodes WHERE project_id=?1 AND kind=?2 AND reference_project=?3 AND reference=?4"),params![p.id,kind,ref_project,reference],row).optional()?;
         if let Some(node) = found {
             return Ok(node);
@@ -269,13 +283,16 @@ fn expected(op: &Operation) -> Option<i64> {
 }
 
 pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) -> Result<Value> {
-    if expected(op).is_some_and(|v| version(db, &p.id).map_or(true, |current| v != current)) {
-        return Err(Error::conflict(
-            "Map changed; show it again and retry with the current version",
-        ));
+    if let Some(expected) = expected(op) {
+        if expected != version(db, &p.id)? {
+            return Err(Error::conflict(
+                "Map changed; show it again and retry with the current version",
+            ));
+        }
     }
     let mut touched = BTreeSet::new();
     let mut selected = None;
+    let mut relationship = None;
     let mut changed = false;
     match op {
         Operation::Show => {}
@@ -453,6 +470,9 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
                 touched.insert(from["project_id"].as_str().unwrap().into());
                 touched.insert(to["project_id"].as_str().unwrap().into());
             }
+            relationship = Some(
+                json!({"from":from["id"],"to":to["id"],"kind":kind,"description":description}),
+            );
             selected = Some(from);
         }
         Operation::Unlink { from, to, kind, .. } => {
@@ -479,10 +499,42 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             params![project, now],
         )?;
     }
-    let mut graph = graph(db, p)?;
+    if op.writes() {
+        // Return just the affected metadata. A full graph here would be copied
+        // into every request-id receipt and make authoring grow quadratically.
+        let mut result = json!({"ok":true,"project":p,"version":version(db,&p.id)?,"changed":changed||!touched.is_empty()});
+        if let Some(node) = selected {
+            result["node"] = node;
+        }
+        if let Some(link) = relationship {
+            result["link"] = link;
+        }
+        let versions = touched
+            .iter()
+            .map(|project| Ok(json!({"project":project,"version":version(db,project)?})))
+            .collect::<Result<Vec<_>>>()?;
+        result["affected_projects"] = json!(versions);
+        return Ok(result);
+    }
+    let viewed_project = if let Some(node) = selected
+        .as_ref()
+        .filter(|_| matches!(op, Operation::Links { .. }))
+    {
+        resolve_project(db, p, node["project_id"].as_str())?
+    } else {
+        p.clone()
+    };
+    let mut graph = graph(db, &viewed_project)?;
     graph["changed"] = json!(changed || !touched.is_empty());
     if let Some(node) = selected {
-        graph["node"] = node.clone();
+        graph["node"] = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(graph["external_nodes"].as_array().unwrap())
+            .find(|n| n["id"] == node["id"])
+            .cloned()
+            .unwrap_or_else(|| node.clone());
         if matches!(op, Operation::Links { .. }) {
             graph["links"]
                 .as_array_mut()
@@ -523,6 +575,7 @@ fn live(db: &Connection, node: &mut Value) -> Result<()> {
     Ok(())
 }
 fn graph(db: &Connection, p: &Project) -> Result<Value> {
+    use std::collections::{HashMap, HashSet};
     let mut stmt = db.prepare(&format!(
         "SELECT {COLUMNS} FROM mindmap_nodes WHERE project_id=?1 ORDER BY position,created_at,id"
     ))?;
@@ -531,19 +584,26 @@ fn graph(db: &Connection, p: &Project) -> Result<Value> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut stmt=db.prepare("SELECT l.source,l.target,l.kind,l.description,l.created_at FROM mindmap_links l JOIN mindmap_nodes s ON s.id=l.source JOIN mindmap_nodes t ON t.id=l.target WHERE s.project_id=?1 OR t.project_id=?1 ORDER BY l.created_at,l.source,l.target,l.kind")?;
     let mut links=stmt.query_map([&p.id],|r|Ok(json!({"from":r.get::<_,String>(0)?,"to":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"description":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?,"automatic":false})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut known: HashSet<String> = nodes.iter().map(|n| id(n).to_owned()).collect();
     let mut external = Vec::new();
     for link in &links {
         for field in ["from", "to"] {
             let key = link[field].as_str().unwrap();
-            if !nodes.iter().chain(external.iter()).any(|n| id(n) == key) {
+            if known.insert(key.to_owned()) {
                 external.push(get(db, key)?);
             }
         }
     }
-    let mut automatic = Vec::new();
     for node in nodes.iter_mut().chain(external.iter_mut()) {
         live(db, node)?;
     }
+    let explicit_prs: HashMap<&str, &str> = nodes
+        .iter()
+        .filter(|n| n["kind"] == "pr")
+        .map(|n| (n["reference"].as_str().unwrap(), id(n)))
+        .collect();
+    let mut automatic = Vec::new();
+    let mut automatic_links = HashSet::new();
     for node in &nodes {
         if node["kind"] == "issue" && node["available"] == true {
             let mut stmt=db.prepare("SELECT url FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
@@ -558,11 +618,13 @@ fn graph(db: &Connection, p: &Project) -> Result<Value> {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for url in urls {
                 let url = url.trim_end_matches('/');
-                let target = nodes
-                    .iter()
-                    .find(|n| n["kind"] == "pr" && n["reference"] == url)
-                    .map(|n| id(n).to_owned())
+                let target = explicit_prs
+                    .get(url)
+                    .map(|id| (*id).to_owned())
                     .unwrap_or_else(|| format!("auto:{}:{url}", id(node)));
+                if !automatic_links.insert((id(node).to_owned(), target.clone())) {
+                    continue;
+                }
                 if target.starts_with("auto:") {
                     automatic.push(json!({"id":target,"project_id":p.id,"parent_id":node["id"],"position":i64::MAX,"kind":"pr","title":url,"body":"","reference":url,"reference_project":"","automatic":true,"available":true}));
                 }
@@ -570,21 +632,36 @@ fn graph(db: &Connection, p: &Project) -> Result<Value> {
             }
         }
     }
-    // Explicit PR nodes also reveal automatic backlinks to issue nodes in other maps.
+    // PR attachments are authoritative even if no issue node has been placed in
+    // a map. Prefer a saved node in this map, then the issue's own project map;
+    // otherwise expose a live resource-only endpoint, without persisting a node.
     for node in &nodes {
-        if node["kind"] == "pr" {
-            let mut stmt=db.prepare(&format!("SELECT {} FROM mindmap_nodes n JOIN issue_pull_requests pr ON pr.project_id=n.reference_project AND CAST(pr.issue_number AS TEXT)=n.reference JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE n.kind='issue' AND rtrim(pr.url,'/')=?1 AND i.deleted_at IS NULL",COLUMNS.split(',').map(|c|format!("n.{c}")).collect::<Vec<_>>().join(",")))?;
-            for issue in stmt.query_map([node["reference"].as_str().unwrap()], row)? {
-                let mut issue = issue?;
-                if !links.iter().any(|l| {
-                    l["from"] == issue["id"] && l["to"] == node["id"] && l["kind"] == "pull-request"
-                }) {
-                    links.push(json!({"from":issue["id"],"to":node["id"],"kind":"pull-request","description":null,"automatic":true}));
-                }
-                if issue["project_id"] != p.id && !external.iter().any(|n| id(n) == id(&issue)) {
-                    live(db, &mut issue)?;
-                    external.push(issue);
-                }
+        if node["kind"] != "pr" {
+            continue;
+        }
+        let mut stmt=db.prepare("SELECT DISTINCT pr.project_id,pr.issue_number,p.name FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number JOIN projects p ON p.id=pr.project_id WHERE rtrim(pr.url,'/')=?1 AND i.deleted_at IS NULL ORDER BY pr.project_id,pr.issue_number")?;
+        let attachments = stmt
+            .query_map([node["reference"].as_str().unwrap()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (project, number, name) in attachments {
+            let saved: Option<String> = db.query_row("SELECT id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=?2 ORDER BY (project_id=?3) DESC,(project_id=?1) DESC,project_id,id LIMIT 1",params![project,number.to_string(),p.id],|r|r.get(0)).optional()?;
+            let mut issue = if let Some(saved) = saved {
+                get(db, &saved)?
+            } else {
+                json!({"id":format!("auto-issue:{project}:{number}"),"project_id":project,"project_name":name,"parent_id":null,"position":0,"kind":"issue","title":format!("Issue #{number}"),"body":"","reference":number.to_string(),"reference_project":project,"automatic":true,"resource_only":true,"available":true})
+            };
+            if automatic_links.insert((id(&issue).to_owned(), id(node).to_owned())) {
+                links.push(json!({"from":issue["id"],"to":node["id"],"kind":"pull-request","description":null,"automatic":true}));
+            }
+            if known.insert(id(&issue).to_owned()) {
+                live(db, &mut issue)?;
+                external.push(issue);
             }
         }
     }

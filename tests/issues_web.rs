@@ -873,3 +873,62 @@ fn mindmap_assets_reads_and_authoring_boundary() {
         403
     );
 }
+
+#[path = "support/mindmap_inbox.rs"]
+mod mindmap_inbox_fixture;
+
+#[test]
+fn actual_web_mindmap_notification_completion_recovery_does_not_acknowledge_notices() {
+    let web = Web::start();
+    for args in [
+        vec!["notice", "review", "--id", "review"],
+        vec!["add", "Follow-up", "--id", "follow-up", "--under", "review"],
+    ] {
+        let o = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&web.root)
+            .env("HEY_BOSS_ISSUE_DB", web.root.join("issues.db"))
+            .env("HEY_BOSS_INBOX_SOCKET", web.root.join("inbox.sock"))
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .args([
+                "mm",
+                "--project",
+                &web.project,
+                "--agent",
+                "human:test",
+                "--json",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    }
+    let pending = json!([{"taskID":"review","status":"pending","title":"Review rollout","summary":"Pending review"}]);
+    let inbox = mindmap_inbox_fixture::Inbox::start(web.root.join("inbox.sock"), pending.clone());
+    let show = || web.ok(json!({"action":"mindmap","operation":{"command":"show"}}));
+    let g = show();
+    assert_eq!(g["nodes"].as_array().unwrap().len(), 2);
+    assert!(
+        g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["title"] == "Review rollout" && n["state"] == "pending")
+    );
+    inbox.tasks(json!([{"taskID":"review","status":"cancelled","title":"Cancelled"}]));
+    let g = show();
+    assert_eq!(g["nodes"].as_array().unwrap().len(), 1);
+    assert!(g["nodes"][0]["parent_id"].is_null());
+    inbox.unavailable();
+    let g = show();
+    assert_eq!(g["notifications"]["available"], false);
+    inbox.tasks(pending);
+    assert_eq!(show()["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(inbox.requests().len(), 4);
+    assert!(
+        inbox
+            .requests()
+            .iter()
+            .all(|r| r["command"] == "inbox_list")
+    );
+    assert!(inbox.path().exists());
+}
