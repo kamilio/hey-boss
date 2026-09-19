@@ -52,12 +52,14 @@ fn initialize(executable: &std::path::Path) -> std::io::Result<()> {
     name = "hey-boss",
     version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("HEY_BOSS_BUILD_ID"), ")"),
     about = "Project issues, native Mac updates, notifications, and questions",
-    after_help = r#"Use --project and --title when creating an item. Keep summaries short;
+    after_help = r#"Use --title when creating an item. Keep summaries short;
 put the details in Markdown. Ask only when requested or an answer is essential.
 
 Questions: --sync waits; --async returns a Task ID. Use wait for the answer.
 Save Task IDs and hide cards when they become obsolete.
-Issues infer the project from Git or the directory. Use issue create --title TITLE --body MARKDOWN.
+Notifications and issues infer the project from Git or the directory.
+Use --project with a full project ID or unambiguous name to override it.
+List shared projects with issue projects. Use issue create --title TITLE --body MARKDOWN.
 
 Examples:
   hey-boss issue list
@@ -95,8 +97,11 @@ struct Metadata {
     /// SSH host owning the related issue.
     #[arg(long, requires = "issue")]
     issue_host: Option<String>,
-    #[arg(long, help = "Short project name shown in the heading; required")]
-    project: String,
+    #[arg(
+        long,
+        help = "Full project ID or unambiguous name; defaults to this Git repository/directory"
+    )]
+    project: Option<String>,
     #[arg(
         long,
         help = "Short title describing this update or question; required"
@@ -407,6 +412,27 @@ Examples:
 
 impl Cli {
     fn into_request(self) -> std::io::Result<(Request, Output)> {
+        self.into_request_with_project(|override_id| {
+            let cwd = std::env::current_dir()?;
+            let machine = hey_boss::issues::identity::machine().map_err(std::io::Error::other)?;
+            let detected = hey_boss::issues::identity::project(&cwd, &machine)
+                .map_err(std::io::Error::other)?;
+            let worker_project = std::env::var("HEY_BOSS_ISSUE_PROJECT")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let path = hey_boss::issues::database_path().map_err(std::io::Error::other)?;
+            hey_boss::issues::Store::open(&path)
+                .and_then(|mut store| {
+                    store.notification_project(&detected, override_id.or(worker_project.as_deref()))
+                })
+                .map_err(std::io::Error::other)
+        })
+    }
+
+    fn into_request_with_project(
+        self,
+        resolve_project: impl FnOnce(Option<&str>) -> std::io::Result<hey_boss::issues::Project>,
+    ) -> std::io::Result<(Request, Output)> {
         let invalid =
             |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
         let mut issue = None;
@@ -416,7 +442,12 @@ impl Cli {
             | Command::Ask { metadata, .. }
             | Command::Prompt { metadata, .. }
             | Command::Approval { metadata, .. } => {
-                if metadata.project.trim().is_empty() || metadata.title.trim().is_empty() {
+                if metadata
+                    .project
+                    .as_deref()
+                    .is_some_and(|p| p.trim().is_empty())
+                    || metadata.title.trim().is_empty()
+                {
                     return Err(invalid("creation project and title must not be blank"));
                 }
                 if let Some(number) = metadata.issue {
@@ -443,7 +474,7 @@ impl Cli {
                     issue = Some(reference);
                 }
                 (
-                    Some(metadata.project.clone()),
+                    Some(resolve_project(metadata.project.as_deref())?.name),
                     Some(metadata.title.clone()),
                     metadata.severity,
                     metadata.icon.clone(),
@@ -953,6 +984,30 @@ fn run() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    impl Cli {
+        fn into_test_request(self) -> std::io::Result<(Request, Output)> {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SERIAL: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "hb-notification-project-{}-{}",
+                std::process::id(),
+                SERIAL.fetch_add(1, Ordering::Relaxed)
+            ));
+            let result = self.into_request_with_project(|override_id| {
+                let cwd = std::env::current_dir()?;
+                let machine =
+                    hey_boss::issues::identity::machine().map_err(std::io::Error::other)?;
+                let detected = hey_boss::issues::identity::project(&cwd, &machine)
+                    .map_err(std::io::Error::other)?;
+                hey_boss::issues::Store::open(&root.join("issues.db"))
+                    .and_then(|mut store| store.notification_project(&detected, override_id))
+                    .map_err(std::io::Error::other)
+            });
+            let _ = std::fs::remove_dir_all(root);
+            result
+        }
+    }
+
     #[test]
     fn appearance_options_reach_every_creation_command() {
         for args in [
@@ -975,7 +1030,10 @@ mod tests {
                     "--icon",
                     "hammer.fill",
                 ]);
-                let (request, _) = Cli::try_parse_from(input).unwrap().into_request().unwrap();
+                let (request, _) = Cli::try_parse_from(input)
+                    .unwrap()
+                    .into_test_request()
+                    .unwrap();
                 let wire = serde_json::to_value(request).unwrap();
                 assert_eq!(wire["severity"], severity);
                 assert_eq!(wire["icon"], "hammer.fill");
@@ -1029,7 +1087,10 @@ mod tests {
             let relative = path.strip_prefix(std::env::current_dir().unwrap()).unwrap();
             let mut input = base.to_vec();
             input.push(relative.to_str().unwrap());
-            let (request, _) = Cli::try_parse_from(input).unwrap().into_request().unwrap();
+            let (request, _) = Cli::try_parse_from(input)
+                .unwrap()
+                .into_test_request()
+                .unwrap();
             assert_eq!(request.icon_path, Some(path.canonicalize().unwrap()));
             assert!(request.icon.is_none());
         }
@@ -1099,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_commands_require_project_and_title() {
+    fn creation_commands_require_title() {
         for args in [
             vec!["alert", "Ready"],
             vec!["update", "Summary", "Content"],
@@ -1107,16 +1168,36 @@ mod tests {
             vec!["prompt", "Name?", "Details"],
             vec!["approval", "Proceed?", "Details"],
         ] {
-            for metadata in [
-                vec![],
-                vec!["--project", "Atlas"],
-                vec!["--title", "Review"],
-            ] {
+            for metadata in [vec![], vec!["--project", "Atlas"]] {
                 let mut input = vec!["hey-boss"];
                 input.extend(args.iter().copied());
                 input.extend(metadata);
                 assert!(Cli::try_parse_from(input).is_err(), "{args:?}");
             }
+        }
+    }
+
+    #[test]
+    fn creation_requests_infer_project_without_override() {
+        let cwd = std::env::current_dir().unwrap();
+        let machine = hey_boss::issues::identity::machine().unwrap();
+        let expected = hey_boss::issues::identity::project(&cwd, &machine).unwrap();
+        for args in [
+            vec!["alert", "Ready"],
+            vec!["update", "Summary", "Content"],
+            vec!["ask", "Proceed?", "Details", "--async"],
+            vec!["prompt", "Name?", "Details"],
+            vec!["approval", "Proceed?", "Details"],
+        ] {
+            let mut input = vec!["hey-boss"];
+            input.extend(args);
+            input.extend(["--title", "Review"]);
+            let (request, _) = Cli::try_parse_from(input)
+                .unwrap()
+                .into_test_request()
+                .unwrap();
+            assert_eq!(request.project.as_deref(), Some(expected.name.as_str()));
+            assert_eq!(request.title.as_deref(), Some("Review"));
         }
     }
 
@@ -1132,7 +1213,10 @@ mod tests {
             let mut input = vec!["hey-boss"];
             input.extend(args);
             input.extend(["--project", "Atlas", "--title", "Review", "--json"]);
-            let (request, output) = Cli::try_parse_from(input).unwrap().into_request().unwrap();
+            let (request, output) = Cli::try_parse_from(input)
+                .unwrap()
+                .into_test_request()
+                .unwrap();
             let wire = serde_json::to_value(request).unwrap();
             assert_eq!(wire["project"], "Atlas");
             assert_eq!(wire["title"], "Review");
@@ -1156,7 +1240,7 @@ mod tests {
                     title,
                 ])
                 .unwrap();
-                assert!(cli.into_request().is_err());
+                assert!(cli.into_test_request().is_err());
             }
         }
     }
@@ -1180,7 +1264,12 @@ mod tests {
                 "Build",
             ];
             input.extend(args);
-            assert!(Cli::try_parse_from(input).unwrap().into_request().is_err());
+            assert!(
+                Cli::try_parse_from(input)
+                    .unwrap()
+                    .into_test_request()
+                    .is_err()
+            );
         }
     }
 
@@ -1189,7 +1278,7 @@ mod tests {
         for command in ["status", "hide", "wait"] {
             let (request, _) = Cli::try_parse_from(["hey-boss", command, "task-1"])
                 .unwrap()
-                .into_request()
+                .into_test_request()
                 .unwrap();
             assert_eq!(request.command, command);
             assert_eq!(request.task_id.as_deref(), Some("task-1"));
@@ -1222,7 +1311,7 @@ mod tests {
             else {
                 panic!()
             };
-            assert_eq!(metadata.project, "Atlas");
+            assert_eq!(metadata.project.as_deref(), Some("Atlas"));
             assert_eq!(summary, "Report ready");
             assert_eq!(content.as_deref(), Some("# Report\n\n**Done**"));
         }
@@ -1245,16 +1334,34 @@ mod tests {
             "--file",
             path.to_str().unwrap(),
         ];
-        let (request, _) = Cli::try_parse_from(args).unwrap().into_request().unwrap();
+        let (request, _) = Cli::try_parse_from(args)
+            .unwrap()
+            .into_test_request()
+            .unwrap();
         std::fs::write(&path, "changed later").unwrap();
         assert!(request.question.unwrap().contains("Report 🌍"));
         assert!(Cli::try_parse_from(args.into_iter().chain(["inline content"])).is_err());
         std::fs::write(&path, [0xff, 0xfe]).unwrap();
-        assert!(Cli::try_parse_from(args).unwrap().into_request().is_err());
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .into_test_request()
+                .is_err()
+        );
         std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
-        assert!(Cli::try_parse_from(args).unwrap().into_request().is_err());
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .into_test_request()
+                .is_err()
+        );
         std::fs::remove_file(&path).unwrap();
-        assert!(Cli::try_parse_from(args).unwrap().into_request().is_err());
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .into_test_request()
+                .is_err()
+        );
         assert!(read_markdown_file(&directory).is_err());
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1273,13 +1380,13 @@ mod tests {
             "--sync",
         ])
         .unwrap()
-        .into_request()
+        .into_test_request()
         .unwrap();
         assert!(review.comments_enabled && review.sync);
         for (flag, sync) in [("--sync", true), ("--async", false)] {
             let (request, _) = Cli::try_parse_from(["hey-boss", "status", "task", flag])
                 .unwrap()
-                .into_request()
+                .into_test_request()
                 .unwrap();
             assert_eq!(request.command, "status");
             assert_eq!(request.sync, sync);
@@ -1317,7 +1424,7 @@ mod tests {
             "devbox",
         ])
         .unwrap()
-        .into_request()
+        .into_test_request()
         .unwrap();
         let issue = request.issue.unwrap();
         assert_eq!(issue.number, 7);
@@ -1368,7 +1475,7 @@ mod tests {
             "1",
         ])
         .unwrap()
-        .into_request()
+        .into_test_request()
         .unwrap();
         let cwd = std::env::current_dir().unwrap();
         let machine = hey_boss::issues::identity::machine().unwrap();

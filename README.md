@@ -8,6 +8,13 @@ shows live sessions, activity, queue state, and worker controls. Install it with
 
 Native macOS notifications and questions for coding agents. Short updates stack by project; Read update opens a Markdown preview. Rust library and CLI, Swift/AppKit daemon, SQLite history. No Python or Electron.
 
+Notification commands (`alert`, `update`, `ask`, `prompt`, and `approval`) infer the
+project from the Git repository or current directory, just like issue commands.
+`--title` is required; `--project` optionally selects a full project ID or an
+unambiguous short name from the same database shown by `hey-boss issue projects`.
+New custom project names are registered there too. Worker sessions inherit
+`HEY_BOSS_ISSUE_PROJECT` unless `--project` overrides it.
+
 Project issues for agents are stored in SQLite, including Markdown bodies,
 comments, session ownership, and change history. The issue CLI works on macOS
 and Linux without the notification daemon:

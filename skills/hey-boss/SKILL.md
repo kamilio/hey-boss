@@ -7,6 +7,11 @@ description: Background notifications, project issues, and secrets kept out of a
 
 Notify once for substantial background results or essential blocking decisions. Keep active chat, routine progress, and tests in chat. One outcome sentence; brief details.
 
+Notification commands infer the project from Git/directory, or inherit
+`HEY_BOSS_ISSUE_PROJECT` in worker sessions. `--project` is optional and uses the
+same registry as `issue projects`: full IDs, unambiguous short names, or a new
+custom name. `--title` remains required.
+
 ```sh
 hey-boss alert --project Atlas --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
 hey-boss update --project Atlas --title Review 'Please review.' --file PATH --comments
