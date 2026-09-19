@@ -306,6 +306,7 @@ fn expected(op: &Operation) -> Option<i64> {
     match op {
         Operation::Add { if_version, .. }
         | Operation::Edit { if_version, .. }
+        | Operation::Alias { if_version, .. }
         | Operation::Move { if_version, .. }
         | Operation::Remove { if_version, .. }
         | Operation::Link { if_version, .. }
@@ -396,6 +397,26 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             let body = body.as_deref().unwrap_or(node["body"].as_str().unwrap());
             changed = node["title"] != title || node["body"] != body;
             db.execute("UPDATE mindmap_nodes SET title=?2,body=?3,kind=CASE WHEN length(?3)>0 THEN 'markdown' ELSE kind END,updated_at=?4 WHERE id=?1",params![id(&node),title,body,now])?;
+            selected = Some(get(db, id(&node))?);
+        }
+        Operation::Alias { node, alias, .. } => {
+            let node = select(db, p, node, false, now, &mut touched)?;
+            same_project(&node, p)?;
+            if let Some(alias) = alias {
+                let collision: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=?1 AND alias=?2 AND id<>?3)",params![p.id,alias,id(&node)],|row|row.get(0))?;
+                if collision {
+                    return Err(Error::conflict(format!(
+                        "Alias {alias:?} is already in use"
+                    )));
+                }
+            }
+            changed = node["alias"].as_str() != alias.as_deref();
+            if changed {
+                db.execute(
+                    "UPDATE mindmap_nodes SET alias=?2,updated_at=?3 WHERE id=?1",
+                    params![id(&node), alias, now],
+                )?;
+            }
             selected = Some(get(db, id(&node))?);
         }
         Operation::Move {

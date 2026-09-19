@@ -172,6 +172,8 @@ one project; cycles are rejected. Automatic issue→PR relationships come from
 `issue pr add/remove`. Only confirmed pending Inbox notices appear; an unavailable
 Inbox is reported explicitly. Map reads never complete notices or change issues.
 `mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
+`mm alias NODE NAME` changes a readable alias; `--clear` removes it without changing
+the generated node ID or links. Aliases must remain unique within their project.
 `mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
 Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
 `mm view NODE` for one full live node, `show --bodies preview|none|full` to control
