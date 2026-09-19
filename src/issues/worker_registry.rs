@@ -15,6 +15,9 @@ UPDATE worker_runs SET worker_id='legacy:'||project_id,claimed_at=started_at WHE
 // Call while holding the caller's write transaction: old updaters can write
 // this marker after Store::open, including while a supervisor is still alive.
 pub(super) fn migrate_runtime(db: &Connection) -> Result<()> {
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |row| row.get::<_, bool>(0))? {
+        return Ok(());
+    }
     db.execute_batch("CREATE TABLE IF NOT EXISTS issue_worker_runtime(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id),owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL)")?;
     db.execute("INSERT OR IGNORE INTO issue_worker_runtime SELECT id,owner_pid,owner_start FROM issue_workers WHERE json_extract(config,'$.upgrading')=1 AND owner_pid IS NOT NULL AND owner_start IS NOT NULL", [])?;
     db.execute("UPDATE issue_workers SET config=json_remove(CASE WHEN json_extract(config,'$.upgrading')=1 AND stop_requested=0 THEN json_set(config,'$.enabled',json('true')) ELSE config END,'$.upgrading') WHERE json_type(config,'$.upgrading') IS NOT NULL", [])?;

@@ -214,6 +214,13 @@ impl Store {
         )?;
         Ok(())
     }
+    pub(crate) fn worker_begin_claim(&self, id: &str) -> Result<()> {
+        self.db.execute("UPDATE worker_runs SET state='awaiting_claim',reservation_expires=?2+coalesce((SELECT json_extract(config,'$.reservation_seconds') FROM issue_workers WHERE id=worker_runs.worker_id),120)*1000 WHERE id=?1 AND state='awaiting_model' AND claimed_at IS NULL AND finished_at IS NULL", params![id, now()])?;
+        Ok(())
+    }
+    pub(crate) fn worker_model_expired(&self, job: &Job) -> Result<bool> {
+        Ok(self.db.query_row("SELECT state='awaiting_model' AND claimed_at IS NULL AND reservation_expires<=?2 FROM worker_runs WHERE id=?1", params![job.id, now()], |row| row.get(0))?)
+    }
     /// Atomically reserve within this worker's capacity, leaving the issue unassigned.
     pub(crate) fn worker_reserve(
         &mut self,
@@ -257,12 +264,12 @@ impl Store {
         actor.process_start = start;
         tx.execute("INSERT INTO agents VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",params![actor.id,serde_json::to_string(&actor)?,now()])?;
         job.actor = actor;
-        tx.execute("UPDATE worker_runs SET actor_id=?2,session_id=?3,state='awaiting_claim',job=?4,updated_at=?5 WHERE id=?1",params![job.id,job.actor.id,session,serde_json::to_string(job)?,now()])?;
+        tx.execute("UPDATE worker_runs SET actor_id=?2,session_id=?3,state='awaiting_model',reservation_expires=?5+900000,job=?4,updated_at=?5 WHERE id=?1",params![job.id,job.actor.id,session,serde_json::to_string(job)?,now()])?;
         tx.commit()?;
         Ok(())
     }
     pub(crate) fn worker_claim_expired(&self, job: &Job) -> Result<bool> {
-        Ok(self.db.query_row("SELECT claimed_at IS NULL AND reservation_expires IS NOT NULL AND reservation_expires<=?2 FROM worker_runs WHERE id=?1",params![job.id,now()],|r|r.get(0))?)
+        Ok(self.db.query_row("SELECT state<>'awaiting_model' AND claimed_at IS NULL AND reservation_expires IS NOT NULL AND reservation_expires<=?2 FROM worker_runs WHERE id=?1",params![job.id,now()],|r|r.get(0))?)
     }
     pub(crate) fn worker_cancelled(&self, job: &Job) -> Result<bool> {
         let (stop, expiry, claimed): (bool, Option<i64>, Option<i64>) = self.db.query_row(

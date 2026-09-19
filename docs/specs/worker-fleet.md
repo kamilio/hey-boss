@@ -40,7 +40,7 @@ Concurrent changes to different fields MAY merge. Conflicting changes to the sam
 
 ## Signals and Recovery
 
-Pause MUST stop new pickup and retain active sessions. Resume MUST enable pickup. Stop MUST stop owned sessions before releasing capacity. Restart MUST stop the previous supervisor before starting its replacement with the same worker ID and settings. Signals issued while disconnected MUST be queued and show pending state until acknowledged. A disconnected agent MUST continue its saved desired state without inventing new signals.
+Pause MUST stop new pickup and retain active sessions. Resume MUST enable pickup. Stop MUST stop owned sessions before releasing capacity. Restart MUST stop the previous supervisor and its owned sessions before starting its replacement with the same worker ID and settings. It MUST leave the controller and companion running and MUST NOT acknowledge before the exact replacement registers. Lifecycle mutations MUST serialize across agent processes. Interrupted stop/start phases MUST survive process exits and exclude ordinary reconciliation until replay completes. Retry delays MUST be bounded to five minutes. A newer explicit control MUST supersede unfinished prior intent, and replay MUST NOT rewrite newer desired state. SSH heartbeats MUST remain responsive during a restart. Signals issued while disconnected MUST be queued and show pending state until acknowledged. A disconnected agent MUST continue its saved desired state without inventing new signals.
 
 ## Observability and Web Application
 

@@ -3,8 +3,8 @@ use super::{Actor, Error, Operation, Project, Request, Result, Store, identity};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
@@ -17,7 +17,7 @@ pub struct Config {
     pub json: bool,
 }
 enum Backend {
-    Local(Mutex<Store>),
+    Local(std::path::PathBuf),
     Remote(String),
 }
 struct App {
@@ -67,10 +67,7 @@ impl App {
             return super::remote::call(host, &request);
         }
         match &self.backend {
-            Backend::Local(store) => store
-                .lock()
-                .map_err(|_| Error::new("database_error", "Issue store is unavailable"))?
-                .execute(&request),
+            Backend::Local(path) => Store::open(path)?.execute(&request),
             Backend::Remote(host) => super::remote::call(host, &request),
         }
     }
@@ -102,7 +99,11 @@ pub fn serve(config: Config) -> Result<()> {
             }
             Backend::Remote(host)
         }
-        None => Backend::Local(Mutex::new(Store::open(&super::database_path()?)?)),
+        None => {
+            let path = super::database_path()?;
+            Store::open(&path)?;
+            Backend::Local(path)
+        }
     };
     let server = Server::http(("127.0.0.1", config.port))
         .map_err(|e| Error::new("io_error", e.to_string()))?;
@@ -169,11 +170,12 @@ pub fn serve(config: Config) -> Result<()> {
                 // stays responsive while projects are discovered.
                 let projects =
                     super::discovery::projects(&crate::agents::scan(), &app.actor.machine);
-                if let Backend::Local(store) = &app.backend
-                    && let Ok(mut store) = store.lock()
-                    && let Err(error) = store.discover_projects(&projects)
-                {
-                    eprintln!("Project discovery: {error}");
+                if let Backend::Local(path) = &app.backend {
+                    let result =
+                        Store::open(path).and_then(|mut store| store.discover_projects(&projects));
+                    if let Err(error) = result {
+                        eprintln!("Project discovery: {error}");
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_secs(15));
             }

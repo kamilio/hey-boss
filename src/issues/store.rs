@@ -359,7 +359,15 @@ impl Store {
         let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(10))?;
         db.pragma_update(None, "foreign_keys", true)?;
+        let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if app != 0 && app != APPLICATION_ID || version > 9 || version > 0 && app != APPLICATION_ID
         {
+            return Err(Error::invalid(
+                "Incompatible issue database; use the matching hey-boss version",
+            ));
+        }
+        if version < 9 {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
             let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -423,9 +431,16 @@ impl Store {
             }
             tx.commit()?;
         }
-        db.pragma_update(None, "journal_mode", "WAL")?;
+        let journal: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+        if !journal.eq_ignore_ascii_case("wal") {
+            db.pragma_update(None, "journal_mode", "WAL")?;
+        }
         db.pragma_update(None, "synchronous", "FULL")?;
-        db.execute_batch(super::fleet::SCHEMA)?;
+        // The additive fleet schema is installed as one batch. Its final table
+        // marks completion; repeated opens must not acquire the writer lock.
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_deferred_subtasks' AND type='table')", [], |r| r.get::<_, bool>(0))? {
+            db.execute_batch(super::fleet::SCHEMA)?;
+        }
         // An early updater persisted runtime state inside strict Settings JSON.
         // Normalize it without terminating supervisors that are still draining.
         if db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get::<_, bool>(0))? {
@@ -439,11 +454,24 @@ impl Store {
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
         validate(r)?;
         let write = r.operation.writes();
-        // First use registers a project, including list/whoami. Taking the write
-        // reservation before reading avoids read-to-write races between agents.
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Existing-project reads use a WAL snapshot and do not compete with
+        // worker reservations, event writes, or replica synchronization.
+        let detected = resolve_project(&self.db, &r.project, r.project_override.as_deref())?;
+        let register = !matches!(
+            r.operation,
+            Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
+        ) && !self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [&detected.id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let legacy_runtime = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |row| row.get::<_, bool>(0))?;
+        let behavior = if write || register || legacy_runtime {
+            TransactionBehavior::Immediate
+        } else {
+            TransactionBehavior::Deferred
+        };
+        let tx = self.db.transaction_with_behavior(behavior)?;
         if matches!(
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
@@ -474,7 +502,9 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
+        if write || register {
+            tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
+        }
         if write {
             let actor = actor.unwrap();
             tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",

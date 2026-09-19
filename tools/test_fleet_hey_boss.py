@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -17,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('fleet', ROOT / 'tools/fleet_hey_boss.py')
 fleet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet)
-BINARY = pathlib.Path(os.environ.get('HEY_BOSS_TEST_BINARY', ROOT / 'target/debug/hey-boss'))
+BINARY = pathlib.Path(os.environ.get('HEY_BOSS_TEST_BINARY', ROOT / 'target/debug/hey-boss')).resolve()
 fleet.BINARY = BINARY
 PROJECT = 'named:Fleet tests'
 
@@ -380,7 +381,7 @@ class FleetTests(unittest.TestCase):
     def test_signal_replay_does_not_restart_twice(self):
         message = {'id': 'signal-id', 'worker': 'worker', 'signal': 'restart'}
         worker = {'id': 'worker', 'config': {}, 'pid': None, 'active': 0}
-        with mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'control_worker'), mock.patch.object(fleet, 'start_worker') as start, mock.patch.object(fleet, 'STATE', self.root):
+        with mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'control_worker'), mock.patch.object(fleet, 'start_worker', return_value=200) as start, mock.patch.object(fleet, 'STATE', self.root):
             first = fleet.apply_signal(self.agent, message)
             second = fleet.apply_signal(self.agent, message)
         self.assertEqual(first, second)
@@ -399,11 +400,205 @@ class FleetTests(unittest.TestCase):
         with self.agent:
             self.agent.execute("INSERT INTO fleet_signals VALUES('interrupted-signal','local','worker','restart','starting',?,0)", (json.dumps({'prior_pid': 100}),))
         worker = {'id': 'worker', 'config': {}, 'pid': 200, 'active': 0}
-        with mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'control_worker') as control, mock.patch.object(fleet, 'start_worker') as start, mock.patch.object(fleet, 'STATE', self.root):
+        with mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'control_worker') as control, mock.patch.object(fleet, 'start_worker', return_value=200) as start, mock.patch.object(fleet, 'STATE', self.root):
             receipt = fleet.apply_signal(self.agent, message)
         self.assertEqual(receipt['state'], 'acknowledged')
         start.assert_not_called()
         control.assert_not_called()
+
+    def test_signal_id_cannot_be_reused_with_different_payload(self):
+        with self.agent:
+            self.agent.execute("INSERT INTO fleet_signals VALUES('reused','local','worker','restart','acknowledged','{}',0)")
+        with mock.patch.object(fleet, 'STATE', self.root), self.assertRaisesRegex(ValueError, 'different payload'):
+            fleet.apply_signal(self.agent, {'id': 'reused', 'worker': 'worker', 'signal': 'stop'})
+
+    def test_failed_launch_is_not_acknowledged_and_retries_with_backoff(self):
+        message = {'id': 'failed-launch', 'worker': 'worker', 'signal': 'restart'}
+        worker = {'id': 'worker', 'config': {}, 'pid': None, 'active': 0}
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'control_worker'), mock.patch.object(fleet, 'start_worker', side_effect=RuntimeError('launch failed')) as start:
+            with self.assertRaisesRegex(RuntimeError, 'launch failed'):
+                fleet.apply_signal(self.agent, message)
+            self.assertEqual(fleet.apply_signal(self.agent, message)['state'], 'pending')
+            start.assert_called_once()
+        row = self.agent.execute("SELECT state,result FROM fleet_signals WHERE id='failed-launch'").fetchone()
+        self.assertEqual(row['state'], 'starting')
+        self.assertEqual(json.loads(row['result'])['failures'], 1)
+
+    def test_starting_replay_never_launches_over_prior_supervisor_or_sessions(self):
+        with self.agent:
+            self.agent.execute("INSERT INTO fleet_signals VALUES('unsafe-replay','local','worker','restart','starting',?,0)", (json.dumps({'prior_pid': 100}),))
+        for pid, active in [(100, 0), (None, 1)]:
+            worker = {'id': 'worker', 'config': {}, 'pid': pid, 'active': active}
+            with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'start_worker') as start:
+                with self.assertRaisesRegex(RuntimeError, 'no duplicate'):
+                    fleet.apply_signal_locked(self.agent, {'id': 'unsafe-replay', 'worker': 'worker', 'signal': 'restart'})
+                start.assert_not_called()
+
+    def test_reconciliation_does_not_steal_interrupted_restart(self):
+        with self.agent:
+            self.agent.execute("INSERT INTO fleet_signals VALUES('recovering','local','worker','restart','starting','{}',0)")
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'identity', return_value=('agent', self.agent_path)), mock.patch.object(fleet, 'worker_status', return_value=[]), mock.patch.object(fleet, 'start_worker') as start:
+            fleet.reconcile_workers({'workers': self.workers})
+            start.assert_not_called()
+
+    def test_lifecycle_lock_excludes_another_process(self):
+        lock_path = self.root / 'fleet-worker-control.lock'
+        code = "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.read()"
+        process = subprocess.Popen([sys.executable, '-c', code, str(lock_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), 'locked')
+            with mock.patch.object(fleet, 'STATE', self.root), fleet.lifecycle_lock(wait=False) as acquired:
+                self.assertFalse(acquired)
+        finally:
+            process.communicate('', timeout=5)
+        with mock.patch.object(fleet, 'STATE', self.root), fleet.lifecycle_lock(wait=False) as acquired:
+            self.assertTrue(acquired)
+
+    def test_start_worker_requires_its_exact_registration(self):
+        child = mock.Mock(pid=200)
+        child.poll.return_value = None
+        worker = {'id': 'worker', 'config': {'directory': str(self.root)}}
+        registrations = [{'workers': [{'id': 'worker', 'pid': 100}]}, {'workers': [{'id': 'worker', 'pid': 200}]}]
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'ensure_worker'), mock.patch.object(fleet.subprocess, 'Popen', return_value=child), mock.patch.object(fleet, 'worker_overview', side_effect=registrations) as overview, mock.patch.object(fleet.time, 'sleep'):
+            self.assertEqual(fleet.start_worker(worker), 200)
+            self.assertEqual(overview.call_count, 2)
+            child.terminate.assert_not_called()
+
+    def test_start_worker_reports_child_exit(self):
+        child = mock.Mock(pid=200)
+        child.poll.return_value = 1
+        worker = {'id': 'worker', 'config': {'directory': str(self.root)}}
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'ensure_worker'), mock.patch.object(fleet.subprocess, 'Popen', return_value=child), self.assertRaisesRegex(RuntimeError, 'exited during startup'):
+            fleet.start_worker(worker)
+        child.wait.assert_called_once()
+
+    def test_start_worker_timeout_reaps_only_new_child(self):
+        child = mock.Mock(pid=200)
+        child.poll.return_value = None
+        worker = {'id': 'worker', 'config': {'directory': str(self.root)}}
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'ensure_worker'), mock.patch.object(fleet.subprocess, 'Popen', return_value=child), mock.patch.object(fleet.time, 'monotonic', side_effect=[0, 16]), self.assertRaisesRegex(RuntimeError, 'did not register'):
+            fleet.start_worker(worker)
+        child.terminate.assert_called_once()
+        child.wait.assert_called_once()
+
+    def test_remote_restart_keeps_heartbeat_channel_responsive(self):
+        code = "import importlib.util,sys,time; spec=importlib.util.spec_from_file_location('fleet',sys.argv[1]); f=importlib.util.module_from_spec(spec); spec.loader.exec_module(f); f.worker_status=lambda: []; f.apply_signal=lambda db,m: (time.sleep(2), {'id':m['id'],'state':'acknowledged'})[1]; f.agent_stdio()"
+        environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.agent_path), 'HEY_BOSS_FLEET_STATE': str(self.root / 'async-state'), 'HEY_BOSS_FLEET_BINARY': str(BINARY)}
+        environment.pop('HEY_BOSS_ISSUE_HOST', None)
+        process = subprocess.Popen([sys.executable, '-c', code, str(ROOT / 'tools/fleet_hey_boss.py')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        try:
+            self.assertTrue(select.select([process.stdout], [], [], 10)[0])
+            self.assertEqual(json.loads(process.stdout.readline())['kind'], 'hello')
+            for message in [{'version': 1, 'kind': 'signal', 'id': 'slow-restart', 'worker': 'worker', 'signal': 'restart'}, {'version': 1, 'kind': 'ping'}]:
+                process.stdin.write(json.dumps(message) + chr(10))
+                process.stdin.flush()
+            self.assertTrue(select.select([process.stdout], [], [], 1.5)[0], 'Restart blocked the heartbeat reader')
+            self.assertEqual(json.loads(process.stdout.readline())['kind'], 'heartbeat')
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0])
+            self.assertEqual(json.loads(process.stdout.readline())['signal']['state'], 'acknowledged')
+        finally:
+            _, errors = process.communicate('', timeout=10)
+        self.assertEqual(process.returncode, 0, errors)
+
+    def test_new_stop_supersedes_failed_restart_and_old_replay(self):
+        with self.agent:
+            self.agent.execute("INSERT INTO fleet_signals VALUES('old-restart','local','worker','restart','starting',?,0)", (json.dumps({'prior_pid': 100}),))
+        worker = {'id': 'worker', 'config': {}, 'pid': None, 'active': 0}
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[worker]), mock.patch.object(fleet, 'control_worker'), mock.patch.object(fleet, 'start_worker') as start:
+            receipt = fleet.apply_signal(self.agent, {'id': 'new-stop', 'worker': 'worker', 'signal': 'stop'})
+            replay = fleet.apply_signal(self.agent, {'id': 'old-restart', 'worker': 'worker', 'signal': 'restart'})
+        self.assertEqual(receipt['state'], 'acknowledged')
+        self.assertEqual(replay['state'], 'superseded')
+        start.assert_not_called()
+
+    def test_duplicate_controller_signal_does_not_rewrite_newer_intent(self):
+        saved = {'machines': {'local': {'workers': [{'id': 'worker', 'intent': 'running', 'config': {}}]}}}
+        desired = self.root / 'desired.json'
+        desired.write_text(json.dumps(saved))
+        with self.main:
+            self.main.execute("INSERT INTO fleet_signals VALUES('old-pause','local','worker','pause','acknowledged','{}',0)")
+        app = fleet.Controller.__new__(fleet.Controller)
+        app.path, app.lock = self.main_path, threading.RLock()
+        with mock.patch.object(fleet, 'DESIRED', desired), mock.patch.object(fleet, 'inventory', return_value=[]):
+            receipt = app.signal({'host': 'local', 'worker': 'worker', 'signal': 'pause', 'id': 'old-pause'})
+        self.assertEqual(receipt['state'], 'acknowledged')
+        self.assertEqual(json.loads(desired.read_text()), saved)
+
+    def test_real_worker_restart_preserves_controller_and_stable_id(self):
+        state = self.root / 'restart-state'
+        config = self.root / 'inventory.json'
+        config.write_text('{"ssh_hosts":[]}')
+        environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.root / 'restart.db'), 'HEY_BOSS_FLEET_STATE': str(state), 'HEY_BOSS_FLEET_CONFIG': str(config), 'HEY_BOSS_FLEET_DESIRED': str(self.root / 'restart-desired.json'), 'HEY_BOSS_CODEX': str(ROOT / 'tests/fixtures/codex-worker.py')}
+        environment.pop('HEY_BOSS_ISSUE_HOST', None)
+        def command(*args):
+            result = subprocess.run([str(BINARY), *args], env=environment, cwd=self.root, text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        def until(predicate, timeout=45):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                result = predicate()
+                if result:
+                    return result
+                time.sleep(.1)
+            self.fail('Worker lifecycle operation timed out')
+        worker = subprocess.Popen([str(BINARY), 'worker', '--project', 'Restart fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        controller = None
+        replacement = None
+        identifier = None
+        try:
+            def registered():
+                if worker.poll() is not None:
+                    self.fail('Fixture worker failed: ' + worker.stderr.read())
+                return [w for w in command('worker', '--json', 'status')['workers'] if w['pid']]
+            value = until(registered)
+            identifier = value[0]['id']
+            old_pid = value[0]['pid']
+            old_config = value[0]['config']
+            self.assertEqual(old_pid, worker.pid)
+            controller = subprocess.Popen([str(BINARY), 'fleet', 'controller'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            until(lambda: (state / 'fleet.sock').exists())
+            signal = command('worker', '--json', 'restart', identifier)
+            self.assertEqual(signal['state'], 'pending')
+            def completed():
+                overview = command('fleet', 'status')
+                return next((s for s in overview['signals'] if s['id'] == signal['id'] and s['state'] == 'acknowledged'), None)
+            until(completed)
+            current = command('worker', '--json', 'status')['workers']
+            replacement = next(w['pid'] for w in current if w['id'] == identifier)
+            self.assertEqual(next(w['config'] for w in current if w['id'] == identifier), old_config)
+            self.assertIsNotNone(replacement)
+            self.assertNotEqual(replacement, old_pid)
+            self.assertIsNone(controller.poll(), 'Controller exited during worker restart')
+            worker.wait(timeout=10)
+            self.assertEqual(worker.returncode, 0, worker.stderr.read())
+            with mock.patch.object(fleet, 'STATE', state):
+                replay = fleet.local_request({'kind': 'signal', 'host': 'local', 'worker': identifier, 'signal': 'restart', 'id': signal['id']})
+            self.assertEqual(replay['state'], 'acknowledged')
+            self.assertEqual(next(w['pid'] for w in command('worker', '--json', 'status')['workers'] if w['id'] == identifier), replacement)
+        finally:
+            if controller and controller.poll() is None and identifier:
+                try:
+                    command('fleet', 'signal', 'local', identifier, 'stop')
+                    until(lambda: not next(w['pid'] for w in command('worker', '--json', 'status')['workers'] if w['id'] == identifier), timeout=20)
+                finally:
+                    controller.terminate()
+                    try:
+                        controller.communicate(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        controller.kill()
+                        controller.communicate(timeout=5)
+            if worker.poll() is None:
+                worker.terminate()
+                worker.communicate(timeout=10)
+            else:
+                worker.stderr.close()
+            if replacement:
+                # Only the isolated fixture worker, never a production registration.
+                try:
+                    os.kill(replacement, 15)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == '__main__':
