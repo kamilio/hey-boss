@@ -601,10 +601,10 @@ pub fn run(options: &Options) -> Result<()> {
                 command.arg(flag).arg(value);
             }
         }
-        if options.project.is_none() {
-            if let Some(project) = worker_project() {
-                command.arg("--project").arg(project);
-            }
+        if options.project.is_none()
+            && let Some(project) = worker_project()
+        {
+            command.arg("--project").arg(project);
         }
         command.arg("--state").arg(state);
         for (enabled, flag) in [
