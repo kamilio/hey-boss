@@ -77,8 +77,11 @@ one coding session. A companion synchronizes a machine and applies worker contro
 Run `hey-boss fleet setup --source /path/to/hey-boss` once on the supervisor machine
 to manage the existing SSH machine inventory automatically. The supervisor
 installs companions, mirrors issue queues, distributes saved worker configurations,
-and redeploys changed source builds. Open `/workers` in the Issues web app for
-live connections, capacity, tasks, sync conflicts, and pause/resume/stop/restart.
+and redeploys changed source builds. Open `/workers` in the Issues web app for a
+Supervisor → Worker → Agent tree of running workers, their current tasks,
+elapsed task time, goal state, and pause/resume/stop/restart controls. Session IDs
+stay hidden behind copy buttons. Saved workers, disconnected snapshots, and
+recent attempts are collapsed separately; they do not inflate live counts.
 Fleet database access uses the CLI bundled SQLite across all machines. Companions
 keep local replicas and continue allocated work offline; their
 transaction journals sync on reconnect. Allocations do not expire when a machine
