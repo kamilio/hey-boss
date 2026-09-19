@@ -17,7 +17,7 @@ class UpgradeTests(unittest.TestCase):
     def source(self, root):
         for name in upgrade.PAYLOAD:
             path = root / name
-            if name in ('src', 'worker-tui/src', 'skills/hey-boss', 'assets', 'tests'):
+            if name in ('src', 'skills/hey-boss', 'assets', 'tests'):
                 path.mkdir(parents=True)
                 (path / 'fixture').write_text(name)
             else:
@@ -38,10 +38,10 @@ class UpgradeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             self.source(root)
-            self.assertIn('worker-tui/Cargo.toml', upgrade.PAYLOAD)
-            self.assertIn('worker-tui/src', upgrade.PAYLOAD)
+            self.assertIn('src', upgrade.PAYLOAD)
             original = upgrade.build_id(root)
-            (root / 'worker-tui/src/runtime.rs').write_text('Changed dashboard')
+            (root / 'src/worker_tui').mkdir()
+            (root / 'src/worker_tui/runtime.rs').write_text('Changed dashboard')
             self.assertNotEqual(original, upgrade.build_id(root))
 
     def test_unreachable_host_does_not_stop_remaining_rollout(self):
