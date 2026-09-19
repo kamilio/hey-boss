@@ -931,6 +931,34 @@ fn unavailable_inbox_does_not_block_the_issue_service() {
 }
 
 #[test]
+fn main_navigation_includes_mindmaps_on_every_page() {
+    let web = Web::start();
+    for path in ["/", "/workers", "/mm"] {
+        let reply = web.http("GET", path, &[], b"");
+        assert_eq!(reply.status, 200);
+        let html = String::from_utf8(reply.body).unwrap();
+        let navigation = html
+            .split("aria-label=\"Main navigation\"")
+            .nth(1)
+            .unwrap_or_else(|| panic!("Missing main navigation on {path}"))
+            .split("</nav>")
+            .next()
+            .unwrap();
+        for (href, label) in [("/mm", "Mindmaps"), ("/workers", "Workers")] {
+            assert!(
+                navigation.contains(&format!("href=\"{href}\"")) && navigation.contains(label),
+                "Missing {label} in main navigation on {path}"
+            );
+        }
+        assert!(navigation.contains("Inbox") && navigation.contains("Issues"));
+        assert_eq!(html.matches("href=\"/mm\"").count(), 1);
+        if path != "/" {
+            assert!(navigation.contains(&format!("href=\"{path}\" aria-current=\"page\"")));
+        }
+    }
+}
+
+#[test]
 fn mindmap_assets_reads_and_authoring_boundary() {
     let web = Web::start();
     for (path, kind) in [

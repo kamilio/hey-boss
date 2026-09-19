@@ -3560,6 +3560,11 @@ final class AgentControlPanel: NSStackView {
 
 /// Opens the normal browser, reusing or starting the local issue service.
 final class IssuesLauncher {
+    enum Page: String {
+        case issues = "/"
+        case inbox = "/#view=inbox"
+        case mindmaps = "/mm"
+    }
     let url = URL(string: "http://127.0.0.1:4781/")!
     var destination = URL(string: "http://127.0.0.1:4781/")!
     var launching = false
@@ -3579,8 +3584,8 @@ final class IssuesLauncher {
         }.resume()
     }
     var start: ((String) throws -> Void)?
-    func open(cli: String?, inbox: Bool = false) {
-        destination = inbox ? URL(string: "http://127.0.0.1:4781/#view=inbox")! : url
+    func open(cli: String?, page: Page = .issues) {
+        destination = URL(string: page.rawValue, relativeTo: url)!.absoluteURL
         guard !launching else { return }
         launching = true
         probe { [weak self] ready in
@@ -3618,12 +3623,15 @@ final class IssuesLauncher {
 
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate {
     var openInbox: (() -> Void)?
-    @objc func showInbox() { if let openInbox { openInbox() } else { issuesLauncher.open(cli:cli,inbox:true) } }
+    @objc func showInbox() { if let openInbox { openInbox() } else { issuesLauncher.open(cli:cli,page:.inbox) } }
     var openIssues: (() -> Void)?
     lazy var issuesLauncher = IssuesLauncher()
     @objc func showIssues() { if let openIssues { openIssues() } else { issuesLauncher.open(cli: cli) } }
+    var openMindmaps: (() -> Void)?
+    @objc func showMindmaps() { if let openMindmaps { openMindmaps() } else { issuesLauncher.open(cli: cli, page: .mindmaps) } }
     let inboxMenuItem = NSMenuItem(title: "Inbox…", action: nil, keyEquivalent: "")
     let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "")
+    let mindmapsMenuItem = NSMenuItem(title: "Mindmaps…", action: nil, keyEquivalent: "")
     let statusMenu = NSMenu()
     let activityMenuItem = NSMenuItem(title: "Activity status unavailable", action: nil, keyEquivalent: "")
     let activityBadge = ActivityBadge(frame: NSRect(x: 15, y: 2, width: 7, height: 7))
@@ -3825,6 +3833,9 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         issuesMenuItem.action = #selector(showIssues)
         issuesMenuItem.target = self
         menu.addItem(issuesMenuItem)
+        mindmapsMenuItem.action = #selector(showMindmaps)
+        mindmapsMenuItem.target = self
+        menu.addItem(mindmapsMenuItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Agent overview…", action: #selector(show), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Machine Health…", action: #selector(showHealth), keyEquivalent: "").target = self
