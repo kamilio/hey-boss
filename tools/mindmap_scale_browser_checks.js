@@ -203,6 +203,50 @@ async function mindmapScaleChecks(page) {
     }),
     "Narrow phone navigation controls do not overlap the overview",
   );
+  // The overview's canvas has padding around it; clicks must target its drawing.
+  const overview = await page.locator("#map-overview canvas").boundingBox();
+  const world = await page.locator(".map-edges").evaluate((svg) => ({
+    width: Number(svg.getAttribute("width")),
+    height: Number(svg.getAttribute("height")),
+  }));
+  await page.locator("#map-overview").evaluate((button) => {
+    button.addEventListener("click", (event) => {
+      button.dataset.testClick = JSON.stringify({
+        x: event.clientX,
+        y: event.clientY,
+      });
+    });
+  });
+  for (const fraction of [0.1, 0.9]) {
+    await page.mouse.click(
+      overview.x + overview.width / 2,
+      overview.y + overview.height * fraction,
+    );
+    await frame();
+    const centered = await camera();
+    // Browsers quantize click coordinates; compare with the event actually sent.
+    const click = JSON.parse(
+      await page.locator("#map-overview").getAttribute("data-test-click"),
+    );
+    check(
+      Math.abs(
+        overview.x + centered.x / world.width * overview.width - click.x,
+      ) < 0.01 &&
+        Math.abs(
+          overview.y + centered.y / world.height * overview.height - click.y,
+        ) < 0.01,
+      "Overview clicks center the position drawn in its canvas",
+    );
+  }
+  await page.locator("#map-overview").focus();
+  await page.keyboard.press("Enter");
+  await frame();
+  const overviewCenter = await camera();
+  check(
+    Math.abs(overviewCenter.x - world.width / 2) < 0.1 &&
+      Math.abs(overviewCenter.y - world.height / 2) < 0.1,
+    "Keyboard overview activation centers the complete map",
+  );
   check(errors.length === 0, `Browser runtime errors: ${errors.join("; ")}`);
   return {
     passed,

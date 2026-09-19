@@ -135,14 +135,14 @@
       this.overview = document.getElementById("map-overview");
       this.overview?.addEventListener("click", (e) => {
         if (!this.data) return;
-        const box = this.overview.getBoundingClientRect(),
+        const box = this.overview.querySelector("canvas").getBoundingClientRect(),
           d = this.data,
           c = this.camera;
         const x = e.detail
-          ? ((e.clientX - box.left) / box.width) * d.width
+          ? Math.max(0, Math.min(1, (e.clientX - box.left) / box.width)) * d.width
           : d.width / 2;
         const y = e.detail
-          ? ((e.clientY - box.top) / box.height) * d.height
+          ? Math.max(0, Math.min(1, (e.clientY - box.top) / box.height)) * d.height
           : d.height / 2;
         c.x = element.clientWidth / 2 - x * c.scale;
         c.y = element.clientHeight / 2 - y * c.scale;
