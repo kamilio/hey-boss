@@ -1449,17 +1449,25 @@ class MobileIssues:
             return json.loads(data)
 
     def sync(self):
-        registry = self.rpc({'action': 'projects'})
+        registry = self.rpc({'action': 'projects', 'include_hidden': True})
         if not registry.get('ok'):
             raise RuntimeError('Issue project registry unavailable')
         projects = {p['id']: {'id': p['id'], 'name': p['name']} for p in registry['projects']}
-        self.call('/api/bridge/issue-projects', {'projects': list(projects.values())})
+        visible = {p['id'] for p in registry['projects'] if p.get('hidden_at') is None}
+        self.call('/api/bridge/issue-projects', {'projects': [p for id, p in projects.items() if id in visible]})
         for creation in self.call('/api/bridge/issues')['creations']:
             request_id = creation['requestID']
             if not isinstance(request_id, str) or not 0 < len(request_id) <= 128 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in request_id):
                 raise ValueError('Invalid mobile creation ID')
             project = projects.get(creation['project'])
-            if project is None:
+            accepted = False
+            if project is not None and project['id'] not in visible:
+                # A project hidden after native commit must not turn a lost ack
+                # into a false error. Reuse the native receipt without new writes.
+                with contextlib.closing(sqlite3.connect(self.path)) as db:
+                    accepted = db.execute('SELECT EXISTS(SELECT 1 FROM requests WHERE project_id=? AND actor=? AND request_id=?)',
+                        (project['id'], 'human:boss', 'mobile:' + request_id)).fetchone()[0]
+            if project is None or project['id'] not in visible and not accepted:
                 outcome = {'status': 'error', 'error': 'This project is no longer registered or is hidden. Choose a registered project and submit again.'}
             else:
                 value = self.rpc({'action': 'create', 'title': creation['title'], 'body': creation['body'],
