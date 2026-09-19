@@ -932,3 +932,41 @@ fn actual_web_mindmap_notification_completion_recovery_does_not_acknowledge_noti
     );
     assert!(inbox.path().exists());
 }
+
+#[test]
+fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_boundary() {
+    let web = Web::start();
+    let body = "## Planning\n\n🧭 ".repeat(2000);
+    let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
+    db.execute("INSERT INTO mindmap_nodes VALUES('n-long-web',?1,'long',NULL,0,'markdown','Long note',?2,NULL,NULL,1,1)",rusqlite::params![web.project,body]).unwrap();
+    let preview =
+        web.ok(json!({"action":"mindmap","operation":{"command":"show","body_mode":"preview"}}));
+    assert_eq!(preview["nodes"][0]["body_truncated"], true);
+    assert_eq!(
+        preview["nodes"][0]["body"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        512
+    );
+    let full = web.ok(json!({"action":"mindmap","operation":{"command":"view","node":"long"}}));
+    assert_eq!(full["node"]["body"], body);
+    assert!(
+        full["node"]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<h2>Planning</h2>")
+    );
+    let edit = json!({"action":"mindmap","operation":{"command":"edit","node":"long","title":"Forbidden","body":null,"if_version":null}});
+    assert_eq!(web.action(&web.project, edit, None).status, 403);
+    assert_eq!(
+        db.query_row(
+            "SELECT body FROM mindmap_nodes WHERE id='n-long-web'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        body
+    );
+}

@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use hey_boss::{
     issues::{self, Error, Result, Store},
-    mindmap::{self, Operation},
+    mindmap::{self, BodyMode, Operation},
 };
 use serde_json::Value;
 use std::{io::Read, path::PathBuf};
@@ -88,7 +88,13 @@ struct Placement {
 enum Action {
     /// Show the nested outline, live resources and cross-links (also the default).
     #[command(visible_alias = "list")]
-    Show,
+    Show {
+        /// Include bodies: default none in the terminal, full in JSON.
+        #[arg(long, value_enum)]
+        bodies: Option<BodyMode>,
+    },
+    /// Read a single node's full live text/Markdown, without loading the whole map.
+    View { node: String },
     /// List projects with maps.
     Projects,
     /// Export the nested outline and relationships as Markdown to stdout.
@@ -191,7 +197,24 @@ impl Options {
             if_version: self.if_version,
         };
         Ok(match self.action.as_ref() {
-            None | Some(Action::Show) | Some(Action::Export) => Operation::Show,
+            None => Operation::Show {
+                body_mode: if self.json {
+                    BodyMode::Full
+                } else {
+                    BodyMode::None
+                },
+            },
+            Some(Action::Export) => Operation::Show {
+                body_mode: BodyMode::Full,
+            },
+            Some(Action::Show { bodies }) => Operation::Show {
+                body_mode: bodies.unwrap_or(if self.json {
+                    BodyMode::Full
+                } else {
+                    BodyMode::None
+                }),
+            },
+            Some(Action::View { node }) => Operation::View { node: node.clone() },
             Some(Action::Projects) => Operation::Projects,
             Some(Action::Add {
                 title,
@@ -344,6 +367,33 @@ pub fn run(options: &Options) -> Result<()> {
         println!("{}", serde_json::to_string(&graph)?);
         return Ok(());
     }
+    if matches!(options.action, Some(Action::View { .. })) {
+        if let Some(node) = graph.get("node") {
+            println!(
+                "{} [{}]{}",
+                node["title"].as_str().unwrap_or("Untitled"),
+                node["kind"].as_str().unwrap_or("text"),
+                node["state"]
+                    .as_str()
+                    .map(|state| format!(" ({state})"))
+                    .unwrap_or_default()
+            );
+            if let Some(body) = node["body"].as_str().filter(|body| !body.is_empty()) {
+                println!("\n{body}");
+            }
+        } else {
+            println!("This notification is not confirmed pending.");
+        }
+        if graph["notifications"]["available"] == false {
+            eprintln!(
+                "Inbox unavailable: {}",
+                graph["notifications"]["error"]
+                    .as_str()
+                    .unwrap_or("Unknown error")
+            );
+        }
+        return Ok(());
+    }
     if matches!(options.action, Some(Action::Projects)) {
         for p in graph["projects"].as_array().unwrap() {
             println!(
@@ -389,7 +439,14 @@ pub fn run(options: &Options) -> Result<()> {
                 format!(" · map version {}", graph["version"])
             }
         );
-        outline(&graph, None, 0, export);
+        let include_bodies = export
+            || matches!(
+                options.action,
+                Some(Action::Show {
+                    bodies: Some(BodyMode::Full | BodyMode::Preview)
+                })
+            );
+        outline(&graph, None, 0, export, include_bodies);
         if graph["nodes"].as_array().unwrap().is_empty() {
             println!("No nodes yet. Use: hey-boss mm add 'Topic' --id topic");
         }
@@ -455,7 +512,13 @@ fn label(graph: &Value, id: &Value) -> String {
         })
         .unwrap_or_else(|| id.as_str().unwrap_or("Unknown").into())
 }
-fn outline(graph: &Value, parent: Option<&str>, depth: usize, markdown: bool) {
+fn outline(
+    graph: &Value,
+    parent: Option<&str>,
+    depth: usize,
+    markdown: bool,
+    include_bodies: bool,
+) {
     for node in graph["nodes"]
         .as_array()
         .unwrap()
@@ -486,11 +549,17 @@ fn outline(graph: &Value, parent: Option<&str>, depth: usize, markdown: bool) {
                 String::new()
             }
         );
-        if markdown {
+        if include_bodies {
             for line in node["body"].as_str().unwrap_or("").lines() {
                 println!("{}{}", "  ".repeat(depth + 1), line);
             }
         }
-        outline(graph, node["id"].as_str(), depth + 1, markdown);
+        outline(
+            graph,
+            node["id"].as_str(),
+            depth + 1,
+            markdown,
+            include_bodies,
+        );
     }
 }

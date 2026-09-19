@@ -3,10 +3,44 @@ use crate::issues::{BODY_LIMIT, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum BodyMode {
+    #[default]
+    Full,
+    Preview,
+    None,
+}
+
+/// Prepare a bounded display body without losing its saved source.
+pub fn project_body(node: &mut Value, mode: BodyMode) {
+    let body = node["body"].as_str().unwrap_or("");
+    let has_body = node["has_body"] == true || !body.is_empty();
+    let previously_truncated = node["body_truncated"] == true;
+    let (body, truncated) = match mode {
+        BodyMode::Full => (body.to_owned(), false),
+        BodyMode::None => (String::new(), has_body),
+        BodyMode::Preview => match body.char_indices().nth(512) {
+            Some((index, _)) => (body[..index].to_owned(), true),
+            None => (body.to_owned(), previously_truncated),
+        },
+    };
+    node["has_body"] = json!(has_body);
+    node["body_truncated"] = json!(truncated);
+    node["body_html"] = json!(crate::markdown::render_fragment(&body));
+    node["body"] = json!(body);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    Show,
+    Show {
+        #[serde(default)]
+        body_mode: BodyMode,
+    },
+    View {
+        node: String,
+    },
     Projects,
     Links {
         node: Option<String>,
@@ -55,7 +89,10 @@ pub enum Operation {
 }
 impl Operation {
     pub fn writes(&self) -> bool {
-        !matches!(self, Self::Show | Self::Projects | Self::Links { .. })
+        !matches!(
+            self,
+            Self::Show { .. } | Self::View { .. } | Self::Projects | Self::Links { .. }
+        )
     }
     pub fn validate(&self) -> Result<()> {
         let version = match self {
@@ -169,6 +206,7 @@ fn validate_kind(kind: &str) -> Result<()> {
 /// Decorate a graph with a fresh pending-only desktop Inbox snapshot. Failure is
 /// explicit and never makes a saved notification look resolved.
 pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
+    let mode = serde_json::from_value(graph["body_mode"].clone()).unwrap_or(BodyMode::Full);
     let tasks = match snapshot {
         Ok(value) => match value.get("tasks").and_then(Value::as_array) {
             Some(tasks) => {
@@ -198,9 +236,7 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
                 if let Some(task) = pending.get(node["reference"].as_str().unwrap_or("")) {
                     node["title"] = task["title"].clone();
                     node["body"] = json!(task["summary"].as_str().unwrap_or(""));
-                    node["body_html"] = json!(crate::markdown::render_fragment(
-                        node["body"].as_str().unwrap_or("")
-                    ));
+                    project_body(node, mode);
                     node["state"] = json!("pending");
                     node["available"] = json!(true);
                 } else {

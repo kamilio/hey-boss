@@ -642,3 +642,129 @@ fn existing_issue_shorthands_remain_manageable_after_the_issue_is_deleted() {
         .unwrap()
     );
 }
+
+#[test]
+fn large_markdown_maps_have_small_utf8_safe_previews_and_full_single_node_reads() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    let body = "🧭 Planning the release. ".repeat(20000);
+    for i in 0..40 {
+        db.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',?2,NULL,?3,'markdown',?4,?5,NULL,NULL,1,1)",rusqlite::params![format!("n-body-{i}"),format!("long-{i}"),i,format!("Long planning note {i}"),body]).unwrap();
+    }
+    let preview = f.run("Atlas", &["show", "--bodies", "preview"]);
+    assert!(preview.to_string().len() < 120000);
+    let note = alias(&preview, "long-0");
+    assert_eq!(note["body"].as_str().unwrap().chars().count(), 512);
+    assert_eq!(note["body_truncated"], true);
+    assert_eq!(note["has_body"], true);
+    let omitted = f.run("Atlas", &["show", "--bodies", "none"]);
+    assert_eq!(alias(&omitted, "long-0")["body"], "");
+    assert_eq!(alias(&omitted, "long-0")["has_body"], true);
+    let full = f.run("Atlas", &["view", "long-0"]);
+    assert_eq!(full["node"]["body"], body);
+    assert_eq!(full["node"]["body_truncated"], false);
+    assert_eq!(nodes(&full).len(), 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT body FROM mindmap_nodes WHERE alias='long-0'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        body
+    );
+}
+
+#[test]
+fn node_view_resolves_current_cross_project_issues_and_pending_only_notices() {
+    let f = Fixture::new();
+    f.issue(
+        "Platform",
+        &[
+            "create",
+            "--title",
+            "Shared API",
+            "--body",
+            "Current issue details",
+        ],
+    );
+    f.run("Platform", &["issue", "1", "--id", "api"]);
+    let g = f.run("Atlas", &["view", "Platform::api"]);
+    assert_eq!(g["project"]["id"], "named:Platform");
+    assert_eq!(g["node"]["body"], "Current issue details");
+    f.run("Atlas", &["notice", "review", "--id", "review"]);
+    let inbox = inbox_fixture::Inbox::start(
+        f.root.join("inbox.sock"),
+        json!([{"taskID":"review","status":"pending","title":"Review","summary":"Please review"}]),
+    );
+    let view = || {
+        success(
+            f.cmd("Atlas", "mm", &["view", "review"])
+                .env("HEY_BOSS_INBOX_SOCKET", inbox.path())
+                .output()
+                .unwrap(),
+        )
+    };
+    assert_eq!(view()["node"]["state"], "pending");
+    inbox.tasks(json!([{"taskID":"review","status":"completed"}]));
+    let g = view();
+    assert!(g.get("node").is_none());
+    assert!(nodes(&g).is_empty());
+    assert!(
+        inbox
+            .requests()
+            .iter()
+            .all(|r| r["command"] == "inbox_list")
+    );
+}
+
+#[test]
+fn terminal_outline_defaults_to_titles_but_view_and_export_keep_bodies() {
+    let f = Fixture::new();
+    f.run(
+        "Atlas",
+        &[
+            "add",
+            "Planning",
+            "--id",
+            "plan",
+            "--body",
+            "A complete planning note.",
+        ],
+    );
+    let terminal = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&f.root)
+            .env("HEY_BOSS_ISSUE_DB", f.root.join("issues.db"))
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .args(["mm", "--project", "Atlas", "--agent", "human:test"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    for args in [&[][..], &["show"][..]] {
+        let outline = terminal(args);
+        assert!(outline.contains("Planning"));
+        assert!(!outline.contains("A complete planning note."));
+    }
+    for args in [
+        &["show", "--bodies", "full"][..],
+        &["show", "--bodies", "preview"][..],
+        &["view", "plan"][..],
+        &["export"][..],
+    ] {
+        assert!(terminal(args).contains("A complete planning note."));
+    }
+    assert_eq!(
+        alias(&f.run("Atlas", &["show"]), "plan")["body"],
+        "A complete planning note."
+    );
+}
