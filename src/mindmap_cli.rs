@@ -439,6 +439,13 @@ pub fn run(options: &Options) -> Result<()> {
         return Ok(());
     }
     let export = matches!(options.action, Some(Action::Export));
+    let display_text = |text: &str| {
+        if export {
+            markdown_text(text)
+        } else {
+            text.to_owned()
+        }
+    };
     if request.operation.writes() {
         println!(
             "{} · map version {}",
@@ -465,7 +472,7 @@ pub fn run(options: &Options) -> Result<()> {
         println!(
             "{}{}{}",
             if export { "# " } else { "" },
-            graph["project"]["name"].as_str().unwrap(),
+            display_text(graph["project"]["name"].as_str().unwrap()),
             if export {
                 String::new()
             } else {
@@ -499,12 +506,12 @@ pub fn run(options: &Options) -> Result<()> {
     for link in links {
         println!(
             "- {} → {} [{}]{}{}",
-            label(&labels, &link["from"]),
-            label(&labels, &link["to"]),
-            link["kind"].as_str().unwrap(),
+            display_text(label(&labels, &link["from"])),
+            display_text(label(&labels, &link["to"])),
+            display_text(link["kind"].as_str().unwrap()),
             link["description"]
                 .as_str()
-                .map(|s| format!(" — {s}"))
+                .map(|s| format!(" — {}", display_text(s)))
                 .unwrap_or_default(),
             if link["automatic"] == true {
                 " (automatic)"

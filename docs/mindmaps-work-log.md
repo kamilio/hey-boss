@@ -389,3 +389,19 @@ unavailable issue presentation using isolated demo data. Browser session still
 contained earlier failure-test routes; cleared those routes and disabled cache
 before checking the current assets. Screenshot:
 `output/playwright/mm-reference-mobile.png`.
+
+Applied resource-context/URL fixes from commit `d1f6255` to the original checkout
+after `git apply --check`, preserving its unstaged development. Advanced the
+delivery anchor to that commit. Local-only source upgrade reported `updated`,
+and the installed command now reports build `cae9b1248d409db3`. Actual installed
+`mm view mirrored-api` prints `Platform · issue #1 · named:Platform`. Isolated
+installed CLI checks also create a long PR URL, give it a readable label, restore
+its URL label and read the same reference successfully; results are saved in
+`out/mindmap-installed-smoke/long-url-result.json`.
+
+Export follow-up: plain relationship labels, descriptions and project names now
+escape literal Markdown punctuation consistently with node titles. A rendered
+export fixture verifies title emphasis/brackets/code and explanatory text stay
+literal. The existing Markdown renderer still autolinks a bare URL; the test
+checks that `[ship](URL)` remains visible as literal syntax around that URL,
+rather than becoming a Markdown link labelled “ship”.
