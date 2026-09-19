@@ -134,7 +134,7 @@ Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not fo
 
 ## Viewer
 
-`mm web` serves `/mm` on loopback, default port 4781. `--port 0` chooses an available port; `--json` prints the URL. Existing `issue web` servers also serve `/mm`, with a Mindmaps navigation link.
+`mm web` serves `/mm` on loopback, default port 4781. `--port 0` chooses an available port; `--json` prints the URL. Existing `issue web` servers also serve `/mm`. Mindmaps appears in the main web navigation alongside Inbox, Issues and Workers, and in the Mac menu bar alongside Inbox and Issues.
 
 The viewer supports project switching, nested collapse/expand, search through topics
 and link descriptions, incoming/outgoing dependency labels, Markdown bodies and

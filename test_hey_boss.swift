@@ -126,15 +126,17 @@ func audit() {
 
 func auditInbox(root: URL, sample: Record) {
     let overview = AgentsOverview(present: false, cli: nil)
-    var openedInbox = 0, openedIssues = 0
+    var openedInbox = 0, openedIssues = 0, openedMindmaps = 0
     overview.openInbox = { openedInbox += 1 }
     overview.openIssues = { openedIssues += 1 }
+    overview.openMindmaps = { openedMindmaps += 1 }
     precondition(overview.inboxMenuItem.menu != nil && overview.issuesMenuItem.menu === overview.inboxMenuItem.menu)
-    for item in [overview.inboxMenuItem, overview.issuesMenuItem] {
+    precondition(overview.mindmapsMenuItem.menu === overview.inboxMenuItem.menu)
+    for item in [overview.inboxMenuItem, overview.issuesMenuItem, overview.mindmapsMenuItem] {
         precondition(overview.validateMenuItem(item))
         precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
     }
-    precondition(openedInbox == 1 && openedIssues == 1)
+    precondition(openedInbox == 1 && openedIssues == 1 && openedMindmaps == 1)
     let launcher = IssuesLauncher()
     var launches = 0, urls: [URL] = [], failures: [String] = []
     launcher.openURL = { urls.append($0); return true }
@@ -143,20 +145,23 @@ func auditInbox(root: URL, sample: Record) {
     launcher.probe = { $0(true) }
     launcher.open(cli: nil)
     precondition(launches == 0 && urls.count == 1 && failures.isEmpty, "Reuse the running issue service")
-    launcher.open(cli:nil,inbox:true)
+    launcher.open(cli:nil,page:.inbox)
     precondition(urls.last?.fragment == "view=inbox", "Inbox opens the shared web interface")
+    launcher.open(cli:nil,page:.mindmaps)
+    precondition(urls.last?.path == "/mm" && urls.last?.fragment == nil && launches == 0, "Mindmaps reuses the shared web service")
     var probes = 0
     launcher.probe = { probes += 1; $0(probes > 1) }
     launcher.open(cli: "/usr/bin/true")
-    precondition(launches == 1 && urls.count == 3 && !launcher.launching)
+    precondition(launches == 1 && urls.count == 4 && !launcher.launching)
+    precondition(urls.last?.path == "/" && urls.last?.fragment == nil, "Issues resets the destination")
     launcher.probe = { $0(false) }
     launcher.open(cli: nil)
     precondition(failures.count == 1 && !launcher.launching)
     var ready: ((Bool) -> Void)?
     launcher.probe = { ready = $0 }
-    launcher.open(cli: nil); launcher.open(cli: nil)
+    launcher.open(cli: nil); launcher.open(cli: nil, page: .mindmaps)
     ready?(true)
-    precondition(urls.count == 4 && !launcher.launching, "Repeated menu clicks must not start duplicate servers")
+    precondition(urls.count == 5 && urls.last?.path == "/mm" && !launcher.launching, "Repeated menu clicks must open the latest destination without starting duplicate servers")
     let store = try! Store(root.appendingPathComponent("inbox-dismiss.db").path)
     let ui = Interface(present: false)
     store.removeMany = { ui.remove($0) }
@@ -180,7 +185,7 @@ func auditInbox(root: URL, sample: Record) {
     precondition(ui.current?.taskID == second.taskID)
     ui.presentQuestion(first)
     precondition(ui.field?.stringValue == "Keep my unfinished answer" && ui.questions.count == 1)
-    print("Passed: web Inbox/Issues menu actions, service reuse/start/errors, grouped review dismissal, hidden stack, question draft preservation")
+    print("Passed: web Inbox/Issues/Mindmaps menu actions, service reuse/start/errors, grouped review dismissal, hidden stack, question draft preservation")
 }
 
 func auditDismissalAnimation(sample: Record) {
