@@ -1,4 +1,4 @@
-//! Small embedded web UI. Loopback only, same-origin API, shared SQLite semantics.
+//! Embedded web UI. Loopback listener, optional private HTTPS proxy, shared SQLite.
 use super::{Actor, Error, Operation, Project, Request, Result, Store, identity};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,6 +10,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 pub struct Config {
     pub port: u16,
+    pub mobile_origin: Option<String>,
     pub discover: bool,
     pub project: Option<String>,
     pub actor: Option<String>,
@@ -26,6 +27,7 @@ struct App {
     actor: Actor,
     token: String,
     authority: String,
+    mobile_origin: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +77,10 @@ impl App {
 
 pub fn serve(config: Config) -> Result<()> {
     use std::os::unix::process::CommandExt;
+    let mobile_origin = config
+        .mobile_origin
+        .map(validate_mobile_origin)
+        .transpose()?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let original_executable = super::worker::executable_identity(&executable);
     let cwd = std::env::current_dir()?.canonicalize()?;
@@ -116,6 +122,7 @@ pub fn serve(config: Config) -> Result<()> {
         actor,
         token: secret.iter().map(|b| format!("{b:02x}")).collect(),
         authority,
+        mobile_origin,
     };
     let resolved = app.execute(
         config.project,
@@ -129,10 +136,13 @@ pub fn serve(config: Config) -> Result<()> {
     if config.json {
         println!(
             "{}",
-            json!({"ok":true,"url":url,"project":app.project,"actor":app.actor.id})
+            json!({"ok":true,"url":url,"mobile_url":app.mobile_origin,"project":app.project,"actor":app.actor.id})
         );
     } else {
         println!("Hey Boss Issues · {url}\nPress Ctrl+C to stop.");
+        if let Some(origin) = &app.mobile_origin {
+            println!("Mobile · {origin}/ (requires private Tailscale Serve)");
+        }
     }
     std::io::stdout().flush()?;
     let app = Arc::new(app);
@@ -254,18 +264,66 @@ fn header<'a>(request: &'a tiny_http::Request, name: &str) -> Option<&'a str> {
         .find(|h| h.field.to_string().eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str())
 }
+// This is an explicit trusted proxy origin, never an arbitrary forwarded header.
+// Tailscale provides authentication/TLS; this server stays on IPv4 loopback.
+fn validate_mobile_origin(origin: String) -> Result<String> {
+    let invalid = || {
+        Error::invalid(
+            "Mobile origin must be an HTTPS Tailscale hostname (https://machine.tailnet.ts.net[:port]), without a path",
+        )
+    };
+    let authority = origin.strip_prefix("https://").ok_or_else(invalid)?;
+    let hostname = if let Some((hostname, port)) = authority.split_once(':') {
+        if !port.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        port.parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(invalid)?;
+        if port == "443" || port.starts_with('0') {
+            return Err(invalid());
+        }
+        hostname
+    } else {
+        authority
+    };
+    let labels: Vec<_> = hostname.split('.').collect();
+    if hostname.len() > 253
+        || labels.len() < 4
+        || !hostname.ends_with(".ts.net")
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(origin)
+}
 fn allowed(request: &tiny_http::Request, app: &App) -> bool {
     let local = app.authority.replace("127.0.0.1", "localhost");
-    if !matches!(header(request,"host"),Some(h) if h==app.authority || h==local) {
-        return false;
-    }
+    let origin = match header(request, "host") {
+        Some(host) if host == app.authority || host == local => format!("http://{host}"),
+        Some(host)
+            if app
+                .mobile_origin
+                .as_deref()
+                .is_some_and(|origin| origin.strip_prefix("https://") == Some(host)) =>
+        {
+            app.mobile_origin.clone().unwrap()
+        }
+        _ => return false,
+    };
     if header(request, "sec-fetch-site").is_some_and(|s| !["same-origin", "none"].contains(&s)) {
         return false;
     }
-    if let Some(origin) = header(request, "origin")
-        && origin != format!("http://{}", app.authority)
-        && origin != format!("http://{local}")
-    {
+    if header(request, "origin").is_some_and(|value| value != origin) {
         return false;
     }
     true
@@ -318,7 +376,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     if !allowed(request, app) {
         return Err(Error::new(
             "forbidden",
-            "This interface only accepts same-origin local requests",
+            "This interface only accepts its configured same-origin requests",
         ));
     }
     let path = request.url().split('?').next().unwrap_or("/").to_owned();
@@ -481,4 +539,44 @@ fn json_response(value: Value) -> Result<(u16, &'static str, Vec<u8>)> {
         "application/json; charset=utf-8",
         serde_json::to_vec(&value)?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_mobile_origin;
+
+    #[test]
+    fn mobile_origins_are_private_https_origins_without_url_components() {
+        for origin in [
+            "https://mac.example.ts.net",
+            "https://dev-box.example.ts.net:8443",
+        ] {
+            assert_eq!(validate_mobile_origin(origin.into()).unwrap(), origin);
+        }
+        for origin in [
+            "http://mac.example.ts.net",
+            "https://example.com",
+            "https://ts.net",
+            "https://example.ts.net",
+            "https://mac.example.ts.net/",
+            "https://mac.example.ts.net/issues",
+            "https://mac.example.ts.net?x=1",
+            "https://mac.example.ts.net#fragment",
+            "https://user@mac.example.ts.net",
+            "https://mac.example.ts.net.evil.com",
+            "https://mac..ts.net",
+            "https://-mac.example.ts.net",
+            "https://mac-.example.ts.net",
+            "https://MAC.example.ts.net",
+            "https://mac.example.ts.net:0",
+            "https://mac.example.ts.net:65536",
+            "https://mac.example.ts.net:+8443",
+            "https://mac.example.ts.net:08443",
+            "https://mac.example.ts.net:443",
+            "https://mac.example.ts.net:8443:1",
+            "https://mac.example.ts.net\r\n",
+        ] {
+            assert!(validate_mobile_origin(origin.into()).is_err(), "{origin:?}");
+        }
+    }
 }

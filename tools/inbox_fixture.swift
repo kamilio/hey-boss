@@ -21,6 +21,7 @@ func runInboxFixture() {
         for (index,item) in rows.enumerated() {
             var row=Record(taskID:"notice-\(index+1)",kind:item.0,question:item.2,project:index==4 ? "Other project" : "Inbox QA",title:item.1,description:item.0=="update" ? "Report ready for review." : "Your input is welcome.",options:item.0=="approval" ? ["Approve","Reject"] : [],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:Date().timeIntervalSince1970-Double(index*60),presentedAt:nil,expiresAt:nil,status:index==5 ? "ok" : "pending",result:nil,origin:nil)
             row.sourceHost="This Mac";row.sourceKnown=true;row.commentsEnabled=index==3;row.severity=index==4 ? "success" : "info"
+            row.icon = index==4 ? "deploy" : index==0 ? "build" : nil
             if index==5 { row.completedAt=Date().timeIntervalSince1970-120 }
             try! store.database.save(row)
         }
