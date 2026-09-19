@@ -19,8 +19,6 @@ fn main() {
         "Cargo.lock",
         "build.rs",
         "src",
-        "worker-tui/Cargo.toml",
-        "worker-tui/src",
         "skills/hey-boss",
         "tools/upgrade_hey_boss.py",
         "tools/fleet_hey_boss.py",
