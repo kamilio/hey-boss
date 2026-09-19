@@ -931,9 +931,9 @@ fn unavailable_inbox_does_not_block_the_issue_service() {
 }
 
 #[test]
-fn issues_and_mindmaps_share_shell_and_project_picker_components() {
+fn every_page_uses_the_issues_design_library_and_shell() {
     let web = Web::start();
-    for path in ["/", "/mm"] {
+    for path in ["/", "/mm", "/workers"] {
         let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
         for component in [
             "/components.css",
@@ -943,6 +943,10 @@ fn issues_and_mindmaps_share_shell_and_project_picker_components() {
             "id=\"project-search\"",
             "id=\"project-options\"",
             "class=\"app-navigation\"",
+            "class=\"page-heading\"",
+            "class=\"page-description\"",
+            "class=\"page-footer\"",
+            "id=\"main\"",
         ] {
             assert!(
                 html.contains(component),
@@ -950,6 +954,7 @@ fn issues_and_mindmaps_share_shell_and_project_picker_components() {
             );
         }
         assert!(!html.contains("<select id=\"project\""));
+        assert!(!html.contains("<!--app-shell-->"));
     }
     for (path, kind) in [
         ("/components.js", "text/javascript"),
