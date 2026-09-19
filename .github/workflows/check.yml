@@ -22,6 +22,8 @@ jobs:
           swift package_hey_boss.swift out/hey-boss-daemon "out/Hey Boss.app"
           codesign --verify --strict "out/Hey Boss.app"
           plutil -lint "out/Hey Boss.app/Contents/Info.plist"
+        env:
+          HEY_BOSS_CLI_PATH: ${{ github.workspace }}/target/release/hey-boss
       - run: cargo package --locked --allow-dirty
   linux:
     runs-on: ubuntu-latest

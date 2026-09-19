@@ -18,6 +18,8 @@ jobs:
           mkdir -p out
           xcrun swiftc -O -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
           out/hey-boss-test
+        env:
+          HEY_BOSS_CLI_PATH: ${{ github.workspace }}/target/debug/hey-boss
       - run: swift release_hey_boss.swift "$RELEASE_VERSION" "$GITHUB_REPOSITORY"
         env:
           RELEASE_VERSION: ${{ inputs.version }}

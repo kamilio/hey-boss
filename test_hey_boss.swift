@@ -6,6 +6,8 @@ import zlib
 import SQLite3
 
 func audit() {
+    // Preserve the last completed check in CI logs if an optimized precondition traps.
+    setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
