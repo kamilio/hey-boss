@@ -1146,7 +1146,7 @@ class Supervisor:
                 raise RuntimeError((target or {}).get('error') or (result.stderr or result.stdout)[-2000:])
             self.update(host, deployment='current', deployment_error=None)
             self.event(host, 'deployment', 'Software deployment complete')
-            # Reconnect the channel to load the new agent implementation.
+            # Reconnect the channel to load the new companion implementation.
             # Independently owned worker sessions are left running.
             with self.lock:
                 connection = self.connections.get(host)
@@ -1196,7 +1196,7 @@ class Supervisor:
                 threading.Thread(target=read, daemon=True).start()
                 hello = inbox.get(timeout=15)
                 if not isinstance(hello, dict) or hello.get('kind') != 'hello' or hello.get('version') != VERSION:
-                    raise RuntimeError('Agent is missing or has an incompatible fleet protocol: ' + ''.join(stderr_tail)[-2000:])
+                    raise RuntimeError('Companion is missing or has an incompatible fleet protocol: ' + ''.join(stderr_tail)[-2000:])
                 node = hello['node']
                 with connect_db(self.path) as db:
                     db.execute('BEGIN IMMEDIATE')
@@ -1211,7 +1211,7 @@ class Supervisor:
                 workers = self.local_config(host, hello.get('local_config', []), workers)
                 revision = hashlib.sha256(encode({'controller': self.node, 'workers': workers}).encode()).hexdigest()[:16]
                 self.update(host, node=node, hostname=hello['hostname'], state='connected', role=COMPANION_ROLE, heartbeat=time.time(), build=hello['build'], workers=hello['workers'], desired_workers=workers, desired_revision=revision, applied_revision=hello.get('revision'), pending=hello.get('pending', 0), error=None)
-                self.event(host, 'connected', 'Agent connected')
+                self.event(host, 'connected', 'Companion connected')
                 send(process.stdin, {'kind': 'configure', 'controller': self.node, 'revision': revision, 'workers': workers})
                 last_message = time.monotonic()
                 last_ping = 0
@@ -1221,13 +1221,13 @@ class Supervisor:
                         send(process.stdin, {'kind': 'ping'})
                         last_ping = time.monotonic()
                     if time.monotonic() - last_message > 15:
-                        raise TimeoutError('Agent heartbeat timed out')
+                        raise TimeoutError('Companion heartbeat timed out')
                     try:
                         message = inbox.get(timeout=.25)
                     except queue.Empty:
                         continue
                     if message is None:
-                        raise ConnectionError('Agent connection closed: ' + ''.join(stderr_tail)[-2000:])
+                        raise ConnectionError('Companion connection closed: ' + ''.join(stderr_tail)[-2000:])
                     if isinstance(message, Exception):
                         raise message
                     if message.get('version') != VERSION:
@@ -1457,7 +1457,19 @@ def install_service(role):
                                         'ThrottleInterval': 10, 'AbandonProcessGroup': True, 'StandardOutPath': str(STATE / ('fleet-' + role + '.log')), 'StandardErrorPath': str(STATE / ('fleet-' + role + '.log'))}))
         domain = 'gui/' + str(os.getuid())
         subprocess.run(['launchctl', 'bootout', domain + '/' + label], capture_output=True)
-        subprocess.run(['launchctl', 'bootstrap', domain, str(path)], check=True)
+        # launchd can return EIO while the previous registration is unloading.
+        # Keep the stable service label and stop retrying as soon as it starts.
+        for delay in [0, .1, .2, .4, .8, 1, 2, 2, 2]:
+            if delay:
+                time.sleep(delay)
+            result = subprocess.run(['launchctl', 'bootstrap', domain, str(path)], capture_output=True, text=True)
+            if result.returncode == 0:
+                break
+            if result.returncode != 5:
+                break
+        if result.returncode:
+            sys.stderr.write(result.stderr)
+            result.check_returncode()
     elif sys.platform.startswith('linux'):
         path = pathlib.Path.home() / '.config/systemd/user' / ('hey-boss-fleet-' + role + '.service')
         path.parent.mkdir(parents=True, exist_ok=True)

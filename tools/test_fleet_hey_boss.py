@@ -66,6 +66,36 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(self.main.execute('SELECT role FROM fleet_meta WHERE id=1').fetchone()[0], 'controller')
         self.assertEqual(json.loads((self.root / 'fleet-main.json').read_text())['role'], 'controller')
 
+    def test_launchd_upgrade_retries_teardown_without_changing_service_identity(self):
+        import plistlib
+        for role, command in [('controller', 'supervisor'), ('agent', 'companion')]:
+            with self.subTest(role=role):
+                results = [subprocess.CompletedProcess([], code, '', 'Unloading' if code else '') for code in [0, 5, 0]]
+                with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(pathlib.Path, 'home', return_value=self.root), mock.patch.object(fleet.sys, 'platform', 'darwin'), mock.patch.object(fleet.subprocess, 'run', side_effect=results) as run, mock.patch.object(fleet.time, 'sleep'):
+                    fleet.install_service(role)
+                bootstraps = [call for call in run.call_args_list if call.args[0][1] == 'bootstrap']
+                self.assertEqual(len(bootstraps), 2)
+                config = plistlib.loads((self.root / ('Library/LaunchAgents/local.hey-boss-fleet-' + role + '.plist')).read_bytes())
+                self.assertEqual(config['Label'], 'local.hey-boss-fleet-' + role)
+                self.assertEqual(config['ProgramArguments'][-1], command)
+
+    def test_launchd_upgrade_does_not_retry_unrelated_errors(self):
+        results = [subprocess.CompletedProcess([], 0, '', ''), subprocess.CompletedProcess(['launchctl'], 1, '', 'Invalid registration')]
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(pathlib.Path, 'home', return_value=self.root), mock.patch.object(fleet.sys, 'platform', 'darwin'), mock.patch.object(fleet.subprocess, 'run', side_effect=results) as run, mock.patch.object(fleet.time, 'sleep') as sleep:
+            with self.assertRaises(subprocess.CalledProcessError):
+                fleet.install_service('controller')
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_not_called()
+
+    def test_launchd_upgrade_bounds_teardown_retries(self):
+        def unloading(command, **_):
+            return subprocess.CompletedProcess(command, 0 if command[1] == 'bootout' else 5, '', '')
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(pathlib.Path, 'home', return_value=self.root), mock.patch.object(fleet.sys, 'platform', 'darwin'), mock.patch.object(fleet.subprocess, 'run', side_effect=unloading) as run, mock.patch.object(fleet.time, 'sleep') as sleep:
+            with self.assertRaises(subprocess.CalledProcessError):
+                fleet.install_service('controller')
+        self.assertEqual(run.call_count, 10)
+        self.assertLess(sum(call.args[0] for call in sleep.call_args_list), 10)
+
     def edit(self, db, **fields):
         fields['version'] = db.execute('SELECT version+1 FROM issues WHERE number=1').fetchone()[0]
         fields['updated_at'] = 1800000000000
