@@ -1,0 +1,45 @@
+// Project instructions only. Workers launch and report progress in the CLI.
+async page => {
+ const checks=[],errors=[];const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name)};
+ page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept().catch(()=>{}));
+ const open=async()=>{await page.locator('#project-settings-trigger').click();await page.waitForFunction(()=>!document.querySelector('#project-prompt').disabled && document.querySelector('#project-instructions-preview').getAttribute('aria-busy')==='false')};
+ const preview=()=>page.locator('#project-instructions-preview').textContent();
+ await page.goto('http://127.0.0.1:4782/#project=named%3AWorker%20QA');await page.reload();await page.setViewportSize({width:1440,height:1000});
+ check(await page.locator('#worker-trigger,#worker-dialog,#worker-new,#worker-runs,#worker-directory,#worker-concurrency,#worker-claim-timeout,#worker-labels').count()===0,'No worker controls or session pages');
+ await open();
+ const storedPrompt=await page.locator('#project-prompt').inputValue();
+ check(await page.locator('#project-settings-form button[type=submit]').isDisabled(),'Save disabled until changed');
+ check(!(await page.locator('#project-settings-dialog').innerText()).includes('SQLite'),'No storage implementation text');
+ await page.locator('#project-prompt').fill('Assign and implement `{{issue_command}}`. {{commit_instruction}}');
+ await page.locator('#project-prs').uncheck();await page.waitForFunction(()=>document.querySelector('#project-instructions-preview').textContent.endsWith('push to main.'));
+ check((await preview()).startsWith('Assign and implement `hey-boss issue view'),'Exact default preview');
+ check(!(await preview()).includes('--project'),'Issue commands use current project');
+ await page.locator('#project-prs').check();await page.waitForFunction(()=>document.querySelector('#project-instructions-preview').textContent.includes('attach every PR'));
+ check(!(await preview()).includes('--project'),'PR command uses current project');
+ const before=await preview();await page.locator('#project-prompt').fill('/goal');check((await preview())===before,'Typing keeps previous preview visible');
+ await page.waitForFunction(()=>!document.querySelector('#project-goal-indicator').hidden && document.querySelector('#project-instructions-preview').getAttribute('aria-busy')==='false');
+ check((await preview()).startsWith('Assign and implement `hey-boss issue view') && (await preview()).includes('attach every PR'),'Bare /goal uses full default instructions');
+ check(await page.locator('#project-settings-dialog input[type=checkbox]').count()===1,'Only PR checkbox, no goal toggle');
+ await page.locator('#project-prompt').fill('/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}');await page.waitForFunction(()=>document.querySelector('#project-instructions-preview').textContent.includes('\nCommit'));
+ check((await preview()).startsWith('Assign and implement `hey-boss issue view'),'Multiline /goal preserves first sentence');
+ await page.locator('#project-prompt').fill('/goals Assign it');await page.waitForFunction(()=>document.querySelector('#project-goal-indicator').hidden);
+ check((await preview())==='/goals Assign it','Goal boundary prevents accidental activation');
+ const finalPrompt='/goal Assign and implement `{{issue_command}}`. {{commit_instruction}}';await page.locator('#project-prompt').fill(finalPrompt===storedPrompt?finalPrompt+'\n':finalPrompt);await page.waitForFunction(()=>!document.querySelector('#project-goal-indicator').hidden);
+ await page.locator('#project-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#project-settings-dialog').open);
+ check(await page.locator('#project-settings-trigger').evaluate(el=>el===document.activeElement),'Save closes and restores focus');
+ await open();check((await page.locator('#project-prompt').inputValue()).startsWith('/goal'),'Goal prompt persists');
+ await page.screenshot({path:'output/playwright/goal-prefix-instructions.png'});
+ const buttons=await page.locator('#project-settings-dialog .dialog-footer button').evaluateAll(els=>els.map(el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top}}));
+ check(buttons.length===2&&buttons[0].right+7<=buttons[1].left&&buttons[0].top===buttons[1].top,'Cancel and Save aligned and spaced');
+ await page.setViewportSize({width:390,height:844});check(await page.locator('#project-settings-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth&&el.getBoundingClientRect().right<=innerWidth),'Mobile modal fits');
+ await page.locator('#project-prompt').fill('Discard this draft');await page.locator('#project-settings-cancel').click();await open();check((await page.locator('#project-prompt').inputValue()).startsWith('/goal'),'Cancel discards draft');
+ await page.keyboard.press('Escape');check(!await page.locator('#project-settings-dialog').evaluate(el=>el.open),'Escape closes modal');
+ check(await page.locator('#project-settings-trigger').evaluate(el=>el===document.activeElement),'Escape restores focus');
+ await page.setViewportSize({width:1440,height:1000});
+ const links=page.locator('.issue-row .issue-pr-link');check(await links.count()>=2,'Multiple PRs visible in issue list');
+ const link=links.first(),href=await link.getAttribute('href');check((await link.getAttribute('target'))==='_blank'&&(await link.getAttribute('rel')).includes('noopener'),'PR links open safely in another tab');
+ const context=page.context();await context.route(href,route=>route.fulfill({status:200,body:'PR test destination'}));
+ const popupPromise=context.waitForEvent('page');await link.click();const popup=await popupPromise;await popup.waitForLoadState();check(popup.url()===href,'Click opens attached PR directly');await popup.close();
+ check(page.url().includes('project=named%3AWorker%20QA')&&!page.url().includes('issue='),'PR click keeps issue list open');
+ check(errors.length===0,'No browser errors');return {passed:checks.length,checks};
+}

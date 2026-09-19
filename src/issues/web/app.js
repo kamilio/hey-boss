@@ -1,0 +1,1649 @@
+"use strict";
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const paths = {
+  inbox: '<path d="M4 4h16l2 12v4H2v-4L4 4Z"/><path d="M2 16h6l2 3h4l2-3h6"/>',
+  settings:
+    '<circle cx="12" cy="12" r="3"/><path d="M10 2h4l.5 3.2L17 6.6l3-1.1L22 9l-2.5 2.1v2.8L22 16l-2 3.5-3-1.1-2.5 1.4L14 22h-4l-.5-2.2L7 18.4l-3 1.1L2 16l2.5-2.1v-2.8L2 9l2-3.5 3 1.1 2.5-1.4L10 2Z"/>',
+  subtasks: '<path d="M6 3v14a3 3 0 0 0 3 3h3M6 8h6"/><rect x="12" y="5" width="8" height="6" rx="1.5"/><rect x="12" y="17" width="8" height="6" rx="1.5"/>',
+  instructions:
+    '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
+  hide: '<path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9 5.5A11 11 0 0 1 12 5c6 0 10 7 10 7a18 18 0 0 1-4 4M6 6C3 8 2 12 2 12s4 7 10 7a12 12 0 0 0 5-1"/>',
+  folder:
+    '<path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>',
+  chevrons: '<path d="m8 8 4-4 4 4M8 16l4 4 4-4"/>',
+  search: '<circle cx="10.8" cy="10.8" r="7.3"/><path d="m16 16 4.5 4.5"/>',
+  issue:
+    '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>',
+  closed:
+    '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.7"/>',
+  check: '<path d="m5 12 4.5 4.5L19 7"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  x: '<path d="m6 6 12 12M6 18 18 6"/>',
+  tag: '<path d="M3 4h8l10 10-7 7L3 10V4Z"/><circle cx="7" cy="8" r="1"/>',
+  user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+  refresh: '<path d="M20 8a8 8 0 1 0 .3 7M20 3v5h-5"/>',
+  sync: '<path d="M20 8a8 8 0 0 0-14-3L3 8m0 0V3m0 5h5M4 16a8 8 0 0 0 14 3l3-3m0 0v5m0-5h-5"/>',
+  grip: '<circle cx="9" cy="5" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="19" r="1"/>',
+  sort: '<path d="M5 5h14M5 10h10M5 15h6M5 20h2"/>',
+  comment:
+    '<path d="M21 12a8.5 8.5 0 0 1-8.5 8.5 10 10 0 0 1-4-.8L3 21l1.4-5.2A8.5 8.5 0 1 1 21 12Z"/>',
+  "arrow-right": '<path d="M4 12h16m-6-6 6 6-6 6"/>',
+  "arrow-left": '<path d="M20 12H4m6-6-6 6 6 6"/>',
+  trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  edit: '<path d="m15 4 5 5M4 20l1-6L17 2l5 5L10 19l-6 1Z"/>',
+  spark:
+    '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/>',
+  link: '<path d="m10 13 4-4M8 16l-2 2a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M14 8l2-2a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/>',
+};
+const icon = (name) =>
+  `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.issue}</svg>`;
+function icons(root = document) {
+  $$("[data-icon]", root).forEach((el) => {
+    el.innerHTML = icon(el.dataset.icon);
+  });
+}
+const esc = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+const storage = {
+  get(key) {
+    try {
+      return JSON.parse(localStorage.getItem(key));
+    } catch {
+      return null;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  },
+  remove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  },
+};
+let model = {
+  csrf: "",
+  actor: null,
+  boss: { id: "human:boss", name: "Boss" },
+  assignees: [],
+  projects: [],
+  labels: [],
+  project: null,
+  route: {},
+  issues: [],
+  detail: null,
+  editor: null,
+  sequence: 0,
+  polling: false,
+  orderVersion: 0,
+  orderDragging: false,
+  orderSaving: false,
+  signature: "",
+  showHiddenProjects: false,
+  creation: null,
+};
+let pageRequests = new AbortController();
+window.addEventListener("pagehide", () => pageRequests.abort());
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  pageRequests = new AbortController();
+  if (model.csrf && model.project) {
+    refresh(false);
+    refreshInboxBadge();
+  }
+});
+const detailCache = new Map();
+let toastTimer,
+  searchTimer,
+  previewSequence = 0,
+  pendingMutation = new Map(
+    Object.entries(storage.get("hey-boss-issues-pending") || {}),
+  ),
+  confirmResolve = null;
+icons();
+const own = (id) => id && id === model.actor?.id;
+function actorName(id) {
+  if (!id) return "Unassigned";
+  if (id === "human:boss") return model.boss.name;
+  if (own(id)) return "You";
+  if (id.startsWith("codex:")) return `Codex · ${id.slice(6, 14)}`;
+  if (id.startsWith("claude:")) return `Claude · ${id.slice(7, 15)}`;
+  return id.replace(/^human:/, "").split("@")[0];
+}
+const nameSegmenter =
+  typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+function initials(name) {
+  const characters = nameSegmenter
+    ? Array.from(nameSegmenter.segment(name), (part) => part.segment)
+    : Array.from(name);
+  return characters.slice(0, 2).join("").toUpperCase();
+}
+function avatar(id) {
+  return `<span class="avatar" title="${esc(id)}" aria-label="${esc(actorName(id))}">${esc(id === "human:boss" ? initials(actorName(id)) : own(id) ? "Y" : id.startsWith("codex:") ? "CX" : id.startsWith("claude:") ? "CL" : initials(actorName(id)))}</span>`;
+}
+function relative(at) {
+  const delta = Math.max(0, Date.now() - at),
+    m = Math.floor(delta / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return d < 30
+    ? `${d}d ago`
+    : new Date(at).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      });
+}
+function date(at) {
+  return `<time datetime="${new Date(at).toISOString()}" title="${esc(new Date(at).toLocaleString())}">${relative(at)}</time>`;
+}
+function labelTone(name) {
+  const known = {
+    bug: 1,
+    enhancement: 0,
+    feature: 0,
+    documentation: 5,
+    docs: 5,
+    "needs-review": 3,
+    blocked: 4,
+    performance: 2,
+  };
+  return (
+    known[name.toLowerCase()] ??
+    [...name].reduce((a, c) => a + c.charCodeAt(0), 0) % 6
+  );
+}
+function label(name) {
+  return `<span class="label tone-${labelTone(name)}" title="${esc(name)}">${esc(name)}</span>`;
+}
+function toast(message, error = false) {
+  clearTimeout(toastTimer);
+  const el = $("#toast");
+  el.classList.toggle("error", error);
+  el.innerHTML = `${icon(error ? "issue" : "check")}<span>${esc(message)}</span><button class="toast-close" aria-label="Dismiss notification">${icon("x")}</button>`;
+  el.hidden = false;
+  $(".toast-close", el).onclick = () => (el.hidden = true);
+  toastTimer = setTimeout(() => (el.hidden = true), error ? 10000 : 4000);
+}
+function connection(ok) {
+  $("#connection").classList.toggle("offline", !ok);
+  $("#connection span").textContent = ok ? "Connected" : "Reconnecting";
+}
+async function post(path, data, reconnect = true) {
+  const sentToken = model.csrf;
+  let response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Hey-Boss-CSRF": sentToken,
+      },
+      body: JSON.stringify(data),
+      signal: AbortSignal.any([AbortSignal.timeout(35000), pageRequests.signal]),
+    });
+  } catch {
+    connection(false);
+    throw new Error(
+      "Connection lost. Your draft is saved. Try again when the server is available.",
+    );
+  }
+  let value;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error(
+      "The server returned an unexpected response. Try refreshing.",
+    );
+  }
+  if (response.status === 403 && reconnect) {
+    try {
+      const bootstrap = await fetch("/api/bootstrap", {
+        signal: AbortSignal.any([AbortSignal.timeout(10000), pageRequests.signal]),
+      });
+      const fresh = await bootstrap.json();
+      if (
+        bootstrap.ok &&
+        fresh.ok &&
+        fresh.csrf !== sentToken &&
+        fresh.actor.id === model.actor.id
+      ) {
+        model.csrf = fresh.csrf;
+        return post(path, data, false);
+      }
+    } catch {
+      /* Preserve the original, actionable error below. */
+    }
+  }
+  if (!response.ok || !value.ok) {
+    const error = new Error(value.error?.message || "The request failed.");
+    error.code = value.error?.code;
+    throw error;
+  }
+  if (
+    value.boss &&
+    (data.host || model.defaultHost || "") ===
+      (model.route.host || model.defaultHost || "") &&
+    (value.scope === "global" || value.project?.id === model.project?.id)
+  ) {
+    const host = data.host || model.defaultHost || "",
+      version = value.boss.version ??
+        (value.scope === "global" ? value.version : null);
+    if (
+      model.bossHost !== host ||
+      model.boss.version == null ||
+      (version != null && version >= model.boss.version)
+    ) {
+      if (model.boss.name !== value.boss.name) {
+        detailCache.clear();
+        model.signature = "";
+      }
+      model.boss = { ...value.boss, version };
+      model.bossHost = host;
+      updateProfile();
+    }
+  }
+  connection(true);
+  return value;
+}
+const api = (
+  operation,
+  project = model.project?.id,
+  request_id = null,
+  host = model.route.host || null,
+) => post("/api/action", { project, operation, request_id, host: host || null });
+async function mutationKey(project, operation, host) {
+  const bytes = new TextEncoder().encode(
+    JSON.stringify([model.actor.id, project, operation, ...(host && host !== model.defaultHost ? [host] : [])]),
+  );
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+function persistPending() {
+  storage.set(
+    "hey-boss-issues-pending",
+    Object.fromEntries([...pendingMutation].slice(-100)),
+  );
+}
+async function mutate(operation, project = model.project.id, host = model.route.host || null) {
+  const key = await mutationKey(project, operation, host);
+  let id = pendingMutation.get(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    pendingMutation.set(key, id);
+    persistPending();
+  }
+  try {
+    const result = await api(operation, project, id, host);
+    pendingMutation.delete(key);
+    persistPending();
+    detailCache.delete(detailKey(project,operation.number,host));
+    return result;
+  } catch (error) {
+    if (["conflict", "invalid_input", "not_found"].includes(error.code))
+      pendingMutation.delete(key);
+    persistPending();
+    throw error;
+  }
+}
+function routeHash(route) {
+  const p = new URLSearchParams();
+  for (const [key, value] of Object.entries(route)) {
+    if (
+      value !== null &&
+      value !== undefined &&
+      value !== "" &&
+      value !== false &&
+      key !== "offset"
+    )
+      p.set(key, String(value));
+  }
+  return "#" + p.toString();
+}
+function parseRoute() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const project =
+    params.get("project") ||
+    storage.get("hey-boss-issues-project") ||
+    model.project.id;
+  return {
+    project,
+    host: params.get("host") || model.defaultHost || "",
+    view: params.get("view") === "inbox" ? "inbox" : "issues",
+    notice: params.get("notice") || "",
+    inbox_state: params.get("inbox_state") === "archive" ? "archive" : "unread",
+    inbox_project: params.get("inbox_project") || "",
+    inbox_search: params.get("inbox_search") || "",
+    issue: /^[1-9]\d*$/.test(params.get("issue") || "")
+      ? Number(params.get("issue"))
+      : null,
+    state: ["open", "closed", "deleted"].includes(params.get("state"))
+      ? params.get("state")
+      : "open",
+    search: params.get("search") || "",
+    owner: params.get("owner") || "all",
+    label: params.get("label") || "",
+  };
+}
+function navigate(changes, replace = false) {
+  const route = { ...model.route, ...changes };
+  const hash = routeHash(route);
+  saveComment();
+  if (replace) {
+    history.replaceState(null, "", hash);
+  } else if (location.hash !== hash) {
+    history.pushState(null, "", hash);
+  }
+  renderRoute();
+}
+function currentProject() {
+  return (
+    model.projects.find((p) => p.id === model.route.project) || {
+      id: model.route.project,
+      name: model.route.project
+        .split("/")
+        .pop()
+        .replace(/^named:/, ""),
+      open: 0,
+      closed: 0,
+      deleted: 0,
+      unassigned: 0,
+    }
+  );
+}
+function updateHeader() {
+  const p = model.project;
+  $("#project-name").textContent = p.name;
+  $("#hidden-project-banner").hidden = !p.hidden_at;
+  $("#project-caption").textContent =
+    p.id.startsWith("local:") || p.id.startsWith("named:") ? p.name : p.id;
+  $("#heading-count").textContent = p.open;
+  $("#open-count").textContent = p.open;
+  $("#closed-count").textContent = p.closed;
+  $("#deleted-count").textContent = p.deleted;
+  $(".page-description").textContent =
+    `${p.unassigned} unassigned ${p.unassigned === 1 ? "issue" : "issues"}`;
+  document.title =
+    model.detail && model.route.issue
+      ? `${model.detail.issue.title} · Hey Boss`
+      : `${p.name} · Issues · Hey Boss`;
+  $$("[data-state]").forEach((b) => {
+    const selected = b.dataset.state === model.route.state;
+    b.classList.toggle("selected", selected);
+    b.setAttribute("aria-selected", selected);
+    b.tabIndex = selected ? 0 : -1;
+  });
+  renderOwnerFilter();
+  updateProfile();
+  renderLabelFilter();
+}
+function renderOwnerFilter() {
+  const selected = model.route.owner;
+  const ids = [
+    ...new Set([
+      "human:boss",
+      ...model.assignees,
+      ...(!["all", "mine", "unassigned"].includes(selected) ? [selected] : []),
+    ]),
+  ];
+  $("#owner-filter").innerHTML =
+    '<option value="all">Assignee</option>' +
+    `<option value="mine">Assigned to me (${esc(model.boss.name)})</option><option value="unassigned">Unassigned</option>` +
+    ids
+      .map((id) => `<option value="${esc(id)}">${esc(actorName(id))}</option>`)
+      .join("");
+  $("#owner-filter").value = selected;
+}
+function listLabel(name) {
+  return `<a class="list-label-filter" href="${esc(routeHash({ ...model.route, issue: null, label: name }))}" aria-label="Filter by label ${esc(name)}">${label(name)}</a>`;
+}
+function listAssignee(id) {
+  return `<a class="list-assignee-filter" href="${esc(routeHash({ ...model.route, issue: null, owner: id }))}" aria-label="Filter by assignee ${esc(actorName(id))}" title="Filter by ${esc(actorName(id))}">${avatar(id)}<span>${esc(actorName(id))}</span></a>`;
+}
+function renderLabelFilter() {
+  const selected = model.route.label;
+  const all = [
+    ...new Set([...model.labels, ...(selected ? [selected] : [])]),
+  ].sort();
+  $("#label-filter").innerHTML =
+    '<option value="">Labels</option>' +
+    all.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join("");
+  $("#label-filter").value = selected;
+}
+function projectOptions() {
+  const focused = document.activeElement;
+  const focusProject = focused?.dataset.project;
+  const focusVisibility = focused?.dataset.projectVisibility;
+  const query = $("#project-search").value.toLocaleLowerCase();
+  const hidden = model.projects.filter((p) => p.hidden_at).length;
+  const matches = model.projects.filter(
+    (p) =>
+      Boolean(p.hidden_at) === model.showHiddenProjects &&
+      (p.name + " " + p.id).toLocaleLowerCase().includes(query),
+  );
+  $("#project-sort-label").textContent = model.showHiddenProjects
+    ? "HIDDEN PROJECTS"
+    : "RECENT ACTIVITY";
+  $("#toggle-hidden-projects").textContent = model.showHiddenProjects
+    ? "Back to active projects"
+    : `Hidden projects (${hidden})`;
+  $("#toggle-hidden-projects").setAttribute(
+    "aria-pressed",
+    String(model.showHiddenProjects),
+  );
+  $("#project-options").innerHTML =
+    matches
+      .map(
+        (p) =>
+          `<div class="project-choice"><button class="project-option ${p.id === model.project.id ? "selected" : ""}" data-project="${esc(p.id)}">${icon("folder")}<span class="project-option-info"><strong>${esc(p.name)}</strong><small>${esc(p.id.startsWith("local:") ? "Local directory" : p.id.replace(/^named:/, ""))}</small><small class="project-activity">${p.activity_at ? `Active ${date(p.activity_at)}` : "No activity yet"}</small></span><span class="tab-count">${p.open}</span>${p.id === model.project.id ? `<span class="project-check">${icon("check")}</span>` : ""}</button><button class="icon-button project-visibility" data-project-visibility="${esc(p.id)}" aria-label="${p.hidden_at ? "Restore" : "Hide"} ${esc(p.name)}" title="${p.hidden_at ? "Restore project" : "Hide project"}">${icon(p.hidden_at ? "refresh" : "hide")}</button></div>`,
+      )
+      .join("") ||
+    `<div class="menu-empty">${query ? "No matching projects." : model.showHiddenProjects ? "No hidden projects." : "No active projects. Projects appear automatically when agents use them."}</div>`;
+  if (focusProject || focusVisibility) {
+    const target = $$("#project-options button").find((b) =>
+      focusProject
+        ? b.dataset.project === focusProject
+        : b.dataset.projectVisibility === focusVisibility,
+    );
+    (target || $("#project-search")).focus();
+  }
+}
+async function setProjectVisibility(project) {
+  const p = model.projects.find((p) => p.id === project);
+  if (!p) return;
+  const restoring = Boolean(p.hidden_at);
+  const button = [...$$("[data-project-visibility]")].find(
+    (b) => b.dataset.projectVisibility === project,
+  );
+  if (button) button.disabled = true;
+  try {
+    await mutate(
+      { action: restoring ? "restore_project" : "hide_project" },
+      project,
+    );
+    await refreshProjects();
+    if (!restoring && model.project.id === project) {
+      const next = model.projects.find((p) => !p.hidden_at);
+      if (next)
+        navigate({
+          project: next.id,
+          issue: null,
+          search: "",
+          label: "",
+          owner: "all",
+          state: "open",
+        });
+    }
+    projectOptions();
+    toast(
+      restoring
+        ? `${p.name} restored`
+        : `${p.name} hidden. Restore it from Hidden projects.`,
+    );
+  } catch (error) {
+    toast(error.message, true);
+    if (button) button.disabled = false;
+  }
+}
+$("#restore-current-project").onclick = () =>
+  setProjectVisibility(model.project.id);
+$("#toggle-hidden-projects").onclick = () => {
+  model.showHiddenProjects = !model.showHiddenProjects;
+  projectOptions();
+};
+
+function closeProjectMenu() {
+  const was = !$("#project-menu").hidden;
+  $("#project-menu").hidden = true;
+  $("#project-trigger").setAttribute("aria-expanded", "false");
+  return was;
+}
+$("#project-trigger").onclick = () => {
+  const opening = $("#project-menu").hidden;
+  $("#project-menu").hidden = !opening;
+  $("#project-trigger").setAttribute("aria-expanded", opening);
+  if (opening) {
+    $("#project-search").value = "";
+    projectOptions();
+    $("#project-search").focus();
+  }
+};
+$("#project-search").oninput = projectOptions;
+$("#project-options").onclick = (e) => {
+  const visibility = e.target.closest("[data-project-visibility]");
+  if (visibility) {
+    setProjectVisibility(visibility.dataset.projectVisibility);
+    return;
+  }
+  const button = e.target.closest("[data-project]");
+  if (!button) return;
+  closeProjectMenu();
+  navigate({
+    project: button.dataset.project,
+    issue: null,
+    search: "",
+    label: "",
+    owner: "all",
+    state: "open",
+  });
+  $("#project-trigger").focus();
+};
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".project-control")) closeProjectMenu();
+});
+$("#project-menu").addEventListener("keydown", (e) => {
+  const controls = [
+    $("#project-search"),
+    ...$$("#project-options button"),
+    $("#toggle-hidden-projects"),
+    $("#add-project"),
+  ];
+  const index = controls.indexOf(document.activeElement);
+  if (["ArrowDown", "ArrowUp"].includes(e.key)) {
+    e.preventDefault();
+    controls[
+      (index + (e.key === "ArrowDown" ? 1 : controls.length - 1)) %
+        controls.length
+    ].focus();
+  }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeProjectMenu();
+    $("#project-trigger").focus();
+  }
+});
+function listOperation() {
+  return {
+    action: "list",
+    state: model.route.state,
+    mine: model.route.owner === "mine",
+    unassigned: model.route.owner === "unassigned",
+    assignee: ["all", "mine", "unassigned"].includes(model.route.owner)
+      ? null
+      : model.route.owner,
+    labels: model.route.label ? [model.route.label] : [],
+    search: model.route.search || null,
+    limit: 50,
+    offset: 0,
+    all: true,
+  };
+}
+function emptyState() {
+  const filtered =
+    model.route.search || model.route.label || model.route.owner !== "all";
+  const state = model.route.state;
+  const title = filtered
+    ? "No matching issues"
+    : state === "closed"
+      ? "Nothing closed yet"
+      : state === "deleted"
+        ? "No deleted issues"
+        : "A clear place to start";
+  const description = filtered
+    ? "Try another search or clear your filters."
+    : state === "closed"
+      ? "Completed work will appear here."
+      : state === "deleted"
+        ? "Deleted issues can be restored from this view."
+        : "Create an issue, add some context, and let the work begin.";
+  return `<div class="empty-state"><div class="empty-icon">${icon(filtered ? "search" : state === "closed" ? "closed" : state === "deleted" ? "trash" : "issue")}</div><h2>${title}</h2><p>${description}</p>${filtered ? '<button class="button" data-empty="clear">Clear filters</button>' : state === "open" ? `<button class="button primary" data-empty="create">${icon("plus")}Create your first issue</button>` : ""}</div>`;
+}
+function listPullRequests(issue) {
+  return (issue.pull_requests || [])
+    .map((pr) => {
+      let title = pr.url;
+      try {
+        const url = new URL(pr.url),
+          match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+        title = match
+          ? `${match[1]}/${match[2]}#${match[3]}`
+          : `${url.host}${url.pathname}${url.search}`;
+      } catch {
+        /* Keep old attached links readable if URL parsing fails. */
+      }
+      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}" aria-label="Open pull request ${esc(title)}">${icon("link")}${esc(title)}</a>`;
+    })
+    .join("");
+}
+function renderList(result) {
+  if (model.orderDragging) return;
+  const creation = model.creation;
+  const createdHere =
+    creation &&
+    creation.project === model.project.id &&
+    creation.host === model.route.host;
+  if (
+    createdHere &&
+    creation.reveal &&
+    !creation.filtersChecked &&
+    !result.issues.some((issue) => issue.number === creation.number)
+  ) {
+    creation.filtersChecked = true;
+    navigate({ state: "open", owner: "all", label: "", search: "" }, true);
+    return;
+  }
+  const listContext = JSON.stringify([model.project.id, model.route.host]);
+  const focused = document.activeElement;
+  const focusedRow = focused?.closest("#issue-list .issue-row");
+  const savedFocus =
+    focusedRow && model.listContext === listContext
+      ? {
+          number: focusedRow.dataset.issueNumber,
+          tag: focused.tagName,
+          href: focused.getAttribute("href"),
+          move: focused.dataset.moveIssue,
+          top: focused.getBoundingClientRect().top,
+        }
+      : null;
+  model.listContext = listContext;
+  model.orderVersion = result.order_version;
+  model.issues = result.issues;
+  model.signature = JSON.stringify(result.issues);
+  $("#issue-list").classList.toggle("large-list", result.issues.length > 300);
+  $("#issue-list").innerHTML = result.issues.length
+    ? result.issues
+        .map(
+          (i) =>
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "closed" ? "closed" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span><span>${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(actorName(i.created_by))}`}</span>${listPullRequests(i)}${IssueSubtasks.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
+        )
+        .join("")
+    : emptyState();
+  $("#list-footer").hidden = !result.issues.length;
+  $("#list-summary").textContent = result.issues.length
+    ? `${result.issues.length} ${result.issues.length === 1 ? "issue" : "issues"}`
+    : "No issues";
+  $("#issue-list").removeAttribute("aria-busy");
+  if (savedFocus && !$("#list-view").hidden) {
+    const row = $(
+      `[data-issue-number="${CSS.escape(savedFocus.number)}"]`,
+      $("#issue-list"),
+    );
+    const control = row &&
+      $$("a, button", row).find((el) =>
+        savedFocus.move
+          ? el.dataset.moveIssue === savedFocus.move
+          : el.tagName === savedFocus.tag &&
+            el.getAttribute("href") === savedFocus.href,
+      );
+    const target = control || row?.querySelector(".issue-title");
+    if (target) {
+      target.focus({ preventScroll: true });
+      window.scrollBy({
+        top: target.getBoundingClientRect().top - savedFocus.top,
+        behavior: "instant",
+      });
+    } else $("#issue-search").focus();
+  }
+  if (createdHere) {
+    const row = $(`[data-issue-number="${creation.number}"]`, $("#issue-list"));
+    if (row) {
+      row.classList.add("issue-created");
+      if (creation.reveal) {
+        creation.reveal = false;
+        row.querySelector(".issue-title").focus({ preventScroll: true });
+        row.scrollIntoView({ block: "nearest" });
+      }
+      if (!creation.timer)
+        creation.timer = setTimeout(() => {
+          if (model.creation !== creation) return;
+          model.creation = null;
+          $$(".issue-created").forEach((el) =>
+            el.classList.remove("issue-created"),
+          );
+        }, 4000);
+    }
+  }
+}
+$("#issue-list").onclick = (e) => {
+  const empty = e.target.closest("[data-empty]");
+  if (empty?.dataset.empty === "create") openEditor();
+  if (empty?.dataset.empty === "clear")
+    navigate({ search: "", label: "", owner: "all" });
+};
+let prefetchTimer;
+$("#issue-list").addEventListener("pointerover", (e) => {
+  const link = e.target.closest("[data-issue]");
+  if (!link) return;
+  clearTimeout(prefetchTimer);
+  const project = model.project.id,
+    number = Number(link.dataset.issue),
+    host = model.route.host,
+    key = detailKey(project,number,host);
+  if (detailCache.has(key)) return;
+  prefetchTimer = setTimeout(
+    () =>
+      api({ action: "view", number }, project, null, host)
+        .then((value) => {
+          if (detailCache.size > 40) detailCache.clear();
+          detailCache.set(key, { value, at: Date.now() });
+        })
+        .catch(() => {}),
+    100,
+  );
+});
+$("#issue-search").oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(
+    () => navigate({ search: $("#issue-search").value }, true),
+    160,
+  );
+};
+$("#label-filter").onchange = () =>
+  navigate({ label: $("#label-filter").value });
+$("#owner-filter").onchange = () =>
+  navigate({ owner: $("#owner-filter").value });
+$$("[data-state]").forEach(
+  (b) => (b.onclick = () => navigate({ state: b.dataset.state })),
+);
+$("#refresh").onclick = () => refresh(false);
+async function refreshProjects(project = model.project.id) {
+  const result = await api(
+    { action: "projects", include_hidden: true },
+    project,
+  );
+  model.projects = result.projects;
+  if (model.project.id !== project) return;
+  model.labels = result.labels;
+  model.assignees = result.assignees || [];
+  model.project = currentProject();
+  updateHeader();
+  if (!$("#project-menu").hidden) projectOptions();
+}
+async function renderRoute() {
+  closeIssueTagPicker();
+  const sequence = ++model.sequence;
+  const previous = model.project?.id;
+  model.route = parseRoute();
+  updateAppNavigation();
+  $("#inbox-view").hidden = model.route.view !== "inbox";
+  $("#project-settings-trigger").hidden = model.route.view === "inbox";
+  $(".project-control").hidden = model.route.view === "inbox";
+  if (model.route.view === "inbox") {
+    closeProjectMenu();
+    model.detail = null;
+    for (const selector of [
+      "#list-view",
+      "#detail-view",
+      "#issue-heading",
+      "#hidden-project-banner",
+    ])
+      $(selector).hidden = true;
+    await renderInboxRoute(sequence);
+    return;
+  }
+  if (model.activeHost !== model.route.host) {
+    try {
+      const projects = await api(
+        { action: "projects", include_hidden: true },
+        model.route.project,
+        null,
+        model.route.host || null,
+      );
+      if (sequence !== model.sequence) return;
+      model.projects = projects.projects;
+      model.activeHost = model.route.host;
+      model.labels = projects.labels;
+      model.assignees = projects.assignees || [];
+      detailCache.clear();
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
+  }
+  clearTimeout(searchTimer);
+  $("#issue-search").value = model.route.search;
+  model.project = currentProject();
+  storage.set("hey-boss-issues-project", model.project.id);
+  model.detail = null;
+  model.signature = "";
+  updateHeader();
+  const detail = !!model.route.issue;
+  $("#list-view").hidden = detail;
+  $("#detail-view").hidden = !detail;
+  $("#issue-heading").hidden = detail;
+  $("#issue-heading").classList.toggle("detail-page", detail);
+  if (previous !== model.project.id) {
+    model.labels = [];
+    model.assignees = [];
+    $("#issue-list").innerHTML =
+      '<div class="loading-state"><span class="spinner"></span>Loading issues…</div>';
+    refreshProjects(model.project.id).catch((e) => toast(e.message, true));
+  }
+  if (detail) {
+    const key = detailKey(model.project.id,model.route.issue);
+    const cached = detailCache.get(key);
+    if (cached && Date.now() - cached.at < 30000) renderDetail(cached.value);
+    else
+      $("#detail-view").innerHTML =
+        '<div class="loading-state"><span class="spinner"></span>Opening issue…</div>';
+    try {
+      const value = await api({ action: "view", number: model.route.issue });
+      if (sequence !== model.sequence) return;
+      detailCache.set(key, { value, at: Date.now() });
+      if (!cached || Date.now() - cached.at >= 30000 || JSON.stringify(cached.value.issue) !== JSON.stringify(value.issue) || IssueSubtasks.signature(cached.value) !== IssueSubtasks.signature(value)) {
+        const input = $("#comment-body"), focus = input === document.activeElement ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection,top:input.getBoundingClientRect().top} : null;
+        saveComment();renderDetail(value);
+        if (focus) {const next=$("#comment-body");next?.focus({preventScroll:true});next?.setSelectionRange(focus.start,focus.end,focus.direction);if(next)window.scrollBy(0,next.getBoundingClientRect().top-focus.top);}
+      }
+    } catch (e) {
+      if (sequence !== model.sequence) return;
+      $("#detail-view").innerHTML =
+        `<button class="back-link" data-back>${icon("arrow-left")}All issues</button><div class="empty-state"><div class="empty-icon">${icon("issue")}</div><h2>Unable to open this issue</h2><p>${esc(e.message)}</p><button class="button" data-retry>Try again</button></div>`;
+    }
+  } else {
+    try {
+      const result = await api(listOperation());
+      if (sequence !== model.sequence) return;
+      renderList(result);
+    } catch (e) {
+      if (sequence !== model.sequence) return;
+      $("#issue-list").innerHTML =
+        `<div class="empty-state"><div class="empty-icon">${icon("issue")}</div><h2>Issues are unavailable</h2><p>${esc(e.message)}</p><button class="button" id="retry-list">Try again</button></div>`;
+      $("#retry-list").onclick = () => refresh(false);
+    }
+  }
+}
+async function refresh(quiet = true) {
+  if (model.route.view === "inbox") {
+    await refreshInbox(quiet);
+    return;
+  }
+  if (
+    model.orderDragging ||
+    model.orderSaving ||
+    model.polling ||
+    !model.csrf ||
+    document.hidden ||
+    $("#editor-dialog").open ||
+    $("#confirm-dialog").open
+  )
+    return;
+  model.polling = true;
+  const sequence = model.sequence,
+    project = model.project.id,
+    bossName = model.boss.name;
+  $("#refresh").classList.add("busy");
+  try {
+    const [projects, result] = await Promise.all([
+      api({ action: "projects", include_hidden: true }, project),
+      api(
+        model.route.issue
+          ? { action: "view", number: model.route.issue }
+          : listOperation(),
+        project,
+      ),
+    ]);
+    if (sequence !== model.sequence || model.orderDragging || model.orderSaving)
+      return;
+    $$("time[datetime]").forEach((time) => {
+      const text = relative(Date.parse(time.dateTime));
+      if (time.textContent !== text) time.textContent = text;
+    });
+    model.projects = projects.projects;
+    model.labels = projects.labels;
+    model.assignees = projects.assignees || [];
+    model.project = currentProject();
+    updateHeader();
+    if (!$("#project-menu").hidden) projectOptions();
+    if (model.route.issue) {
+      model.orderVersion = result.order_version ?? model.orderVersion;
+      if (model.detail && bossName !== model.boss.name) {
+        if (quiet) showUpdate();
+        else renderDetail(result);
+      } else if (
+        model.detail &&
+        (result.issue.version !== model.detail.issue.version || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+      ) {
+        if (quiet) showUpdate();
+        else renderDetail(result);
+      }
+    } else {
+      model.orderVersion = result.order_version;
+      if (JSON.stringify(result.issues) !== model.signature) renderList(result);
+    }
+    connection(true);
+    if (!quiet) toast("Up to date");
+  } catch (e) {
+    connection(false);
+    if (!quiet) toast(e.message, true);
+  } finally {
+    model.polling = false;
+    $("#refresh").classList.remove("busy");
+  }
+}
+function detailKey(project, number, host = model.route.host) {
+  return JSON.stringify([host || model.defaultHost || "",project,number]);
+}
+function draftKey(kind, project, number = "new", host = model.route.host) {
+  const scope = host && host !== model.defaultHost ? `:host:${encodeURIComponent(host)}` : "";
+  return `hey-boss-issues:${kind}:${project}:${number}${scope}`;
+}
+function saveComment() {
+  if (!model.detail) return;
+  const input = $("#comment-body");
+  if (input)
+    storage.set(
+      draftKey("comment", model.project.id, model.detail.issue.number, model.activeHost ?? model.route.host),
+      input.value,
+    );
+}
+function showUpdate() {
+  detailCache.delete(detailKey(model.project.id,model.route.issue));
+  if ($("#update-banner")) return;
+  $("#detail-view").insertAdjacentHTML(
+    "afterbegin",
+    `<div class="update-banner" id="update-banner"><span>This issue was updated by another session.</span><button data-reload>Load changes</button></div>`,
+  );
+}
+function assigneeActions(issue) {
+  if (issue.state !== "open" || issue.deleted_at) return "";
+  return `<div class="assignee-actions">${own(issue.assignee) ? "" : `<button class="button small" data-action="assign_boss">Assign to ${esc(model.boss.name)}</button>`}${issue.assignee ? '<button class="button small" data-action="unassign">Unassign</button>' : ""}</div>`;
+}
+function renderDetail(value) {
+  model.detail = value;
+  model.orderVersion = value.order_version ?? model.orderVersion;
+  const i = value.issue;
+  const deleted = !!i.deleted_at;
+  const state = deleted ? "deleted" : i.state;
+  const authored = esc(actorName(i.created_by));
+  const description =
+    i.body_html || '<p class="muted-text">No description provided.</p>';
+  $("#detail-view").innerHTML =
+    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1><div class="detail-heading-actions">${deleted ? "" : `<button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "closed" ? "closed" : "issue")}${deleted ? "Deleted" : i.state === "closed" ? "Closed" : "Open"}</span><span><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div><div class="detail-layout"><div class="detail-main"><article class="comment-card"><div class="comment-header">${avatar(i.created_by)}<strong>${authored}</strong><span>opened ${date(i.created_at)}</span><span class="author-badge">Author</span></div><div class="comment-body markdown">${description}</div></article>${IssueSubtasks.card(value)}<div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button><div id="activity-timeline" hidden></div></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => `<article class="comment-card"><div class="comment-header">${avatar(c.author)}<strong>${esc(actorName(c.author))}</strong><span>commented ${date(c.created_at)}</span></div><div class="comment-body markdown">${c.body_html}</div></article>`).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Leave an update, ask a question, or share what you found…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions"><button type="button" class="button" data-action="${i.state === "closed" ? "reopen" : "close"}">${icon(i.state === "closed" ? "issue" : "closed")}${i.state === "closed" ? "Reopen issue" : "Close issue"}</button><button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</div><section class="sidebar" aria-label="Issue properties"><div class="side-section"><h2 class="side-heading">Assignee${icon("user")}</h2><div class="assignee-line">${i.assignee ? avatar(i.assignee) : ""}<span title="${esc(i.assignee || "")}">${esc(actorName(i.assignee))}</span></div>${assigneeActions(i)}</div>${renderTagSidebar(i)}${renderPullRequests(i)}<div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div><div class="side-section"><h2 class="side-heading">Project</h2><div class="side-project">${icon("folder")}${esc(model.project.name)}</div><p>${esc(model.project.id.startsWith("local:") ? "Local directory" : model.project.id.replace(/^named:/, ""))}</p></div><div class="side-section"><h2 class="side-heading">Activity</h2><p>Updated ${date(i.updated_at)}</p>${i.closed_by ? `<p>Closed by ${esc(actorName(i.closed_by))}</p>` : ""}<p data-issue-version>Revision ${i.version}</p></div><div>${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : `<button class="button link-button danger" data-action="delete">${icon("trash")}Delete issue</button>`}</div></section></div>`;
+  document.title = `${i.title} · Hey Boss`;
+  secureLinks();
+  loadRelatedNotices(i.number, model.project.id, model.route.host);
+  if (!deleted) {
+    const input = $("#comment-body");
+    input.value =
+      storage.get(draftKey("comment", model.project.id, i.number)) || "";
+    input.oninput = () => {
+      saveComment();
+      $("#comment-submit").disabled = !input.value.trim();
+    };
+    $("#comment-submit").disabled = !input.value.trim();
+    $("#comment-form").onsubmit = submitComment;
+    $("#comment-write").onclick = () => preview("comment", false);
+    $("#comment-preview").onclick = () => preview("comment", true);
+  }
+  IssueSubtasks.rendered();
+  $("#history-toggle").onclick = loadHistory;
+  if ($("#pr-form"))
+    $("#pr-form").onsubmit = (event) => {
+      event.preventDefault();
+      changePullRequest("add_pull_request", $("#pr-url").value);
+    };
+}
+let markdownSequence = 0;
+function secureLinks() {
+  // Code and tables scroll horizontally on narrow screens. Keyboard users need
+  // a focus target to scroll them without moving the whole page.
+  $$(".markdown pre, .markdown table").forEach((el) => {
+    el.tabIndex = 0;
+    el.onkeydown = (event) => {
+      // WebKit doesn't consistently scroll focusable code blocks with arrows.
+      if (
+        event.target !== el ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        el.scrollWidth <= el.clientWidth ||
+        !["ArrowLeft", "ArrowRight"].includes(event.key)
+      )
+        return;
+      event.preventDefault();
+      el.scrollLeft += event.key === "ArrowRight" ? 80 : -80;
+    };
+  });
+  // Each body/comment/preview can define the same footnote. Keep their IDs
+  // distinct, and keep anchor clicks inside the rendered Markdown's scope.
+  $$(".markdown").forEach((root) => {
+    const scope =
+      (root.dataset.markdownScope ||= `markdown-${++markdownSequence}-`);
+    root.querySelectorAll("[id]").forEach((el) => {
+      if (!el.id.startsWith(scope)) el.id = scope + el.id;
+    });
+    root.querySelectorAll('a[href^="#"]').forEach((a) => {
+      const id = a.getAttribute("href").slice(1);
+      if (!id.startsWith(scope)) a.setAttribute("href", "#" + scope + id);
+    });
+  });
+  $$('.markdown input[type="checkbox"]').forEach((input) =>
+    input.setAttribute("aria-label", input.parentElement.textContent.trim()),
+  );
+  $$(".markdown a").forEach((a) => {
+    if (a.getAttribute("href")?.startsWith("#"))
+      a.onclick = (e) => {
+        e.preventDefault();
+        const el = document.getElementById(a.getAttribute("href").slice(1));
+        el?.scrollIntoView();
+      };
+    else {
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    }
+  });
+}
+$("#detail-view").addEventListener("click", async (e) => {
+  const button = e.target.closest("button");
+  if (!button) return;
+  if (button.hasAttribute("data-back")) navigate({ issue: null });
+  if (button.hasAttribute("data-edit")) openEditor(model.detail.issue);
+  if (button.hasAttribute("data-retry")) renderRoute();
+  if (button.hasAttribute("data-reload")) {
+    saveComment();
+    await renderRoute();
+  }
+  if (button.hasAttribute("data-copy")) {
+    try {
+      await navigator.clipboard.writeText(location.href);
+      toast("Issue link copied");
+    } catch {
+      toast("Copy the URL from your address bar.", true);
+    }
+  }
+  if (button.dataset.removePr)
+    changePullRequest("remove_pull_request", button.dataset.removePr);
+  if (button.dataset.action) performAction(button.dataset.action, button);
+});
+async function performAction(action, button) {
+  const i = model.detail.issue,
+    project = model.project.id;
+  let force = false;
+  if (action === "delete") {
+    const yes = await confirmDialog(
+      "Delete this issue?",
+      "The issue will move to Deleted. You can restore it later, including its comments and history.",
+      "Delete issue",
+    );
+    if (!yes) return;
+  }
+  if (
+    i.assignee &&
+    !own(i.assignee) &&
+    ["claim", "assign_boss", "unassign", "close", "delete"].includes(action)
+  ) {
+    force = await confirmDialog(
+      ["claim", "assign_boss"].includes(action)
+        ? `Assign this issue to ${model.boss.name}?`
+        : action === "unassign"
+          ? "Unassign this issue?"
+          : "Change another session’s issue?",
+      `${actorName(i.assignee)} currently owns this issue. This change will clear their claim and be recorded in the activity.`,
+      action === "unassign" ? "Unassign" : "Continue",
+    );
+    if (!force) return;
+  }
+  const operation = { action, number: i.number };
+  if (["claim", "assign_boss", "unassign", "close", "delete"].includes(action))
+    operation.force = force;
+  if (action === "close") operation.comment = null;
+  button.disabled = true;
+  try {
+    await mutate(operation, project);
+    toast(
+      {
+        claim: "Assigned to you",
+        assign_boss: `Assigned to ${model.boss.name}`,
+        unassign: "Claim released",
+        close: "Issue closed",
+        reopen: "Issue reopened",
+        delete: "Issue moved to Deleted",
+        restore: "Issue restored",
+      }[action],
+    );
+    await Promise.all([renderRoute(), refreshProjects(project)]);
+  } catch (e) {
+    toast(e.message, true);
+    button.disabled = false;
+  }
+}
+async function submitComment(e) {
+  e.preventDefault();
+  const project = model.project.id,
+    number = model.detail.issue.number,
+    host = model.route.host,
+    input = $("#comment-body"),
+    body = input.value;
+  if (!body.trim()) return;
+  const button = $("#comment-submit");
+  if (button.disabled) return;
+  button.disabled = true;
+  input.readOnly = true;
+  $("#comment-error").hidden = true;
+  try {
+    await mutate({ action: "comment", number, body }, project,host);
+    storage.remove(draftKey("comment", project, number,host));
+    if (model.project.id !== project || model.route.issue !== number || model.route.host !== host) {
+      toast("Comment added");
+      return;
+    }
+    await renderRoute();
+    toast("Comment added");
+    $("#comment-body")?.focus();
+  } catch (error) {
+    input.readOnly = false;
+    if (model.project.id !== project || model.route.issue !== number || model.route.host !== host) {
+      toast(error.message, true);
+      return;
+    }
+    $("#comment-error").textContent = error.message;
+    $("#comment-error").hidden = false;
+    button.disabled = false;
+  }
+}
+let historyOffset = 0;
+async function loadHistory() {
+  const target = $("#activity-timeline");
+  if (!target.hidden) {
+    target.hidden = true;
+    $("#history-toggle").setAttribute("aria-expanded", "false");
+    return;
+  }
+  target.hidden = false;
+  $("#history-toggle").setAttribute("aria-expanded", "true");
+  target.innerHTML =
+    '<div class="loading-state"><span class="spinner"></span></div>';
+  historyOffset = 0;
+  await historyPage(true);
+}
+async function historyPage(reset = false) {
+  const project = model.project.id,
+    number = model.detail.issue.number;
+  try {
+    const result = await api(
+      { action: "history", number, limit: 20, offset: historyOffset },
+      project,
+    );
+    if (model.project.id !== project || model.route.issue !== number) return;
+    const target = $("#activity-timeline");
+    if (reset) target.innerHTML = '<div class="timeline"></div>';
+    $(".history-more", target)?.remove();
+    const verbs = {
+      created: "created this issue",
+      edited: "edited the description or labels",
+      claimed: "claimed this issue",
+      unassigned: "released the claim",
+      commented: "added a comment",
+      closed: "closed this issue",
+      reopened: "reopened this issue",
+      deleted: "deleted this issue",
+      restored: "restored this issue",
+      reordered: "changed this issue’s order",
+      subtask_added: "added a subtask",
+      subtask_removed: "unlinked a subtask",
+      parent_added: "added a parent issue",
+      parent_removed: "unlinked the parent issue",
+      subtask_change_conflict: "attempted a subtask change that conflicted during sync",
+    };
+    $(".timeline", target).insertAdjacentHTML(
+      "beforeend",
+      result.events
+        .map(
+          (event) =>
+            `<div class="timeline-item"><strong>${esc(actorName(event.actor))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : event.action === "edited" ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
+        )
+        .join(""),
+    );
+    if (result.next_offset !== null) {
+      historyOffset = result.next_offset;
+      target.insertAdjacentHTML(
+        "beforeend",
+        '<button class="button small history-more">Load more activity</button>',
+      );
+      $(".history-more", target).onclick = () => historyPage();
+    }
+  } catch (e) {
+    toast(e.message, true);
+    $("#activity-timeline").innerHTML =
+      '<p class="form-error">Activity could not be loaded. Close and reopen activity to retry.</p>';
+  }
+}
+function editorValues() {
+  return {
+    title: $("#editor-subject").value,
+    body: $("#editor-body").value,
+    labels: editorTags.values().join(", "),
+    version: model.editor?.version,
+    parentVersion: model.editor?.parent?.version,
+  };
+}
+function saveEditor() {
+  if (model.editor) storage.set(model.editor.key, editorValues());
+}
+function openEditor(issue = null, options = {}) {
+  const project = model.project;
+  const key = draftKey("editor", project.id, issue?.number || (options.parent ? `subtask-${options.parent.number}` : "new"));
+  const draft = storage.get(key);
+  model.editor = {
+    project: project.id,
+    number: issue?.number,
+    parent: options.parent ? {...options.parent,version:draft?.parentVersion ?? options.parent.version} : null,
+    host: model.route.host,
+    version: draft?.version || issue?.version,
+    key,
+    original: issue,
+    returnFocus: document.activeElement,
+  };
+  $("#editor-title").textContent = issue ? "Edit issue" : options.parent ? "New subtask" : "New issue";
+  $("#editor-project").textContent = project.name;
+  $("#editor-subject").value = draft?.title ?? issue?.title ?? "";
+  $("#editor-body").value = draft?.body ?? issue?.body ?? "";
+  editorTags.set(
+    (draft?.labels ?? issue?.labels.join(", ") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  $("#editor-submit").innerHTML =
+    `${issue ? "Save changes" : options.parent ? "Create subtask" : "Create issue"}${icon("arrow-right")}`;
+  $("#editor-submit").disabled = false;
+  $("#editor-error").hidden = true;
+  $("#editor-conflict").hidden = true;
+  $("#conflict-replace").textContent = options.parent ? "Create using the latest parent revision" : "Save my draft over this version";
+  editorBusy(false);
+  preview("editor", false);
+  $("#editor-dialog").showModal();
+  $("#editor-subject").focus();
+  if (draft) toast("Unsaved draft restored");
+}
+function closeEditor() {
+  if (model.editor?.busy) return;
+  saveEditor();
+  const focus = model.editor?.returnFocus;
+  $("#editor-dialog").close();
+  model.editor = null;
+  const target =
+    focus && focus !== document.body && focus.checkVisibility()
+      ? focus
+      : $("#new-issue").checkVisibility()
+        ? $("#new-issue")
+        : $("#main");
+  target.focus();
+}
+$("#new-issue").onclick = () => openEditor();
+$("#editor-close").onclick = closeEditor;
+$("#editor-cancel").onclick = closeEditor;
+$("#editor-dialog").addEventListener("cancel", (e) => {
+  if (model.editor?.busy) {
+    e.preventDefault();
+    return;
+  }
+  saveEditor();
+  model.editor = null;
+});
+for (const id of ["editor-subject", "editor-body", "editor-labels"])
+  $("#" + id).addEventListener("input", saveEditor);
+const editorTags = new TagInput(
+  $("#editor-tags"),
+  $("#editor-labels"),
+  () => model.labels,
+  saveEditor,
+);
+$("#editor-write").onclick = () => preview("editor", false);
+$("#editor-preview").onclick = () => preview("editor", true);
+async function preview(prefix, show) {
+  const input = $("#" + prefix + "-body"),
+    rendered = $("#" + prefix + "-rendered");
+  input.hidden = show;
+  rendered.hidden = !show;
+  for (const suffix of ["write", "preview"]) {
+    const selected = (suffix === "preview") === show;
+    const b = $("#" + prefix + "-" + suffix);
+    b.classList.toggle("selected", selected);
+    b.setAttribute("aria-selected", selected);
+    b.tabIndex = selected ? 0 : -1;
+  }
+  if (!show) return;
+  const seq = ++previewSequence;
+  rendered.innerHTML = '<span class="spinner"></span>';
+  try {
+    const value = await post("/api/preview", { body: input.value });
+    if (seq !== previewSequence) return;
+    rendered.innerHTML =
+      value.html || '<p class="muted-text">Nothing to preview yet.</p>';
+    secureLinks();
+  } catch (e) {
+    rendered.textContent = e.message;
+  }
+}
+$("#editor-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const ctx = model.editor;
+  if (!ctx || ctx.busy) return;
+  saveEditor();
+  const values = editorValues(),
+    labels = [
+      ...new Set(
+        values.labels
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    ];
+  const operation = ctx.number
+    ? {
+        action: "edit",
+        number: ctx.number,
+        title: values.title,
+        body: values.body,
+        add_labels: labels.filter((l) => !ctx.original.labels.includes(l)),
+        remove_labels: ctx.original.labels.filter((l) => !labels.includes(l)),
+        if_version: ctx.version,
+      }
+    : {
+        action: ctx.parent ? "create_subtask" : "create",
+        ...(ctx.parent ? { number: ctx.parent.number, if_version: ctx.parent.version } : {}),
+        title: values.title,
+        body: values.body,
+        labels,
+        at_top: true,
+      };
+  editorBusy(true);
+  $("#editor-error").hidden = true;
+  $("#editor-conflict").hidden = true;
+  try {
+    const value = await mutate(operation, ctx.project, ctx.host);
+    storage.remove(ctx.key);
+    $("#editor-dialog").close();
+    model.editor = null;
+    toast(ctx.number ? "Issue updated" : "Issue created");
+    refreshProjects(ctx.project).catch((error) => toast(error.message, true));
+    if (ctx.parent) {
+      IssueSubtasks.reveal(value.issue.number);
+      navigate({project:ctx.project,host:ctx.host,issue:ctx.parent.number},true);
+    } else if (ctx.number)
+      navigate({ project: ctx.project, issue: value.issue.number });
+    else {
+      clearTimeout(model.creation?.timer);
+      model.creation = {
+        project: ctx.project,
+        host: model.route.host,
+        number: value.issue.number,
+        reveal: true,
+        timer: null,
+      };
+      navigate(
+        { view: "issues", project: ctx.project, issue: null, notice: "" },
+        true,
+      );
+    }
+  } catch (error) {
+    $("#editor-error").textContent =
+      error.code === "conflict"
+        ? `${error.message}. Your draft is preserved. Compare the latest version before replacing it.`
+        : error.message;
+    $("#editor-error").hidden = false;
+    editorBusy(false);
+    if (error.code === "conflict" && (ctx.number || ctx.parent)) {
+      try {
+        const latest = await api(
+          { action: "view", number: ctx.number || ctx.parent.number },
+          ctx.project,
+          null,
+          ctx.host,
+        );
+        if (model.editor !== ctx) return;
+        ctx.latest = latest.issue;
+        $("#conflict-latest").textContent =
+          latest.issue.title + "\n\n" + latest.issue.body;
+        $("#editor-conflict").hidden = false;
+      } catch (e) {
+        toast(e.message, true);
+      }
+    }
+  }
+};
+function editorBusy(busy) {
+  if (model.editor) model.editor.busy = busy;
+  $$("input,textarea,button", $("#editor-form")).forEach(
+    (el) => (el.disabled = busy),
+  );
+}
+$("#conflict-replace").onclick = () => {
+  if (!model.editor?.latest) return;
+  if (model.editor.parent) model.editor.parent = model.editor.latest;
+  else {model.editor.version = model.editor.latest.version;model.editor.original = model.editor.latest;}
+  saveEditor();
+  $("#editor-form").requestSubmit();
+};
+function confirmDialog(title, message, submit, input = false) {
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+    $("#confirm-title").textContent = title;
+    $("#confirm-message").textContent = message;
+    $("#confirm-submit").textContent = submit;
+    $("#confirm-input").hidden = !input;
+    $("#confirm-input-label").hidden = !input;
+    $("#confirm-input").value = "";
+    $("#confirm-input").required = input;
+    $("#confirm-error").hidden = true;
+    $("#confirm-dialog").showModal();
+    (input ? $("#confirm-input") : $("#confirm-cancel")).focus();
+  });
+}
+$("#confirm-form").onsubmit = (e) => {
+  e.preventDefault();
+  const input = $("#confirm-input");
+  if (!input.hidden && !input.value.trim()) return;
+  $("#confirm-dialog").close();
+  confirmResolve?.(input.hidden ? true : input.value.trim());
+  confirmResolve = null;
+};
+$("#confirm-cancel").onclick = () => {
+  $("#confirm-dialog").close();
+  confirmResolve?.(false);
+  confirmResolve = null;
+};
+$("#confirm-dialog").addEventListener("cancel", () => {
+  confirmResolve?.(false);
+  confirmResolve = null;
+});
+$("#add-project").onclick = async () => {
+  closeProjectMenu();
+  const name = await confirmDialog(
+    "New project",
+    "Choose a name for a custom project. Repositories used by agents appear automatically.",
+    "Continue",
+    true,
+  );
+  if (!name) return;
+  if (name.length > 128 || /[\x00-\x1f\x7f]/.test(name)) {
+    toast("Choose a project name of up to 128 characters.", true);
+    return;
+  }
+  const id = `named:${name}`;
+  if (!model.projects.some((p) => p.id === id))
+    model.projects.unshift({
+      id,
+      name,
+      open: 0,
+      closed: 0,
+      deleted: 0,
+      unassigned: 0,
+    });
+  model.route = {
+    ...model.route,
+    project: id,
+    issue: null,
+    state: "open",
+    search: "",
+    label: "",
+    owner: "all",
+  };
+  model.project = currentProject();
+  history.replaceState(null, "", routeHash(model.route));
+  updateHeader();
+  await renderRoute();
+  openEditor();
+};
+document.addEventListener("keydown", (e) => {
+  if (
+    e.key === "Escape" &&
+    $("#editor-dialog").open &&
+    !$("#confirm-dialog").open
+  ) {
+    e.preventDefault();
+    closeEditor();
+    return;
+  }
+  const typing = e.target.matches(
+    "input,textarea,select,[contenteditable=true]",
+  );
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    if (model.route.view === "inbox") {
+      const form = e.target.closest("form");
+      if (form) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+      return;
+    }
+    if ($("#editor-dialog").open) {
+      e.preventDefault();
+      $("#editor-form").requestSubmit();
+    } else if ($("#comment-form") && $("#comment-body").value.trim()) {
+      e.preventDefault();
+      $("#comment-form").requestSubmit();
+    }
+    return;
+  }
+  if (e.key === "Escape" && closeProjectMenu()) {
+    $("#project-trigger").focus();
+    return;
+  }
+  if (
+    e.target.matches("[role=tab]") &&
+    ["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)
+  ) {
+    e.preventDefault();
+    const tabs = $$("[role=tab]", e.target.parentElement);
+    let n = tabs.indexOf(e.target);
+    n =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? tabs.length - 1
+          : (n + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length;
+    tabs[n].focus();
+    tabs[n].click();
+    return;
+  }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey || $("dialog[open]")) return;
+  if (model.route.view === "inbox") {
+    if (e.key === "/" && !model.route.notice) {
+      e.preventDefault();
+      $("#inbox-search")?.focus();
+    }
+    return;
+  }
+  if (e.key === "n" || e.key === "N") {
+    e.preventDefault();
+    openEditor();
+  }
+  if (e.key === "/" && !model.route.issue) {
+    e.preventDefault();
+    $("#issue-search").focus();
+  }
+});
+window.addEventListener("beforeunload", (e) => {
+  if (
+    model.editor ||
+    (model.route.view === "issues" && model.route.issue && $("#comment-body")?.value.trim())
+  ) {
+    saveEditor();
+    saveComment();
+    e.preventDefault();
+  }
+});
+window.addEventListener("hashchange", () => {
+  saveComment();
+  renderRoute();
+});
+$(".skip-link").onclick = (e) => {
+  e.preventDefault();
+  $("#main").focus();
+};
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});
+$(".brand").onclick = (e) => {
+  e.preventDefault();
+  navigate({ view: "issues", issue: null, notice: "" });
+};
+async function boot() {
+  try {
+    const response = await fetch("/api/bootstrap", {
+      signal: AbortSignal.any([AbortSignal.timeout(10000), pageRequests.signal]),
+    });
+    const value = await response.json();
+    if (!response.ok || !value.ok)
+      throw new Error(value.error?.message || "Unable to connect.");
+    model.defaultHost = value.backend_host || "";
+    model.activeHost = model.defaultHost;
+    model.csrf = value.csrf;
+    model.actor = value.actor;
+    model.boss = value.boss;
+    model.bossHost = model.defaultHost;
+    model.assignees = value.assignees || [];
+    model.projects = value.projects;
+    model.labels = value.labels;
+    model.project = value.project;
+    initGlobalSettings();
+    IssueSubtasks.init();
+    updateProfile();
+    initInbox();
+    await renderRoute();
+    refreshInboxBadge();
+    setInterval(() => {
+      refresh();
+      if (model.route.view !== "inbox") refreshInboxBadge();
+    }, 5000);
+  } catch (e) {
+    connection(false);
+    $("#issue-list").innerHTML =
+      `<div class="empty-state"><div class="empty-icon">${icon("issue")}</div><h2>Let’s reconnect</h2><p>${esc(e.message)}</p><button class="button" id="reconnect">Try again</button></div>`;
+    $("#reconnect").onclick = boot;
+  }
+}
+boot();
+
+function renderPullRequests(issue) {
+  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><div class="pr-links">${(issue.pull_requests || []).map((pr) => `<div class="pr-link"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>`).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : '<form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><button class="button small" type="submit">Attach PR</button><p id="pr-error" class="form-error" role="alert" hidden></p></form>'}</div>`;
+}
+async function changePullRequest(action, url) {
+  const project = model.project.id,
+    number = model.detail.issue.number;
+  const button = $("#pr-form button");
+  if (button) button.disabled = true;
+  try {
+    await mutate({ action, number, url }, project);
+    detailCache.delete(detailKey(project,number));
+    await renderRoute();
+    toast(action === "add_pull_request" ? "PR attached" : "PR removed");
+  } catch (error) {
+    const el = $("#pr-error");
+    if (el) {
+      el.textContent = error.message;
+      el.hidden = false;
+    } else toast(error.message, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
