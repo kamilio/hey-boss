@@ -6,6 +6,7 @@
   const collapsed = new Set(), openBodies = new Set();
   let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
   let detailsHTML = "", detailsNode = null;
+  let relationshipPage = 0;
   let renderingIndex = null;
   let searchQuery = "", searchMatches = [], searchHit = null, mapHit = null;
   const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
@@ -22,8 +23,8 @@
     return id.replace(/^human:/, "").split("@")[0];
   };
   const allNodes = () => new Map([...graph.nodes, ...graph.external_nodes].map((node) => [node.id, fullBodies.get(node.id) || node]));
-  function relationships(node, nodes, incidents) {
-    return (incidents.get(node.id) || []).map((link) => {
+  function relationships(node, nodes, links) {
+    return links.map((link) => {
       const outgoing = link.from === node.id, other = nodes.get(outgoing ? link.to : link.from);
       if (!other) return "";
       const text = link.kind === "depends-on" ? (outgoing ? "Depends on" : "Required by") : link.kind === "pull-request" ? (outgoing ? "Pull request" : "Issue") : `${outgoing ? "→" : "←"} ${link.kind}`;
@@ -68,18 +69,23 @@
     $("#map-inspector").hidden = !node;
     if (!node) { container.innerHTML = ""; detailsHTML = ""; detailsNode = null; return; }
     const resource = node.kind === "issue" && node.available !== false ? `<a class="map-resource-link" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))} ↗</a>` : node.kind === "pr" ? `<a class="map-resource-link" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open pull request ↗</a>` : node.kind === "notification" ? `<a class="map-resource-link" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification ↗</a>` : "";
-    const rel = relationships(node, nodes, incidents);
+    if (detailsNode !== node.id) relationshipPage = 0;
+    const links = (incidents.get(node.id) || []).filter(link => nodes.has(link.from === node.id ? link.to : link.from));
+    relationshipPage = Math.max(0, Math.min(relationshipPage, Math.ceil(links.length / 50) - 1));
+    const start = relationshipPage * 50, end = Math.min(start + 50, links.length);
+    const rel = relationships(node, nodes, links.slice(start, end));
+    const pager = links.length > 50 ? `<div class="relationship-navigation" role="group" aria-label="Relationship pages"><button type="button" data-rel-page="previous" aria-label="Previous relationships" ${start === 0 ? "disabled" : ""}>‹</button><span role="status">${start + 1}–${end} of ${links.length.toLocaleString()}</span><button type="button" data-rel-page="next" aria-label="Next relationships" ${end === links.length ? "disabled" : ""}>›</button></div>` : "";
     const children = graph.nodes.filter(n => n.parent_id === node.id);
     const topics = children.length ? `<section class="topic-children" aria-label="Child topics"><h3>Topics <span>${children.length}</span></h3><ul>${children.slice(0,50).map(n => `<li><button type="button" data-select-topic="${esc(n.id)}">${esc(nodes.get(n.id).title)}</button></li>`).join("")}</ul>${children.length > 50 ? '<button type="button" data-topic-outline>View all in outline</button>' : ""}</section>` : "";
-    const html = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(node.title)}</h2><div class="meta"><span class="badge">${esc(node.kind)}</span>${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div>`;
+    const html = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(node.title)}</h2><div class="meta"><span class="badge">${esc(node.kind)}</span>${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<section class="topic-relationships">${pager}<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul></section>` : ""}</div>`;
     if (html === detailsHTML) return;
     const same = detailsNode === node.id, active = same && container.contains(document.activeElement) ? document.activeElement : null;
-    const heading = active?.matches("h2[tabindex]"), id = active?.id, read = active?.dataset.readBody, less = active?.dataset.collapseBody, topic = active?.dataset.selectTopic, outline = active?.hasAttribute("data-topic-outline"), href = active?.tagName === "A" ? active.getAttribute("href") : null;
+    const heading = active?.matches("h2[tabindex]"), id = active?.id, read = active?.dataset.readBody, less = active?.dataset.collapseBody, topic = active?.dataset.selectTopic, outline = active?.hasAttribute("data-topic-outline"), page = active?.dataset.relPage, href = active?.tagName === "A" ? active.getAttribute("href") : null;
     container.innerHTML = html; detailsHTML = html; detailsNode = node.id;
     if (!same) container.scrollTop = 0;
     if (active) {
-      const target = heading ? container.querySelector("h2[tabindex]") : id ? document.getElementById(id) : read ? container.querySelector(`[data-read-body="${read}"]`) : less ? container.querySelector(`[data-collapse-body="${less}"]`) : topic ? container.querySelector(`[data-select-topic="${topic}"]`) : outline ? container.querySelector("[data-topic-outline]") : href ? [...container.querySelectorAll("a")].find(a => a.getAttribute("href") === href) : null;
-      (target && !target.disabled ? target : container.querySelector("h2[tabindex]"))?.focus({preventScroll:true});
+      const target = heading ? container.querySelector("h2[tabindex]") : id ? document.getElementById(id) : read ? container.querySelector(`[data-read-body="${read}"]`) : less ? container.querySelector(`[data-collapse-body="${less}"]`) : topic ? container.querySelector(`[data-select-topic="${topic}"]`) : outline ? container.querySelector("[data-topic-outline]") : page ? container.querySelector(`[data-rel-page="${page}"]`) : href ? [...container.querySelectorAll("a")].find(a => a.getAttribute("href") === href) : null;
+      (target && !target.disabled ? target : page ? container.querySelector("[data-rel-page]:not(:disabled)") : container.querySelector("h2[tabindex]"))?.focus({preventScroll:true});
     }
   }
   async function readBody(id, mode = "full") {
@@ -186,7 +192,7 @@
         const node = nodes.get(saved.id);
         const hasChildren = (children.get(node.id) || []).some((n) => visible.has(n.id)), expanded = Boolean(query) || !collapsed.has(node.id);
         const resource = node.kind === "issue" ? node.available === false ? `<span class="resource">${esc(issueContext(node))}</span>` : `<a class="resource" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))}</a>` : node.kind === "pr" ? `<a class="resource" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open PR ↗</a>` : node.kind === "notification" ? `<a class="resource" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification</a>` : "";
-        const rel = relationships(node, nodes, incidents);
+        const rel = relationships(node, nodes, incidents.get(node.id) || []);
         return `<li class="node${query && node.id === searchHit ? " highlight" : ""}" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(node.title)}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(node.title)}</span><div class="meta">${node.kind !== "text" ? `<span class="badge">${esc(node.kind)}</span>` : ""}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.assignee ? `<span class="assignee" title="${esc(node.assignee)}">Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
       }).join("")}</ul>`;
     };
@@ -264,6 +270,13 @@
   const bodyClick = (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } };
   $("#outline").addEventListener("click", bodyClick); $("#map-details").addEventListener("click", bodyClick);
   $("#map-details").addEventListener("click", event => {
+    const page = event.target.closest("[data-rel-page]");
+    if (page) {
+      relationshipPage += page.dataset.relPage === "next" ? 1 : -1; render();
+      const container = $("#map-details"), section = container.querySelector(".topic-relationships");
+      if (section) container.scrollTop += section.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      return;
+    }
     const topic = event.target.closest("[data-select-topic]");
     if (topic) {
       $("#search").value = ""; const nodes = allNodes(); let node = nodes.get(topic.dataset.selectTopic);

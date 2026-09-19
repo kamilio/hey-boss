@@ -415,7 +415,7 @@
         paths = [];
       const curve = (a, b, color, dashed = false, label = "") => {
         // Avoid thousands of overlapping offscreen branches at a large parent.
-        if (!inViewport(b, view, 200) && (!dashed || !inViewport(a, view, 200)))
+        if (!inViewport(b, view, 200) || (dashed && !inViewport(a, view, 200)))
           return;
         if (
           Math.max(a.x, b.x) + WIDTH < view.x - 300 ||
@@ -424,12 +424,13 @@
           Math.min(a.y, b.y) > view.y + view.height + 300
         )
           return;
-        const forward = b.x >= a.x,
+        const sameColumn = dashed && a.x === b.x,
+          forward = b.x >= a.x,
           x1 = a.x + (forward ? WIDTH : 0),
           y1 = a.y + HEIGHT / 2,
-          x2 = b.x + (forward ? 0 : WIDTH),
+          x2 = b.x + (sameColumn || !forward ? WIDTH : 0),
           y2 = b.y + HEIGHT / 2,
-          m = (x1 + x2) / 2;
+          m = sameColumn ? x1 + 80 : (x1 + x2) / 2;
         paths.push(
           `<path d="M${x1} ${y1} C${m} ${y1},${m} ${y2},${x2} ${y2}" stroke="${color}" ${dashed ? 'class="map-link" marker-end="url(#map-arrow)"' : ""}>${label ? `<title>${esc(label)}</title>` : ""}</path>`,
         );
