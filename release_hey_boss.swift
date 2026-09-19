@@ -37,6 +37,7 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
         system "swift", "package_hey_boss.swift", "hey-boss-daemon", "Hey Boss.app"
         libexec.install "Hey Boss.app", "hey-boss-setup"
         bin.install_symlink libexec/"bin/hey-boss"
+        bin.install_symlink libexec/"bin/hb"
         pkgshare.install "skills"
       end
 
@@ -91,6 +92,7 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
       test do
         assert_equal "hey-boss #{version}\\n", shell_output("#{bin}/hey-boss --version")
         assert_match "--project", shell_output("#{bin}/hey-boss update --help")
+        assert_equal shell_output("#{bin}/hey-boss --version"), shell_output("#{bin}/hb --version")
       end
     end
     """

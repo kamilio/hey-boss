@@ -170,7 +170,7 @@ async (page) => {
       !document.querySelector("#project-goal-indicator").hidden &&
       document
         .querySelector("#project-instructions-preview")
-        .textContent.includes("Assign and implement"),
+        .textContent.includes("Claim and implement"),
   );
   check(
     !(await page.locator("#project-settings-error").isVisible()),

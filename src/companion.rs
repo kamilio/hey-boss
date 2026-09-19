@@ -211,6 +211,9 @@ mkdir -p "$HOME/.local/bin" "$HOME/.local/share/hey-boss" "$HOME/.codex/skills/h
 chmod 700 "$HOME/.local/share/hey-boss"
 cp "$stage/target/release/hey-boss" "$HOME/.local/bin/hey-boss.new"
 mv "$HOME/.local/bin/hey-boss.new" "$HOME/.local/bin/hey-boss"
+if [ ! -e "$HOME/.local/bin/hb" ] && [ ! -L "$HOME/.local/bin/hb" ]; then
+ln -s hey-boss "$HOME/.local/bin/hb"
+fi
 "$HOME/.local/bin/hey-boss" configure-agents --binary "$HOME/.local/bin/hey-boss"
 printf '%s' "$HOME/.local/share/hey-boss" > "$HOME/.local/bin/hey-boss.state"
 touch "$HOME/.local/bin/hey-boss.companion"
