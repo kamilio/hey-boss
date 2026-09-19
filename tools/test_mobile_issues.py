@@ -11,7 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('fleet', ROOT / 'tools/fleet_hey_boss.py')
 fleet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet)
-fleet.BINARY = pathlib.Path(os.environ.get('HEY_BOSS_TEST_BINARY', ROOT / 'target/debug/hey-boss'))
+fleet.BINARY = pathlib.Path(os.environ.get('HEY_BOSS_TEST_BINARY', ROOT / 'target/debug/hey-boss')).resolve()
 
 class MobileIssuesTests(unittest.TestCase):
     def setUp(self):
@@ -56,6 +56,16 @@ class MobileIssuesTests(unittest.TestCase):
             self.bridge.sync()
         self.assertEqual(self.results[0]['status'], 'error')
         self.assertIn('control characters', self.results[0]['error'])
+    def test_accepted_creation_still_syncs_if_project_is_hidden_before_ack(self):
+        self.fail_ack = True
+        with mock.patch.object(self.bridge, 'call', side_effect=self.hub):
+            with self.assertRaises(TimeoutError):
+                self.bridge.sync()
+        subprocess.run([str(fleet.BINARY), 'issue', '--project', 'Phone tests', '--agent', 'human:boss', '--json', 'hide-project'], capture_output=True, check=True)
+        self.fail_ack = False
+        with mock.patch.object(self.bridge, 'call', side_effect=self.hub):
+            self.bridge.sync()
+        self.assertEqual(self.results, [{'status': 'synced', 'number': 2}])
     def test_unknown_project_cannot_register_itself(self):
         self.creation['project'] = 'named:Unknown'
         with mock.patch.object(self.bridge, 'call', side_effect=self.hub):
