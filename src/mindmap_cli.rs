@@ -374,7 +374,7 @@ pub fn run(options: &Options) -> Result<()> {
         mindmap::enrich_notifications(
             &mut graph,
             hey_boss::notices::execute(&hey_boss::notices::Action::List),
-        );
+        )?;
     }
     if options.json {
         println!("{}", serde_json::to_string(&graph)?);

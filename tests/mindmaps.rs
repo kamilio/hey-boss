@@ -221,6 +221,9 @@ fn live_issues_and_automatic_pr_links_follow_store_updates() {
     let g = f.run("Atlas", &["show"]);
     assert_eq!(nodes(&g).len(), 2);
     assert_eq!(g["links"][0]["to"], alias(&g, "implementation")["id"]);
+    for node in ["api", "implementation"] {
+        assert_eq!(f.run("Atlas", &["links", node])["links"], g["links"]);
+    }
     f.fail("Atlas", &["edit", "api", "--title", "Copied issue"], 2);
     f.issue("Platform", &["close", "1"]);
     assert_eq!(alias(&f.run("Atlas", &["show"]), "api")["state"], "closed");
@@ -302,7 +305,7 @@ fn notification_projection_is_pending_only_preserves_children_and_links() {
         Ok(
             json!({"tasks":[{"taskID":"completed","status":"completed","title":"Done"},{"taskID":"pending","status":"pending","title":"Review","summary":"Needs review"}]}),
         ),
-    );
+    ).unwrap();
     assert_eq!(nodes(&graph).len(), 2);
     assert!(
         graph["nodes"]
@@ -324,7 +327,8 @@ fn unavailable_inbox_hides_unverified_notifications_without_losing_children() {
             "inbox_unavailable",
             "Synthetic unavailable Inbox",
         )),
-    );
+    )
+    .unwrap();
     assert_eq!(graph["notifications"]["available"], false);
     assert_eq!(nodes(&graph).len(), 1);
     assert_eq!(graph["nodes"][0]["id"], "topic");
@@ -334,7 +338,7 @@ fn unavailable_inbox_hides_unverified_notifications_without_losing_children() {
 #[test]
 fn completed_notice_children_keep_their_original_outline_location() {
     let mut graph = json!({"nodes":[{"id":"after","kind":"text","position":3,"parent_id":null},{"id":"child","kind":"text","position":0,"parent_id":"notice"},{"id":"before","kind":"text","position":1,"parent_id":null},{"id":"notice","kind":"notification","reference":"done","position":2,"parent_id":null}],"external_nodes":[],"links":[]});
-    hey_boss::mindmap::enrich_notifications(&mut graph, Ok(json!({"tasks":[]})));
+    hey_boss::mindmap::enrich_notifications(&mut graph, Ok(json!({"tasks":[]}))).unwrap();
     let ids: Vec<_> = nodes(&graph)
         .iter()
         .map(|n| n["id"].as_str().unwrap())
@@ -452,6 +456,7 @@ fn explicit_pr_reveals_attached_issues_without_manual_issue_placement() {
     assert_eq!(issue["resource_only"], true);
     assert_eq!(g["links"][0]["from"], issue["id"]);
     assert_eq!(g["links"][0]["to"], alias(&g, "api-pr")["id"]);
+    assert_eq!(f.run("Atlas", &["links", "api-pr"])["links"], g["links"]);
     f.issue("Platform", &["edit", "1", "--title", "API v2"]);
     assert_eq!(
         f.run("Atlas", &["show"])["external_nodes"][0]["title"],
@@ -659,6 +664,16 @@ fn large_markdown_maps_have_small_utf8_safe_previews_and_full_single_node_reads(
     let omitted = f.run("Atlas", &["show", "--bodies", "none"]);
     assert_eq!(alias(&omitted, "long-0")["body"], "");
     assert_eq!(alias(&omitted, "long-0")["has_body"], true);
+    let oversized = f.fail("Atlas", &["show"], 2);
+    assert!(
+        oversized["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("show --bodies preview")
+    );
+    let link_view = f.run("Atlas", &["links", "long-0"]);
+    assert!(link_view.to_string().len() < 40000);
+    assert_eq!(alias(&link_view, "long-0")["body"], "");
     let full = f.run("Atlas", &["view", "long-0"]);
     assert_eq!(full["node"]["body"], body);
     assert_eq!(full["node"]["body_truncated"], false);
@@ -1060,4 +1075,108 @@ fn schema_nine_migrates_and_map_reads_do_not_wait_for_an_existing_writer() {
         "Mindmap reads waited for the SQLite writer lock"
     );
     db.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn oversized_relationship_maps_keep_mutations_and_focused_link_reads_available() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Release", "--id", "release"]);
+    let mut db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    let tx = db.transaction().unwrap();
+    for i in 0..66 {
+        tx.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',NULL,NULL,?2,'text',?3,'',NULL,NULL,1,1)",rusqlite::params![format!("n-description-{i}"),i,format!("Topic {i}")]).unwrap();
+    }
+    let description = "x".repeat(16384);
+    for i in 0..2100 {
+        let from = i / 65;
+        let to = (from + i % 65 + 1) % 66;
+        tx.execute(
+            "INSERT INTO mindmap_links VALUES(?1,?2,'related',?3,1)",
+            rusqlite::params![
+                format!("n-description-{from}"),
+                format!("n-description-{to}"),
+                description
+            ],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    f.fail("Atlas", &["show", "--bodies", "preview"], 2);
+    f.run(
+        "Atlas",
+        &[
+            "link",
+            "release",
+            "n-description-0",
+            "--description",
+            "The release's important relationship",
+        ],
+    );
+    let focused = f.run("Atlas", &["links", "release"]);
+    assert_eq!(focused["links"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        focused["links"][0]["description"],
+        "The release's important relationship"
+    );
+    f.run("Atlas", &["unlink", "release", "n-description-0"]);
+    assert!(
+        f.run("Atlas", &["links", "release"])["links"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM mindmap_links", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2100
+    );
+}
+
+#[test]
+fn large_pending_notice_bodies_are_bounded_without_losing_preview_or_single_node_reads() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    let mut db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    let tx = db.transaction().unwrap();
+    for i in 0..30 {
+        tx.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',?2,NULL,?3,'notification','Saved notice','',?2,'',1,1)",rusqlite::params![format!("n-notice-{i}"),format!("notice-{i}"),i]).unwrap();
+    }
+    tx.commit().unwrap();
+    let summary = "Pending review context. ".repeat(25000);
+    let inbox = inbox_fixture::Inbox::start(f.root.join("inbox.sock"), Value::Array((0..30).map(|i| json!({"taskID":format!("notice-{i}"),"status":"pending","title":format!("Review {i}"),"summary":summary})).collect()));
+    let run = |args: &[&str]| {
+        f.cmd("Atlas", "mm", args)
+            .env("HEY_BOSS_INBOX_SOCKET", inbox.path())
+            .output()
+            .unwrap()
+    };
+    let full = run(&["show"]);
+    assert_eq!(full.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&full.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("32 MiB")
+    );
+    let preview = success(run(&["show", "--bodies", "preview"]));
+    assert_eq!(nodes(&preview).len(), 31);
+    assert!(preview.to_string().len() < 100000);
+    assert_eq!(success(run(&["view", "notice-0"]))["node"]["body"], summary);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM mindmap_nodes WHERE kind='notification'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        30
+    );
+    assert!(
+        inbox
+            .requests()
+            .iter()
+            .all(|request| request["command"] == "inbox_list")
+    );
 }

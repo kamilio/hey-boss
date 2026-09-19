@@ -35,11 +35,14 @@ impl Inbox {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS accepts inherit the nonblocking listener flag.
+                        // The bridge protocol sends complete, potentially large replies.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .unwrap();
                         stream
-                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .set_write_timeout(Some(Duration::from_secs(5)))
                             .unwrap();
                         let mut bytes = Vec::new();
                         stream.read_to_end(&mut bytes).unwrap();
@@ -83,7 +86,11 @@ impl Inbox {
 impl Drop for Inbox {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.thread.take().unwrap().join().unwrap();
+        if let Err(error) = self.thread.take().unwrap().join() {
+            if !std::thread::panicking() {
+                std::panic::resume_unwind(error);
+            }
+        }
         std::fs::remove_file(&self.path).unwrap();
     }
 }

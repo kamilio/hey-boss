@@ -1,6 +1,6 @@
 use super::{get_issue, resolve_project};
 use crate::issues::{Error, Project, Result};
-use crate::mindmap::{BodyMode, Operation, project_body};
+use crate::mindmap::{BodyMode, Operation, ReadBudget, project_body};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -333,9 +333,9 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             let mut node = select(db, p, node, false, now, &mut touched)?;
             let project = resolve_project(db, p, node["project_id"].as_str())?;
             live(db, &mut node, BodyMode::Full)?;
-            return Ok(
-                json!({"ok":true,"project":project,"version":version(db,&project.id)?,"body_mode":"full","node":node,"nodes":[node],"external_nodes":[],"links":[]}),
-            );
+            let result = json!({"ok":true,"project":project,"version":version(db,&project.id)?,"body_mode":"full","node":node,"nodes":[node],"external_nodes":[],"links":[]});
+            ReadBudget::default().charge(&result)?;
+            return Ok(result);
         }
         Operation::Projects => {
             let mut stmt=db.prepare("SELECT p.id,p.name,coalesce(m.version,0),count(n.id) FROM projects p LEFT JOIN mindmaps m ON m.project_id=p.id LEFT JOIN mindmap_nodes n ON n.project_id=p.id WHERE p.hidden_at IS NULL GROUP BY p.id HAVING count(n.id)>0 ORDER BY lower(p.name),p.id")?;
@@ -587,9 +587,14 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     };
     let mode = match op {
         Operation::Show { body_mode } => *body_mode,
+        Operation::Links { .. } => BodyMode::None,
         _ => BodyMode::Full,
     };
-    let mut graph = graph(db, &viewed_project, mode)?;
+    let focus = selected
+        .as_ref()
+        .filter(|_| matches!(op, Operation::Links { .. }))
+        .map(id);
+    let mut graph = graph(db, &viewed_project, mode, focus)?;
     graph["changed"] = json!(changed || !touched.is_empty());
     if let Some(node) = selected {
         graph["node"] = graph["nodes"]
@@ -639,29 +644,39 @@ fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
     project_body(node, mode);
     Ok(())
 }
-fn graph(db: &Connection, p: &Project, mode: BodyMode) -> Result<Value> {
+fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> Result<Value> {
     use std::collections::{HashMap, HashSet};
     let mut stmt = db.prepare(&format!(
-        "SELECT {} FROM mindmap_nodes WHERE project_id=?1 ORDER BY position,created_at,id",
+        "SELECT {} FROM mindmap_nodes WHERE project_id=?1 AND (?2 IS NULL OR id=?2) ORDER BY position,created_at,id",
         projected_columns(mode)
     ))?;
-    let mut nodes = stmt
-        .query_map([&p.id], projected_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut stmt=db.prepare("SELECT l.source,l.target,l.kind,l.description,l.created_at FROM mindmap_links l JOIN mindmap_nodes s ON s.id=l.source JOIN mindmap_nodes t ON t.id=l.target WHERE s.project_id=?1 OR t.project_id=?1 ORDER BY l.created_at,l.source,l.target,l.kind")?;
-    let mut links=stmt.query_map([&p.id],|r|Ok(json!({"from":r.get::<_,String>(0)?,"to":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"description":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?,"automatic":false})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut budget = ReadBudget::default();
+    let mut nodes = Vec::new();
+    for node in stmt.query_map(params![p.id, focus], projected_row)? {
+        let mut node = node?;
+        live(db, &mut node, mode)?;
+        budget.charge(&node)?;
+        nodes.push(node);
+    }
+    let mut stmt=db.prepare("SELECT l.source,l.target,l.kind,l.description,l.created_at FROM mindmap_links l JOIN mindmap_nodes s ON s.id=l.source JOIN mindmap_nodes t ON t.id=l.target WHERE (s.project_id=?1 OR t.project_id=?1) AND (?2 IS NULL OR l.source=?2 OR l.target=?2) ORDER BY l.created_at,l.source,l.target,l.kind")?;
+    let mut links = Vec::new();
+    for link in stmt.query_map(params![p.id,focus],|r|Ok(json!({"from":r.get::<_,String>(0)?,"to":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"description":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?,"automatic":false})))? {
+        let link = link?;
+        budget.charge(&link)?;
+        links.push(link);
+    }
     let mut known: HashSet<String> = nodes.iter().map(|n| id(n).to_owned()).collect();
     let mut external = Vec::new();
     for link in &links {
         for field in ["from", "to"] {
             let key = link[field].as_str().unwrap();
             if known.insert(key.to_owned()) {
-                external.push(get_projected(db, key, mode)?);
+                let mut node = get_projected(db, key, mode)?;
+                live(db, &mut node, mode)?;
+                budget.charge(&node)?;
+                external.push(node);
             }
         }
-    }
-    for node in nodes.iter_mut().chain(external.iter_mut()) {
-        live(db, node, mode)?;
     }
     let explicit_prs: HashMap<&str, &str> = nodes
         .iter()
@@ -671,30 +686,43 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode) -> Result<Value> {
     let mut automatic = Vec::new();
     let mut automatic_links = HashSet::new();
     for node in &nodes {
+        if focus.is_some_and(|focus| focus != id(node)) {
+            continue;
+        }
         if node["kind"] == "issue" && node["available"] == true {
             let mut stmt=db.prepare("SELECT url FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
-            let urls = stmt
-                .query_map(
-                    params![
-                        node["reference_project"].as_str().unwrap(),
-                        node["reference"].as_str().unwrap().parse::<i64>().unwrap()
-                    ],
-                    |r| r.get::<_, String>(0),
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let urls = stmt.query_map(
+                params![
+                    node["reference_project"].as_str().unwrap(),
+                    node["reference"].as_str().unwrap().parse::<i64>().unwrap()
+                ],
+                |r| r.get::<_, String>(0),
+            )?;
             for url in urls {
+                let url = url?;
                 let url = url.trim_end_matches('/');
-                let target = explicit_prs
-                    .get(url)
-                    .map(|id| (*id).to_owned())
-                    .unwrap_or_else(|| format!("auto:{}:{url}", id(node)));
+                let explicit = if focus.is_some() {
+                    db.query_row("SELECT id FROM mindmap_nodes WHERE project_id=?1 AND kind='pr' AND reference_project='' AND reference=?2",params![p.id,url],|row|row.get::<_,String>(0)).optional()?
+                } else {
+                    explicit_prs.get(url).map(|id| (*id).to_owned())
+                };
+                let target = explicit.unwrap_or_else(|| format!("auto:{}:{url}", id(node)));
                 if !automatic_links.insert((id(node).to_owned(), target.clone())) {
                     continue;
                 }
                 if target.starts_with("auto:") {
-                    automatic.push(json!({"id":target,"project_id":p.id,"parent_id":node["id"],"position":i64::MAX,"kind":"pr","title":url,"body":"","reference":url,"reference_project":"","automatic":true,"available":true}));
+                    let automatic_node = json!({"id":target,"project_id":p.id,"parent_id":node["id"],"position":i64::MAX,"kind":"pr","title":url,"body":"","reference":url,"reference_project":"","automatic":true,"available":true});
+                    budget.charge(&automatic_node)?;
+                    automatic.push(automatic_node);
+                } else if known.insert(target.clone()) {
+                    let mut endpoint = get_projected(db, &target, mode)?;
+                    live(db, &mut endpoint, mode)?;
+                    budget.charge(&endpoint)?;
+                    external.push(endpoint);
                 }
-                links.push(json!({"from":node["id"],"to":target,"kind":"pull-request","description":null,"automatic":true}));
+                let link = json!({"from":node["id"],"to":target,"kind":"pull-request","description":null,"automatic":true});
+                budget.charge(&link)?;
+                links.push(link);
             }
         }
     }
@@ -702,20 +730,22 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode) -> Result<Value> {
     // a map. Prefer a saved node in this map, then the issue's own project map;
     // otherwise expose a live resource-only endpoint, without persisting a node.
     for node in &nodes {
+        if focus.is_some_and(|focus| focus != id(node)) {
+            continue;
+        }
         if node["kind"] != "pr" {
             continue;
         }
         let mut stmt=db.prepare("SELECT DISTINCT pr.project_id,pr.issue_number,p.name FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number JOIN projects p ON p.id=pr.project_id WHERE rtrim(pr.url,'/')=?1 AND i.deleted_at IS NULL ORDER BY pr.project_id,pr.issue_number")?;
-        let attachments = stmt
-            .query_map([node["reference"].as_str().unwrap()], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (project, number, name) in attachments {
+        let attachments = stmt.query_map([node["reference"].as_str().unwrap()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for attachment in attachments {
+            let (project, number, name) = attachment?;
             let saved: Option<String> = db.query_row("SELECT id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=?2 ORDER BY (project_id=?3) DESC,(project_id=?1) DESC,project_id,id LIMIT 1",params![project,number.to_string(),p.id],|r|r.get(0)).optional()?;
             let mut issue = if let Some(saved) = saved {
                 get_projected(db, &saved, mode)?
@@ -723,10 +753,13 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode) -> Result<Value> {
                 json!({"id":format!("auto-issue:{project}:{number}"),"project_id":project,"project_name":name,"parent_id":null,"position":0,"kind":"issue","title":format!("Issue #{number}"),"body":"","reference":number.to_string(),"reference_project":project,"automatic":true,"resource_only":true,"available":true})
             };
             if automatic_links.insert((id(&issue).to_owned(), id(node).to_owned())) {
-                links.push(json!({"from":issue["id"],"to":node["id"],"kind":"pull-request","description":null,"automatic":true}));
+                let link = json!({"from":issue["id"],"to":node["id"],"kind":"pull-request","description":null,"automatic":true});
+                budget.charge(&link)?;
+                links.push(link);
             }
             if known.insert(id(&issue).to_owned()) {
                 live(db, &mut issue, mode)?;
+                budget.charge(&issue)?;
                 external.push(issue);
             }
         }

@@ -500,7 +500,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             crate::mindmap::enrich_notifications(
                 &mut result,
                 crate::notices::execute(&crate::notices::Action::List),
-            );
+            )?;
         }
         if let Some(issue) = result.get_mut("issue")
             && let Some(body) = issue["body"].as_str()
