@@ -851,6 +851,8 @@ mod tests {
 #include <sys/socket.h>
 #include <netinet/in.h>
 int main(int argc, char **argv) {
+    // Keep inherited runner descriptors out of this controlled fixture.
+    for (int fd = 3; fd < 1024; ++fd) close(fd);
     int owned = argc > 4 && strcmp(argv[4], "owned") == 0;
     if (!owned) { pid_t p = fork(); if (p < 0) return 2; if (p > 0) return 0; setsid(); }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
