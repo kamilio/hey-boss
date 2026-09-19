@@ -30,7 +30,9 @@ state = json.loads((root / "state.json").read_text())
 if "pause" in args or "stop" in args:
     action = "stop" if "stop" in args else "pause"
     state[args[args.index(action)+1]] = action
-    (root / "state.json").write_text(json.dumps(state))
+    pending = root / "state.json.tmp"
+    pending.write_text(json.dumps(state))
+    pending.replace(root / "state.json")
     print(json.dumps({"ok": True}))
     sys.exit(0)
 if (root / "offline").exists():
@@ -82,6 +84,7 @@ async function wait(session, pattern) {
   await session.waitFor(pattern, { scope: "screen", timeout: 12000 });
 }
 async function capture(session, name) {
+  await session.waitForQuiet(100);
   const screen = await session.screen();
   await writeFile(path.join(output, `${name}.txt`), screen.text);
   await renderTerminalPng(screen.rawLines.join("\n"), { output: path.join(output, `${name}.png`) });
