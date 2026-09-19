@@ -655,3 +655,35 @@ Evidence `out/mm-map-10k-heap-result.txt`. Dark-mode screenshot was inspected;
 reduced motion disables card transitions, Escape returns focus to the selected
 card, and arrow/plus keys pan/zoom the map. At 320×740, controls stay visible and
 the Zoom in button remains the top clickable element, with no page overflow.
+
+Added compact previous/next search controls and Enter/Shift+Enter navigation,
+with a current-match indicator in Map and Outline. The Outline search bar stays
+visible when navigating distant results. A real resize reproduction previously
+restored the desktop camera unchanged on a phone, mounting zero cards after
+clearing search. Restoration now preserves the world center relative to the new
+viewport; the same reproduction mounts four cards. Evidence:
+`out/mm-map-search-navigation-before.txt`, `out/mm-map-search-navigation-after.txt`,
+`out/mm-outline-search-position-before.txt`, `out/mm-outline-search-position-after.txt`,
+`out/mm-map-resized-search-before.txt`, `out/mm-map-resized-search-after.txt`.
+The 320×740 search screenshot was inspected. Narrow-phone overview dimensions
+now leave a gap beside the complete navigation controls, including when the
+browser reserves scrollbar width.
+
+Added `tools/mindmap_scale_browser_checks.js`: 30 actual browser assertions cover
+search counts/cycling/wrapping, IME composition, selection/Escape focus, camera
+restoration with resizing, empty/single matches, Outline navigation visibility,
+phone width/control spacing and keyboard pan/zoom. The first harness run hit a
+JavaScript-expression semicolon wrapper issue; the next checks were corrected
+to account for scrollbar width and wait for the scheduled clearing draw before
+measuring keyboard movement. Final assertions passed. Evidence:
+`out/mm-map-browser-checks-result.txt`. A pinned-build repeated UI run is active
+until 19:40 UTC under `out/mm-map-ui-soak-20260919`; outcome pending.
+
+The fixed-build native/server endurance run passed its full 3,600 seconds and
+1,522 CLI/HTTP edit-read cycles. It exercised full/preview text, live native titles,
+cross-project descriptions, automatic PR links, pending/unavailable Inbox states,
+one stale-token recovery and repeated read-only mutation rejection. Server RSS
+samples ranged from 14,304 to 18,416 KiB across 59 samples; clean server exit 0.
+Evidence: `out/mm-soak-pinned-hour-20260919/samples.jsonl`. The earlier unpinned
+run remains a failure caused by concurrent executable replacement; it is not
+counted as a passing endurance measurement.
