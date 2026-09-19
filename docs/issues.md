@@ -676,3 +676,64 @@ restarts and prevent premature parent pickup until they can be reconciled.
 Schema 8 adds graph guards and readiness; schema 9 adds durable graph receipts and
 deferred canonical relationships. Both preserve existing issue data and global
 profile settings. Older binaries reject the newer schema.
+
+## Drafts and terminal planning
+
+Create a draft only when the user explicitly requests one. Ordinary issue
+creation remains runnable; planning discussions alone do not imply draft status.
+
+```sh
+hey-boss issue create --title 'Feature' --draft
+hey-boss issue edit 12 --draft
+hey-boss issue undraft 12
+hey-boss issue settings set --no-drafts
+hey-boss issue settings set --drafts-enabled --plan-template 'plans/{timestamp}-{number}.md'
+```
+
+Drafts are ordinary persisted issues, visible in lists and details, excluded from
+worker reservation and manual claims. Drafting requires an open, unassigned,
+unreserved issue. Disabling drafts rejects new drafts and interactive planning;
+it preserves existing drafts and allows explicit undrafting. The web creation
+form and issue properties offer compact Draft checkboxes with these same rules.
+
+Interactive planning is a human-terminal workflow. Agents must not start it
+unless explicitly asked:
+
+```sh
+hey-boss issue create --title 'Feature' --interactive
+hey-boss issue edit 12 --interactive
+hey-boss issue edit 12 --draft --interactive --file plans/existing.md
+```
+
+Creation with `--interactive` implies `--draft`. Without interactive mode,
+`--file` remains a one-time Markdown body import. Interactive mode binds one
+existing file inside the checkout, or seeds a new Markdown file with `# Title`
+and the issue body. Its first level-one heading supplies the issue title; the
+remaining Markdown supplies the body. Links to sibling documents stay as links.
+
+The project template defaults to `plans/{timestamp}-{number}.md`; `{timestamp}`
+is a UTC timestamp, and `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`, and
+`{second}` are also supported. Missing directories are created. The resolved
+repository-relative path, checkout, machine, and host are saved once; resuming
+uses that location and changing the title does not rename the file.
+
+Before launching Codex, existing file content is compared with the issue. Matching
+content prompts for nothing. Differences display both versions and require the
+human to choose `hey-boss` (write the issue to the file) or `file` (sync the file
+to the issue). A blank answer cancels without overwriting either version or
+launching Codex. An existing sync owner pauses during reconciliation and remains
+paused on cancellation until reconciliation or explicit undrafting succeeds.
+
+Codex starts in the checkout with exactly `We are planning in <path>`. One
+local detached process syncs file edits every ten seconds, without creating
+mutations for unchanged content. Normal Codex exit syncs the file and undrafts;
+an unsuccessful exit or failed final sync leaves the draft intact. Manual and
+web undrafting also require a successful final sync from the owning machine.
+A missing file or unreachable machine leaves the issue drafted with an error.
+
+Sync continues after Codex exits, after undrafting, and after assignment. Assigned
+file-bound issues display a warning because plan edits continue updating them.
+If sync is interrupted, resume interactive planning on the original machine and
+checkout; an already runnable bound issue retains its status. Workers receive
+the plan path as context and implement from the synced body. This flow neither
+commits nor transfers the plan document.

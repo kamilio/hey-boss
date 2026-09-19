@@ -76,6 +76,10 @@ The profile is shared across projects in the issue store; the stable ID and
 assignments remain unchanged. Boss-assigned issues
 are excluded from worker pickup. Web list labels and assignees are clickable filters.
 
+Create a draft only when the user explicitly asks for a draft. Otherwise create an ordinary issue; do not infer draft status from planning, incomplete requirements, or exploratory discussion. Interactive mode is a human-facing terminal workflow. Agents must not start it unless explicitly asked.
+
+Use `issue create --title TITLE --draft` for a persisted draft without files or sessions, `issue edit NUMBER --draft` to draft an eligible issue, and `issue undraft NUMBER` to make it runnable. Explicit human planning uses `create --interactive` or `edit NUMBER --interactive`, optionally with `--file PATH`. File-bound issues keep syncing every ten seconds after planning ends; assigned issues continue receiving plan edits.
+
 Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
 
 Reuse `--request-id` for identical uncertain retries; `view` reads current state; `edit --if-version N` protects concurrent changes. Test with separate `HEY_BOSS_ISSUE_DB` and `web --no-discovery`.

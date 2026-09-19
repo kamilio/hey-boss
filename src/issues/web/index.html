@@ -329,6 +329,10 @@
               ></span
             ></label
           >
+          <label class="field-help"><input type="checkbox" id="project-drafts" /> Drafts enabled</label>
+          <label class="field-label" for="project-plan-template">Plan file template</label>
+          <input id="project-plan-template" />
+          <p class="field-help">Repository-relative path. Use {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
           <div class="worker-preview-block">
             <strong
               >Preview
@@ -434,6 +438,7 @@
               hidden
             ></div>
           </div>
+          <label class="field-help" id="editor-draft-control"><input type="checkbox" id="editor-draft" /> Draft</label>
           <label class="field-label labels-label" for="editor-labels"
             >Labels <span>optional</span></label
           >

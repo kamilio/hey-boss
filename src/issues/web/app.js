@@ -513,7 +513,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "closed" ? "closed" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span><span>${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(actorName(i.created_by))}`}</span>${listPullRequests(i)}${IssueSubtasks.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "closed" ? "closed" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="muted-text">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span><span>${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(actorName(i.created_by))}`}</span>${listPullRequests(i)}${IssueSubtasks.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -850,7 +850,7 @@ function renderDetail(value) {
   const description =
     i.body_html || '<p class="muted-text">No description provided.</p>';
   $("#detail-view").innerHTML =
-    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1><div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "closed" ? "closed" : "issue")}${deleted ? "Deleted" : i.state === "closed" ? "Closed" : "Open"}</span><span><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div><div class="detail-layout"><div class="detail-main"><article class="comment-card"><div class="comment-header">${avatar(i.created_by)}<strong>${authored}</strong><span>opened ${date(i.created_at)}</span><span class="author-badge">Author</span></div><div class="comment-body markdown">${description}</div></article>${IssueSubtasks.card(value)}<div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button><div id="activity-timeline" hidden></div></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Leave an update, ask a question, or share what you found…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions"><button type="button" class="button" data-action="${i.state === "closed" ? "reopen" : "close"}">${icon(i.state === "closed" ? "issue" : "closed")}${i.state === "closed" ? "Reopen issue" : "Close issue"}</button><button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</div><section class="sidebar" aria-label="Issue properties"><div class="side-section"><h2 class="side-heading">Assignee${icon("user")}</h2><div class="assignee-line">${i.assignee ? avatar(i.assignee) : ""}<span title="${esc(i.assignee || "")}">${esc(actorName(i.assignee))}</span></div>${assigneeActions(i)}</div>${renderTagSidebar(i)}${renderPullRequests(i)}<div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div><div class="side-section"><h2 class="side-heading">Project</h2><div class="side-project">${icon("folder")}${esc(model.project.name)}</div><p>${esc(model.project.id.startsWith("local:") ? "Local directory" : model.project.id.replace(/^named:/, ""))}</p></div><div class="side-section"><h2 class="side-heading">Activity</h2><p>Updated ${date(i.updated_at)}</p>${i.closed_by ? `<p>Closed by ${esc(actorName(i.closed_by))}</p>` : ""}<p data-issue-version>Revision ${i.version}</p></div><div>${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : `<button class="button link-button danger" data-action="delete">${icon("trash")}Delete issue</button>`}</div></section></div>`;
+    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1><div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "closed" ? "closed" : "issue")}${deleted ? "Deleted" : i.state === "closed" ? "Closed" : "Open"}</span><span><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div><div class="detail-layout"><div class="detail-main"><article class="comment-card"><div class="comment-header">${avatar(i.created_by)}<strong>${authored}</strong><span>opened ${date(i.created_at)}</span><span class="author-badge">Author</span></div><div class="comment-body markdown">${description}</div></article>${IssueSubtasks.card(value)}<div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button><div id="activity-timeline" hidden></div></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Leave an update, ask a question, or share what you found…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions"><button type="button" class="button" data-action="${i.state === "closed" ? "reopen" : "close"}">${icon(i.state === "closed" ? "issue" : "closed")}${i.state === "closed" ? "Reopen issue" : "Close issue"}</button><button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</div><section class="sidebar" aria-label="Issue properties"><div class="side-section"><h2 class="side-heading">Assignee${icon("user")}</h2><div class="assignee-line">${i.assignee ? avatar(i.assignee) : ""}<span title="${esc(i.assignee || "")}">${esc(actorName(i.assignee))}</span></div>${assigneeActions(i)}</div>${deleted ? "" : `<div class="side-section"><label class="field-help"><input type="checkbox" data-draft-toggle ${i.draft ? "checked" : ""} ${!i.draft && (value.drafts_enabled === false || i.assignee || i.state !== "open") ? "disabled" : ""} /> Draft</label>${i.plan ? `<p class="field-help">Plan: ${esc(i.plan.path)} · ${esc(i.plan.host)}</p>${i.assignee ? '<p class="field-help">Assigned; plan edits continue updating this issue.</p>' : ""}` : ""}<p class="form-error" id="draft-error" role="alert" hidden></p></div>`}${renderTagSidebar(i)}${renderPullRequests(i)}<div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div><div class="side-section"><h2 class="side-heading">Project</h2><div class="side-project">${icon("folder")}${esc(model.project.name)}</div><p>${esc(model.project.id.startsWith("local:") ? "Local directory" : model.project.id.replace(/^named:/, ""))}</p></div><div class="side-section"><h2 class="side-heading">Activity</h2><p>Updated ${date(i.updated_at)}</p>${i.closed_by ? `<p>Closed by ${esc(actorName(i.closed_by))}</p>` : ""}<p data-issue-version>Revision ${i.version}</p></div><div>${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : `<button class="button link-button danger" data-action="delete">${icon("trash")}Delete issue</button>`}</div></section></div>`;
   document.title = `${i.title} · Hey Boss`;
   $$('[data-resolve-comment]').forEach((button) => {
     button.onclick = (event) => resolveComment(event.currentTarget);
@@ -1116,6 +1116,7 @@ function editorValues() {
     title: $("#editor-subject").value,
     body: $("#editor-body").value,
     labels: editorTags.values().join(", "),
+    draft: $("#editor-draft").checked,
     version: model.editor?.version,
     parentVersion: model.editor?.parent?.version,
   };
@@ -1141,6 +1142,14 @@ function openEditor(issue = null, options = {}) {
   $("#editor-project").textContent = project.name;
   $("#editor-subject").value = draft?.title ?? issue?.title ?? "";
   $("#editor-body").value = draft?.body ?? issue?.body ?? "";
+  $("#editor-draft").checked = draft?.draft ?? issue?.draft ?? false;
+  $("#editor-draft-control").hidden = !!options.parent;
+  $("#editor-draft").disabled = true;
+  const editor = model.editor;
+  api({action:"project_settings"}, project.id, null, editor.host).then(settings => {
+    if (model.editor !== editor) return;
+    $("#editor-draft").disabled = !issue?.draft && (settings.drafts_enabled === false || !!issue?.assignee || (issue && issue.state !== "open"));
+  }).catch(error => toast(error.message, true));
   editorTags.set(
     (draft?.labels ?? issue?.labels.join(", ") ?? "")
       .split(",")
@@ -1270,6 +1279,7 @@ $("#editor-form").onsubmit = async (e) => {
         add_labels: labels.filter((l) => !ctx.original.labels.includes(l)),
         remove_labels: ctx.original.labels.filter((l) => !labels.includes(l)),
         if_version: ctx.version,
+        ...(values.draft !== ctx.original.draft ? {draft: values.draft} : {}),
       }
     : {
         action: ctx.parent ? "create_subtask" : "create",
@@ -1278,6 +1288,7 @@ $("#editor-form").onsubmit = async (e) => {
         body: values.body,
         labels,
         at_top: true,
+        ...(!ctx.parent && values.draft ? {draft:true} : {}),
       };
   editorBusy(true);
   $("#editor-error").hidden = true;
@@ -1583,3 +1594,21 @@ async function changePullRequest(action, url) {
 }
 
 window.addEventListener("hey-boss-issue-created", () => refresh(false));
+
+$("#editor-draft").onchange = saveEditor;
+document.addEventListener("change", async event => {
+  const toggle = event.target;
+  if (!toggle.matches("[data-draft-toggle]")) return;
+  const issue = model.detail.issue, project = model.project.id, host = model.route.host;
+  toggle.disabled = true;
+  try {
+    await mutate({action: toggle.checked ? "edit" : "undraft", number:issue.number,
+      ...(toggle.checked ? {draft:true,title:null,body:null,add_labels:[],remove_labels:[],if_version:issue.version} : {})}, project, host);
+    detailCache.clear();
+    await renderRoute();
+  } catch(error) {
+    toggle.checked = !!issue.draft;
+    const message = $("#draft-error");
+    if (message) {message.textContent=error.message; message.hidden=false;}
+  } finally {toggle.disabled=false;}
+});
