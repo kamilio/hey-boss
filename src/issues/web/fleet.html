@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Workers · Hey Boss</title>
+    <link rel="icon" href="/icon.png" />
+    <link rel="stylesheet" href="/fleet.css" />
+    <script src="/fleet.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#machines">Skip to workers</a>
+    <header><a class="brand" href="/"><img src="/icon.png" width="30" height="30" alt="" />Hey Boss</a><nav aria-label="Main navigation"><a href="/#view=inbox">Inbox</a><a href="/">Issues</a><a href="/workers" aria-current="page">Workers</a></nav><span id="live" role="status">Connecting…</span></header>
+    <main>
+      <div class="heading"><div><p class="eyebrow">YOUR WORKFORCE</p><h1>Workers</h1><p class="intro">Connected machines. Independent workers. One synchronized queue.</p></div><button id="refresh" type="button">Refresh</button></div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <section id="overview" class="overview" aria-label="Fleet overview"></section>
+      <div class="section-heading"><h2>Machines</h2><span>Work continues while disconnected</span></div>
+      <section id="machines" class="machines" aria-label="Machines and workers" tabindex="-1"><p>Loading your machines…</p></section>
+      <section class="activity"><div class="section-heading"><h2>Recent activity</h2><span id="event-count"></span></div><ol id="events" aria-label="Recent fleet events"></ol></section>
+      <section id="conflicts" class="activity" hidden><h2>Changes needing review</h2><p>These changes are saved. Canonical data was preserved.</p><ul id="conflict-list"></ul></section>
+    </main>
+    <footer>Configuration is distributed automatically. Changes are saved locally and synchronized whenever connected.</footer>
+  </body>
+</html>

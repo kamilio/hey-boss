@@ -1,0 +1,1373 @@
+//! Durable issue workers, each backed by an owned Codex app-server process.
+use super::{Actor, Error, Project, Result, Store, identity};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::VecDeque,
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+pub const DEFAULT_PROMPT: &str = "Assign and implement `{{issue_command}}`. {{commit_instruction}}";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    pub name: String,
+    pub concurrency: u32,
+    pub tags: Vec<String>,
+    pub projects: Vec<String>,
+    pub directory: String,
+    pub prompt: Option<String>,
+    pub prs_enabled: Option<bool>,
+    pub use_goal: bool,
+    pub reservation_seconds: u32,
+    pub enabled: bool,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            name: "Worker".into(),
+            concurrency: 1,
+            tags: vec![],
+            projects: vec![],
+            directory: String::new(),
+            prompt: None,
+            prs_enabled: None,
+            use_goal: false,
+            reservation_seconds: 120,
+            enabled: false,
+        }
+    }
+}
+pub fn validate_settings(c: &Settings) -> Result<()> {
+    super::identifier(&c.name, "worker name", 128)?;
+    if !(1..=1024).contains(&c.concurrency) {
+        return Err(Error::invalid(
+            "Worker concurrency must be between 1 and 1024",
+        ));
+    }
+    if !(5..=3600).contains(&c.reservation_seconds) {
+        return Err(Error::invalid(
+            "Claim timeout must be between 5 and 3600 seconds",
+        ));
+    }
+    if c.tags.len() > 50 {
+        return Err(Error::invalid("Use at most 50 worker tags"));
+    }
+    for tag in &c.tags {
+        super::identifier(tag, "tag", 64)?;
+    }
+    for p in &c.projects {
+        super::identifier(p, "project", 8192)?;
+    }
+    if let Some(prompt) = &c.prompt
+        && (prompt.trim().is_empty() || prompt.len() > 32000)
+    {
+        return Err(Error::invalid("Prompt must contain 1–32000 bytes"));
+    }
+    if !c.directory.is_empty()
+        && (!Path::new(&c.directory).is_absolute() || !Path::new(&c.directory).is_dir())
+    {
+        return Err(Error::invalid(
+            "Choose an existing absolute checkout directory",
+        ));
+    }
+    if !c.directory.is_empty() && c.projects.len() != 1 {
+        return Err(Error::invalid(
+            "A checkout directory requires one project; leave it empty to discover directories for multiple projects",
+        ));
+    }
+    if c.enabled {
+        codex_binary()?;
+    }
+    Ok(())
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectConfig {
+    pub prompt: String,
+    pub cwd: String,
+    pub concurrency: u32,
+    pub labels: Vec<String>,
+    pub use_goal: bool,
+    pub enabled: bool,
+    pub prs_enabled: bool,
+}
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            prompt: DEFAULT_PROMPT.into(),
+            cwd: String::new(),
+            concurrency: 1,
+            labels: vec![],
+            use_goal: false,
+            enabled: false,
+            prs_enabled: false,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Job {
+    pub id: String,
+    #[serde(default)]
+    pub worker_id: String,
+    pub project: Project,
+    pub issue: Value,
+    pub comments: Vec<Value>,
+    pub config: ProjectConfig,
+    pub actor: Actor,
+    pub owner_pid: u32,
+    pub owner_start: String,
+    pub machine: String,
+}
+impl Job {
+    pub fn number(&self) -> i64 {
+        self.issue["number"].as_i64().unwrap()
+    }
+}
+pub(crate) fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+pub(crate) fn random_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+pub fn validate_config(c: &ProjectConfig, p: &Project) -> Result<()> {
+    if c.prompt.trim().is_empty() || c.prompt.len() > 32_000 {
+        return Err(Error::invalid("Worker prompt must contain 1–32000 bytes"));
+    }
+    if !(1..=1024).contains(&c.concurrency) {
+        return Err(Error::invalid(
+            "Worker concurrency must be between 1 and 1024",
+        ));
+    }
+    if c.labels.len() > 50 {
+        return Err(Error::invalid("Use at most 50 required labels"));
+    }
+    for tag in &c.labels {
+        super::identifier(tag, "label", 64)?;
+    }
+    if c.cwd.is_empty() && !c.enabled {
+        return Ok(());
+    }
+    let path = Path::new(&c.cwd);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(Error::invalid(
+            "Choose an existing absolute project directory",
+        ));
+    }
+    let actual = identity::project(&path.canonicalize()?, &identity::machine()?)?;
+    if !p.id.starts_with("named:") && actual.id != p.id {
+        return Err(Error::invalid(
+            "The worker directory belongs to a different project. Choose this repository's checkout or worktree.",
+        ));
+    }
+    if c.enabled {
+        codex_binary()?;
+    }
+    Ok(())
+}
+
+pub fn codex_binary() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("HEY_BOSS_CODEX") {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() || !executable(&path) {
+            return Err(Error::invalid(
+                "HEY_BOSS_CODEX must point to an executable absolute Codex path",
+            ));
+        }
+        return Ok(path);
+    }
+    let mut candidates: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|p| p.join("codex"))
+            .collect();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.extend([
+            home.join(".local/bin/codex"),
+            home.join(".cargo/bin/codex"),
+            PathBuf::from("/opt/homebrew/bin/codex"),
+        ]);
+        if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            let mut versions: Vec<_> = versions.flatten().map(|p| p.path()).collect();
+            versions.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+            candidates.extend(versions.into_iter().rev().map(|p| p.join("bin/codex")));
+        }
+    }
+    candidates.push("/Applications/Codex.app/Contents/Resources/codex".into());
+    candidates.into_iter().find(|p|executable(p)).ok_or_else(||Error::new("worker_error","Codex CLI was not found. Install Codex or set HEY_BOSS_CODEX to its absolute path."))
+}
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+pub struct Supervisor {
+    pub stop: Arc<AtomicBool>,
+    pub upgrading: Arc<AtomicBool>,
+    reload: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+impl Supervisor {
+    pub fn start(path: PathBuf) -> Result<Self> {
+        Self::start_for(path, None)
+    }
+    pub fn start_for(path: PathBuf, worker_id: Option<String>) -> Result<Self> {
+        let machine = identity::machine()?;
+        let mut store = Store::open(&path)?;
+        // Never free a slot until the old owned process has actually stopped.
+        recover(&mut store, &machine)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let upgrading = Arc::new(AtomicBool::new(false));
+        let reload = Arc::new(AtomicBool::new(false));
+        let executable = std::env::current_exe()?;
+        let original_executable = executable_identity(&executable);
+        let upgrade_requested = upgrading.clone();
+        let reload_ready = reload.clone();
+        let stopped = stop.clone();
+        let handle = thread::spawn(move || {
+            let mut handles: Vec<(String, thread::JoinHandle<()>)> = vec![];
+            let mut abandoned = Vec::new();
+            let mut last_recovery = Instant::now();
+            while !stopped.load(Ordering::Relaxed) {
+                if let Some(id) = &worker_id
+                    && store.worker_shutdown_requested(id).unwrap_or(false)
+                {
+                    stopped.store(true, Ordering::Relaxed);
+                    break;
+                }
+                let mut active = Vec::new();
+                for (id, handle) in handles.drain(..) {
+                    if handle.is_finished() {
+                        let _ = handle.join();
+                        abandoned.push(id);
+                    } else {
+                        active.push((id, handle));
+                    }
+                }
+                handles = active;
+                abandoned.retain(|id| {
+                    if let Err(e) = finalize_abandoned(&mut store, &machine, id) {
+                        eprintln!("Worker recovery: {e}");
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if worker_id.is_some()
+                    && executable_identity(&executable)
+                        .is_some_and(|current| Some(current) != original_executable)
+                {
+                    upgrade_requested.store(true, Ordering::Relaxed);
+                }
+                if upgrade_requested.load(Ordering::Relaxed) {
+                    if let Some(id) = &worker_id
+                        && let Err(e) = store.worker_mark_upgrading(id)
+                    {
+                        eprintln!("Worker upgrade status: {e}");
+                    }
+                    if handles.is_empty()
+                        && abandoned.is_empty()
+                        && worker_id
+                            .as_deref()
+                            .is_some_and(|id| store.worker_reload_allowed(id).unwrap_or(false))
+                    {
+                        reload_ready.store(true, Ordering::Relaxed);
+                        if stopped
+                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_err()
+                        {
+                            reload_ready.store(false, Ordering::Relaxed);
+                        }
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                if last_recovery.elapsed() >= Duration::from_secs(5) {
+                    if let Err(e) = recover(&mut store, &machine) {
+                        eprintln!("Worker recovery: {e}");
+                    }
+                    last_recovery = Instant::now();
+                }
+                match store.worker_reserve(&machine, worker_id.as_deref()) {
+                    Ok(Some(job)) => {
+                        let path = path.clone();
+                        let stop = stopped.clone();
+                        handles.push((
+                            job.id.clone(),
+                            thread::spawn(move || execute_job(&path, job, stop)),
+                        ));
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("Worker scheduler: {e}"),
+                }
+                for _ in 0..5 {
+                    if stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+            for (id, handle) in handles {
+                let _ = handle.join();
+                if let Err(e) = finalize_abandoned(&mut store, &machine, &id) {
+                    eprintln!("Worker recovery: {e}");
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            upgrading,
+            reload,
+            handle: Some(handle),
+        })
+    }
+}
+pub(crate) fn executable_identity(path: &Path) -> Option<(u64, u64, i64, i64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.len(),
+    ))
+}
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+pub fn install_signals(stop: Arc<AtomicBool>) -> Result<()> {
+    install_signals_for_upgrade(stop, None)
+}
+pub(crate) fn install_signals_for_upgrade(
+    stop: Arc<AtomicBool>,
+    reload: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    ctrlc::set_handler(move || {
+        if let Some(reload) = &reload {
+            reload.store(false, Ordering::Relaxed);
+        }
+        stop.store(true, Ordering::Relaxed);
+    })
+    .map_err(|e| Error::new("worker_error", e.to_string()))
+}
+pub fn serve() -> Result<()> {
+    let supervisor = Supervisor::start(super::database_path()?)?;
+    install_signals(supervisor.stop.clone())?;
+    println!(
+        "Hey Boss issue workers · monitoring enabled managed workers. Ctrl+C stops owned sessions."
+    );
+    while !supervisor.stop.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+fn alive(pid: u32, start: &str) -> bool {
+    crate::agents::process_identity(pid).as_deref() == Some(start)
+}
+fn stop_group(pid: u32, start: &str) -> Result<()> {
+    if !alive(pid, start) {
+        return Ok(());
+    }
+    if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ESRCH) {
+            return Err(e.into());
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while alive(pid, start) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if alive(pid, start) && unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ESRCH) {
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+fn finalize_abandoned(store: &mut Store, machine: &str, id: &str) -> Result<()> {
+    for (job, pid, start) in store.worker_orphans(machine)? {
+        if job.id != id {
+            continue;
+        }
+        if let (Some(pid), Some(start)) = (pid, start) {
+            stop_group(pid, &start)?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while alive(pid, &start) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            if alive(pid, &start) {
+                return Err(Error::new(
+                    "worker_error",
+                    "Failed worker process is still alive; capacity retained",
+                ));
+            }
+        }
+        store.worker_finish(
+            &job,
+            "failed",
+            "Worker exited before saving its result. Review the saved session before retrying.",
+        )?;
+    }
+    Ok(())
+}
+fn recover(store: &mut Store, machine: &str) -> Result<()> {
+    store.prune_workers(machine)?;
+    for (job, pid, start) in store.worker_orphans(machine)? {
+        if alive(job.owner_pid, &job.owner_start) {
+            continue;
+        }
+        if let (Some(pid), Some(start)) = (pid, start) {
+            stop_group(pid, &start)?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while alive(pid, &start) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            if alive(pid, &start) {
+                return Err(Error::new(
+                    "worker_error",
+                    "An orphaned Codex process could not be stopped. Its issue claim and capacity were retained.",
+                ));
+            }
+        }
+        store.worker_finish(&job,"interrupted","The worker service stopped unexpectedly. The saved Codex session and issue history are retained. Review or retry this issue.")?;
+    }
+    Ok(())
+}
+
+struct Codex {
+    child: Child,
+    input: ChildStdin,
+    inbox: mpsc::Receiver<Result<Value>>,
+    pending: VecDeque<Value>,
+    next_id: u64,
+    start: String,
+    session: Option<String>,
+    native_goal: bool,
+}
+impl Codex {
+    fn spawn(path: &Path, job: &Job) -> Result<Self> {
+        let binary = codex_binary()?;
+        let mut paths = vec![
+            binary.parent().unwrap().to_path_buf(),
+            std::env::current_exe()?.parent().unwrap().to_path_buf(),
+        ];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let mut command = Command::new(binary);
+        command
+            .args(["app-server", "--listen", "stdio://"])
+            .current_dir(&job.config.cwd)
+            .process_group(0)
+            .env("HEY_BOSS_ISSUE_DB", path)
+            .env("HEY_BOSS_ISSUE_PROJECT", &job.project.id)
+            .env(
+                "PATH",
+                std::env::join_paths(paths)
+                    .map_err(|e| Error::new("worker_error", e.to_string()))?,
+            )
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CLAUDE_SESSION_ID")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn()?;
+        let Some(start) = crate::agents::process_identity(child.id()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::new("worker_error", "Codex exited during launch"));
+        };
+        let input = child.stdin.take().unwrap();
+        let output = child.stdout.take().unwrap();
+        let (send, inbox) = mpsc::sync_channel(128);
+        thread::spawn(move || {
+            let mut reader = BufReader::new(output);
+            loop {
+                let mut line = Vec::new();
+                let read =
+                    Read::take(&mut reader, 8 * 1024 * 1024 + 1).read_until(b'\n', &mut line);
+                let value = match read {
+                    Ok(0) => break,
+                    Ok(_) if line.len() > 8 * 1024 * 1024 => {
+                        Err(Error::new("worker_error", "Codex event exceeded 8 MiB"))
+                    }
+                    Ok(_) => serde_json::from_slice(&line).map_err(Error::from),
+                    Err(e) => Err(e.into()),
+                };
+                let bad = value.is_err();
+                if send.send(value).is_err() || bad {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            child,
+            input,
+            inbox,
+            pending: VecDeque::new(),
+            next_id: 0,
+            start,
+            session: None,
+            native_goal: false,
+        })
+    }
+    fn suspend_goal(&mut self, state: &str) -> Result<Option<Value>> {
+        let Some(session) = self.session.clone().filter(|_| self.native_goal) else {
+            return Ok(None);
+        };
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(json!({"id":id,"method":"thread/goal/set","params":{"threadId":session,"status":state}}))?;
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            if let Some(value) = self.receive()?
+                && value.get("id") == Some(&json!(id))
+                && value.get("method").is_none()
+            {
+                return Ok(value.get("result").and_then(|r| r.get("goal")).cloned());
+            }
+        }
+        Ok(None)
+    }
+    fn send(&mut self, value: Value) -> Result<()> {
+        serde_json::to_writer(&mut self.input, &value)?;
+        self.input.write_all(b"\n")?;
+        self.input.flush()?;
+        Ok(())
+    }
+    fn receive(&mut self) -> Result<Option<Value>> {
+        match self.inbox.recv_timeout(Duration::from_millis(200)) {
+            Ok(v) => v.map(Some),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(_) => Err(Error::new(
+                "worker_error",
+                "Codex disconnected before reporting completion",
+            )),
+        }
+    }
+    fn check(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
+        if store.worker_claim_expired(job)? {
+            return Err(Error::new(
+                "claim_timeout",
+                "Codex did not claim the issue before its reservation expired. The session was stopped; review or retry the issue.",
+            ));
+        }
+        if stop.load(Ordering::Relaxed) || store.worker_cancelled(job)? {
+            return Err(Error::new(
+                "cancelled",
+                "Worker stopped, claim deadline expired, or issue ownership changed",
+            ));
+        }
+        Ok(())
+    }
+    fn rpc(
+        &mut self,
+        method: &str,
+        params: Value,
+        store: &Store,
+        job: &Job,
+        stop: &AtomicBool,
+    ) -> Result<Value> {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(json!({"id":id,"method":method,"params":params}))?;
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            Self::check(store, job, stop)?;
+            if Instant::now() > deadline {
+                return Err(Error::new(
+                    "worker_error",
+                    format!("Codex timed out acknowledging {method}"),
+                ));
+            }
+            let Some(value) = self.receive()? else {
+                continue;
+            };
+            if value.get("id") == Some(&json!(id)) && value.get("method").is_none() {
+                if let Some(error) = value.get("error") {
+                    return Err(Error::new(
+                        "worker_error",
+                        format!("Codex {method}: {}", error["message"]),
+                    ));
+                }
+                return value.get("result").cloned().ok_or_else(|| {
+                    Error::new("worker_error", "Codex returned an invalid acknowledgement")
+                });
+            }
+            if value.get("id").is_some() && value.get("method").is_some() {
+                return self.needs_input(value);
+            }
+            if self.pending.len() > 4096 {
+                return Err(Error::new(
+                    "worker_error",
+                    "Too many Codex events before acknowledgement",
+                ));
+            }
+            self.pending.push_back(value);
+        }
+    }
+    fn needs_input<T>(&mut self, value: Value) -> Result<T> {
+        let method = value["method"].as_str().unwrap_or("input");
+        // Honor the user's Codex approval rules. Save a recoverable session;
+        // never automatically approve an unrelated tool or permission request.
+        let response = match method {
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+                json!({"decision":"cancel"})
+            }
+            "item/permissions/requestApproval" => json!({"permissions":{},"scope":"turn"}),
+            "item/tool/requestUserInput" | "tool/requestUserInput" => json!({"answers":{}}),
+            "mcpServer/elicitation/request" => json!({"action":"cancel","content":null}),
+            _ => json!({}),
+        };
+        self.send(json!({"id":value["id"],"result":response}))?;
+        let detail = value["params"]["reason"]
+            .as_str()
+            .or_else(|| value["params"]["command"].as_str())
+            .unwrap_or(method);
+        Err(Error::new(
+            "blocked",
+            format!(
+                "Codex needs input or approval: {detail}. Resume the saved session to continue."
+            ),
+        ))
+    }
+}
+impl Drop for Codex {
+    fn drop(&mut self) {
+        let _ = stop_group(self.child.id(), &self.start);
+        // Reap the parent even if it exited before its process identity was read.
+        let _ = self.child.wait();
+    }
+}
+
+fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
+    let mut store = match Store::open(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Worker {}: {e}", job.id);
+            return;
+        }
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_codex(path, &mut store, &mut job, &stop)
+    }));
+    let (state, summary) = match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => (
+            match error.code.as_str() {
+                "cancelled" => "cancelled",
+                "claim_timeout" => "claim_timeout",
+                "blocked" => "blocked",
+                _ => "failed",
+            }
+            .into(),
+            error.message,
+        ),
+        Err(_) => (
+            "failed".into(),
+            "Worker encountered an internal error. Review the saved session before retrying."
+                .into(),
+        ),
+    };
+    if let Err(e) = store.worker_finish(&job, &state, &summary) {
+        eprintln!("Worker {} could not finalize: {e}", job.id)
+    }
+}
+fn template(text: &str, job: &Job) -> String {
+    let mut output = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("}}") else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let key = rest[start + 2..start + end].trim();
+        let value = match key {
+            "issue_command" => format!("hey-boss issue view {}", number_text(job)),
+            "create_issue_command" => create_issue_command(None),
+            "project" => job.project.id.clone(),
+            "number" => number_text(job),
+            "title" => job.issue["title"].as_str().unwrap().into(),
+            "body" => job.issue["body"].as_str().unwrap().into(),
+            "commit_instruction" => {
+                commit_instruction(&job.config.cwd, job.config.prs_enabled, job)
+            }
+            _ => match key.split_once(char::is_whitespace) {
+                Some(("create_issue_command", project)) if !project.trim().is_empty() => {
+                    create_issue_command(Some(project.trim()))
+                }
+                _ => rest[start..start + end + 2].into(),
+            },
+        };
+        output.push_str(&value);
+        rest = &rest[start + end + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+fn create_issue_command(project: Option<&str>) -> String {
+    let target = project
+        .map(|value| format!(" --project '{}'", value.replace('\'', "'\\''")))
+        .unwrap_or_default();
+    format!("hey-boss issue create{target} --title '<title>' --body '<markdown>'")
+}
+fn number_text(job: &Job) -> String {
+    job.issue["number"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| job.number().to_string())
+}
+fn commit_instruction(cwd: &str, prs: bool, job: &Job) -> String {
+    let remote = !cwd.is_empty()
+        && Command::new("git")
+            .args(["remote"])
+            .current_dir(cwd)
+            .output()
+            .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
+    if remote && prs {
+        format!(
+            "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {} '<pr-url>'`.",
+            number_text(job)
+        )
+    } else if remote {
+        "Commit your changes and push to main.".into()
+    } else {
+        "Commit your changes.".into()
+    }
+}
+pub(crate) fn preview(
+    config: &ProjectConfig,
+    project: &Project,
+    issue: Value,
+) -> (String, bool, String) {
+    let job = Job {
+        id: String::new(),
+        worker_id: String::new(),
+        project: project.clone(),
+        issue,
+        comments: vec![],
+        config: config.clone(),
+        actor: Actor {
+            id: String::new(),
+            kind: String::new(),
+            session_id: None,
+            machine: String::new(),
+            host: String::new(),
+            pid: None,
+            process_start: None,
+            cwd: config.cwd.clone().into(),
+            source: String::new(),
+        },
+        owner_pid: 0,
+        owner_start: String::new(),
+        machine: String::new(),
+    };
+    prompt(&job)
+}
+fn prompt(job: &Job) -> (String, bool, String) {
+    let rendered = template(&job.config.prompt, job);
+    let after_goal = rendered
+        .trim_start()
+        .strip_prefix("/goal")
+        .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace));
+    let goal = after_goal.is_some();
+    let instructions = if let Some(rest) = after_goal {
+        if rest.trim().is_empty() {
+            template(DEFAULT_PROMPT, job)
+        } else {
+            rest.trim_start().to_owned()
+        }
+    } else {
+        rendered
+    };
+    let objective = instructions.trim().chars().take(4000).collect();
+    (instructions, goal, objective)
+}
+fn turn_params(session: &str, text: &str) -> Value {
+    json!({"threadId":session,"input":[{"type":"text","text":text}],"outputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["completed","blocked"]},"summary":{"type":"string"}},"required":["status","summary"],"additionalProperties":false}})
+}
+fn run_codex(
+    path: &Path,
+    store: &mut Store,
+    job: &mut Job,
+    stop: &AtomicBool,
+) -> Result<(String, String)> {
+    validate_config(&job.config, &job.project)?;
+    Codex::check(store, job, stop)?;
+    let mut c = Codex::spawn(path, job)?;
+    store.worker_process(&job.id, c.child.id())?;
+    store.worker_event(&job.id, "Launching Codex", None)?;
+    let outcome = run_thread(&mut c, store, job, stop);
+    if let Err(error) = &outcome {
+        let state = if matches!(error.code.as_str(), "cancelled" | "claim_timeout") {
+            "paused"
+        } else {
+            "blocked"
+        };
+        if let Ok(Some(goal)) = c.suspend_goal(state) {
+            let _ = store.worker_event(&job.id, &format!("Goal: {state}"), Some(&goal));
+        }
+    }
+    outcome
+}
+fn run_thread(
+    c: &mut Codex,
+    store: &mut Store,
+    job: &mut Job,
+    stop: &AtomicBool,
+) -> Result<(String, String)> {
+    c.rpc("initialize",json!({"clientInfo":{"name":"hey_boss_worker","title":"Hey Boss issue worker","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),store,job,stop)?;
+    c.send(json!({"method":"initialized","params":{}}))?;
+    let result = c.rpc(
+        "thread/start",
+        json!({"cwd":job.config.cwd,"ephemeral":false}),
+        store,
+        job,
+        stop,
+    )?;
+    let session = result["thread"]["id"]
+        .as_str()
+        .ok_or_else(|| Error::new("worker_error", "Codex did not return a session ID"))?
+        .to_owned();
+    c.session = Some(session.clone());
+    store.worker_attach(job, &session)?;
+    store.worker_event(&job.id, &format!("Codex session {session}"), None)?;
+    let (text, goal_enabled, objective) = prompt(job);
+    store.worker_prompt(&job.id, &text)?;
+    let result = c.rpc("turn/start", turn_params(&session, &text), store, job, stop)?;
+    let mut turn = result["turn"]["id"]
+        .as_str()
+        .ok_or_else(|| Error::new("worker_error", "Codex did not return a turn ID"))?
+        .to_owned();
+    if goal_enabled {
+        c.native_goal = true;
+        let result = c.rpc(
+            "thread/goal/set",
+            json!({"threadId":session,"objective":objective,"status":"active"}),
+            store,
+            job,
+            stop,
+        )?;
+        if result["goal"]["status"] != "active" {
+            return Err(Error::new(
+                "worker_error",
+                "Codex did not activate the goal",
+            ));
+        }
+        store.worker_event(&job.id, "/goal activated", Some(&result["goal"]))?;
+    }
+    let mut final_text = String::new();
+    let mut activity_text = String::new();
+    let mut last_log = Instant::now() - Duration::from_secs(2);
+    loop {
+        Codex::check(store, job, stop)?;
+        let Some(value) = (if let Some(pending) = c.pending.pop_front() {
+            Some(pending)
+        } else {
+            c.receive()?
+        }) else {
+            continue;
+        };
+        if value.get("id").is_some() && value.get("method").is_some() {
+            return c.needs_input(value);
+        }
+        let method = value["method"].as_str().unwrap_or("");
+        let params = &value["params"];
+        if params["threadId"].as_str().is_some_and(|id| id != session) {
+            continue;
+        }
+        match method {
+            "thread/goal/updated" => {
+                store.worker_event(
+                    &job.id,
+                    &format!(
+                        "Goal: {}",
+                        params["goal"]["status"].as_str().unwrap_or("updated")
+                    ),
+                    Some(&params["goal"]),
+                )?;
+            }
+            "item/agentMessage/delta" => {
+                if let Some(text) = params["delta"].as_str() {
+                    activity_text.push_str(text);
+                    if activity_text.len() > 4000 {
+                        activity_text = activity_text
+                            .chars()
+                            .rev()
+                            .take(2000)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                    }
+                    if last_log.elapsed() > Duration::from_secs(1) {
+                        store.worker_event(&job.id, &activity_text, None)?;
+                        last_log = Instant::now();
+                    }
+                }
+            }
+            "item/started" => {
+                let item = &params["item"];
+                let kind = item["type"].as_str().unwrap_or("working");
+                if kind == "agentMessage" {
+                    activity_text.clear();
+                }
+                let detail = item["command"]
+                    .as_str()
+                    .or_else(|| item["text"].as_str())
+                    .unwrap_or(kind);
+                store.worker_event(&job.id, detail, None)?;
+            }
+            "item/completed" if params["item"]["type"] == "agentMessage" => {
+                final_text = params["item"]["text"].as_str().unwrap_or("").to_owned();
+                store.worker_event(&job.id, &final_text, None)?;
+            }
+            "turn/started" => {
+                if let Some(id) = params["turn"]["id"].as_str() {
+                    turn = id.into();
+                }
+            }
+            "turn/completed" if params["turn"]["id"] == turn => {
+                if params["turn"]["status"] != "completed" {
+                    return Err(Error::new(
+                        "worker_error",
+                        format!(
+                            "Codex turn {}: {}",
+                            params["turn"]["status"], params["turn"]["error"]
+                        ),
+                    ));
+                }
+                let report = serde_json::from_str::<Value>(final_text.trim())
+                    .ok()
+                    .filter(|v| {
+                        matches!(v["status"].as_str(), Some("completed" | "blocked"))
+                            && v["summary"].as_str().is_some_and(|s| !s.trim().is_empty())
+                    });
+                if let Some(report) = report {
+                    if goal_enabled {
+                        let state = if report["status"] == "completed" {
+                            "complete"
+                        } else {
+                            "blocked"
+                        };
+                        let goal = c.rpc(
+                            "thread/goal/set",
+                            json!({"threadId":session,"status":state}),
+                            store,
+                            job,
+                            stop,
+                        )?;
+                        store.worker_event(
+                            &job.id,
+                            &format!("Goal: {state}"),
+                            Some(&goal["goal"]),
+                        )?;
+                    }
+                    return Ok((
+                        report["status"].as_str().unwrap().into(),
+                        report["summary"].as_str().unwrap().into(),
+                    ));
+                }
+                if goal_enabled {
+                    let result = c.rpc(
+                        "thread/goal/get",
+                        json!({"threadId":session}),
+                        store,
+                        job,
+                        stop,
+                    )?;
+                    store.worker_event(&job.id, "Checking goal progress", Some(&result["goal"]))?;
+                    match result["goal"]["status"].as_str() {
+                        Some("complete") if !final_text.trim().is_empty() => {
+                            return Ok(("completed".into(), final_text));
+                        }
+                        Some("active") => {
+                            let result=c.rpc("turn/start",turn_params(&session,"Continue pursuing the saved goal and the assigned issue. Return the required JSON status and summary only after completing and verifying the issue or identifying a blocker."),store,job,stop)?;
+                            turn = result["turn"]["id"]
+                                .as_str()
+                                .ok_or_else(|| {
+                                    Error::new("worker_error", "Missing continuation turn")
+                                })?
+                                .into();
+                            final_text.clear();
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "blocked",
+                                format!(
+                                    "Codex goal stopped with status {}. {final_text}",
+                                    result["goal"]["status"]
+                                ),
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(Error::new(
+                        "blocked",
+                        format!(
+                            "Codex ended without a completion report. Review the saved session.\n\n{final_text}"
+                        ),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn print_status(v: &Value, redraw: bool) {
+    print_status_with_history(v, redraw, 3);
+}
+pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) {
+    if redraw {
+        print!("\x1b[H\x1b[2J");
+    }
+    println!(
+        "{} · {}",
+        v["config"]["name"].as_str().unwrap_or("Workers"),
+        v["worker_id"].as_str().unwrap_or("new")
+    );
+    println!(
+        "Slots: {} free · {} busy / {} · {}",
+        v["free"],
+        v["active"],
+        v["config"]["concurrency"],
+        if v["config"]["enabled"] == true && v["upgrading"] == true {
+            "draining for CLI upgrade"
+        } else if v["config"]["enabled"] == true {
+            "pickup on"
+        } else {
+            "paused"
+        }
+    );
+    if let Some(database) = v["store"]["database"].as_str() {
+        println!(
+            "Queue: {} · {database}",
+            v["store"]["host"].as_str().unwrap_or("local")
+        );
+    }
+    println!("Projects: {}", v["config"]["projects"]);
+    if v["fleet"]["role"] == "agent" {
+        println!(
+            "Fleet replica · {} local changes waiting to synchronize · workers can continue reserved work offline",
+            v["fleet"]["pending_changes"]
+        );
+    }
+    if v["eligible"] == 0 && v["active"] == 0 && v["fleet"]["role"] != "agent" {
+        println!(
+            "No eligible issues in this machine's queue. Issues on another machine require running the worker there (worker --host HOST --directory PATH)."
+        );
+    }
+    println!(
+        "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch Codex → manual claim → implement → finish",
+        v["config"]["tags"], v["eligible"]
+    );
+    if let Some(runs) = v["runs"].as_array() {
+        let active = runs.iter().filter(|run| run["finished_at"].is_null());
+        let recent = runs
+            .iter()
+            .filter(|run| !run["finished_at"].is_null())
+            .take(history_limit);
+        println!("Active sessions ({})", v["active"]);
+        let mut printed_history = false;
+        for run in active.chain(recent) {
+            if !run["finished_at"].is_null() && !printed_history {
+                println!("Recent attempts (history; these do not use slots)");
+                printed_history = true;
+            }
+            let end = run["finished_at"].as_i64().unwrap_or_else(now);
+            let seconds = (end - run["started_at"].as_i64().unwrap_or(end)).max(0) / 1000;
+            let claim = run["reservation_expires"]
+                .as_i64()
+                .filter(|_| run["finished_at"].is_null())
+                .map(|t| format!(" · claim in {}s", ((t - now()).max(0) + 999) / 1000))
+                .unwrap_or_default();
+            println!(
+                "{} #{} · {} · {}m{:02}s{} · Codex {} · {}",
+                run["project_name"].as_str().unwrap_or(""),
+                run["number"],
+                run["state"].as_str().unwrap_or(""),
+                seconds / 60,
+                seconds % 60,
+                claim,
+                run["session_id"]
+                    .as_str()
+                    .unwrap_or(if run["finished_at"].is_null() {
+                        "launching"
+                    } else {
+                        "not launched"
+                    }),
+                run["last_event"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| run["summary"].as_str().unwrap_or(""))
+            );
+        }
+    }
+}
+pub fn serve_instance(
+    settings: Settings,
+    id: Option<&str>,
+    project: Project,
+    json_output: bool,
+) -> Result<()> {
+    serve_instance_with_history(settings, id, project, json_output, 3)
+}
+pub fn serve_instance_with_history(
+    settings: Settings,
+    id: Option<&str>,
+    project: Project,
+    json_output: bool,
+    history_limit: usize,
+) -> Result<()> {
+    use std::io::IsTerminal;
+    // Linux current_exe() gains " (deleted)" after an atomic replacement.
+    // Retain the installed path while it still names the running executable.
+    let reload_executable = std::env::current_exe()?.canonicalize()?;
+    let path = super::database_path()?;
+    let machine = identity::machine()?;
+    let mut store = Store::open(&path)?;
+    // Ensure the caller's project exists before registration/selection.
+    store.execute(&super::Request {
+        version: 1,
+        project: project.clone(),
+        project_override: None,
+        actor: None,
+        operation: super::Operation::Projects {
+            include_hidden: true,
+        },
+        request_id: None,
+    })?;
+    let id = store.register_worker(id, &settings, &machine)?;
+    crate::fleet::record_local_worker(&id, Some(&settings), "running")?;
+    struct Registration {
+        path: PathBuf,
+        id: String,
+    }
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            if let Ok(store) = Store::open(&self.path) {
+                let _ = store.unregister_worker(&self.id);
+            }
+        }
+    }
+    let _registration = Registration {
+        path: path.clone(),
+        id: id.clone(),
+    };
+    let supervisor = Supervisor::start_for(path, Some(id.clone()))?;
+    install_signals_for_upgrade(supervisor.stop.clone(), Some(supervisor.reload.clone()))?;
+    struct Screen(bool);
+    impl Drop for Screen {
+        fn drop(&mut self) {
+            if self.0 {
+                print!("\x1b[?1049l");
+                let _ = std::io::stdout().flush();
+            }
+        }
+    }
+    let tty = std::io::stdout().is_terminal() && !json_output;
+    let _screen = Screen(tty);
+    if tty {
+        print!("\x1b[?1049h");
+    }
+    let mut last = String::new();
+    let mut heartbeat = Instant::now() - Duration::from_secs(30);
+    while !supervisor.stop.load(Ordering::Relaxed) {
+        let mut value = store.execute(&super::Request {
+            version: 1,
+            project: project.clone(),
+            project_override: None,
+            actor: None,
+            operation: super::Operation::Workers {
+                worker_id: Some(id.clone()),
+            },
+            request_id: None,
+        })?;
+        value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
+        value["upgrading"] =
+            json!(supervisor.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
+        let signature = serde_json::to_string(&value)?;
+        if tty || signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
+            if json_output {
+                println!("{value}");
+            } else {
+                print_status_with_history(&value, tty, history_limit);
+                println!("Ctrl+C stops this worker's Codex sessions.");
+            }
+            std::io::stdout().flush()?;
+            last = signature;
+            heartbeat = Instant::now();
+        }
+        for _ in 0..5 {
+            if supervisor.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    let reload =
+        supervisor.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
+    drop(supervisor);
+    if !reload && !store.worker_shutdown_requested(&id)? {
+        crate::fleet::record_local_worker(&id, None, "stop")?;
+    }
+    store.unregister_worker(&id)?;
+    if reload {
+        drop(_registration);
+        drop(_screen);
+        let mut command = Command::new(reload_executable);
+        command.args([
+            "worker",
+            "--id",
+            &id,
+            "--history",
+            &history_limit.to_string(),
+        ]);
+        if json_output {
+            command.arg("--json");
+        }
+        return Err(command.exec().into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn project() -> Project {
+        Project {
+            id: "named:a'b $(touch nope)".into(),
+            name: "Prompt test".into(),
+        }
+    }
+    fn issue() -> Value {
+        json!({"number":7,"title":"Literal {{body}}","body":"Literal {{title}}"})
+    }
+    #[test]
+    fn issue_commands_use_the_worker_project_and_expand_once() {
+        let c = ProjectConfig {
+            prompt: "{{issue_command}} | {{title}} | {{body}} | {{unknown}}".into(),
+            ..ProjectConfig::default()
+        };
+        let (text, _, _) = preview(&c, &project(), issue());
+        assert_eq!(
+            text,
+            "hey-boss issue view 7 | Literal {{body}} | Literal {{title}} | {{unknown}}"
+        );
+    }
+    #[test]
+    fn create_commands_target_projects_quote_arguments_and_expand_once() {
+        let config = ProjectConfig {
+            prompt: "/goal If safe-bash fails, report with `{{create_issue_command poe-code}}`. {{create_issue_command}} | {{ create_issue_command  Team's project $(touch nope); x }} | {{unknown}} | {{title}}".into(),
+            ..ProjectConfig::default()
+        };
+        let (text, goal, objective) = preview(&config, &project(), issue());
+        assert!(goal);
+        assert_eq!(objective, text);
+        assert_eq!(
+            text,
+            "If safe-bash fails, report with `hey-boss issue create --project 'poe-code' --title '<title>' --body '<markdown>'`. hey-boss issue create --title '<title>' --body '<markdown>' | hey-boss issue create --project 'Team'\\''s project $(touch nope); x' --title '<title>' --body '<markdown>' | {{unknown}} | Literal {{body}}"
+        );
+    }
+    #[test]
+    fn slash_goal_only_is_not_an_empty_turn() {
+        for prompt in ["/goal", "/goal Implement issue {{number}}"] {
+            let c = ProjectConfig {
+                prompt: prompt.into(),
+                use_goal: false,
+                ..ProjectConfig::default()
+            };
+            let (text, goal, objective) = preview(&c, &project(), issue());
+            assert!(goal);
+            assert!(!text.trim().is_empty());
+            assert!(!objective.trim().is_empty());
+            if prompt != "/goal" {
+                assert_eq!(text, "Implement issue 7");
+                assert_eq!(objective, text);
+            }
+        }
+    }
+    #[test]
+    fn slash_goal_preserves_multiline_instructions_and_requires_command_boundary() {
+        for source in [
+            "/goal First sentence.\nSecond sentence.",
+            " \t/goal\tFirst sentence.\nSecond sentence.",
+            "/goal\r\nFirst sentence.\nSecond sentence.",
+        ] {
+            let config = ProjectConfig {
+                prompt: source.into(),
+                ..Default::default()
+            };
+            let (text, goal, objective) = preview(&config, &project(), issue());
+            assert_eq!(text, "First sentence.\nSecond sentence.");
+            assert_eq!(objective, text);
+            assert!(goal);
+        }
+        for source in [
+            "/goals Implement it",
+            "Implement /goal later",
+            "Assign and implement {{issue_command}}.",
+        ] {
+            let config = ProjectConfig {
+                prompt: source.into(),
+                use_goal: true,
+                ..Default::default()
+            };
+            let (_, goal, _) = preview(&config, &project(), issue());
+            assert!(!goal, "Only a leading /goal command enables a goal");
+        }
+    }
+    #[test]
+    fn preview_placeholder_does_not_rewrite_literal_commands() {
+        let config = ProjectConfig {
+            prompt: "{{issue_command}}. Keep issue view 123 literal.".into(),
+            ..Default::default()
+        };
+        let (text, _, _) = preview(
+            &config,
+            &project(),
+            json!({"number":"<number>","title":"t","body":"b"}),
+        );
+        assert_eq!(
+            text,
+            "hey-boss issue view <number>. Keep issue view 123 literal."
+        );
+    }
+    #[test]
+    fn stale_pid_identity_cannot_signal_a_reused_process() {
+        let pid = std::process::id();
+        assert!(!alive(pid, "an unrelated process start"));
+        stop_group(pid, "an unrelated process start").unwrap();
+        assert!(crate::agents::process_identity(pid).is_some());
+    }
+}

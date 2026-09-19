@@ -28,8 +28,9 @@ func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: Strin
     let content: [String: Any] = [
         "Label": "local.hey-boss",
         "ProgramArguments": [daemonPath],
-        "EnvironmentVariables": ["HEY_BOSS_STATE_DIR": state.path],
+        "EnvironmentVariables": ["HEY_BOSS_STATE_DIR": state.path, "HEY_BOSS_CLI_PATH": binaries.appendingPathComponent("hey-boss").path],
         "LimitLoadToSessionType": "Aqua",
+        "RunAtLoad": true,
         "Sockets": ["Listener": ["SockPathName": state.appendingPathComponent("daemon.sock").path, "SockPathMode": 0o600, "SockType": "stream"]],
         "StandardOutPath": state.appendingPathComponent("daemon.log").path,
         "StandardErrorPath": state.appendingPathComponent("daemon.log").path,
@@ -37,6 +38,7 @@ func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: Strin
     ]
     try! PropertyListSerialization.data(fromPropertyList: content, format: .xml, options: 0).write(to: plist, options: .atomic)
     try! files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plist.path)
+    try! Data("1".utf8).write(to: state.appendingPathComponent("protocol-version"), options: .atomic)
     launchctl(["bootstrap", domain, plist.path])
 }
 

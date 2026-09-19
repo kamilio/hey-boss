@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="theme-color"
+      content="#eef0f4"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#11151d"
+      media="(prefers-color-scheme: dark)"
+    />
+    <title>Issues · Hey Boss</title>
+    <link rel="icon" href="/icon.png" />
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/tags.js" defer></script>
+    <script src="/inbox.js" defer></script>
+    <script src="/global-settings.js" defer></script>
+    <script src="/subtasks.js" defer></script>
+    <script src="/app.js" defer></script>
+    <script src="/project-settings.js" defer></script>
+    <script src="/issue-order.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="app-header">
+      <div class="header-inner">
+        <a class="brand" href="#" aria-label="Hey Boss issues"
+          ><img src="/icon.png" alt="" width="30" height="30" /><span
+            >Hey Boss</span
+          ></a
+        >
+        <span class="header-divider" aria-hidden="true"></span>
+        <div class="project-control">
+          <button
+            id="project-trigger"
+            class="project-trigger"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="project-menu"
+          >
+            <span class="project-glyph" data-icon="folder"></span
+            ><span id="project-name">Projects</span
+            ><span data-icon="chevrons"></span>
+          </button>
+          <div
+            id="project-menu"
+            class="popover project-menu"
+            role="dialog"
+            aria-label="Switch project"
+            hidden
+          >
+            <div class="popover-search">
+              <span data-icon="search"></span
+              ><input
+                id="project-search"
+                type="search"
+                aria-label="Find a project"
+                placeholder="Find a project…"
+                autocomplete="off"
+              />
+            </div>
+            <div class="menu-caption" id="project-sort-label">
+              RECENT ACTIVITY
+            </div>
+            <div id="project-options"></div>
+            <button
+              id="toggle-hidden-projects"
+              class="add-project"
+              type="button"
+            >
+              Hidden projects
+            </button>
+            <button id="add-project" class="add-project">
+              <span data-icon="plus"></span>New project
+            </button>
+          </div>
+        </div>
+        <div class="header-right">
+          <button
+            class="button instructions-trigger"
+            id="project-settings-trigger"
+            type="button"
+            aria-label="Project instructions"
+            title="Project instructions"
+            aria-haspopup="dialog"
+          >
+            <span data-icon="instructions"></span><span>Instructions</span>
+          </button>
+          <span class="connection" id="connection" role="status"
+            ><i></i><span>Connected</span></span
+          >
+          <div class="profile-control">
+            <button
+              class="avatar self"
+              id="self-avatar"
+              type="button"
+              title="Boss"
+              aria-label="Profile: Boss"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="profile-menu"
+            >
+              BO
+            </button>
+            <div
+              id="profile-menu"
+              class="profile-menu"
+              role="menu"
+              aria-labelledby="self-avatar"
+              hidden
+            >
+              <div class="profile-summary" aria-hidden="true">
+                <small>Your profile</small
+                ><strong id="profile-name">Boss</strong>
+              </div>
+              <button
+                id="global-settings-trigger"
+                type="button"
+                role="menuitem"
+              >
+                <span data-icon="settings"></span>Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <nav class="app-navigation" aria-label="Main navigation">
+      <div class="navigation-inner">
+        <a id="nav-inbox" href="#view=inbox"
+          ><span data-icon="inbox"></span>Inbox<span
+            id="inbox-unread"
+            class="tab-count"
+            hidden
+          ></span
+        ></a>
+        <a id="nav-issues" href="#"><span data-icon="issue"></span>Issues</a>
+        <a href="/workers">Workers</a>
+      </div>
+    </nav>
+    <main id="main" tabindex="-1">
+      <section id="inbox-view" aria-label="Inbox" hidden></section>
+      <div id="hidden-project-banner" class="update-banner" hidden>
+        <span
+          >This project is hidden. Its issues and history are preserved.</span
+        >
+        <button id="restore-current-project" type="button">
+          Restore project
+        </button>
+      </div>
+      <div class="page-heading" id="issue-heading">
+        <div>
+          <div class="eyebrow">
+            <span data-icon="folder"></span
+            ><span id="project-caption">Your project</span>
+          </div>
+          <h1>Issues <span id="heading-count" class="heading-count"></span></h1>
+          <p class="page-description">One place for the work ahead.</p>
+        </div>
+        <button class="button primary" id="new-issue">
+          <span data-icon="plus"></span>New issue<span class="keycap">N</span>
+        </button>
+      </div>
+      <section id="list-view" aria-label="Project issues">
+        <div class="toolbar">
+          <label class="search-field"
+            ><span data-icon="search"></span
+            ><input
+              id="issue-search"
+              type="search"
+              aria-label="Search issues"
+              placeholder="Search issues…"
+              autocomplete="off"
+            /><kbd>/</kbd></label
+          >
+          <div class="filter-controls">
+            <label class="select-control"
+              ><span data-icon="tag"></span
+              ><select id="label-filter" aria-label="Filter by label">
+                <option value="">Labels</option>
+              </select></label
+            ><label class="select-control"
+              ><span data-icon="user"></span
+              ><select id="owner-filter" aria-label="Filter by assignee">
+                <option value="all">Assignee</option>
+                <option value="mine">Assigned to me</option>
+                <option value="unassigned">Unassigned</option>
+              </select></label
+            ><button
+              class="icon-button refresh"
+              id="refresh"
+              aria-label="Refresh issues"
+              title="Refresh issues"
+            >
+              <span data-icon="refresh"></span>
+            </button>
+          </div>
+        </div>
+        <div class="issue-panel glass">
+          <div class="list-heading">
+            <div class="state-tabs" role="tablist" aria-label="Issue state">
+              <button
+                data-state="open"
+                class="selected"
+                role="tab"
+                aria-selected="true"
+              >
+                <span data-icon="issue"></span>Open<span
+                  id="open-count"
+                  class="tab-count"
+                  >0</span
+                ></button
+              ><button
+                data-state="closed"
+                role="tab"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                <span data-icon="closed"></span>Closed<span
+                  id="closed-count"
+                  class="tab-count"
+                  >0</span
+                ></button
+              ><button
+                data-state="deleted"
+                role="tab"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                <span data-icon="trash"></span>Deleted<span
+                  id="deleted-count"
+                  class="tab-count"
+                  >0</span
+                >
+              </button>
+            </div>
+            <span
+              class="list-sort"
+              title="Drag issue handles to change pickup order"
+              >Queue order<span data-icon="sort"></span
+            ></span>
+          </div>
+          <div id="issue-list" role="tabpanel" aria-label="Issues">
+            <div class="loading-state">
+              <span class="spinner"></span>Loading your issues…
+            </div>
+          </div>
+          <div class="list-footer" id="list-footer" hidden>
+            <span id="list-summary"></span>
+          </div>
+        </div>
+        <div class="list-bottom">
+          <span><span data-icon="sync"></span>In sync with your agents</span
+          ><span
+            ><kbd>N</kbd> new issue<span class="shortcut-separator">·</span
+            ><kbd>/</kbd> search</span
+          >
+        </div>
+      </section>
+      <section id="detail-view" hidden aria-label="Issue detail"></section>
+      <div class="page-footer">
+        <span class="footer-mark" data-icon="spark"></span
+        ><span>A little less coordination. A little more progress.</span
+        ><span class="footer-product">Hey Boss Issues</span>
+      </div>
+    </main>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog id="global-settings-dialog" aria-labelledby="global-settings-title">
+      <form id="global-settings-form">
+        <div class="dialog-heading">
+          <h2 id="global-settings-title">Settings</h2>
+          <button
+            type="button"
+            class="icon-button"
+            id="global-settings-close"
+            aria-label="Close settings"
+          >
+            <span data-icon="x"></span>
+          </button>
+        </div>
+        <div class="global-settings-body">
+          <label class="field-label" for="global-boss-name">Your name</label>
+          <input
+            id="global-boss-name"
+            class="text-input"
+            required
+            maxlength="64"
+            autocomplete="nickname"
+            placeholder="Boss"
+          />
+          <p class="field-help">
+            Your name across all projects. Renaming keeps your existing
+            assignments.
+          </p>
+          <p
+            id="global-settings-error"
+            class="form-error"
+            role="alert"
+            hidden
+          ></p>
+          <button
+            id="global-settings-reload"
+            class="button small global-settings-reload"
+            type="button"
+            hidden
+          >
+            Reload current settings
+          </button>
+        </div>
+        <div class="dialog-footer">
+          <span id="global-settings-state" role="status"></span>
+          <div>
+            <button class="button" id="global-settings-cancel" type="button">
+              Cancel</button
+            ><button
+              class="button primary"
+              id="global-settings-submit"
+              type="submit"
+            >
+              Save changes
+            </button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="notice-link-dialog" aria-labelledby="notice-link-title">
+      <form id="notice-link-form">
+        <div class="dialog-heading">
+          <h2 id="notice-link-title">Link an issue</h2>
+          <button
+            class="icon-button"
+            type="button"
+            id="notice-link-close"
+            aria-label="Close issue link dialog"
+          >
+            <span data-icon="x"></span>
+          </button>
+        </div>
+        <div class="worker-form-body">
+          <p class="field-help">
+            This adds a relationship. The issue’s state and assignment stay the
+            same.
+          </p>
+          <label class="field-label" for="notice-link-host">Server</label
+          ><input
+            id="notice-link-host"
+            class="text-input"
+            placeholder="This Mac"
+            maxlength="256"
+            autocomplete="off"
+          />
+          <label class="field-label" for="notice-link-project">Project</label
+          ><select
+            id="notice-link-project"
+            class="text-input"
+            required
+          ></select>
+          <label class="field-label" for="notice-link-search"
+            >Find an issue</label
+          ><input
+            type="search"
+            id="notice-link-search"
+            class="text-input"
+            placeholder="Search title or number…"
+            autocomplete="off"
+          />
+          <div
+            id="notice-link-results"
+            class="notice-link-results"
+            aria-label="Choose an issue"
+          ></div>
+          <p class="form-error" id="notice-link-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-footer">
+          <span id="notice-link-state" role="status"></span>
+          <div class="dialog-footer-actions">
+            <button type="button" class="button" id="notice-link-cancel">
+              Cancel</button
+            ><button
+              class="button primary"
+              type="submit"
+              id="notice-link-submit"
+              disabled
+            >
+              Link issue
+            </button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="project-settings-dialog"
+      aria-labelledby="project-settings-title"
+    >
+      <form id="project-settings-form">
+        <div class="dialog-heading">
+          <h2 id="project-settings-title">Project instructions</h2>
+          <button
+            class="icon-button"
+            id="project-settings-close"
+            type="button"
+            aria-label="Close project settings"
+          >
+            <span data-icon="x"></span>
+          </button>
+        </div>
+        <div class="worker-form-body">
+          <p id="project-settings-name" class="field-help"></p>
+          <label class="field-label" for="project-prompt">Instructions</label
+          ><textarea
+            class="text-input"
+            id="project-prompt"
+            rows="4"
+            required
+            maxlength="32000"
+          ></textarea>
+          <p class="field-help">
+            {{issue_command}} retrieves the issue. {{commit_instruction}} fills
+            in the commit or PR instruction. {{create_issue_command poe-code}}
+            creates an issue in poe-code; replace the title and Markdown
+            placeholders in the command.
+          </p>
+          <label class="worker-goal"
+            ><input type="checkbox" id="project-prs" /><span
+              ><strong>PRs enabled</strong
+              ><small
+                >Open pull requests and attach their links to the issue.</small
+              ></span
+            ></label
+          >
+          <div class="worker-preview-block">
+            <strong
+              >Preview
+              <span id="project-goal-indicator" class="goal-indicator" hidden
+                >/goal</span
+              ></strong
+            >
+            <p id="project-instructions-preview" aria-live="polite"></p>
+          </div>
+          <p
+            id="project-settings-error"
+            class="form-error"
+            role="alert"
+            hidden
+          ></p>
+        </div>
+        <div class="dialog-footer">
+          <span id="project-settings-state" role="status"></span>
+          <div>
+            <button class="button" id="project-settings-cancel" type="button">
+              Cancel</button
+            ><button class="button primary" type="submit">Save</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="subtask-picker-dialog" aria-labelledby="subtask-picker-title">
+      <div class="dialog-heading">
+        <h2 id="subtask-picker-title">Add existing issue</h2>
+        <button type="button" class="icon-button" id="subtask-picker-close" aria-label="Close subtask picker"><span data-icon="x"></span></button>
+      </div>
+      <div class="subtask-picker-body">
+        <label class="field-label" for="subtask-picker-search">Find an issue</label>
+        <input id="subtask-picker-search" class="text-input" type="search" placeholder="Search by title or number…" autocomplete="off">
+        <p class="form-error" id="subtask-picker-error" role="alert" hidden></p>
+        <div id="subtask-picker-results" aria-label="Existing project issues"></div>
+      </div>
+      <div class="dialog-footer"><span id="subtask-picker-count" role="status"></span><div><button class="button" type="button" id="subtask-picker-cancel">Cancel</button></div></div>
+    </dialog>
+    <dialog id="editor-dialog" aria-labelledby="editor-title">
+      <form id="editor-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="dialog-eyebrow" id="editor-project"></span>
+            <h2 id="editor-title">New issue</h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            id="editor-close"
+            aria-label="Close editor"
+          >
+            <span data-icon="x"></span>
+          </button>
+        </div>
+        <div class="dialog-content">
+          <label class="field-label" for="editor-subject">Title</label
+          ><input
+            id="editor-subject"
+            class="text-input title-input"
+            placeholder="What needs to be done?"
+            required
+            maxlength="512"
+            autocomplete="off"
+          />
+          <div class="field-label description-label">
+            <label for="editor-body">Description</label
+            ><span>Markdown supported</span>
+          </div>
+          <div class="markdown-editor">
+            <div
+              class="editor-tabs"
+              role="tablist"
+              aria-label="Description mode"
+            >
+              <button
+                type="button"
+                id="editor-write"
+                class="selected"
+                role="tab"
+                aria-selected="true"
+              >
+                Write</button
+              ><button
+                type="button"
+                id="editor-preview"
+                role="tab"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                Preview
+              </button>
+            </div>
+            <textarea
+              id="editor-body"
+              aria-label="Issue description"
+              placeholder="Add context, a plan, or acceptance criteria…"
+              rows="9"
+            ></textarea>
+            <div
+              class="markdown preview-content"
+              id="editor-rendered"
+              hidden
+            ></div>
+          </div>
+          <label class="field-label labels-label" for="editor-labels"
+            >Labels <span>optional</span></label
+          >
+          <div class="tag-input" id="editor-tags">
+            <div class="tag-chips"></div>
+            <input
+              id="editor-labels"
+              placeholder="Search or add a tag…"
+              autocomplete="off"
+            />
+            <div
+              class="tag-suggestions"
+              role="group"
+              aria-label="Suggested issue tags"
+              hidden
+            ></div>
+          </div>
+          <p class="field-help">
+            Select a tag or type a new one and press Enter.
+          </p>
+          <p class="form-error" id="editor-error" role="alert" hidden></p>
+          <div id="editor-conflict" class="conflict-panel" hidden>
+            <details open>
+              <summary>Latest saved version</summary>
+              <pre id="conflict-latest"></pre>
+            </details>
+            <button id="conflict-replace" type="button" class="button">
+              Save my draft over this version
+            </button>
+          </div>
+        </div>
+        <div class="dialog-footer">
+          <span><kbd>⌘</kbd> <kbd>↵</kbd> to save</span>
+          <div>
+            <button type="button" class="button" id="editor-cancel">
+              Cancel</button
+            ><button type="submit" class="button primary" id="editor-submit">
+              Create issue<span data-icon="arrow-right"></span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+      <form id="confirm-form">
+        <div class="dialog-heading">
+          <h2 id="confirm-title">Confirm action</h2>
+        </div>
+        <p id="confirm-message"></p>
+        <label
+          id="confirm-input-label"
+          class="field-label"
+          for="confirm-input"
+          hidden
+          >Project name</label
+        ><input
+          id="confirm-input"
+          class="text-input"
+          hidden
+          autocomplete="off"
+        />
+        <p class="form-error" id="confirm-error" role="alert" hidden></p>
+        <div class="dialog-footer">
+          <button class="button" id="confirm-cancel" type="button">
+            Cancel</button
+          ><button class="button primary" id="confirm-submit" type="submit">
+            Confirm
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <noscript
+      ><p class="no-script">
+        Enable JavaScript to use the issue interface. The hey-boss issue CLI
+        remains available.
+      </p></noscript
+    >
+  </body>
+</html>
