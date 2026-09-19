@@ -34,7 +34,8 @@ to zoom, and use Fit for an overview. The small overview also jumps to a locatio
 Select a card to read its Markdown, native assignment/state and incoming/outgoing
 relationships; visible dependencies show directional arrows. Branch buttons and
 Expand/Collapse all control the hierarchy. Search reveals matching branches and
-keeps the search field focused. Outline switches to the complete nested reading
+keeps the search field focused. Previous/next buttons cycle matches; Enter and
+Shift+Enter do the same from the field. Outline switches to the complete nested reading
 view. Keyboard users can Tab to cards/controls, use arrow keys to pan the map,
 `+`/`-` to zoom, `0`/Home to fit, and Escape to close topic details.
 

@@ -283,7 +283,16 @@
     }
     update(
       nodes,
-      { collapsed, matches, hits, project, selected, links, assigneeName },
+      {
+        collapsed,
+        matches,
+        hits,
+        currentHit,
+        project,
+        selected,
+        links,
+        assigneeName,
+      },
     ) {
       const changed = this.project?.id !== project.id;
       this.data = layout(nodes, collapsed, matches);
@@ -291,6 +300,7 @@
       this.selected = selected;
       this.links = links;
       this.hits = hits;
+      this.currentHit = currentHit;
       this.assigneeName = assigneeName;
       if (this.overview) {
         this.overview.hidden = this.data.items.length === 0;
@@ -468,7 +478,7 @@
           this.cards.set(item.id, card);
           this.layer.append(card);
         }
-        card.className = `map-item${item.project ? " map-project" : ""}${item.id === this.selected ? " selected" : ""}${this.hits?.has(item.id) ? " search-hit" : ""}`;
+        card.className = `map-item${item.project ? " map-project" : ""}${item.id === this.selected ? " selected" : ""}${this.hits?.has(item.id) ? " search-hit" : ""}${item.id === this.currentHit ? " search-current" : ""}`;
         card.style.cssText = `left:${item.x}px;top:${item.y}px;--branch:${item.color}`;
         if (card.dataset.content !== html) {
           const active = card.contains(document.activeElement)

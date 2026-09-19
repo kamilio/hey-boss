@@ -207,6 +207,7 @@ assignment names/IDs and state. Show less fetches a fresh preview after a full r
 The web viewer opens a branching map with pan/zoom, collapsible branches and a
 clickable overview. Select cards for live details and relationships; Outline
 switches to nested reading. Search reveals matches without moving keyboard focus.
+Previous/next search buttons and Enter/Shift+Enter cycle through matches.
 `mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
 Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
 `mm view NODE` for one full live node, `show --bodies preview|none|full` to control

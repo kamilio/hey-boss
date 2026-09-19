@@ -7,6 +7,7 @@
   let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
   let detailsHTML = "", detailsNode = null;
   let renderingIndex = null;
+  let searchQuery = "", searchMatches = [], searchHit = null, mapHit = null;
   const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
   const route = () => new URLSearchParams(location.hash.slice(1));
   const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
@@ -148,17 +149,30 @@
         while (current && !visible.has(current.id)) { visible.add(current.id); current = nodes.get(current.parent_id); }
       }
     }
+    searchMatches = query ? [...matched] : [];
+    if (query !== searchQuery || !matched.has(searchHit)) searchHit = searchMatches[0] || null;
+    searchQuery = query;
+    $("#search-navigation").hidden = !query;
+    $("#search-status").textContent = searchMatches.length ? `${searchMatches.indexOf(searchHit) + 1} of ${searchMatches.length}` : query ? "No matches" : "";
+    $("#search-status").title = searchHit ? nodes.get(searchHit).title : "";
+    $("#search-previous").disabled = $("#search-next").disabled = searchMatches.length < 2;
     $("#count").textContent = `${graph.nodes.length} ${graph.nodes.length === 1 ? "node" : "nodes"} · ${graph.links.length} ${graph.links.length === 1 ? "link" : "links"}`;
     $("#revision").textContent = `Map version ${graph.version}`;
+    document.body.dataset.mindmapView = viewMode;
     $("#outline").hidden = viewMode !== "outline"; $("#map-panel").hidden = viewMode !== "map";
     if (viewMode === "map") {
       $("#outline").innerHTML = "";
-      if (mapQuery !== query && query && !mapQuery) mapSearchCamera = {...mapUI.camera};
-      mapUI.update(graph.nodes.map(n => nodes.get(n.id)), {collapsed, matches:query ? visible : null, hits:query ? matched : null, project:graph.project, selected, links:graph.links, assigneeName});
-      if (mapQuery !== query) {
+      if (mapQuery !== query && query && !mapQuery) mapSearchCamera = {...mapUI.camera, viewportWidth:$("#mindmap").clientWidth, viewportHeight:$("#mindmap").clientHeight};
+      mapUI.update(graph.nodes.map(n => nodes.get(n.id)), {collapsed, matches:query ? visible : null, hits:query ? matched : null, currentHit:searchHit, project:graph.project, selected, links:graph.links, assigneeName});
+      if (mapQuery !== query || mapHit !== searchHit) {
+        const changedQuery = mapQuery !== query;
         mapQuery = query;
-        if (query) { mapUI.fit(); const first = matched.values().next().value; if (first) mapUI.focus(first, false); }
-        else if (mapSearchCamera) { mapUI.camera = mapSearchCamera; mapSearchCamera = null; mapUI.schedule(); }
+        mapHit = searchHit;
+        if (query) { if (changedQuery) mapUI.fit(); if (searchHit) mapUI.focus(searchHit, false); }
+        else if (mapSearchCamera) {
+          mapUI.camera = {scale:mapSearchCamera.scale,x:mapSearchCamera.x + ($("#mindmap").clientWidth - mapSearchCamera.viewportWidth) / 2,y:mapSearchCamera.y + ($("#mindmap").clientHeight - mapSearchCamera.viewportHeight) / 2};
+          mapSearchCamera = null; mapUI.schedule();
+        }
       }
       details(nodes, incidents, visible); return;
     }
@@ -173,7 +187,7 @@
         const hasChildren = (children.get(node.id) || []).some((n) => visible.has(n.id)), expanded = Boolean(query) || !collapsed.has(node.id);
         const resource = node.kind === "issue" ? node.available === false ? `<span class="resource">${esc(issueContext(node))}</span>` : `<a class="resource" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))}</a>` : node.kind === "pr" ? `<a class="resource" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open PR ↗</a>` : node.kind === "notification" ? `<a class="resource" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification</a>` : "";
         const rel = relationships(node, nodes, incidents);
-        return `<li class="node" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(node.title)}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(node.title)}</span><div class="meta">${node.kind !== "text" ? `<span class="badge">${esc(node.kind)}</span>` : ""}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.assignee ? `<span class="assignee" title="${esc(node.assignee)}">Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
+        return `<li class="node${query && node.id === searchHit ? " highlight" : ""}" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(node.title)}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(node.title)}</span><div class="meta">${node.kind !== "text" ? `<span class="badge">${esc(node.kind)}</span>` : ""}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.assignee ? `<span class="assignee" title="${esc(node.assignee)}">Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
       }).join("")}</ul>`;
     };
     $("#outline").innerHTML = tree() || `<p class="empty">${query ? "No matching topics or relationships." : 'No topics yet.<br>Add the first with <code>hey-boss mm add \'Topic\' --id topic</code>'}</p>`;
@@ -233,6 +247,17 @@
   }
   $("#project").addEventListener("change", () => { $("#search").value = ""; location.hash = new URLSearchParams({ project: $("#project").value }).toString(); });
   $("#search").addEventListener("input", render);
+  function searchMatch(step) {
+    if (!searchMatches.length) return;
+    searchHit = searchMatches[(searchMatches.indexOf(searchHit) + step + searchMatches.length) % searchMatches.length];
+    render();
+    if (viewMode === "outline") document.getElementById(searchHit)?.scrollIntoView({block:"center"});
+  }
+  $("#search").addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing && searchMatches.length) { event.preventDefault(); searchMatch(event.shiftKey ? -1 : 1); }
+  });
+  $("#search-previous").addEventListener("click", () => searchMatch(-1));
+  $("#search-next").addEventListener("click", () => searchMatch(1));
   $("#refresh").addEventListener("click", () => load({ refresh: true }));
   $("#expand").addEventListener("click", () => branches(true));
   $("#collapse").addEventListener("click", () => branches(false));
