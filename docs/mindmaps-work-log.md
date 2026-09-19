@@ -818,3 +818,16 @@ read endpoint too and remains unsuccessful evidence; final exact asset routes
 leave native reads intact. Debug compilation, syntax and own whitespace pass.
 The overview install attempt met an active concurrent upgrader and did not
 change the installed binary. Wait for it; never remove locks or kill it.
+
+The combined shared-shell/10,000-node UI check exposed narrow-phone overflow:
+305 pixels available with a reserved scrollbar, but body minimum width 320 and
+navigation reached 336.2. A mindmap-only <=380px rule removes that minimum and
+uses compact horizontal main/navigation spacing. Restoring 12px main side
+padding also keeps map navigation clear of the overview; the first partial fix
+passed overflow but caught that overlap and is retained as unsuccessful evidence.
+The combined 34 browser assertions now pass using the same shared asset snapshot
+and unchanged native read API; returned asset hashes include the final stylesheet.
+Evidence `out/mm-map-shared-scale-integration.txt` (before),
+`out/mm-map-shared-scale-integration-after.txt` (partial),
+`out/mm-map-shared-scale-integration-final.txt` (pass). The adjustment is scoped
+to the mindmap stylesheet; concurrent shared-theme files remain intact.
