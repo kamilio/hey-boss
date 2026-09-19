@@ -575,3 +575,18 @@ navigation controls end at y=800.56 and stay visible without horizontal overflow
 Opening cards now uses at least 80% scale. Topic details include child navigation
 (first 50, with complete Outline navigation for larger child lists), avoiding long
 pans on phones. Native child selection retained heading focus and assignment.
+
+Applied the visualization increment to current main without staging concurrent
+worker/claim edits; main commit `0266a46`, feature commit `1a3ce52`. Merged current
+main into the worktree; normalized delivery anchor is `188d480`. Current-main
+verification passed 31 map + 18 web tests. Installed build `f72f6387d8a53c86`
+serves the exact current renderer/CSS/HTML bytes and an isolated map read;
+`out/mindmap-installed-smoke/visualization-result.json` records the asset hashes.
+
+Reproduced a global Expand all regression on the 2,500-node fixture: the visible
+root disappeared after layout changed. Global expansion/collapse now preserve
+the nearest root's screen position. The real browser retains that root with
+0.000122 CSS-pixel expansion shift and zero collapse shift. Evidence:
+`out/mm-map-global-expand-before.txt`, `out/mm-map-global-expand-after.txt`.
+Closing details whose card is hidden now returns focus to a visible ancestor
+or to the map surface.
