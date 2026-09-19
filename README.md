@@ -33,6 +33,13 @@ work to the pool. Use `--body -` for Markdown on stdin, `--json` for automation,
 and `--agent ID` if session detection is unavailable. See [issue commands and
 storage](docs/issues.md) for recovery, filtering, retry IDs, and a shared SSH host.
 
+Create project outlines with `hey-boss mm add 'Release' --id release`, reference work
+with `mm issue NUMBER --under release`, and explain dependencies with
+`mm link FROM TO --kind depends-on --description 'Why it depends'`.
+`mm web` serves a read-only nested-list viewer. Maps support cross-project references,
+live issues, automatic issue→PR links and pending-only notifications.
+See [mindmap commands](docs/mindmaps.md) and [tool research](docs/mindmaps-research.md).
+
 Open the issue interface with `hey-boss issue web`, then visit
 [127.0.0.1:4781](http://127.0.0.1:4781/). It shares the CLI's SQLite database and
 includes a project switcher, Markdown editing, comments, claims, search, history,

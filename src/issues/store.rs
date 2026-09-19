@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "../mindmap/store.rs"]
+mod mindmap;
 #[path = "worker_registry.rs"]
 mod registry;
 #[path = "subtasks.rs"]
@@ -138,6 +140,7 @@ fn validate(r: &Request) -> Result<()> {
         return Err(Error::invalid("Issue number must be positive"));
     }
     match &r.operation {
+        Operation::Mindmap { operation } => operation.validate()?,
         Operation::Create {
             title,
             body: text,
@@ -361,17 +364,17 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if app != 0 && app != APPLICATION_ID || version > 9 || version > 0 && app != APPLICATION_ID
+        if app != 0 && app != APPLICATION_ID || version > 10 || version > 0 && app != APPLICATION_ID
         {
             return Err(Error::invalid(
                 "Incompatible issue database; use the matching hey-boss version",
             ));
         }
-        if version < 9 {
+        if version < 10 {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
             let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if app != 0 && app != APPLICATION_ID || version > 9 {
+            if app != 0 && app != APPLICATION_ID || version > 10 {
                 return Err(Error::invalid(
                     "Incompatible issue database; use the matching hey-boss version",
                 ));
@@ -429,6 +432,10 @@ impl Store {
                 subtasks::migrate_sync(&tx)?;
                 tx.pragma_update(None, "user_version", 9)?;
             }
+            if version < 10 {
+                tx.execute_batch(mindmap::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 10)?;
+            }
             tx.commit()?;
         }
         let journal: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
@@ -440,6 +447,9 @@ impl Store {
         // marks completion; repeated opens must not acquire the writer lock.
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_deferred_subtasks' AND type='table')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
+        }
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url')", [], |r| r.get::<_, i64>(0))? < 2 {
+            db.execute_batch(mindmap::INDEXES)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
         // Normalize it without terminating supervisors that are still draining.
@@ -537,6 +547,7 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
             | Operation::ControlWorker { .. }

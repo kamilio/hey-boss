@@ -653,6 +653,7 @@ pub fn run(options: &Options) -> Result<()> {
                     .filter(|s| !s.is_empty())
             }),
             json: options.json,
+            mindmap: false,
         });
     }
     let rpc = matches!(options.action, Action::Rpc);
