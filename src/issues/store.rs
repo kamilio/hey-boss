@@ -213,7 +213,16 @@ fn validate(r: &Request) -> Result<()> {
             return Err(Error::invalid("Comment ID must be positive"));
         }
         Operation::Artifact { operation } => operation.validate()?,
-        Operation::Mindmap { operation } => operation.validate()?,
+        Operation::Mindmap { operation } => {
+            operation.validate()?;
+            if matches!(
+                operation,
+                crate::mindmap::Operation::Batch { dry_run: true, .. }
+            ) && r.request_id.is_some()
+            {
+                return Err(Error::invalid("--request-id cannot be used with --dry-run"));
+            }
+        }
         Operation::Create {
             title,
             body: text,
@@ -970,7 +979,16 @@ impl Store {
             tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response) VALUES(?1,?2,?3,?4,?5)",
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
         }
-        tx.commit()?;
+        if matches!(
+            &r.operation,
+            Operation::Mindmap {
+                operation: crate::mindmap::Operation::Batch { dry_run: true, .. }
+            }
+        ) {
+            tx.rollback()?;
+        } else {
+            tx.commit()?;
+        }
         if matches!(&r.operation, Operation::ControlWorker { command, .. } if command == "stop_worker" || command == "stop")
         {
             // No process inspection or termination while holding the writer lock.

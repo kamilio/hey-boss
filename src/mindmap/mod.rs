@@ -61,9 +61,71 @@ pub fn project_body(node: &mut Value, mode: BodyMode) {
     node["body"] = json!(body);
 }
 
+/// Restricted operations accepted by one atomic organization batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BatchEdit {
+    Edit {
+        node: String,
+        title: Option<String>,
+        #[serde(default)]
+        clear_label: bool,
+    },
+    Alias {
+        node: String,
+        alias: Option<String>,
+    },
+    Move {
+        node: String,
+        under: Option<String>,
+        before: Option<String>,
+        after: Option<String>,
+    },
+}
+impl BatchEdit {
+    pub(super) fn operation(&self) -> Operation {
+        match self {
+            Self::Edit {
+                node,
+                title,
+                clear_label,
+            } => Operation::Edit {
+                node: node.clone(),
+                title: title.clone(),
+                body: None,
+                clear_label: *clear_label,
+                if_version: None,
+            },
+            Self::Alias { node, alias } => Operation::Alias {
+                node: node.clone(),
+                alias: alias.clone(),
+                if_version: None,
+            },
+            Self::Move {
+                node,
+                under,
+                before,
+                after,
+            } => Operation::Move {
+                node: node.clone(),
+                under: under.clone(),
+                before: before.clone(),
+                after: after.clone(),
+                if_version: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Batch {
+        edits: Vec<BatchEdit>,
+        #[serde(default)]
+        dry_run: bool,
+        if_version: Option<i64>,
+    },
     Show {
         #[serde(default)]
         body_mode: BodyMode,
@@ -135,6 +197,20 @@ impl Operation {
     }
     pub fn validate(&self) -> Result<()> {
         let version = match self {
+            Self::Batch {
+                edits, if_version, ..
+            } => {
+                if edits.len() > 10000 {
+                    return Err(Error::invalid("A batch supports at most 10000 edits"));
+                }
+                for edit in edits {
+                    edit.operation().validate()?;
+                }
+                if serde_json::to_vec(edits)?.len() > BODY_LIMIT {
+                    return Err(Error::invalid("Batch exceeds 1 MiB"));
+                }
+                *if_version
+            }
             Self::Add {
                 title,
                 body,

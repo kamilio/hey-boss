@@ -206,6 +206,15 @@ Descriptions are optional; A depends-on B means A waits for B. Nesting stays wit
 one project; cycles are rejected. Automatic issue→PR relationships come from
 `issue pr add/remove`. Only confirmed pending Inbox notices appear; an unavailable
 Inbox is reported explicitly. Map reads never complete notices or change issues.
+`mm batch --file edits.json` (or `--file -` for stdin) atomically applies a JSON
+array of `edit` (`node`, `title` or `clear_label`), `alias` (`node`, `alias`), and
+`move` (`node`, optional `under`/`before`/`after`) entries. Preview with `--dry-run`
+and guard the whole batch with `--if-version`. All selectors bind before edits;
+invalid nodes, duplicate requested labels/aliases, cycles and stale versions roll
+back everything. JSON returns compact `changed_nodes` before/after metadata and
+one resulting version; empty/net no-op batches do not advance it. Identical
+`--request-id` retries are safe after alias changes; dry runs cannot use request IDs.
+
 `mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
 `mm alias NODE NAME` changes a readable alias; `--clear` removes it without changing
 the generated node ID or links. Aliases must remain unique within their project.

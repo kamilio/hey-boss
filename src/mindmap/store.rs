@@ -3,7 +3,7 @@ use crate::issues::{Error, Project, Result};
 use crate::mindmap::{BodyMode, Operation, ReadBudget, project_body};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 pub(super) const SCHEMA: &str = include_str!("schema.sql");
@@ -313,7 +313,8 @@ fn version(db: &Connection, p: &str) -> Result<i64> {
 }
 fn expected(op: &Operation) -> Option<i64> {
     match op {
-        Operation::Add { if_version, .. }
+        Operation::Batch { if_version, .. }
+        | Operation::Add { if_version, .. }
         | Operation::Edit { if_version, .. }
         | Operation::Alias { if_version, .. }
         | Operation::Move { if_version, .. }
@@ -341,11 +342,146 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             "Map changed; show it again and retry with the current version",
         ));
     }
+    if let Operation::Batch { edits, dry_run, .. } = op {
+        return batch(db, p, edits, *dry_run, now);
+    }
+    execute_single(db, p, op, now, true)
+}
+
+fn organization_snapshot(db: &Connection, p: &Project) -> Result<BTreeMap<String, Value>> {
+    let mut stmt = db.prepare("SELECT id,alias,parent_id,position,title,display_label FROM mindmap_nodes WHERE project_id=?1")?;
+    Ok(stmt
+        .query_map([&p.id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                json!({
+                    "alias":r.get::<_,Option<String>>(1)?,
+                    "parent_id":r.get::<_,Option<String>>(2)?,
+                    "position":r.get::<_,i64>(3)?,
+                    "title":r.get::<_,String>(4)?,
+                    "display_label":r.get::<_,Option<String>>(5)?
+                }),
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+fn batch(
+    db: &Connection,
+    p: &Project,
+    edits: &[crate::mindmap::BatchEdit],
+    dry_run: bool,
+    now: i64,
+) -> Result<Value> {
+    let base_version = version(db, &p.id)?;
+    // Bind all selectors against the original map. Changing an alias never
+    // changes the meaning of a later selector in the same input.
+    let mut touched = BTreeSet::new();
+    let mut resolve = |selector: &str| -> Result<String> {
+        let node = select(db, p, selector, false, now, &mut touched)?;
+        same_project(&node, p)?;
+        Ok(id(&node).to_owned())
+    };
+    let operations = edits
+        .iter()
+        .map(|edit| {
+            let mut op = edit.operation();
+            match &mut op {
+                Operation::Edit { node, .. } | Operation::Alias { node, .. } => {
+                    *node = resolve(node)?
+                }
+                Operation::Move {
+                    node,
+                    under,
+                    before,
+                    after,
+                    ..
+                } => {
+                    *node = resolve(node)?;
+                    for selector in [under, before, after].into_iter().flatten() {
+                        *selector = resolve(selector)?;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            Ok(op)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let before = organization_snapshot(db, p)?;
+    db.execute_batch("SAVEPOINT mindmap_batch")?;
+    for op in &operations {
+        execute_single(db, p, op, now, false)?;
+    }
+    let after = organization_snapshot(db, p)?;
+    // Reject newly requested ambiguous labels, without making pre-existing
+    // duplicate ordinary titles prevent unrelated organization.
+    let mut labels = BTreeMap::<&str, usize>::new();
+    for value in after.values() {
+        let label = value["display_label"]
+            .as_str()
+            .unwrap_or(value["title"].as_str().unwrap());
+        *labels.entry(label).or_default() += 1;
+    }
+    for op in &operations {
+        if let Operation::Edit {
+            node,
+            title: Some(_),
+            ..
+        } = op
+        {
+            let value = &after[node];
+            if value["title"] == before[node]["title"]
+                && value["display_label"] == before[node]["display_label"]
+            {
+                continue;
+            }
+            let label = value["display_label"]
+                .as_str()
+                .unwrap_or(value["title"].as_str().unwrap());
+            let collision = labels[label] > 1;
+            if collision {
+                return Err(Error::conflict(format!(
+                    "Label {label:?} is already in use"
+                )));
+            }
+        }
+    }
+    let changed_nodes = after
+        .iter()
+        .filter(|(id, value)| before.get(*id) != Some(*value))
+        .map(|(id, value)| json!({"id":id,"before":before[id],"after":value}))
+        .collect::<Vec<_>>();
+    let changed = !changed_nodes.is_empty();
+    if !changed {
+        // Also undo timestamps when a sequence cancels its own edits.
+        db.execute_batch("ROLLBACK TO mindmap_batch")?;
+    } else {
+        db.execute("INSERT INTO mindmaps(project_id,version) VALUES(?1,1) ON CONFLICT(project_id) DO UPDATE SET version=version+1", [&p.id])?;
+        db.execute(
+            "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
+            params![p.id, now],
+        )?;
+    }
+    db.execute_batch("RELEASE mindmap_batch")?;
+    let result = json!({"ok":true,"project":p,"changed":changed,"dry_run":dry_run,
+        "base_version":base_version,"version":version(db,&p.id)?,"changed_nodes":changed_nodes});
+    ReadBudget::default().charge(&result)?;
+    Ok(result)
+}
+
+fn execute_single(
+    db: &Connection,
+    p: &Project,
+    op: &Operation,
+    now: i64,
+    bump_version: bool,
+) -> Result<Value> {
     let mut touched = BTreeSet::new();
     let mut selected = None;
     let mut relationship = None;
     let mut changed = false;
     match op {
+        Operation::Batch { .. } => unreachable!("Batches are dispatched before single operations"),
         Operation::Show { .. } => {}
         Operation::View { node, body_mode } => {
             let mut node = select(db, p, node, false, now, &mut touched)?;
@@ -530,19 +666,29 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
                     siblings.iter().position(|s| s == id(a)).unwrap() + usize::from(after.is_some())
                 })
                 .unwrap_or(siblings.len());
+            // An unchanged destination/order is a real no-op, including timestamps.
+            let current: Vec<String> = {
+                let mut stmt = db.prepare("SELECT id FROM mindmap_nodes WHERE project_id=?1 AND parent_id IS ?2 ORDER BY position,id")?;
+                stmt.query_map(params![p.id, parent], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
             siblings.insert(index, id(&node).into());
-            db.execute(
-                "UPDATE mindmap_nodes SET parent_id=?2,updated_at=?3 WHERE id=?1",
-                params![id(&node), parent, now],
-            )?;
-            for (position, sibling) in siblings.iter().enumerate() {
+            changed = node["parent_id"].as_str() != parent.as_deref() || current != siblings;
+            if !changed {
+                selected = Some(node);
+            } else {
                 db.execute(
-                    "UPDATE mindmap_nodes SET position=?2 WHERE id=?1",
-                    params![sibling, position as i64],
+                    "UPDATE mindmap_nodes SET parent_id=?2,updated_at=?3 WHERE id=?1",
+                    params![id(&node), parent, now],
                 )?;
+                for (position, sibling) in siblings.iter().enumerate() {
+                    db.execute(
+                        "UPDATE mindmap_nodes SET position=?2 WHERE id=?1",
+                        params![sibling, position as i64],
+                    )?;
+                }
+                selected = Some(get(db, id(&node))?);
             }
-            selected = Some(get(db, id(&node))?);
-            changed = true;
         }
         Operation::Remove {
             node, recursive, ..
@@ -608,7 +754,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     if changed && !matches!(op, Operation::Link { .. } | Operation::Unlink { .. }) {
         touched.insert(p.id.clone());
     }
-    for project in &touched {
+    for project in touched.iter().filter(|_| bump_version) {
         db.execute("INSERT INTO mindmaps(project_id,version) VALUES(?1,1) ON CONFLICT(project_id) DO UPDATE SET version=version+1",[project])?;
         db.execute(
             "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
