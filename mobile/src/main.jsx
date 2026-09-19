@@ -1,8 +1,9 @@
 import React,{useState,useEffect,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Theme,Button,TextArea,TextField,Spinner,Dialog} from '@radix-ui/themes';
-import {Inbox,History,Settings,Bell,MessageCircle,Check,CheckCheck,TriangleAlert,CircleAlert,Info,ArrowUpRight,ChevronRight,X,Monitor,Server,RefreshCw} from 'lucide-react';
+import {Inbox,History,Settings,Bell,MessageCircle,Check,CheckCheck,TriangleAlert,CircleAlert,Info,ArrowUpRight,ChevronRight,X,Monitor,Server,RefreshCw,ListTodo} from 'lucide-react';
 import Markdown from './Markdown';
+import Issues from './Issues';
 import usePullRefresh from './usePullRefresh';
 import LiquidGlass from 'liquid-glass-react';
 import {activityGroups,activityTime,activityDateTime} from './activity';
@@ -43,7 +44,7 @@ function App(){
   }catch(e){if(e.status===401)setPaired(false);else setConnectionError('Unable to connect. Your requests are safe; retry when online.');}
  })().finally(()=>{refreshing.current=null;}),[]);
  const shellRef=useRef(null);
- const pull=usePullRefresh(shellRef,paired===true&&selectedID===null&&tab!=='settings',refresh);
+ const pull=usePullRefresh(shellRef,paired===true&&selectedID===null&&tab!=='settings'&&tab!=='issues',refresh);
  useEffect(()=>{
   refresh();const timer=setInterval(()=>{if(!document.hidden)refresh();},15000);
   const visible=()=>{if(!document.hidden)refresh();};document.addEventListener('visibilitychange',visible);window.addEventListener('online',refresh);window.addEventListener('pageshow',refresh);
@@ -104,8 +105,8 @@ function App(){
   <div className={'pull-refresh '+(pull.loading?'is-refreshing':'')} style={{height:pull.distance}} role="status" aria-live="polite">{pull.distance>0&&<span><RefreshCw size={18} style={{transform:pull.loading?undefined:`rotate(${pull.distance*3}deg)`}}/>{pull.loading?'Refreshing…':pull.ready?'Release to refresh':'Pull to refresh'}</span>}</div>
   <main>
    {paired===null?<div className="loading"><Spinner size="3"/><p>Connecting…</p></div>:!paired?<section className="pair-card glass"><MessageCircle size={30}/><h1>Connect your iPhone</h1><p>Updates and decisions, synced with your Mac.</p><form onSubmit={pair}><label htmlFor="pair-code">Pairing code</label><TextField.Root id="pair-code" value={code} onChange={e=>setCode(e.target.value)} placeholder="Enter code from your Mac" autoComplete="off" autoCapitalize="characters" size="3"/><Button size="3" loading={busy} disabled={!code.trim()} type="submit">Connect <ArrowUpRight size={16}/></Button></form>{!standalone&&<p className="install-note">Share → Add to Home Screen to enable notifications.</p>}</section>:<>
-   <div className="page-title"><h1>{tab==='inbox'?'Inbox':tab==='history'?'Activity':'Settings'}</h1>{tab!=='settings'&&<div className="title-actions">{tab==='inbox'&&pending.length>0&&<span className="count">{pending.length}</span>}<button className="refresh-button" aria-label="Refresh inbox" disabled={pull.loading} onClick={pull.run}><RefreshCw size={18}/></button></div>}</div>
-   {tab==='settings'?<section className="settings glass">
+   <div className="page-title"><h1>{tab==='inbox'?'Inbox':tab==='history'?'Activity':tab==='issues'?'Issues':'Settings'}</h1>{tab!=='settings'&&tab!=='issues'&&<div className="title-actions">{tab==='inbox'&&pending.length>0&&<span className="count">{pending.length}</span>}<button className="refresh-button" aria-label="Refresh inbox" disabled={pull.loading} onClick={pull.run}><RefreshCw size={18}/></button></div>}</div>
+   {tab==='issues'?<Issues api={api}/>:tab==='settings'?<section className="settings glass">
     <div className="settings-row"><span className="setting-label"><Bell size={18}/>Notifications<small>{state.pushEnabled?'Enabled':'Not enabled'}</small></span><Button size="2" variant="soft" loading={pushBusy} onClick={enablePush}>{state.pushEnabled?'Check':'Enable'}</Button></div>
     <div className="settings-block"><label id="routing-label">Send notifications</label><div className="segmented" role="group" aria-labelledby="routing-label">{[['automatic','When away'],['always','Always'],['off','Off']].map(([value,label])=><button key={value} disabled={settingsBusy} aria-pressed={(state.notifications?.mode||'automatic')===value} onClick={()=>savePreferences({mode:value})}>{label}</button>)}</div><p className="fine">{state.notifications?.mode==='off'?'Updates still appear in your inbox.':state.notifications?.mode==='always'?'Notify this iPhone even while you use your Mac.':state.notifications?.macState==='unknown'?'Waiting for Mac status. iPhone push stays paused.':state.notifications?.notifyPhone?'You’re away from your Mac. iPhone push is active.':'Your Mac is available. iPhone push is paused.'}</p></div>
     <details className="settings-help"><summary>Connection details</summary><p>Opening an update marks it read on both devices. Questions close when you answer. Offline read receipts retry automatically.</p><p>iOS may retain a delivered Lock Screen notification until the app opens or another push arrives.</p><p>Automatic pushes require {Math.round((state.notifications?.awayAfterSeconds||600)/60)} minutes without mouse or keyboard input, confirmed for another minute. Unreliable readings stay quiet. A two-minute disconnect also enables phone pushes.</p><p>Mac activity: {macIdle==null?'idle reading unavailable':`last input ${Math.floor(macIdle)} seconds ago`}. Only aggregate inactivity is sampled; no keys, app contents or screen recording.</p><Button variant="soft" color="red" onClick={async()=>{await api('/logout',{});setDrafts({});setState(null);setPaired(false);setTab('inbox');}}>Disconnect this iPhone</Button></details>
@@ -121,7 +122,7 @@ function App(){
    {(error||connectionError)&&<div className="message error" role="alert"><CircleAlert size={18}/><span>{error||connectionError}</span><button aria-label="Dismiss error" onClick={()=>{setError('');setConnectionError('');}}><X size={18}/></button></div>}
    {notice&&!error&&!connectionError&&<div className="message" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={()=>setNotice('')}><X size={18}/></button></div>}
   </main>
-  {paired&&<nav aria-label="Main navigation">{glassNav(<div className="tabs">{[['inbox','Inbox',Inbox],['history','Activity',History]].map(([value,label,Icon])=><button key={value} className={tab===value?'selected':''} aria-current={tab===value?'page':undefined} onClick={()=>{setTab(value);setNotice('');}}><Icon size={21} strokeWidth={1.8}/><span>{label}</span>{value==='inbox'&&pending.length>0&&<b>{pending.length}</b>}</button>)}</div>)}</nav>}
+  {paired&&<nav aria-label="Main navigation">{glassNav(<div className="tabs">{[['inbox','Inbox',Inbox],['history','Activity',History],['issues','Issues',ListTodo]].map(([value,label,Icon])=><button key={value} className={tab===value?'selected':''} aria-current={tab===value?'page':undefined} onClick={()=>{setTab(value);setNotice('');}}><Icon size={21} strokeWidth={1.8}/><span>{label}</span>{value==='inbox'&&pending.length>0&&<b>{pending.length}</b>}</button>)}</div>)}</nav>}
   <Dialog.Root open={selectedID!==null} onOpenChange={open=>{if(!open)closeReader();}}><Dialog.Content className="reader-dialog" aria-describedby={undefined} onOpenAutoFocus={event=>{event.preventDefault();document.getElementById('reader-heading')?.focus();}}>
    <div className="reader-top"><span className="reader-context">{selected?.project||'Update'}</span><Dialog.Close><button className="icon-button" aria-label="Close reader"><X size={20}/></button></Dialog.Close></div>
    <Dialog.Title id="reader-heading" tabIndex={-1}>{selected?.title||state?.tasks.find(t=>t.taskID===selectedID)?.title||'Loading update…'}</Dialog.Title>
