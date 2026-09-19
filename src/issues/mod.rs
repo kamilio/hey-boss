@@ -400,6 +400,12 @@ pub fn identifier(value: &str, name: &str, max: usize) -> Result<()> {
 }
 
 pub fn database_path() -> Result<PathBuf> {
+    database_path_for_installation(&std::env::current_exe()?.canonicalize()?)
+}
+
+/// Resolve a staged upgrade's database using the installed CLI's state pointer.
+/// Environment overrides follow the same precedence as ordinary commands.
+pub fn database_path_for_installation(exe: &std::path::Path) -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HEY_BOSS_ISSUE_DB").filter(|p| !p.is_empty()) {
         let path = PathBuf::from(path);
         if !path.is_absolute() {
@@ -414,7 +420,6 @@ pub fn database_path() -> Result<PathBuf> {
         }
         return Ok(path.join("issues.db"));
     }
-    let exe = std::env::current_exe()?.canonicalize()?;
     match std::fs::read_to_string(exe.with_file_name("hey-boss.state")) {
         Ok(value) => {
             let path = PathBuf::from(value.trim());
