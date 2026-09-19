@@ -322,6 +322,28 @@ fn stopping_a_killed_supervisor_recovers_its_orphaned_agent_and_claim() {
 }
 
 #[test]
+fn web_monitor_recovers_a_killed_worker_without_a_running_supervisor() {
+    let f = Fixture::new("web-orphan-recovery");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    worker.0.kill().unwrap();
+    worker.0.wait().unwrap();
+    let _web = Worker(
+        f.command(&["web", "--port", "0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let recovered = f.wait(|s| s["active"] == 0);
+    assert_eq!(recovered["runs"][0]["state"], "interrupted");
+    assert_eq!(recovered["eligible"], 1);
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+}
+
+#[test]
 fn worker_queue_distinguishes_open_issues_from_pickup_eligibility() {
     let f = Fixture::new("queue-counts");
     f.setup(&[]);
