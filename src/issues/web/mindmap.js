@@ -8,6 +8,7 @@
   const route = () => new URLSearchParams(location.hash.slice(1));
   const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
   const issueUrl = (node) => `/#${new URLSearchParams({ project: node.reference_project, issue: node.reference, ...(boot?.backend_host ? { host: boot.backend_host } : {}) })}`;
+  const issueContext = (node) => `${node.reference_project !== graph.project.id ? `${node.reference_project_name || projects.find((p) => p.id === node.reference_project)?.name || node.reference_project} · ` : ""}issue #${node.reference}`;
   const nodeName = (node) => `${node.project_id !== graph.project.id ? `${node.project_name || projects.find((p) => p.id === node.project_id)?.name || node.project_id} · ` : ""}${node.title}`;
   const allNodes = () => new Map([...graph.nodes, ...graph.external_nodes].map((node) => [node.id, fullBodies.get(node.id) || node]));
   function relationships(node, nodes, incidents) {
@@ -15,7 +16,7 @@
       const outgoing = link.from === node.id, other = nodes.get(outgoing ? link.to : link.from);
       if (!other) return "";
       const text = link.kind === "depends-on" ? (outgoing ? "Depends on" : "Required by") : link.kind === "pull-request" ? (outgoing ? "Pull request" : "Issue") : `${outgoing ? "→" : "←"} ${link.kind}`;
-      return `<li><span class="relation-kind">${esc(text)}</span> <a data-map-link href="${esc(other.resource_only && other.kind === "issue" ? issueUrl(other) : mapUrl(other.project_id, other.id))}">${esc(nodeName(other))}</a>${link.description ? `<span class="description">— ${esc(link.description)}</span>` : ""}${link.automatic ? ' <span class="automatic">automatic</span>' : ""}</li>`;
+      return `<li><span class="relation-kind">${esc(text)}</span> <a data-map-link href="${esc(other.resource_only && other.kind === "issue" ? issueUrl(other) : mapUrl(other.project_id, other.id))}">${esc(nodeName(other))}</a>${other.kind === "issue" ? ` <span class="description">(${esc(issueContext(other))})</span> ` : ""}${link.description ? `<span class="description">— ${esc(link.description)}</span>` : ""}${link.automatic ? ' <span class="automatic">automatic</span>' : ""}</li>`;
     }).join("");
   }
   function bodyContent(node) {
@@ -71,7 +72,7 @@
     for (const node of graph.nodes) {
       const rel = query ? incidents.get(node.id) || [] : [];
       const display = nodes.get(node.id);
-      if (!query || [display.title, display.body, node.alias, node.kind, node.reference, ...rel.flatMap((l) => [l.kind, l.description, nodes.get(l.from)?.title, nodes.get(l.to)?.title])].join(" ").toLowerCase().includes(query)) {
+      if (!query || [display.title, display.body, node.alias, node.kind, node.reference, node.reference_project, node.reference_project_name, ...rel.flatMap((l) => [l.kind, l.description, nodes.get(l.from)?.title, nodes.get(l.to)?.title])].join(" ").toLowerCase().includes(query)) {
         let current = node;
         while (current && !visible.has(current.id)) { visible.add(current.id); current = nodes.get(current.parent_id); }
       }
@@ -82,7 +83,7 @@
       return `<ul class="tree">${list.map((saved) => {
         const node = nodes.get(saved.id);
         const hasChildren = (children.get(node.id) || []).some((n) => visible.has(n.id)), expanded = Boolean(query) || !collapsed.has(node.id);
-        const resource = node.kind === "issue" ? `<a class="resource" href="${esc(issueUrl(node))}">Open issue #${esc(node.reference)}</a>` : node.kind === "pr" ? `<a class="resource" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open PR ↗</a>` : node.kind === "notification" ? `<a class="resource" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification</a>` : "";
+        const resource = node.kind === "issue" ? node.available === false ? `<span class="resource">${esc(issueContext(node))}</span>` : `<a class="resource" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))}</a>` : node.kind === "pr" ? `<a class="resource" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open PR ↗</a>` : node.kind === "notification" ? `<a class="resource" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification</a>` : "";
         const rel = relationships(node, nodes, incidents);
         return `<li class="node" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(node.title)}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(node.title)}</span><div class="meta">${node.kind !== "text" ? `<span class="badge">${esc(node.kind)}</span>` : ""}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
       }).join("")}</ul>`;

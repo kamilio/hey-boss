@@ -365,3 +365,27 @@ Delivery is now proven for the installed local command. The full goal remains ac
 continue the requested eight-hour work period, inspect cross-project resource labels
 and unavailable-resource navigation, check long PR URL authorship consistency, and
 perform the final requirement audit before readiness notification/completion.
+
+## Resource context and long PR references
+
+Mirrored issue nodes now project `reference_project_name` alongside their stable
+resource project ID. CLI `view` prints the project, issue number and full project
+ID. The viewer labels foreign issue-opening links with the source project and
+adds issue context to relationship endpoints; search also matches resource project
+names/IDs. Deleted resources retain their map node and unavailable state without
+an issue-opening link.
+
+Explicit `mm pr` and typed PR creation now accept the same 2,048-byte resource
+URLs. Custom labels and ordinary topic titles remain limited to 512 bytes. PR
+title edits can restore the full reference URL, including equivalent trailing
+slash forms. Failed over-limit typed creation remains atomic.
+
+Focused verification: 29 mindmap tests and 16 web tests passed. New CLI fixtures
+cover both URL creation paths, restoring full URL labels, rejected oversized
+custom/topic labels and atomic rejection of oversized references. Mirrored issue
+views retain source context and node identity after resource deletion. Actual
+390×844 browser snapshot and screenshot verify the foreign-project label and
+unavailable issue presentation using isolated demo data. Browser session still
+contained earlier failure-test routes; cleared those routes and disabled cache
+before checking the current assets. Screenshot:
+`output/playwright/mm-reference-mobile.png`.

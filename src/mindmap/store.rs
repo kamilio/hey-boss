@@ -397,6 +397,9 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
                 return Err(Error::invalid("PR nodes accept --title only"));
             }
             let title = title.as_deref().unwrap_or(node["title"].as_str().unwrap());
+            if node["kind"] != "pr" || node["reference"] != title.trim_end_matches('/') {
+                crate::issues::identifier(title, "node title", 512)?;
+            }
             let body = body.as_deref().unwrap_or(node["body"].as_str().unwrap());
             changed = node["title"] != title || node["body"] != body;
             if changed {
@@ -621,6 +624,13 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
 }
 fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
     if node["kind"] == "issue" {
+        let project = node["reference_project"].as_str().unwrap();
+        let name: Option<String> = db
+            .query_row("SELECT name FROM projects WHERE id=?1", [project], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        node["reference_project_name"] = json!(name.unwrap_or_else(|| project.to_owned()));
         let number = node["reference"].as_str().unwrap().parse().unwrap();
         match get_issue(
             db,

@@ -58,7 +58,12 @@ prefers its node in the current map, then in the issue's own project map. Traili
 slash variants of the same PR attachment do not duplicate automatic nodes or links.
 Automatic links are not manually editable with `mm link/unlink`.
 
-PR labels default to their URLs. Supply `mm pr URL --title LABEL`, or use
+Mirrored issues show their source project and issue number in the viewer and
+`mm view`. Deleted issues keep their saved map references with an unavailable
+state; the viewer omits their issue-opening link.
+
+PR labels default to their URLs, including URLs up to 2,048 bytes. Custom labels
+and ordinary topic titles support up to 512 bytes. Supply `mm pr URL --title LABEL`, or use
 `mm edit implementation-pr --title 'Navigation polish'` to change a saved PR label.
 Its URL, issue attachments and dependency links remain intact. `mm view` prints the
 URL, and Markdown export makes the label a link to the PR. PRs accept title edits;
