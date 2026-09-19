@@ -24,7 +24,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Runtime options for standalone dashboards and embedded worker supervisors.
+/// Runtime options for standalone dashboards and embedded workers.
 pub struct Options {
     pub client: Client,
     pub id: Option<String>,

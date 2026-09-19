@@ -443,8 +443,8 @@ fn a_resume_error_preserves_the_saved_session_for_retry() {
 }
 
 #[test]
-fn stopping_a_killed_supervisor_recovers_its_orphaned_agent_and_claim() {
-    let f = Fixture::new("killed-supervisor-release");
+fn stopping_a_killed_worker_recovers_its_orphaned_agent_and_claim() {
+    let f = Fixture::new("killed-worker-release");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
     let mut worker = f.worker();
@@ -471,7 +471,7 @@ fn stopping_a_killed_supervisor_recovers_its_orphaned_agent_and_claim() {
 }
 
 #[test]
-fn web_monitor_recovers_a_killed_worker_without_a_running_supervisor() {
+fn web_monitor_recovers_a_killed_worker_without_another_running_worker() {
     let f = Fixture::new("web-orphan-recovery");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
@@ -754,7 +754,7 @@ fn terminal_history_is_separate_bounded_and_can_be_hidden() {
             .unwrap();
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("Active sessions (0)"));
+        assert!(text.contains("Active agents (0)"));
         assert_eq!(
             text.lines()
                 .filter(|line| line.contains(" · failed · "))
@@ -1397,8 +1397,8 @@ fn writer_contention_does_not_exit_worker_or_kill_claimed_session() {
 }
 
 #[test]
-fn worker_status_reports_controller_connectivity_from_fleet_heartbeat() {
-    let f = Fixture::new("controller-connectivity");
+fn worker_status_reports_supervisor_connectivity_from_fleet_heartbeat() {
+    let f = Fixture::new("supervisor-connectivity");
     f.cli(&["create", "--title", "Connectivity fixture"]);
     let db = rusqlite::Connection::open(&f.db).unwrap();
     db.execute("UPDATE fleet_meta SET role='agent' WHERE id=1", [])
@@ -1412,8 +1412,12 @@ fn worker_status_reports_controller_connectivity_from_fleet_heartbeat() {
             .output()
             .unwrap();
         assert!(output.status.success());
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()["fleet"]["controller_connection"]
-            .clone()
+        let fleet = serde_json::from_slice::<Value>(&output.stdout).unwrap()["fleet"].clone();
+        assert_eq!(
+            fleet["supervisor_connection"],
+            fleet["controller_connection"]
+        );
+        fleet["supervisor_connection"].clone()
     };
     assert_eq!(read_status()["state"], "unknown");
     let timestamp = std::time::SystemTime::now()
@@ -1441,4 +1445,27 @@ fn worker_status_reports_controller_connectivity_from_fleet_heartbeat() {
     db.execute("UPDATE fleet_meta SET role='standalone' WHERE id=1", [])
         .unwrap();
     assert_eq!(read_status()["state"], "standalone");
+}
+
+#[test]
+fn fleet_supervisor_command_accepts_the_old_name() {
+    let help = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .args(["fleet", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("supervisor"));
+    for (name, canonical) in [
+        ("supervisor", "supervisor"),
+        ("controller", "supervisor"),
+        ("companion", "companion"),
+        ("agent", "companion"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .args(["fleet", name, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name}: {:?}", output.stderr);
+        assert!(String::from_utf8_lossy(&output.stdout).contains(canonical));
+    }
 }

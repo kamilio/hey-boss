@@ -455,7 +455,7 @@ impl Store {
             db.execute_batch(workers::HISTORY_INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
-        // Normalize it without terminating supervisors that are still draining.
+        // Normalize it without terminating workers that are still draining.
         if db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get::<_, bool>(0))? {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             registry::migrate_runtime(&tx)?;
@@ -851,7 +851,7 @@ impl Store {
         if matches!(&r.operation, Operation::ControlWorker { command, .. } if command == "stop_worker" || command == "stop")
         {
             // No process inspection or termination while holding the writer lock.
-            // A dead supervisor cannot observe its durable stop request itself.
+            // A dead worker cannot observe its durable stop request itself.
             super::worker::recover(self, &super::identity::machine()?)?;
         }
         Ok(result)

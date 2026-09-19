@@ -53,6 +53,19 @@ class FleetTests(unittest.TestCase):
         self.agent.close()
         self.temporary.cleanup()
 
+    def test_supervisor_status_preserves_existing_saved_state(self):
+        with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[]):
+            supervisor = fleet.Supervisor(self.main_path, 'main')
+        supervisor.nodes['remote'] = {'host': 'remote', 'role': 'agent'}
+        status = supervisor.status()
+        self.assertEqual(status['supervisor'], 'main')
+        self.assertEqual(status['controller'], 'main')  # Older status clients.
+        self.assertEqual(status['machines'][0]['role'], 'supervisor')
+        self.assertEqual(status['machines'][1]['role'], 'companion')
+        self.assertEqual(supervisor.nodes['remote']['role'], 'agent')
+        self.assertEqual(self.main.execute('SELECT role FROM fleet_meta WHERE id=1').fetchone()[0], 'controller')
+        self.assertEqual(json.loads((self.root / 'fleet-main.json').read_text())['role'], 'controller')
+
     def edit(self, db, **fields):
         fields['version'] = db.execute('SELECT version+1 FROM issues WHERE number=1').fetchone()[0]
         fields['updated_at'] = 1800000000000
@@ -87,18 +100,18 @@ class FleetTests(unittest.TestCase):
 
     def test_different_field_edits_merge_without_overwrite(self):
         self.edit(self.agent, body='Agent body')
-        self.edit(self.main, title='Controller title')
+        self.edit(self.main, title='Supervisor title')
         _, receipts = self.upload()
         self.assertEqual(receipts[0]['state'], 'applied')
-        self.assertEqual(self.issue(self.main)['title'], 'Controller title')
+        self.assertEqual(self.issue(self.main)['title'], 'Supervisor title')
         self.assertEqual(self.issue(self.main)['body'], 'Agent body')
 
     def test_same_field_conflict_is_retained_and_canonical_preserved(self):
         self.edit(self.agent, title='Agent title')
-        self.edit(self.main, title='Controller title')
+        self.edit(self.main, title='Supervisor title')
         _, receipts = self.upload()
         self.assertEqual(receipts[0]['state'], 'conflict')
-        self.assertEqual(self.issue(self.main)['title'], 'Controller title')
+        self.assertEqual(self.issue(self.main)['title'], 'Supervisor title')
         saved = self.main.execute('SELECT data FROM fleet_conflicts').fetchone()[0]
         self.assertIn('Agent title', saved)
 
@@ -252,30 +265,30 @@ class FleetTests(unittest.TestCase):
         _, receipts = self.upload()
         self.assertEqual(receipts[-1]['state'], 'conflict')
 
-    def test_controller_restart_reconciles_interrupted_deployments(self):
+    def test_supervisor_restart_reconciles_interrupted_deployments(self):
         with self.main:
             fleet.state_set(self.main, 'machines', {'remote': {'host': 'remote', 'state': 'connected', 'deployment': 'updating'}})
         with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[]), mock.patch.object(fleet.subprocess, 'check_output', return_value='fixture build'):
-            controller = fleet.Controller(self.main_path, 'main')
-        self.assertEqual(controller.nodes['remote']['state'], 'disconnected')
-        self.assertEqual(controller.nodes['remote']['deployment'], 'outdated')
+            supervisor = fleet.Supervisor(self.main_path, 'main')
+        self.assertEqual(supervisor.nodes['remote']['state'], 'disconnected')
+        self.assertEqual(supervisor.nodes['remote']['deployment'], 'outdated')
 
     def test_remote_deployment_success_is_independent_of_local_upgrade_lock(self):
-        controller = fleet.Controller.__new__(fleet.Controller)
-        controller.deployment_lock = threading.Lock()
-        controller.lock = threading.RLock()
-        controller.source = None
+        supervisor = fleet.Supervisor.__new__(fleet.Supervisor)
+        supervisor.deployment_lock = threading.Lock()
+        supervisor.lock = threading.RLock()
+        supervisor.source = None
         channel = mock.Mock()
-        controller.connections = {'remote': channel}
-        controller.update = mock.Mock()
-        controller.event = mock.Mock()
+        supervisor.connections = {'remote': channel}
+        supervisor.update = mock.Mock()
+        supervisor.event = mock.Mock()
         report = {'machines': [{'host': 'local', 'status': 'failed', 'error': 'Another upgrade is running'},
                                {'host': 'remote', 'status': 'updated'}]}
         result = subprocess.CompletedProcess([], 1, json.dumps(report), '')
         with mock.patch.object(fleet.subprocess, 'run', return_value=result):
-            self.assertTrue(controller.deploy('remote'))
+            self.assertTrue(supervisor.deploy('remote'))
         channel.terminate.assert_called_once()
-        controller.update.assert_called_with('remote', deployment='current', deployment_error=None)
+        supervisor.update.assert_called_with('remote', deployment='current', deployment_error=None)
 
     def test_status_does_not_create_directory_projects(self):
         with mock.patch.object(fleet, 'BINARY', BINARY), mock.patch.dict(os.environ, {'HEY_BOSS_ISSUE_DB': str(self.agent_path)}, clear=False):
@@ -302,7 +315,7 @@ class FleetTests(unittest.TestCase):
         original = {'role': 'agent', 'revision': 'previous', 'workers': []}
         path.write_text(json.dumps(original))
         with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'configure_workers', return_value=['bad checkout']):
-            result = fleet.configure_agent(self.agent, {'controller': 'main', 'revision': 'invalid', 'workers': []})
+            result = fleet.configure_companion(self.agent, {'controller': 'main', 'revision': 'invalid', 'workers': []})
         self.assertIn('configuration_error', result)
         self.assertEqual(json.loads(path.read_text()), original)
         self.assertIsNone(fleet.state_get(self.agent, 'revision'))
@@ -395,7 +408,7 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(fleet.journal(self.agent), [])
         self.assertEqual(self.issue(self.agent)['body'], 'Requirements')
 
-    def test_restart_replay_after_start_before_ack_preserves_new_supervisor(self):
+    def test_restart_replay_after_start_before_ack_preserves_new_worker(self):
         message = {'id': 'interrupted-signal', 'worker': 'worker', 'signal': 'restart'}
         with self.agent:
             self.agent.execute("INSERT INTO fleet_signals VALUES('interrupted-signal','local','worker','restart','starting',?,0)", (json.dumps({'prior_pid': 100}),))
@@ -424,7 +437,7 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(row['state'], 'starting')
         self.assertEqual(json.loads(row['result'])['failures'], 1)
 
-    def test_starting_replay_never_launches_over_prior_supervisor_or_sessions(self):
+    def test_starting_replay_never_launches_over_prior_worker_or_agents(self):
         with self.agent:
             self.agent.execute("INSERT INTO fleet_signals VALUES('unsafe-replay','local','worker','restart','starting',?,0)", (json.dumps({'prior_pid': 100}),))
         for pid, active in [(100, 0), (None, 1)]:
@@ -482,7 +495,7 @@ class FleetTests(unittest.TestCase):
         child.wait.assert_called_once()
 
     def test_remote_restart_keeps_heartbeat_channel_responsive(self):
-        code = "import importlib.util,sys,time; spec=importlib.util.spec_from_file_location('fleet',sys.argv[1]); f=importlib.util.module_from_spec(spec); spec.loader.exec_module(f); f.worker_status=lambda: []; f.apply_signal=lambda db,m: (time.sleep(2), {'id':m['id'],'state':'acknowledged'})[1]; f.agent_stdio()"
+        code = "import importlib.util,sys,time; spec=importlib.util.spec_from_file_location('fleet',sys.argv[1]); f=importlib.util.module_from_spec(spec); spec.loader.exec_module(f); f.worker_status=lambda: []; f.apply_signal=lambda db,m: (time.sleep(2), {'id':m['id'],'state':'acknowledged'})[1]; f.companion_stdio()"
         environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.agent_path), 'HEY_BOSS_FLEET_STATE': str(self.root / 'async-state'), 'HEY_BOSS_FLEET_BINARY': str(BINARY)}
         environment.pop('HEY_BOSS_ISSUE_HOST', None)
         process = subprocess.Popen([sys.executable, '-c', code, str(ROOT / 'tools/fleet_hey_boss.py')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
@@ -511,20 +524,20 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(replay['state'], 'superseded')
         start.assert_not_called()
 
-    def test_duplicate_controller_signal_does_not_rewrite_newer_intent(self):
+    def test_duplicate_supervisor_signal_does_not_rewrite_newer_intent(self):
         saved = {'machines': {'local': {'workers': [{'id': 'worker', 'intent': 'running', 'config': {}}]}}}
         desired = self.root / 'desired.json'
         desired.write_text(json.dumps(saved))
         with self.main:
             self.main.execute("INSERT INTO fleet_signals VALUES('old-pause','local','worker','pause','acknowledged','{}',0)")
-        app = fleet.Controller.__new__(fleet.Controller)
+        app = fleet.Supervisor.__new__(fleet.Supervisor)
         app.path, app.lock = self.main_path, threading.RLock()
         with mock.patch.object(fleet, 'DESIRED', desired), mock.patch.object(fleet, 'inventory', return_value=[]):
             receipt = app.signal({'host': 'local', 'worker': 'worker', 'signal': 'pause', 'id': 'old-pause'})
         self.assertEqual(receipt['state'], 'acknowledged')
         self.assertEqual(json.loads(desired.read_text()), saved)
 
-    def test_real_worker_restart_preserves_controller_and_stable_id(self):
+    def test_real_worker_restart_preserves_supervisor_and_stable_id(self):
         state = self.root / 'restart-state'
         config = self.root / 'inventory.json'
         config.write_text('{"ssh_hosts":[]}')
@@ -545,7 +558,7 @@ class FleetTests(unittest.TestCase):
         (self.root / 'mode.txt').write_text('delay')
         command('issue', '--project', 'Worker fixture', '--agent', 'human:fixture', '--json', 'create', '--title', 'Unfinished restart work')
         worker = subprocess.Popen([str(BINARY), 'worker', '--project', 'Worker fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        controller = None
+        supervisor = None
         replacement = None
         identifier = None
         try:
@@ -560,7 +573,7 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(old_pid, worker.pid)
             old_session = until(lambda: command('issue', '--project', 'Worker fixture', '--json', 'view', '1')['issue']['assignee'])
             old_agent_pid = command('worker', '--id', identifier, '--json', 'status')['runs'][0]['pid']
-            controller = subprocess.Popen([str(BINARY), 'fleet', 'controller'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            supervisor = subprocess.Popen([str(BINARY), 'fleet', 'supervisor'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             until(lambda: (state / 'fleet.sock').exists())
             signal = command('worker', '--json', 'restart', identifier)
             self.assertEqual(signal['state'], 'pending')
@@ -579,7 +592,7 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(command('issue', '--project', 'Worker fixture', '--json', 'view', '1')['issue']['assignee'], old_session)
             runs = command('worker', '--id', identifier, '--json', 'status')['runs']
             self.assertTrue(any(r['state'] == 'cancelled' and r['finished_at'] is not None for r in runs))
-            self.assertIsNone(controller.poll(), 'Controller exited during worker restart')
+            self.assertIsNone(supervisor.poll(), 'Supervisor exited during worker restart')
             worker.wait(timeout=10)
             self.assertEqual(worker.returncode, 0, worker.stderr.read())
             with mock.patch.object(fleet, 'STATE', state):
@@ -587,17 +600,17 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(replay['state'], 'acknowledged')
             self.assertEqual(next(w['pid'] for w in command('worker', '--json', 'status')['workers'] if w['id'] == identifier), replacement)
         finally:
-            if controller and controller.poll() is None and identifier:
+            if supervisor and supervisor.poll() is None and identifier:
                 try:
                     command('fleet', 'signal', 'local', identifier, 'stop')
                     until(lambda: not next(w['pid'] for w in command('worker', '--json', 'status')['workers'] if w['id'] == identifier), timeout=20)
                 finally:
-                    controller.terminate()
+                    supervisor.terminate()
                     try:
-                        controller.communicate(timeout=15)
+                        supervisor.communicate(timeout=15)
                     except subprocess.TimeoutExpired:
-                        controller.kill()
-                        controller.communicate(timeout=5)
+                        supervisor.kill()
+                        supervisor.communicate(timeout=5)
             if worker.poll() is None:
                 worker.terminate()
                 worker.communicate(timeout=10)

@@ -57,7 +57,7 @@ Files must be private; existing keys, links, and tracked files are refused. Redi
 
 ## Issues
 
-Project defaults to the repository across worktrees. Fleet agents keep durable local replicas and sync automatically with their controller. Standalone queues require the same `--host` / `HEY_BOSS_ISSUE_HOST` to target another machine.
+Project defaults to the repository across worktrees. Fleet companions keep durable local replicas and sync automatically with their supervisor. Standalone queues require the same `--host` / `HEY_BOSS_ISSUE_HOST` to target another machine.
 
 ```sh
 hey-boss issue list --unassigned --json
@@ -93,6 +93,12 @@ still race the final check. See `docs/github-drain.md` in the source repository.
 
 ## Issue workers
 
+Use **Supervisor → Worker → Agent** consistently: the supervisor coordinates the
+fleet, workers pick issues and manage agent lifecycle/retries, and agents are
+Codex coding sessions. A machine companion synchronizes its replica and applies
+worker controls. `fleet supervisor` and `fleet companion` run these background
+services; `fleet setup` manages their installation.
+
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory. Agents continue allocated work offline and replay durable changes on reconnect. `/workers` shows live connections, sync, tasks, and worker controls; `fleet status` shows the same fleet in the CLI. The terminal shows the
 queue host and database.
@@ -101,12 +107,12 @@ to run the worker and its Codex sessions on the authoritative SSH host. New remo
 workers require a remote checkout path (or `--all-projects` to discover known
 checkouts); remote status/stop/pause also work. Every worker owns its slots and
 filters, without shared project/global caps. `worker status` shows slots, pipeline, runtimes and
-activity. Active sessions and recent history are separate; `--history 0` hides
+activity. Active agents and recent history are separate; `--history 0` hides
 finished attempts. Open, unassigned unsuccessful issues retry automatically after
 a delay of 30 seconds to five minutes. Approval/input requests require explicit
-retry. Stopping/restarting workers stops owned agents and releases unfinished claims for immediate pickup; killed supervisors are recovered the same way. Pickup resumes the latest unfinished Codex session on the same machine and checkout, even with a new worker ID, and sends the original prompt template again so the agent claims before continuing. Timeout retries also resume; completed attempts start fresh if reopened, and existing claims block pickup. Resume failures retain the saved session ID for retry. Workers drain active sessions and reload after a CLI replacement.
+retry. Stopping/restarting workers stops owned agents and releases unfinished claims for immediate pickup; killed workers are recovered the same way. Pickup resumes the latest unfinished Codex session on the same machine and checkout, even with a new worker ID, and sends the original prompt template again so the agent claims before continuing. Timeout retries also resume; completed attempts start fresh if reopened, and existing claims block pickup. Resume failures retain the saved session ID for retry. Workers drain active sessions and reload after a CLI replacement.
 `worker pause ID` drains, `worker stop ID` stops its sessions, and
-`worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app. Use `worker restart ID` locally or `worker --host HOST restart ID` from the controller machine; `fleet signal HOST ID restart` also works. These queue durable signals, retain the worker ID/settings, and keep the controller and companion running. Acknowledgment requires the replacement to register. Failed restarts retry with backoff; a new stop supersedes unfinished restart intent.
+`worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app. Use `worker restart ID` locally or `worker --host HOST restart ID` from the supervisor machine; `fleet signal HOST ID restart` also works. These queue durable signals, retain the worker ID/settings, and keep the supervisor and companion running. Acknowledgment requires the replacement to register. Failed restarts retry with backoff; a new stop supersedes unfinished restart intent.
 Pickup reserves an unassigned issue; the default ten-minute manual claim window (`--claim-timeout`) starts with the first model activity. Saved workers retain their configured timeout; start with `--id ID --claim-timeout 600` to update an older two-minute setting. Model startup has a separate fifteen-minute bound;
 **the agent must claim manually** using `hey-boss issue claim NUMBER`.
 Claim output includes project instructions and PR attachment commands.
@@ -175,7 +181,7 @@ uncertain retries. Fleet journals retain offline edits and conflicting payloads.
 `hey-boss mm` shows a project's nested outline. Author from the CLI; `mm web` is a
 read-only viewer. `--project`, `--host`, `--agent`, `--json`, `--request-id` and
 mutation `--if-version` follow issue conventions. Use an isolated issue DB in tests.
-Mindmaps are not replicated to fleet agents; use `--host CONTROLLER` (or
+Mindmaps are not replicated to fleet companions; use `--host SUPERVISOR` (or
 `HEY_BOSS_ISSUE_HOST`) there for authoritative reads/edits and the web viewer.
 
 ```sh

@@ -171,7 +171,7 @@ fn migrate_machines() -> Result<(), String> {
 }
 pub fn setup_machines() -> Result<(), String> {
     migrate_machines()?;
-    install_supervisor()?;
+    install_companion_service()?;
     println!("Machines configured in {}", machines_path()?.display());
     Ok(())
 }
@@ -286,11 +286,11 @@ pub fn configure(host: &str, vpn_domain: &str, enabled: bool) -> Result<(), Stri
         configs.push(settings);
     }
     save_machines(&configs)?;
-    install_supervisor()?;
+    install_companion_service()?;
     println!("Saved {}", machines_path()?.display());
     Ok(())
 }
-fn install_supervisor() -> Result<(), String> {
+fn install_companion_service() -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err("automatic connections require macOS".into());
     }

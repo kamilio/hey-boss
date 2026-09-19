@@ -45,7 +45,7 @@ pub struct Options {
 enum Action {
     #[command(visible_alias = "list")]
     Status,
-    /// Queue a durable restart through the fleet controller; keep the controller alive.
+    /// Queue a durable restart through the fleet supervisor; keep the supervisor alive.
     Restart {
         id: String,
     },
@@ -116,8 +116,8 @@ pub fn run(o: &Options) -> Result<()> {
         .canonicalize()?;
     let machine = issues::identity::machine()?;
     let base = issues::identity::project(&cwd, &machine)?;
-    let controller = format!("worker-controller:{machine}:{}", std::process::id());
-    let actor = issues::identity::resolve(Some(&controller), &machine, &cwd)?;
+    let actor_id = format!("worker-control:{machine}:{}", std::process::id());
+    let actor = issues::identity::resolve(Some(&actor_id), &machine, &cwd)?;
     let path = issues::database_path()?;
     let mut store = if o.action.is_none() {
         issues::worker::retry_database_busy(|| Store::open(&path))?
@@ -135,7 +135,7 @@ pub fn run(o: &Options) -> Result<()> {
     if let Some(action) = &o.action {
         let operation = match action {
             Action::Restart { .. } => {
-                unreachable!("Restart is routed through the fleet controller")
+                unreachable!("Restart is routed through the fleet supervisor")
             }
             Action::Status => Operation::Workers {
                 worker_id: o.id.clone(),

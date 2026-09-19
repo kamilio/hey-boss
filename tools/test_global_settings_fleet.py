@@ -42,10 +42,10 @@ class GlobalProfileFleetTests(unittest.TestCase):
 
     def test_conflicting_global_names_preserve_canonical_and_rejected_draft(self):
         self.rename(self.agent, 'Agent draft')
-        self.rename(self.main, 'Controller name')
+        self.rename(self.main, 'Supervisor name')
         changes, receipts = self.upload()
         self.assertEqual(receipts[0]['state'], 'conflict')
-        self.assertEqual(self.main.execute('SELECT boss_name FROM global_settings').fetchone()[0], 'Controller name')
+        self.assertEqual(self.main.execute('SELECT boss_name FROM global_settings').fetchone()[0], 'Supervisor name')
         data = json.loads(self.main.execute('SELECT data FROM fleet_conflicts').fetchone()[0])
         self.assertEqual(json.loads(data['after_json'])['boss_name'], 'Agent draft')
         with self.main:

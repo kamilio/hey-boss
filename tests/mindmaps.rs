@@ -1613,26 +1613,26 @@ fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
             error["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("--host CONTROLLER")
+                .contains("--host SUPERVISOR")
         );
     }
     // Exercise the actual CLI/RPC transport against a separate authoritative DB.
     use std::os::unix::fs::PermissionsExt;
-    let controller = Fixture::new();
-    controller.run("Atlas", &["add", "Authoritative outline", "--id", "root"]);
+    let supervisor = Fixture::new();
+    supervisor.run("Atlas", &["add", "Authoritative outline", "--id", "root"]);
     let bin = f.root.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let ssh = bin.join("ssh");
-    std::fs::write(&ssh, "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$MM_CONTROLLER_DB\"\nexec \"$MM_TEST_BINARY\" issue rpc\n").unwrap();
+    std::fs::write(&ssh, "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$MM_SUPERVISOR_DB\"\nexec \"$MM_TEST_BINARY\" issue rpc\n").unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
     let remote = |args: &[&str]| {
         let mut cmd = f.cmd("Atlas", "mm", args);
-        cmd.args(["--host", "controller.test"])
+        cmd.args(["--host", "supervisor.test"])
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             )
-            .env("MM_CONTROLLER_DB", controller.root.join("issues.db"))
+            .env("MM_SUPERVISOR_DB", supervisor.root.join("issues.db"))
             .env("MM_TEST_BINARY", env!("CARGO_BIN_EXE_hey-boss"));
         cmd.output().unwrap()
     };
@@ -1649,7 +1649,7 @@ fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
         "--request-id",
         "remote-one",
     ]));
-    assert_eq!(nodes(&controller.run("Atlas", &["show"])).len(), 2);
+    assert_eq!(nodes(&supervisor.run("Atlas", &["show"])).len(), 2);
     std::fs::write(&ssh, "#!/bin/sh\nexit 255\n").unwrap();
     let failed = remote(&["add", "Failed remote write"]);
     assert_eq!(failed.status.code(), Some(1));
@@ -1667,6 +1667,6 @@ fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
     assert_eq!(after["version"], before["version"]);
     f.run(
         "Atlas",
-        &["edit", "note", "--title", "Controller authorship"],
+        &["edit", "note", "--title", "Supervisor authorship"],
     );
 }

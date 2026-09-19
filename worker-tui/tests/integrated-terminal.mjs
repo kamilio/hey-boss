@@ -48,14 +48,14 @@ try {
   await worker.waitFor("q / Ctrl+C stops this worker", { scope: "screen", timeout: 12000 });
   await worker.waitFor("Fixture dashboard activity", { scope: "screen", timeout: 12000 });
   const live = status().workers.find(w => w.config.name === "Integrated builder");
-  assert.ok(live?.pid, "Default TUI did not start the supervisor");
+  assert.ok(live?.pid, "Default TUI did not start the worker");
   await writeFile(path.join(output, "integrated-worker.txt"), (await worker.screen()).text);
   await renderTerminalPng((await worker.screen()).rawLines.join("\n"), { output: path.join(output, "integrated-worker.png") });
   await worker.type("?");
   await worker.waitFor("Keyboard", { scope: "screen", timeout: 1000 });
   await worker.press("Escape");
   await worker.resize(48, 12);
-  await worker.waitFor("Active sessions", { scope: "screen", timeout: 1000 });
+  await worker.waitFor("Active agents", { scope: "screen", timeout: 1000 });
   await worker.resize(120, 36);
   // Status is a dashboard too, but quitting it must leave the worker running.
   const dashboard = await start(["status"]);
@@ -66,7 +66,7 @@ try {
   assert.doesNotMatch(plain, /\x1b\[/);
   assert.ok(status().ok, "JSON status must remain machine-readable");
   await quit(worker);
-  assert.equal(status().workers.find(w => w.id === live.id)?.pid, null, "Quit leaked the owned supervisor");
+  assert.equal(status().workers.find(w => w.id === live.id)?.pid, null, "Quit leaked the owned worker");
   const finished = JSON.parse(execFileSync(binary, ["worker", "--json", "--id", live.id, "status"], { cwd: temporary, env, encoding: "utf8" }));
   assert.equal(finished.active, 0, "Quit leaked an owned Codex session");
   assert.ok(finished.runs.some(r => r.state === "cancelled"), `Owned session was not finalized on quit: ${JSON.stringify(finished.runs)}`);

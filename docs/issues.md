@@ -271,14 +271,14 @@ separate fifteen-minute deadline. Saved workers retain their configured timeout;
 use `--id WORKER_ID --claim-timeout 600` when starting an older saved worker to
 adopt the longer window. Missed deadlines stop Codex and free the slot. Stopping or restarting a worker
 reaps its agents, unassigns their unfinished issues, and makes those issues eligible
-immediately. Recovery does the same for a killed supervisor. Failed/blocked/timed
+immediately. Recovery does the same for a killed worker. Failed/blocked/timed
 out issues become eligible again while open and unassigned after a retry delay
 that grows from 30 seconds to at most five minutes. Input and approval requests
 require explicit retry; no decision is approved automatically. Claims and PR instructions are
 returned by the claim command. Persistent sessions can be resumed with
 `codex resume SESSION_ID`. Workers automatically resume the latest unfinished
 Codex session for an eligible issue on the same machine and checkout, including
-after stop/start, restart, a killed supervisor, or a timeout retry. The original
+after stop/start, restart, a killed worker, or a timeout retry. The original
 prompt template is rendered again so the resumed agent claims the issue before
 continuing. Starting a worker with a new worker ID also resumes available sessions.
 Each attempt has a new run ID while retaining its Codex session ID. Existing
@@ -592,28 +592,34 @@ existing queues in issue-number order.
 
 ## Automatic worker fleet
 
-`hey-boss fleet setup --source /path/to/hey-boss` installs a persistent controller
-using the existing SSH inventory. It installs durable agents automatically and
+**Supervisor → Worker → Agent** is the execution hierarchy. The supervisor
+coordinates the fleet and shared queue. Workers pick issues and manage the
+lifecycle and retries of their Codex agents. Each agent is a coding session
+implementing one issue. Machine companions synchronize replicas and apply
+worker controls; they are background services, not coding agents.
+
+`hey-boss fleet setup --source /path/to/hey-boss` installs a persistent supervisor
+using the existing SSH inventory. It installs durable companions automatically and
 distributes desired worker settings from `~/.hey-boss/fleet.json`. Each machine
 keeps its own SQLite replica; do not mount one SQLite database over the network.
-The controller pulls changes every five seconds, after accepting local journals,
+The supervisor pulls changes every five seconds, after accepting local journals,
 and redeploys software when the source fingerprint changes. Active work drains
-before a supervisor reloads an updated executable.
+before a worker reloads an updated executable.
 
 The **Workers** view at `/workers` shows every configured machine, heartbeat,
 connection, configuration, build, slots, tasks, events, and saved conflicts.
 Pause preserves active jobs, resume enables pickup, stop cancels owned jobs, and
-restart waits for the old supervisor to stop before restoring its stable ID.
+restart waits for the old worker to stop before restoring its stable ID.
 Signals are durable and remain pending while their machine is disconnected.
 `hey-boss fleet signal HOST WORKER_ID pause` provides the same control in the CLI.
 
-Agents continue previously allocated work offline. Allocations never expire
+Companions continue previously allocated work offline. Allocations never expire
 merely because a machine disconnects; other workers cannot pick up that work.
 New offline issues use reserved number ranges. Transaction journals survive
 restarts and sync on reconnect with replay receipts. Different-field edits merge;
 same-field conflicts and completions against changed requirements are saved for
-review. Bootstrap backs up existing agent queues and flags number collisions.
-This supports one controller, with independently operating agents.
+review. Bootstrap backs up existing companion queues and flags number collisions.
+This supports one supervisor, with independently operating companions.
 
 The versioned bidirectional JSON protocol and invariants are documented in
 [the fleet specification](specs/worker-fleet.md).

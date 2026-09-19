@@ -1,10 +1,15 @@
-//! Controller/agent command surface and owner-private local control transport.
+//! Supervisor/companion command surface and owner-private local control transport.
 use clap::Subcommand;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+
+// Persisted roles and protocol-v1 frames keep their original names so existing
+// installations can upgrade without losing state or starting a second service.
+pub const SUPERVISOR_ROLE: &str = "controller";
+pub const COMPANION_ROLE: &str = "agent";
 
 #[derive(Subcommand)]
 pub enum Action {
@@ -14,15 +19,17 @@ pub enum Action {
         #[arg(long)]
         path: PathBuf,
     },
-    /// Install and start the automatic controller using the saved machine inventory.
+    /// Install and start the fleet supervisor using the saved machine inventory.
     Setup {
         #[arg(long)]
         source: Option<PathBuf>,
     },
-    /// Run the controller (normally managed by launchd/systemd).
-    Controller,
-    /// Run the durable local agent (normally managed automatically).
-    Agent {
+    /// Run the fleet supervisor (normally managed by launchd/systemd).
+    #[command(alias = "controller")]
+    Supervisor,
+    /// Run the fleet companion that synchronizes this machine and manages workers.
+    #[command(name = "companion", alias = "agent")]
+    Companion {
         #[arg(long, hide = true)]
         stdio: bool,
         #[arg(long, hide = true, conflicts_with = "stdio")]
@@ -49,12 +56,12 @@ pub fn socket_path() -> std::io::Result<PathBuf> {
     .join(".local/share/hey-boss/fleet.sock"))
 }
 
-/// Read the fleet's existing heartbeat without contacting the controller.
+/// Read the fleet's existing heartbeat without contacting the supervisor.
 /// Missing or unreadable status is unknown, never evidence of a live connection.
 pub fn worker_connection(role: &str) -> Value {
     use serde_json::json;
-    if role != "agent" {
-        return json!({"state": if role == "controller" { "local" } else { "standalone" }});
+    if role != COMPANION_ROLE && role != "companion" {
+        return json!({"state": if role == SUPERVISOR_ROLE || role == "supervisor" { "local" } else { "standalone" }});
     }
     let status = socket_path()
         .ok()
@@ -70,7 +77,7 @@ pub fn worker_connection(role: &str) -> Value {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
         .unwrap_or_default();
-    // The controller pings every five seconds and times out after fifteen.
+    // The supervisor pings every five seconds and times out after fifteen.
     let connected = (0.0..=15.0).contains(&(now - heartbeat));
     json!({"state": if connected { "connected" } else { "disconnected" }, "last_sync":status["last_sync"]})
 }
@@ -79,7 +86,7 @@ pub fn call(value: &Value) -> crate::issues::Result<Value> {
     let mut stream = UnixStream::connect(socket_path()?).map_err(|e| {
         crate::issues::Error::new(
             "fleet_unavailable",
-            format!("Fleet controller is unavailable: {e}. Run hey-boss fleet setup."),
+            format!("Fleet supervisor is unavailable: {e}. Run hey-boss fleet setup."),
         )
     })?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
@@ -135,7 +142,7 @@ pub fn record_local_worker(
         match std::fs::read(&path) {
             Ok(bytes) => {
                 let value: Value = serde_json::from_slice(&bytes)?;
-                if value["role"] == "agent" || value["role"] == "controller" {
+                if value["role"] == COMPANION_ROLE || value["role"] == SUPERVISOR_ROLE {
                     found = Some((path, value));
                     break;
                 }
@@ -195,11 +202,11 @@ pub fn run(action: &Action) -> std::io::Result<()> {
                 command.arg("--source").arg(source);
             }
         }
-        Action::Controller => {
-            command.arg("controller");
+        Action::Supervisor => {
+            command.arg("supervisor");
         }
-        Action::Agent { stdio, install } => {
-            command.arg("agent");
+        Action::Companion { stdio, install } => {
+            command.arg("companion");
             if *stdio {
                 command.arg("--stdio");
             }
@@ -220,7 +227,7 @@ pub fn run(action: &Action) -> std::io::Result<()> {
     }
     if matches!(
         action,
-        Action::Controller | Action::Agent { install: false, .. }
+        Action::Supervisor | Action::Companion { install: false, .. }
     ) {
         use std::os::unix::process::CommandExt;
         return Err(command.exec());
