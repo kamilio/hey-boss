@@ -2176,6 +2176,40 @@ fn staged_upgrade_migrates_the_destination_state_before_replacement() {
 }
 
 #[test]
+fn explicit_database_override_survives_running_executable_replacement() {
+    const CHILD: &str = "HEY_BOSS_TEST_UNLINK_EXECUTABLE";
+    if std::env::var_os(CHILD).is_some() {
+        // Only this test's private copy is removed. Linux current_exe() now
+        // refers to a deleted inode, as it does during an atomic CLI upgrade.
+        fs::remove_file(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(
+            hey_boss::issues::database_path().unwrap(),
+            PathBuf::from(std::env::var_os("HEY_BOSS_ISSUE_DB").unwrap())
+        );
+        return;
+    }
+    let f = Fixture::new();
+    let executable = f.root.join("running-test");
+    fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    let output = Command::new(executable)
+        .env(CHILD, "1")
+        .env("HEY_BOSS_ISSUE_DB", &f.db)
+        .args([
+            "--exact",
+            "explicit_database_override_survives_running_executable_replacement",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn interactive_requires_a_human_terminal_before_creating_anything() {
     let f = Fixture::new();
     f.fail("a", &["create", "--title", "Plan", "--interactive"], 2);
