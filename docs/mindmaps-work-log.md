@@ -994,3 +994,22 @@ used the native installed server with only the new CSS route-overridden;
 final installed-build verification remains pending. Evidence
 `out/mm-controls-baseline-failure.txt`, `out/mm-controls-after-chrome.txt` and
 `out/mm-controls-after-webkit.txt`.
+
+Final Fly deployment completed at 19:13:53 UTC, release 25 of
+`hey-boss-mobile-kamil`, image deployment-01M2XHDCWBAZDPYWMD21KZWH51.
+The machine is started with a passing health check; `/healthz` returns ok.
+All 15 files in the local mobile dist match live bytes, including JavaScript,
+CSS, workers, icons, shell and service worker. Evidence
+`out/mm-fly-postdeploy-status-1914.json` and
+`out/mm-fly-postdeploy-assets-1914.json`.
+
+The overlap fix also passes the existing interaction suite with its new CSS:
+Chrome 40 checks (including native CDP touch), WebKit 25 (focus and shell).
+Evidence `out/mm-controls-core-chrome.txt` and
+`out/mm-controls-core-webkit.txt`. A separate final-CSS endurance run began
+at 19:16 UTC, using the pinned installed server and a frozen CSS override,
+145 assertions in Chrome and 130 in WebKit per cycle, through 19:40 UTC.
+It includes all seven-width navigation checks. This pin retains the original
+inspector header; the subsequently committed header simplification is imported
+for the final native installation check, whose controls suite now has 126
+assertions per browser. Final native/fleet results remain pending.
