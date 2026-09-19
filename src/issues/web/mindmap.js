@@ -43,7 +43,21 @@
   });
   function closeInspector() {
     const previous = selected; selected = null; render();
-    if (previous) mapUI.focus(previous);
+    if (previous) {
+      const nodes = allNodes(); let target = previous;
+      while (target && !mapUI.data?.positions.has(target)) target = nodes.get(target)?.parent_id;
+      if (!target || !mapUI.focus(target)) $("#mindmap").focus({preventScroll:true});
+    }
+  }
+  function branches(expand) {
+    const roots = mapUI.data?.items.filter(n => !mapUI.data.positions.has(n.parent_id)) || [];
+    const center = $("#mindmap").clientHeight / 2, camera = mapUI.camera;
+    const anchor = viewMode === "map" ? roots.reduce((best, n) => !best || Math.abs((n.y + 42) * camera.scale + camera.y - center) < Math.abs((best.y + 42) * camera.scale + camera.y - center) ? n : best, null) : null;
+    const y = anchor ? anchor.y * camera.scale + camera.y : null;
+    if (expand) collapsed.clear(); else if (graph) graph.nodes.forEach(n => collapsed.add(n.id));
+    render();
+    const after = anchor && mapUI.data?.positions.get(anchor.id);
+    if (after && y !== null) { camera.y = y - after.y * camera.scale; mapUI.schedule(); }
   }
   function details(nodes, incidents, visible) {
     const node = selected && visible.has(selected) ? nodes.get(selected) : null;
@@ -211,8 +225,8 @@
   $("#project").addEventListener("change", () => { $("#search").value = ""; location.hash = new URLSearchParams({ project: $("#project").value }).toString(); });
   $("#search").addEventListener("input", render);
   $("#refresh").addEventListener("click", () => load({ refresh: true }));
-  $("#expand").addEventListener("click", () => { collapsed.clear(); render(); });
-  $("#collapse").addEventListener("click", () => { if (graph) graph.nodes.forEach((n) => collapsed.add(n.id)); render(); });
+  $("#expand").addEventListener("click", () => branches(true));
+  $("#collapse").addEventListener("click", () => branches(false));
   const bodyClick = (event) => { const less = event.target.closest("[data-collapse-body]"); if (less) { readBody(less.dataset.collapseBody, "preview"); return; } const read = event.target.closest("[data-read-body]"); if (read) { readBody(read.dataset.readBody); return; } const button = event.target.closest("[data-toggle]"); if (button) { collapsed.has(button.dataset.toggle) ? collapsed.delete(button.dataset.toggle) : collapsed.add(button.dataset.toggle); render(); } };
   $("#outline").addEventListener("click", bodyClick); $("#map-details").addEventListener("click", bodyClick);
   $("#map-details").addEventListener("click", event => {
