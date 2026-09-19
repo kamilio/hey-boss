@@ -27,6 +27,9 @@ impl Reply {
 }
 impl Web {
     fn start() -> Self {
+        Self::start_with_args(&[])
+    }
+    fn start_with_args(args: &[&str]) -> Self {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("out")
             .join(format!(
@@ -55,6 +58,7 @@ impl Web {
                 "human:web-test",
                 "--json",
             ])
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -172,6 +176,99 @@ impl Drop for Web {
         let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn mobile_proxy_uses_the_authoritative_database_and_preserves_origin_and_csrf_checks() {
+    let origin = "https://mac.example.ts.net:8443";
+    let host = "mac.example.ts.net:8443";
+    let web = Web::start_with_args(&["--mobile-origin", origin]);
+    for path in ["/", "/app.js", "/api/bootstrap", "/workers"] {
+        let reply = web.http("GET", path, &[("Host", host)], b"");
+        assert_eq!(reply.status, 200);
+        assert!(
+            reply
+                .headers
+                .to_lowercase()
+                .contains("cache-control: no-store")
+        );
+    }
+    let boot = web
+        .http("GET", "/api/bootstrap", &[("Host", host)], b"")
+        .json();
+    assert_eq!(boot["csrf"], web.token);
+    assert_eq!(boot["actor"]["id"], "human:boss");
+    let body = json!({"project":web.project,"operation":{"action":"create","title":"From phone","body":"Sensitive synthetic body","labels":[]},"request_id":"phone-create"}).to_string();
+    let headers = [
+        ("Host", host),
+        ("Origin", origin),
+        ("Sec-Fetch-Site", "same-origin"),
+        ("Content-Type", "application/json"),
+        ("X-Hey-Boss-CSRF", &web.token),
+    ];
+    assert_eq!(
+        web.http("POST", "/api/action", &headers, body.as_bytes())
+            .status,
+        200
+    );
+    // The local browser and CLI see the phone's write in the original store.
+    assert_eq!(
+        web.ok(json!({"action":"view","number":1}))["issue"]["body"],
+        "Sensitive synthetic body"
+    );
+    let cli = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&web.root)
+        .env("HEY_BOSS_ISSUE_DB", web.root.join("issues.db"))
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .args(["issue", "view", "1", "--project", &web.project, "--json"])
+        .output()
+        .unwrap();
+    assert!(cli.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&cli.stdout).unwrap()["issue"]["title"],
+        "From phone"
+    );
+    for (name, value) in [
+        ("Host", "other.example.ts.net:8443"),
+        ("Origin", "https://evil.example"),
+        ("Origin", "http://mac.example.ts.net:8443"),
+        ("Origin", "null"),
+        ("Origin", &format!("http://{}", web.authority)),
+        ("Sec-Fetch-Site", "cross-site"),
+        ("X-Hey-Boss-CSRF", "wrong"),
+    ] {
+        let mut invalid = headers;
+        invalid.iter_mut().find(|h| h.0 == name).unwrap().1 = value;
+        assert_eq!(
+            web.http("POST", "/api/action", &invalid, body.as_bytes())
+                .status,
+            403,
+            "{name}: {value}"
+        );
+    }
+    assert_eq!(
+        web.http("POST", "/api/action", &headers[..4], body.as_bytes())
+            .status,
+        403
+    );
+    let desktop = Web::start();
+    assert_eq!(
+        desktop
+            .http("GET", "/api/bootstrap", &[("Host", host)], b"")
+            .status,
+        403
+    );
+    assert_eq!(
+        desktop
+            .http(
+                "GET",
+                "/api/bootstrap",
+                &[("X-Forwarded-Host", host), ("X-Forwarded-Proto", "https")],
+                b""
+            )
+            .status,
+        200
+    );
 }
 
 #[test]

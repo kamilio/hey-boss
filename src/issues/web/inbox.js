@@ -14,8 +14,77 @@ let inboxTasks = [],
   noticeLinkIssues = [];
 const noticeDecision = (task) => ["approval", "prompt"].includes(task.kind);
 const noticeReview = (task) => task.kind === "update" && !!task.commentsEnabled;
-const noticeIcon = (task) =>
-  noticeDecision(task) ? "user" : task.kind === "update" ? "edit" : "inbox";
+// Match Record.defaultSymbol and IconBadge in the native notification UI.
+const noticeSeverity = (task) =>
+  ["info", "success", "warning", "error"].includes(task.severity)
+    ? task.severity
+    : "neutral";
+const noticeLabel = (task) =>
+  ({
+    info: "Information",
+    success: "Success",
+    warning: "Warning",
+    error: "Error",
+  })[noticeSeverity(task)] ||
+  (task.kind === "update"
+    ? "Update"
+    : task.kind === "alert"
+      ? "Notification"
+      : "Question");
+const noticeSymbols = {
+  "info.circle.fill": "info",
+  "checkmark.circle.fill": "success",
+  "exclamationmark.triangle.fill": "warning",
+  "xmark.octagon.fill": "error",
+  "hammer.fill": "build",
+  "chevron.left.forwardslash.chevron.right": "code",
+  checklist: "test",
+  "text.magnifyingglass": "review",
+  "shippingbox.fill": "deploy",
+  "doc.text.fill": "docs",
+  "folder.fill": "folder",
+  "bell.fill": "bell",
+  "questionmark.bubble.fill": "question",
+};
+const noticeIcon = (task) => {
+  const fallback =
+    noticeSeverity(task) !== "neutral"
+      ? noticeSeverity(task)
+      : task.kind === "update"
+        ? "docs"
+        : task.kind === "alert"
+          ? "bell"
+          : "question";
+  const selected = noticeSymbols[task.icon] || task.icon;
+  return [
+    "info",
+    "success",
+    "warning",
+    "error",
+    "build",
+    "code",
+    "test",
+    "review",
+    "deploy",
+    "docs",
+    "folder",
+    "bell",
+    "question",
+  ].includes(selected)
+    ? selected
+    : fallback;
+};
+function noticeBadge(task) {
+  const severity = noticeSeverity(task),
+    selected = noticeIcon(task);
+  // Only accept the PNG snapshots saved by snapshotIcon, never a caller file/URL.
+  const custom =
+    typeof task.iconData === "string" &&
+    task.iconData.length <= 131072 &&
+    task.iconData.startsWith("iVBORw0KGgo") &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(task.iconData);
+  return `<span class="notice-symbol notice-tone ${severity}" role="img" aria-label="${esc(noticeLabel(task))}" title="${esc(noticeLabel(task))}">${custom ? `<img src="data:image/png;base64,${task.iconData}" alt="" />` : icon(selected)}${severity !== "neutral" && (custom || selected !== severity) ? `<span class="notice-status-mark">${icon(severity)}</span>` : ""}</span>`;
+}
 const noticeStatus = (task) =>
   task.status === "pending"
     ? noticeDecision(task)
@@ -141,7 +210,7 @@ function renderInboxList() {
     route.inbox_search,
   ]);
   $("#inbox-view").innerHTML =
-    `<div class="page-heading inbox-heading"><div><div class="eyebrow">${icon("inbox")}Your attention, in one place</div><h1>Inbox <span class="heading-count">${unread}</span></h1><p>${unread ? `${unread} ${unread === 1 ? "notice needs" : "notices need"} your attention.` : "A clear view of what needs you next."}</p></div><button class="button" data-inbox-refresh>${icon("refresh")}Refresh</button></div><div class="toolbar"><label class="search-field">${icon("search")}<input type="search" id="inbox-search" aria-label="Search Inbox" placeholder="Search notices…" value="${esc(route.inbox_search)}" autocomplete="off" /><kbd>/</kbd></label><label class="select-control">${icon("folder")}<select id="inbox-project-filter" aria-label="Filter Inbox by project"><option value="">All projects</option>${projects.map((project) => `<option value="${esc(project)}" ${project === route.inbox_project ? "selected" : ""}>${esc(project)}</option>`).join("")}</select></label></div><div class="glass inbox-panel"><div class="list-heading"><div class="state-tabs" role="tablist" aria-label="Inbox state"><button data-inbox-state="unread" role="tab" aria-selected="${route.inbox_state !== "archive"}" class="${route.inbox_state !== "archive" ? "selected" : ""}" tabindex="${route.inbox_state !== "archive" ? 0 : -1}">${icon("inbox")}Unread<span class="tab-count">${unread}</span></button><button data-inbox-state="archive" role="tab" aria-selected="${route.inbox_state === "archive"}" class="${route.inbox_state === "archive" ? "selected" : ""}" tabindex="${route.inbox_state === "archive" ? 0 : -1}">${icon("clock")}Activity<span class="tab-count">${inboxTasks.length - unread}</span></button></div><span class="list-sort">Newest first</span></div><div role="tabpanel" aria-label="Notices" id="notice-list">${tasks.length ? tasks.map((task) => `<article class="notice-row ${noticeDecision(task) || noticeReview(task) ? "needs-response" : ""}" data-notice-row="${esc(task.taskID)}"><span class="notice-symbol ${esc(["warning", "error", "success"].includes(task.severity) ? task.severity : "")}">${icon(noticeIcon(task))}</span><div class="notice-row-main"><a class="notice-title" href="${esc(noticeRoute(task.taskID))}">${esc(task.title || "Untitled notice")}</a>${task.summary ? `<p class="notice-summary">${esc(task.summary)}</p>` : ""}<div class="notice-meta"><span>${esc(task.project || "Notifications")}</span><span>·</span><span>${esc(task.sourceHost || "Source unavailable")}</span><span>·</span>${date(task.createdAt * 1000)}${noticeIssueChip(task)}</div></div><div class="notice-row-end">${noticeDecision(task) || noticeReview(task) ? `<span class="notice-state">${noticeStatus(task)}</span>` : route.inbox_state === "archive" ? `<span class="notice-state">${noticeStatus(task)}</span>` : ""}<a class="notice-open" href="${esc(noticeRoute(task.taskID))}" aria-label="Open ${esc(task.title)}">${icon("arrow-right")}</a></div></article>`).join("") : inboxEmpty(Boolean(query || route.inbox_project))}</div></div><div class="list-footer inbox-footer"><span>${tasks.length} ${tasks.length === 1 ? "notice" : "notices"}</span><span>Answers and read receipts stay in sync.</span></div>`;
+    `<div class="page-heading inbox-heading"><div><div class="eyebrow">${icon("inbox")}Your attention, in one place</div><h1>Inbox <span class="heading-count">${unread}</span></h1><p>${unread ? `${unread} ${unread === 1 ? "notice needs" : "notices need"} your attention.` : "A clear view of what needs you next."}</p></div><button class="button" data-inbox-refresh>${icon("refresh")}Refresh</button></div><div class="toolbar"><label class="search-field">${icon("search")}<input type="search" id="inbox-search" aria-label="Search Inbox" placeholder="Search notices…" value="${esc(route.inbox_search)}" autocomplete="off" /><kbd>/</kbd></label><label class="select-control">${icon("folder")}<select id="inbox-project-filter" aria-label="Filter Inbox by project"><option value="">All projects</option>${projects.map((project) => `<option value="${esc(project)}" ${project === route.inbox_project ? "selected" : ""}>${esc(project)}</option>`).join("")}</select></label></div><div class="glass inbox-panel"><div class="list-heading"><div class="state-tabs" role="tablist" aria-label="Inbox state"><button data-inbox-state="unread" role="tab" aria-selected="${route.inbox_state !== "archive"}" class="${route.inbox_state !== "archive" ? "selected" : ""}" tabindex="${route.inbox_state !== "archive" ? 0 : -1}">${icon("inbox")}Unread<span class="tab-count">${unread}</span></button><button data-inbox-state="archive" role="tab" aria-selected="${route.inbox_state === "archive"}" class="${route.inbox_state === "archive" ? "selected" : ""}" tabindex="${route.inbox_state === "archive" ? 0 : -1}">${icon("clock")}Activity<span class="tab-count">${inboxTasks.length - unread}</span></button></div><span class="list-sort">Newest first</span></div><div role="tabpanel" aria-label="Notices" id="notice-list">${tasks.length ? tasks.map((task) => `<article class="notice-row notice-tone ${noticeSeverity(task)} ${noticeDecision(task) || noticeReview(task) ? "needs-response" : ""}" data-notice-row="${esc(task.taskID)}">${noticeBadge(task)}<div class="notice-row-main"><div class="notice-card-heading"><span class="notice-project">${esc(task.project || "Notifications")} ·</span><a class="notice-title" href="${esc(noticeRoute(task.taskID))}">${esc(task.title || "Untitled notice")}</a></div>${task.summary ? `<p class="notice-summary">${esc(task.summary)}</p>` : ""}<div class="notice-meta"><span class="notice-severity-label">${esc(noticeLabel(task))}</span><span>·</span><span>${esc(task.sourceHost || "Source unavailable")}</span><span>·</span>${date(task.createdAt * 1000)}${noticeIssueChip(task)}</div></div><div class="notice-row-end">${noticeDecision(task) || noticeReview(task) ? `<span class="notice-state">${noticeStatus(task)}</span>` : route.inbox_state === "archive" ? `<span class="notice-state">${noticeStatus(task)}</span>` : ""}<a class="notice-open" href="${esc(noticeRoute(task.taskID))}" aria-label="Open ${esc(task.title)}">${icon("arrow-right")}</a></div></article>`).join("") : inboxEmpty(Boolean(query || route.inbox_project))}</div></div><div class="list-footer inbox-footer"><span>${tasks.length} ${tasks.length === 1 ? "notice" : "notices"}</span><span>Answers and read receipts stay in sync.</span></div>`;
   $("#inbox-search").oninput = () => {
     const value = $("#inbox-search").value;
     clearTimeout(inboxSearchTimer);
@@ -232,7 +301,7 @@ function renderNotice(task) {
     ? `<section class="notice-comments"><h2>Review comments</h2>${(task.comments || []).map((comment) => `<article class="comment-card"><div class="comment-header"><strong>${esc(model.boss.name)}</strong><span>${date(comment.created_at * 1000)}</span></div><div class="comment-body">${comment.quote ? `<blockquote>${esc(comment.quote)}</blockquote>` : ""}<div class="markdown">${comment.body_html || esc(comment.text)}</div></div></article>`).join("")}${pending ? `<form id="notice-comment-form"><label class="field-label" for="notice-comment">Add feedback</label><textarea class="text-input" id="notice-comment" rows="3" required maxlength="16384" placeholder="Leave a review comment…">${esc(storage.get(noticeDraftKey(task, "comment")) || "")}</textarea><div class="notice-form-actions"><button class="button" data-notice-finish type="button">Finish review${icon("check")}</button><button class="button primary" type="submit">Add comment</button></div></form>` : ""}</section>`
     : "";
   $("#inbox-view").innerHTML =
-    `<a class="back-link" href="${esc(noticeRoute(""))}">${icon("arrow-left")}Inbox</a><div class="detail-top"><h1>${esc(task.title || "Untitled notice")}</h1><div class="detail-heading-actions"><button class="icon-button" data-notice-copy aria-label="Copy notice link" title="Copy notice link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${pending ? "open" : "closed"}">${icon(noticeIcon(task))}${esc(noticeStatus(task))}</span><span>${esc(task.project || "Notifications")}</span><span>·</span><span>${esc(task.sourceHost || "Source unavailable")}</span><span>·</span>${date(task.createdAt * 1000)}</div><div class="detail-layout"><div class="detail-main"><article class="comment-card"><div class="comment-header">${icon(noticeIcon(task))}<strong>${esc(task.documentName || (review ? "Document review" : task.kind === "update" ? "Update" : decision ? task.question : "Notice"))}</strong></div><div class="comment-body markdown">${attachment}${body}</div></article><div class="notice-response">${response}</div>${comments}</div><section class="sidebar" aria-label="Notice properties"><div class="side-section"><h2 class="side-heading">Related issue${icon("issue")}</h2>${task.issue ? `<a class="related-issue-link" href="${esc(issueReferenceRoute(task.issue))}">${icon("issue")}<strong>Issue #${task.issue.number}</strong></a><p>${esc(task.issue.project.replace(/^named:/, ""))}${task.issue.host ? ` · ${esc(task.issue.host)}` : ""}</p>` : "<p>No issue linked</p>"}<div class="assignee-actions"><button class="button small" data-notice-link>${task.issue ? "Change link" : "Link issue"}</button>${task.issue ? '<button class="button small" data-notice-unlink>Unlink</button>' : ""}</div></div>${task.linkURL ? `<div class="side-section"><h2 class="side-heading">Destination${icon("link")}</h2><button class="button small" data-notice-open-link>${icon("arrow-right")}${esc(task.linkLabel || "Open link")}</button></div>` : ""}<div class="side-section"><h2 class="side-heading">Activity</h2><p>Received ${date(task.createdAt * 1000)}</p>${task.completedAt ? `<p>${esc(noticeStatus(task))} ${date(task.completedAt * 1000)}</p>` : ""}</div>${pending ? `<button class="button link-button ${decision || review ? "danger" : ""}" data-notice-dismiss>${icon("x")}${decision ? "Cancel question" : review ? "Cancel review" : "Mark as read"}</button>` : ""}</section></div>`;
+    `<a class="back-link" href="${esc(noticeRoute(""))}">${icon("arrow-left")}Inbox</a><div class="detail-top"><h1>${esc(task.title || "Untitled notice")}</h1><div class="detail-heading-actions"><button class="icon-button" data-notice-copy aria-label="Copy notice link" title="Copy notice link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${pending ? "open" : "closed"}">${icon(pending ? "clock" : task.status === "cancelled" ? "x" : "check")}${esc(noticeStatus(task))}</span><span class="notice-severity-label notice-tone ${noticeSeverity(task)}">${esc(noticeLabel(task))}</span><span>${esc(task.project || "Notifications")}</span><span>·</span><span>${esc(task.sourceHost || "Source unavailable")}</span><span>·</span>${date(task.createdAt * 1000)}</div><div class="detail-layout"><div class="detail-main"><article class="comment-card notice-card notice-tone ${noticeSeverity(task)}"><div class="comment-header">${noticeBadge(task)}<strong>${esc(task.documentName || (review ? "Document review" : task.kind === "update" ? "Update" : decision ? task.question : "Notice"))}</strong></div><div class="comment-body markdown">${attachment}${body}</div></article><div class="notice-response">${response}</div>${comments}</div><section class="sidebar" aria-label="Notice properties"><div class="side-section"><h2 class="side-heading">Related issue${icon("issue")}</h2>${task.issue ? `<a class="related-issue-link" href="${esc(issueReferenceRoute(task.issue))}">${icon("issue")}<strong>Issue #${task.issue.number}</strong></a><p>${esc(task.issue.project.replace(/^named:/, ""))}${task.issue.host ? ` · ${esc(task.issue.host)}` : ""}</p>` : "<p>No issue linked</p>"}<div class="assignee-actions"><button class="button small" data-notice-link>${task.issue ? "Change link" : "Link issue"}</button>${task.issue ? '<button class="button small" data-notice-unlink>Unlink</button>' : ""}</div></div>${task.linkURL ? `<div class="side-section"><h2 class="side-heading">Destination${icon("link")}</h2><button class="button small" data-notice-open-link>${icon("arrow-right")}${esc(task.linkLabel || "Open link")}</button></div>` : ""}<div class="side-section"><h2 class="side-heading">Activity</h2><p>Received ${date(task.createdAt * 1000)}</p>${task.completedAt ? `<p>${esc(noticeStatus(task))} ${date(task.completedAt * 1000)}</p>` : ""}</div>${pending ? `<button class="button link-button ${decision || review ? "danger" : ""}" data-notice-dismiss>${icon("x")}${decision ? "Cancel question" : review ? "Cancel review" : "Mark as read"}</button>` : ""}</section></div>`;
   secureLinks();
   for (const [selector, type] of [
     ["#notice-answer", "answer"],
@@ -393,7 +462,9 @@ async function loadRelatedNotices(number, project, host, snapshot = null) {
       : null;
     root.innerHTML = `${heading}${related.length ? related.map((task) => `<a class="related-notice-link" href="${esc(noticeRoute(task.taskID))}"><span>${esc(task.title)}</span><small>${esc(noticeStatus(task))}</small></a>`).join("") : "<p>No linked notices</p>"}`;
     if (focused) {
-      const target = $$("a", root).find((link) => link.getAttribute("href") === focused);
+      const target = $$("a", root).find(
+        (link) => link.getAttribute("href") === focused,
+      );
       const fallback = $("h2", root);
       if (!target && fallback) fallback.tabIndex = -1;
       (target || fallback)?.focus({ preventScroll: true });

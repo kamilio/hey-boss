@@ -95,7 +95,7 @@ interface supports keyboard navigation and narrow screens. Appearance follows
 the system’s light/dark setting automatically, including live changes, with no
 theme switcher or saved override.
 
-Unsaved issue and comment drafts are saved in the browser's local storage, scoped
+On the local HTTP interface, unsaved issue and comment drafts are saved in the browser's local storage, scoped
 to project and issue. They survive navigation and reloads. Retry IDs also survive
 reloads, preventing duplicate writes after a lost response. Saved content lives
 in SQLite; browser drafts remain on that browser profile and origin until saved
@@ -118,6 +118,61 @@ same SSH transport as the CLI; install matching CLI versions on both hosts.
 
 See [web verification](issues-web-verification.md) for reproducible functional,
 accessibility, browser, and performance checks.
+
+### Mobile access without a database copy
+
+Use the existing responsive web interface through **Tailscale Serve**. It
+terminates HTTPS on the machine running the interface and proxies to its
+loopback listener. The phone sends issue operations to the original SQLite
+store; there is no replicated database, exported snapshot, cloud issue hub,
+offline issue cache, or service worker. Reads and writes use the same ownership,
+revision, and retry rules as the desktop web interface.
+
+Install and sign in to Tailscale on that machine and your phone. Enable HTTPS
+for the tailnet, and find the machine's full DNS name with `tailscale status`.
+Restrict access to the serving machine's TCP port 8443 to your own devices using
+your tailnet grants/ACLs. Then, in one terminal (replace the example hostname):
+
+```sh
+hey-boss issue web --port 4782 --mobile-origin https://mac.tailnet.ts.net:8443
+```
+
+In a second terminal:
+
+```sh
+tailscale serve --https=8443 http://127.0.0.1:4782
+```
+
+Use foreground Serve so Ctrl+C removes this temporary endpoint. Check
+`tailscale serve status` to confirm it is **tailnet only**. Open
+`https://mac.tailnet.ts.net:8443/` in Safari or Chrome on your phone while
+Tailscale is connected. You can add a browser shortcut to the home screen.
+Both the issue web process and Serve must remain running; disconnecting or
+sleeping the serving machine makes the page unavailable. Do not enable
+**Tailscale Funnel**, public port forwarding, or a public reverse proxy.
+
+The `--mobile-origin` flag accepts one exact lowercase HTTPS origin ending in
+`.ts.net`, with no path, query, credentials, or fragment. Omit `:443` for the
+default HTTPS port; nondefault ports such as 8443 must match Serve. The flag
+does not install/configure Tailscale or open a network listener. The HTTP server
+still binds only to `127.0.0.1`; forwarded host/protocol headers are never trusted.
+Serve must preserve the HTTPS origin's Host header. Local desktop access still
+works. `--json` includes `mobile_url` alongside the local `url`.
+
+For an issue store on an SSH host, add `--host devbox` to the web command. The
+web process forwards operations over SSH without copying that store to the
+proxy machine or phone.
+
+Tailscale supplies authentication and encrypted transport; every device allowed
+to reach this endpoint can read all projects and act as Boss, including changing
+issues and controlling workers. There is no per-project access control. Host,
+Origin, fetch-site, and CSRF checks remain enforced. Responses use `no-store`,
+and HTTPS pages keep drafts and pending retry IDs only in page memory rather
+than browser storage. Drafts survive navigation and reconnects in the same page,
+but disappear on reload or close. If a write's result is uncertain, reconnect in
+that tab or inspect the saved issue before resubmitting after a reload. Displayed
+content necessarily reaches the phone's memory; this is not a guarantee against
+browser/OS snapshots or screenshots.
 
 ## Project identity
 
