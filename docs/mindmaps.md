@@ -156,16 +156,26 @@ Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not fo
 
 `mm web` serves `/mm` on loopback, default port 4781. `--port 0` chooses an available port; `--json` prints the URL. Existing `issue web` servers also serve `/mm`. Mindmaps appears in the main web navigation alongside Inbox, Issues and Workers, and in the Mac menu bar alongside Inbox and Issues.
 
-The viewer supports project switching, nested collapse/expand, search through topics
-and link descriptions, incoming/outgoing dependency labels, Markdown bodies and
-cross-project navigation. Issue bodies sit behind an expandable “Issue details”
-control so the outline remains readable. Bodies initially show previews; “Read full
-text” loads one complete node and “Show less” restores its preview. Search examines
-titles, previews, loaded full text and link descriptions; it does not fetch every
-body. On the first visit to a map with more than 200 nodes, root sections start
-collapsed. Search reveals matching descendants and their ancestors, and following
-a relationship reveals its target. Refresh reloads live resources. Maps are not
-writable through either `/api/mm` or the general `/api/action` web route. The ordinary
-issue and Inbox interfaces keep their existing editing behavior.
+The viewer opens a branching Map. Drag to pan, pinch or Ctrl+scroll to zoom,
+and use Fit to bring the map into view. Branch buttons collapse or reveal topics;
+Expand all and Collapse all apply to the whole map. Click the overview to navigate
+within a large map. Select a card for Markdown, live issue state and assignments,
+child topics, and incoming/outgoing relationships. Fit, zoom and the overview
+remain reachable while topic details are open. PR cards and details link directly
+to GitHub. Outline switches to a nested reading view.
+
+Search examines titles, aliases, assignments, state, previews, loaded full text
+and link descriptions; it does not fetch every body. Search reveals matching
+descendants and their ancestors. Previous/next match buttons, Enter and Shift+Enter
+cycle through the results. Clearing search restores the earlier map view. On the
+first visit to a map with more than 200 nodes, root sections start collapsed.
+Following a relationship reveals its target, including cross-project targets.
+
+Bodies initially show previews; Read full text loads one complete node and
+Show less reads a fresh preview. Issue details are expandable in Outline.
+Refresh reloads live resources. Project switching works across the shared web
+navigation. Maps are not writable through either `/api/mm` or the general
+`/api/action` web route. The ordinary issue and Inbox interfaces keep their
+existing editing behavior.
 
 See [research and design rationale](mindmaps-research.md).
