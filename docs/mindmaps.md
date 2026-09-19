@@ -91,7 +91,11 @@ Mirrored issues show their source project and issue number in the viewer and
 `mm view`. Deleted issues keep their saved map references with an unavailable
 state; the viewer omits their issue-opening link.
 
-PR labels default to their URLs, including URLs up to 2,048 bytes. Custom labels
+PR labels default to their URLs in CLI output, including URLs up to 2,048 bytes.
+The web viewer shows default GitHub/GitLab PR labels as `#123` across cards,
+details, outlines, and relationships; other URLs use a compact host/path label.
+PR cards have an **Open PR** link, and details and outlines retain their opening
+links. Search matches both compact labels and full URLs. Custom labels
 and ordinary topic titles support up to 512 bytes. Supply `mm pr URL --title LABEL`, or use
 `mm edit implementation-pr --title 'Navigation polish'` to change a saved PR label.
 Its URL, issue attachments and dependency links remain intact. `mm view` prints the

@@ -64,6 +64,8 @@ footer{flex-direction:column}}
 .map-card:hover{background:var(--surface);border-color:var(--branch);box-shadow:0 4px 18px #20334b16}
 .map-card-title{font-size:15px;line-height:1.3;font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .map-card-meta{display:block;font-size:10px;line-height:1.2;letter-spacing:.045em;color:var(--muted);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.map-pr-card{padding-right:88px}
+.map-pr-open{position:absolute;right:14px;bottom:14px;font-size:12px;padding:4px}
 .map-project{background:var(--ink);color:var(--surface);border-radius:14px;padding:17px 21px;box-shadow:0 6px 24px #20334b1c;display:flex;flex-direction:column;justify-content:center;gap:8px}
 .map-project .map-card-meta{color:inherit;opacity:.6}
 .map-project-title{font-size:19px;font-weight:650;line-height:1.25;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}

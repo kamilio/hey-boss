@@ -24,6 +24,19 @@
           "'": "&#39;",
         })[c],
     );
+  function displayTitle(node) {
+    if (
+      node.kind !== "pr" ||
+      node.title.replace(/\/+$/, "") !== node.reference.replace(/\/+$/, "")
+    ) return node.title;
+    try {
+      const url = new URL(node.reference), path = url.pathname.replace(/\/+$/, "");
+      const number = path.match(/\/(?:pull|merge_requests)\/(\d+)$/)?.[1];
+      return number ? `#${number}` : `${url.hostname}${path ? ` · ${path.split("/").pop()}` : ""}`;
+    } catch {
+      return "Pull request";
+    }
+  }
   function layout(nodes, collapsed = new Set(), matches = null) {
     const index = new Map(nodes.map((n) => [n.id, n])),
       children = new Map();
@@ -82,6 +95,7 @@
   }
   function indexGraph(items, links, assigneeName) {
     const nodes = new Map(items.map((node) => [node.id, node])),
+      titles = new Map(items.map((node) => [node.id, displayTitle(node)])),
       incidents = new Map(),
       documents = new Map();
     for (const link of links)
@@ -94,6 +108,7 @@
         node.id,
         [
           node.title,
+          titles.get(node.id),
           node.body,
           node.state,
           node.assignee,
@@ -110,6 +125,8 @@
             link.description,
             nodes.get(link.from)?.title,
             nodes.get(link.to)?.title,
+            titles.get(link.from),
+            titles.get(link.to),
           ]),
         ]
           .join(" ")
@@ -165,7 +182,7 @@
         if (card) this.select(card.dataset.mapNode);
       });
       element.addEventListener("focusin", (e) => {
-        const id = e.target.dataset.mapNode || e.target.dataset.mapToggle,
+        const id = e.target.dataset.mapNode || e.target.dataset.mapToggle || e.target.dataset.mapResource,
           item = this.data?.positions.get(id);
         if (!item) return;
         const c = this.camera,
@@ -478,9 +495,10 @@
                   : item.childCount
                     ? `${item.childCount} TOPICS`
                     : item.alias || "TOPIC";
+        const title = displayTitle(item);
         const html = item.project
           ? `<div class="map-project-title">${esc(item.title)}</div><span class="map-card-meta">${meta}</span>`
-          : `<button class="map-card" data-map-node="${esc(item.id)}" title="${esc(item.title)} · ${esc(meta)}" aria-label="${esc(item.title)}${item.assignee ? `, assigned to ${esc(this.assigneeName(item.assignee))}` : ""}" ${item.id === this.selected ? 'aria-pressed="true"' : ""}><span class="map-card-title">${esc(item.title)}</span><span class="map-card-meta">${esc(meta)}</span></button>${item.childCount ? `<button class="map-branch" data-map-toggle="${esc(item.id)}" aria-expanded="${item.expanded}" aria-label="${item.expanded ? "Collapse" : "Expand"} ${esc(item.title)}">${item.expanded ? "−" : item.childCount}</button>` : ""}`;
+          : `<button class="map-card${item.kind === "pr" ? " map-pr-card" : ""}" data-map-node="${esc(item.id)}" title="${esc(title)} · ${esc(meta)}" aria-label="${esc(title)}${item.assignee ? `, assigned to ${esc(this.assigneeName(item.assignee))}` : ""}" ${item.id === this.selected ? 'aria-pressed="true"' : ""}><span class="map-card-title">${esc(title)}</span><span class="map-card-meta">${esc(meta)}</span></button>${item.kind === "pr" ? `<a class="map-pr-open" data-map-resource="${esc(item.id)}" href="${esc(item.reference)}" target="_blank" rel="noopener noreferrer" aria-label="Open pull request ${esc(title)}">Open PR ↗</a>` : ""}${item.childCount ? `<button class="map-branch" data-map-toggle="${esc(item.id)}" aria-expanded="${item.expanded}" aria-label="${item.expanded ? "Collapse" : "Expand"} ${esc(title)}">${item.expanded ? "−" : item.childCount}</button>` : ""}`;
         let card = existing;
         if (!card) {
           card = document.createElement("div");
@@ -519,7 +537,7 @@
                 b,
                 "var(--accent)",
                 true,
-                `${a.title} → ${b.title}: ${link.kind}${link.description ? ` — ${link.description}` : ""}`,
+                `${displayTitle(a)} → ${displayTitle(b)}: ${link.kind}${link.description ? ` — ${link.description}` : ""}`,
               );
           }
       this.edges.innerHTML =
@@ -546,7 +564,7 @@
       }
     }
   }
-  const api = { layout, inViewport, indexGraph, Mindmap };
+  const api = { layout, inViewport, indexGraph, Mindmap, displayTitle };
   if (typeof module !== "undefined") module.exports = api;
   else root.HeyBossMap = api;
 })(typeof window !== "undefined" ? window : globalThis);
