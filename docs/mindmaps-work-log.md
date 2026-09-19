@@ -840,8 +840,8 @@ without asset mocks (`out/mm-map-shared-native-scale-checks.txt`).
 
 Project-picker Escape bubbled to the viewer's global handler, also closing topic
 details and taking focus away from the restored picker trigger. The viewer now
-respects handled keyboard events (`defaultPrevented`). A proper baseline
-renderer reproduction fails while preserving the selected inspector; current
+respects handled keyboard events (`defaultPrevented`). The baseline renderer fails the
+inspector-preservation assertion; current
 code passes six checks: picker search focus, picker closes, topic remains open,
 trigger focus restored, a second unhandled Escape closes details, card focus
 restored. Evidence `out/mm-map-project-picker-escape-baseline.txt` and
@@ -852,3 +852,13 @@ The 19 focused-read checks also pass current shared UI
 (`out/mm-map-shared-native-focus-retry.txt`). Its first reload timed out with
 a pending local icon request during fixture replacement; that run remains
 unsuccessful evidence, not a pass.
+
+The new shared header moved phone navigation below the initial viewport. At
+320×740 the controls began at y=749.08 and were 41px tall; at 390×844 and
+700×900 they also extended below the screen. The mobile map now reserves space
+for the shared header and keeps at least 300px for the map. The selector applies
+only beneath that shell; desktop geometry is unchanged. General browser coverage
+now includes initial control visibility at all three sizes and passes 37 checks.
+Evidence `out/mm-map-shared-phone-height-before.txt`,
+`out/mm-map-phone-height-widths-first.txt` (320-only partial fix), and
+`out/mm-map-shared-phone-height-final.txt` (complete pass).

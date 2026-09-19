@@ -180,6 +180,13 @@ async function mindmapScaleChecks(page) {
     (await page.locator("#search").boundingBox()).width > 100,
     "Phone search field stays usable",
   );
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const phoneControls = await page.locator(".map-controls").boundingBox();
+  check(
+    phoneControls.y >= 0 && phoneControls.y + phoneControls.height <= 740,
+    "Phone map navigation stays visible without page scrolling: " +
+      JSON.stringify(phoneControls),
+  );
   await page.locator("#search").fill("");
   await page.locator("#mindmap").focus();
   await frame();
@@ -254,6 +261,20 @@ async function mindmapScaleChecks(page) {
       await page.locator("#outline").evaluate((element) => element === document.activeElement),
     "Skip link opens and focuses the reading outline",
   );
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 700, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.getByRole("button", { name: "Map", exact: true }).click();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await frame();
+    const controls = await page.locator(".map-controls").boundingBox();
+    check(
+      controls.y >= 0 && controls.y + controls.height <= viewport.height,
+      `${viewport.width}px map navigation stays visible beneath the shared header`,
+    );
+  }
   check(errors.length === 0, `Browser runtime errors: ${errors.join("; ")}`);
   return {
     passed,
