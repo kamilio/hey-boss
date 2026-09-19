@@ -283,7 +283,13 @@ def append_row(db, origin, table, row, bootstrap=False):
         if table == 'events':
             data = json.loads(values['data'])
             if isinstance(data, dict) and 'comment_id' in data:
-                comment = db.execute('SELECT local_id FROM fleet_row_ids WHERE origin=? AND table_name=? AND origin_id=?', (origin, 'comments', data['comment_id'])).fetchone()
+                comment_origin = data.get('comment_origin') or origin
+                comment_id = data.get('comment_origin_id', data['comment_id'])
+                comment = db.execute('SELECT local_id FROM fleet_row_ids WHERE origin=? AND table_name=? AND origin_id=?', (comment_origin, 'comments', comment_id)).fetchone()
+                if not comment and comment_origin == own_node:
+                    comment = db.execute('SELECT id FROM comments WHERE id=? AND project_id=? AND issue_number=?', (comment_id, values['project_id'], values['issue_number'])).fetchone()
+                if not comment and values['action'] in ('comment_resolved', 'comment_unresolved'):
+                    raise ValueError('Resolved comment is not available on this replica')
                 if comment:
                     data['comment_id'] = comment[0]
                     values['data'] = encode(data)
@@ -429,8 +435,12 @@ def canonical_append(db, supervisor_node, table, row):
             data = json.loads(row['data'])
             if isinstance(data, dict) and 'comment_id' in data:
                 comment = db.execute("SELECT origin,origin_id FROM fleet_row_ids WHERE table_name='comments' AND local_id=?", (data['comment_id'],)).fetchone()
-                if comment and comment['origin'] == origin['origin']:
+                resolution = row['action'] in ('comment_resolved', 'comment_unresolved')
+                if comment and (resolution or comment['origin'] == origin['origin']):
                     data['comment_id'] = comment['origin_id']
+                    if resolution:
+                        data['comment_origin'] = comment['origin']
+                        data['comment_origin_id'] = comment['origin_id']
                     row['data'] = encode(data)
         return {'origin': origin[0], 'row': row}
     return {'origin': supervisor_node, 'row': row}

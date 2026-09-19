@@ -142,6 +142,9 @@ fn validate(r: &Request) -> Result<()> {
         return Err(Error::invalid("Issue number must be positive"));
     }
     match &r.operation {
+        Operation::ResolveComment { comment_id, .. } if *comment_id <= 0 => {
+            return Err(Error::invalid("Comment ID must be positive"));
+        }
         Operation::Mindmap { operation } => operation.validate()?,
         Operation::Create {
             title,
@@ -748,6 +751,24 @@ impl Store {
                 }
                 comments.truncate(count);
                 comments.reverse();
+                // One indexed history scan serves all visible comments. Resolution
+                // events are immutable and use the existing fleet ID remapping.
+                let mut stmt = tx.prepare("SELECT json_extract(data,'$.comment_id'),action FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('comment_resolved','comment_unresolved') ORDER BY created_at DESC,id DESC")?;
+                let mut states = std::collections::HashMap::new();
+                let mut rows = stmt.query(params![project.id, number])?;
+                while let Some(row) = rows.next()? {
+                    states
+                        .entry(row.get::<_, i64>(0)?)
+                        .or_insert(row.get::<_, String>(1)? == "comment_resolved");
+                }
+                for comment in &mut comments {
+                    comment["resolved"] = json!(
+                        states
+                            .get(&comment["id"].as_i64().unwrap())
+                            .copied()
+                            .unwrap_or(false)
+                    );
+                }
                 let assignee: Option<Actor> = if let Some(id) = &issue.assignee {
                     let raw: String =
                         tx.query_row("SELECT metadata FROM agents WHERE id=?1", [id], |r| {
@@ -1082,6 +1103,38 @@ fn mutate(
         }
         Operation::Comment { body, .. } => {
             comment_id = Some(comment(db, &project.id, number, actor, body, now)?);
+        }
+        Operation::ResolveComment {
+            comment_id: id,
+            resolved,
+            ..
+        } => {
+            let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM comments WHERE project_id=?1 AND issue_number=?2 AND id=?3)", params![project.id,number,id], |row| row.get(0))?;
+            if !exists {
+                return Err(Error::new("not_found", "Comment not found on this issue"));
+            }
+            let previous: Option<String> = db.query_row("SELECT action FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('comment_resolved','comment_unresolved') AND json_extract(data,'$.comment_id')=?3 ORDER BY created_at DESC,id DESC LIMIT 1", params![project.id,number,id], |row| row.get(0)).optional()?;
+            if (previous.as_deref() == Some("comment_resolved")) != *resolved {
+                action = if *resolved {
+                    "comment_resolved"
+                } else {
+                    "comment_unresolved"
+                };
+                // A comment can originate on a different fleet machine than this
+                // event. Preserve that identity when the offline journal replays.
+                let reference: Option<(String,i64)> = db.query_row("SELECT origin,origin_id FROM fleet_row_ids WHERE table_name='comments' AND local_id=?1 ORDER BY rowid LIMIT 1", [id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+                let (origin, origin_id) = match reference {
+                    Some(reference) => reference,
+                    None => (
+                        db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |row| {
+                            row.get::<_, String>(0)
+                        })?,
+                        *id,
+                    ),
+                };
+                data =
+                    json!({"comment_id":id,"comment_origin":origin,"comment_origin_id":origin_id});
+            }
         }
         Operation::Close {
             comment: text,

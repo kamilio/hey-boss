@@ -315,6 +315,58 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
 }
 
 #[test]
+fn comment_resolution_preserves_content_is_reversible_and_scoped_to_issue() {
+    let web = Web::start();
+    for title in ["First", "Second"] {
+        web.ok(json!({"action":"create","title":title,"body":"","labels":[]}));
+    }
+    let added = web.ok(json!({"action":"comment","number":1,"body":"**Keep this feedback**"}));
+    let id = added["comment_id"].as_i64().unwrap();
+    let original = web.ok(json!({"action":"view","number":1}));
+    assert_eq!(original["comments"][0]["resolved"], false);
+    let operation = json!({"action":"resolve_comment","number":1,"comment_id":id,"resolved":true});
+    let resolved = web.ok(operation.clone());
+    assert_eq!(resolved["changed"], true);
+    assert_eq!(web.ok(operation)["changed"], false);
+    let view = web.ok(json!({"action":"view","number":1}));
+    assert_eq!(view["comments"][0]["resolved"], true);
+    assert_eq!(view["comments"][0]["body"], original["comments"][0]["body"]);
+    assert_eq!(
+        view["comments"][0]["body_html"],
+        original["comments"][0]["body_html"]
+    );
+    assert_eq!(view["comments"][0]["author"], "human:boss");
+    assert_eq!(view["issue"]["version"], resolved["issue"]["version"]);
+    let wrong = web.action(
+        &web.project,
+        json!({"action":"resolve_comment","number":2,"comment_id":id,"resolved":false}),
+        None,
+    );
+    assert_eq!(wrong.status, 404);
+    web.ok(json!({"action":"resolve_comment","number":1,"comment_id":id,"resolved":false}));
+    assert_eq!(
+        web.ok(json!({"action":"view","number":1}))["comments"][0]["resolved"],
+        false
+    );
+    let history = web.ok(json!({"action":"history","number":1,"limit":20,"offset":0}));
+    let events = history["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["action"] == "comment_resolved")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["action"] == "comment_unresolved")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn markdown_preview_issue_and_comment_share_complete_rendering() {
     let web = Web::start();
     let body = include_str!("fixtures/issues-markdown.md");

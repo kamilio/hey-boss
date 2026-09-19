@@ -637,6 +637,49 @@ dialog::backdrop {
 .comment-body {
   padding: 24px;
 }
+.comment-resolve {
+  margin-left: auto;
+  padding: 3px 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.comment-resolve:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+.comment-resolve:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.comment-resolve:disabled {
+  opacity: .5;
+  cursor: wait;
+}
+.resolved-comment-heading {
+  display: flex;
+  align-items: center;
+  padding: 5px 17px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.resolved-comment summary {
+  cursor: pointer;
+  border-bottom: 0;
+  padding-top: 6px;
+}
+.resolved-comment details[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+.resolved-comment-hint {
+  margin-left: auto;
+  font-size: 10px;
+}
+.resolved-comment details[open] .resolved-comment-hint {
+  display: none;
+}
 .markdown {
   font-size: 13px;
   line-height: 1.8;
