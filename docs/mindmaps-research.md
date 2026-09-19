@@ -39,3 +39,13 @@ npx --yes --package markmap-cli markmap --no-open --offline -o out/mindmap-markm
 The command exited successfully and produced a standalone HTML artifact. Freeplane
 and XMind findings above are from their published API/source; their desktop applications
 have not been installed or executed as part of this research.
+
+Attempted the official legacy XMind Python SDK at commit
+`58b2c7f1971abd941cd0f28e88388ec93ed2c53d` in an isolated checkout. Its
+`createRelationship(end1, end2, title=None)` / `addRelationship(rel)` source confirms
+that description/title is optional and relationship creation is separate from
+hierarchy. Running `xmind.load` under the available Python 3 runtime failed in
+`core/__init__.py` with `AttributeError: 'str' object has no attribute 'decode'`.
+The SDK assumes Python 2 strings. No XMind artifact is claimed from this attempt;
+no old runtime or third-party SDK patches were installed. Markmap's real CLI
+reproduction above did produce its verified artifact.

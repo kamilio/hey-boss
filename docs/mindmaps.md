@@ -6,7 +6,9 @@
 
 ```sh
 hey-boss mm add 'Autumn release' --id release
-hey-boss mm add 'Design decisions' --id design --under release --body '## Scope\nDescribe the plan.'
+hey-boss mm add 'Design decisions' --id design --under release --body '## Scope
+
+Describe the plan.'
 hey-boss mm issue 12 --id implementation --under release
 hey-boss mm show
 hey-boss mm web
@@ -35,7 +37,13 @@ Typed selectors `issue:12`, `pr:HTTP_URL` and `notice:TASK_ID` add missing refer
 
 A link is directed: **A depends-on B** means A waits for B. `related` is the default kind; custom kinds are allowed. Descriptions are optional, and `--why` is an alias for `--description`. Repeating `link` updates the description for the same source, target and kind; an omitted or empty description clears it. `unlink` removes only that direction and kind. Cross-links can cycle; outline parenthood cannot.
 
-Use `hey-boss issue pr add 12 URL` to attach a PR to its issue. Mindmaps project automatic `pull-request` links from those records; removing an attachment removes the automatic relationship on the next load. Explicit PR nodes reuse the automatic link endpoint. Automatic links are not manually editable with `mm link/unlink`.
+Use `hey-boss issue pr add 12 URL` to attach a PR to its issue. Mindmaps project automatic `pull-request` links from those records; removing an attachment removes the automatic relationship on the next load. Explicit PR nodes reuse the automatic link endpoint. An explicit PR also reveals
+its attached issues even when those issues have not been placed in any map. Those
+unplaced issue endpoints are live references and open the issue directly; viewing
+them does not add saved nodes. When an issue is placed in multiple maps, the PR
+prefers its node in the current map, then in the issue's own project map. Trailing
+slash variants of the same PR attachment do not duplicate automatic nodes or links.
+Automatic links are not manually editable with `mm link/unlink`.
 
 Only notices confirmed pending in the current Inbox appear. Completed, read, cancelled or absent notices are omitted, while any child topics are promoted to their nearest visible ancestor. If the Inbox cannot be read, unverified notification nodes are hidden and an availability warning is shown. Saved references remain in the map. Opening the map does not mark a notice read, answer a question, or finish a review.
 
@@ -56,7 +64,13 @@ An anchor supplies the destination parent unless `--under` is supplied; then the
 
 ## Automation and concurrency
 
-All commands support `--json`. Mutations use the same durable transactions, author identity and request ID machinery as issue commands. Use `--agent human:NAME` in a terminal when session detection is unavailable.
+All commands support `--json`. Reads return the live projected map. Mutations return
+compact saved node metadata, the changed link when applicable, and affected project
+versions; use `show` to read the complete current map. Mutations do not read the Inbox,
+so adding or linking notice references works while the desktop app is unavailable.
+The same compact mutation result is cached for request ID retries, rather than a copy
+of every node in the map. Mutations use the same durable transactions, author identity
+and request ID machinery as issue commands. Use `--agent human:NAME` in a terminal when session detection is unavailable.
 
 ```sh
 hey-boss mm add 'Release' --id release --request-id release-topic --if-version 0 --json
@@ -71,6 +85,9 @@ Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not fo
 
 `mm web` serves `/mm` on loopback, default port 4781. `--port 0` chooses an available port; `--json` prints the URL. Existing `issue web` servers also serve `/mm`, with a Mindmaps navigation link.
 
-The viewer supports project switching, nested collapse/expand, search through topics and link descriptions, incoming/outgoing dependency labels, Markdown bodies and cross-project navigation. Refresh reloads live resources. Maps are not writable through either `/api/mm` or the general `/api/action` web route. The ordinary issue and Inbox interfaces keep their existing editing behavior.
+The viewer supports project switching, nested collapse/expand, search through topics
+and link descriptions, incoming/outgoing dependency labels, Markdown bodies and
+cross-project navigation. Issue bodies sit behind an expandable “Issue details”
+control so the outline remains readable; text/Markdown topic bodies stay visible. Refresh reloads live resources. Maps are not writable through either `/api/mm` or the general `/api/action` web route. The ordinary issue and Inbox interfaces keep their existing editing behavior.
 
 See [research and design rationale](mindmaps-research.md).

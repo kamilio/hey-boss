@@ -433,6 +433,7 @@ impl Store {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "FULL")?;
         db.execute_batch(super::fleet::SCHEMA)?;
+        db.execute_batch(mindmap::INDEXES)?;
         // An early updater persisted runtime state inside strict Settings JSON.
         // Normalize it without terminating supervisors that are still draining.
         if db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get::<_, bool>(0))? {

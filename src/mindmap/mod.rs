@@ -186,12 +186,16 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
             Vec::new()
         }
     };
-    let mut hidden = Vec::new();
+    let pending: std::collections::HashMap<String, Value> = tasks
+        .into_iter()
+        .filter(|task| task["status"] == "pending")
+        .filter_map(|task| Some((task["taskID"].as_str()?.to_owned(), task)))
+        .collect();
+    let mut hidden = std::collections::HashSet::<String>::new();
     for field in ["nodes", "external_nodes"] {
         if let Some(nodes) = graph.get_mut(field).and_then(Value::as_array_mut) {
             for node in nodes.iter_mut().filter(|n| n["kind"] == "notification") {
-                let task = tasks.iter().find(|t| t["taskID"] == node["reference"]);
-                if let Some(task) = task.filter(|t| t["status"] == "pending") {
+                if let Some(task) = pending.get(node["reference"].as_str().unwrap_or("")) {
                     node["title"] = task["title"].clone();
                     node["body"] = json!(task["summary"].as_str().unwrap_or(""));
                     node["body_html"] = json!(crate::markdown::render_fragment(
@@ -200,7 +204,7 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
                     node["state"] = json!("pending");
                     node["available"] = json!(true);
                 } else {
-                    hidden.push(node["id"].clone());
+                    hidden.insert(node["id"].as_str().unwrap_or("").to_owned());
                 }
             }
             // Order by original tree paths before promotion, so a completed
@@ -234,21 +238,17 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
                 path.reverse();
                 path
             });
-            // Preserve nesting if a notice's ancestor has completed.
-            let parents: Vec<_> = nodes
-                .iter()
-                .map(|n| (n["id"].clone(), n["parent_id"].clone()))
-                .collect();
+            // Preserve nesting through completed ancestors, using their original parents.
             for node in nodes.iter_mut() {
-                while hidden.contains(&node["parent_id"]) {
-                    node["parent_id"] = parents
-                        .iter()
-                        .find(|(id, _)| *id == node["parent_id"])
-                        .map(|(_, p)| p.clone())
+                while hidden.contains(node["parent_id"].as_str().unwrap_or("")) {
+                    node["parent_id"] = paths
+                        .get(node["parent_id"].as_str().unwrap_or(""))
+                        .and_then(|(parent, _, _)| parent.as_deref())
+                        .map(|parent| json!(parent))
                         .unwrap_or(Value::Null);
                 }
             }
-            nodes.retain(|n| !hidden.contains(&n["id"]));
+            nodes.retain(|n| !hidden.contains(n["id"].as_str().unwrap_or("")));
             let mut positions = std::collections::HashMap::<Option<String>, i64>::new();
             for node in nodes {
                 let position = positions
@@ -260,7 +260,25 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) {
         }
     }
     if let Some(links) = graph.get_mut("links").and_then(Value::as_array_mut) {
-        links.retain(|l| !hidden.contains(&l["from"]) && !hidden.contains(&l["to"]));
+        links.retain(|l| {
+            !hidden.contains(l["from"].as_str().unwrap_or(""))
+                && !hidden.contains(l["to"].as_str().unwrap_or(""))
+        });
+    }
+    if let Some(selected) = graph.get("node") {
+        let selected_id = selected["id"].clone();
+        let projected = ["nodes", "external_nodes"]
+            .iter()
+            .filter_map(|field| graph[*field].as_array())
+            .flatten()
+            .find(|node| node["id"] == selected_id)
+            .cloned();
+        if let Some(node) = projected {
+            graph["node"] = node;
+        } else if hidden.contains(selected_id.as_str().unwrap_or("")) {
+            graph.as_object_mut().unwrap().remove("node");
+            graph["selected_node_id"] = selected_id;
+        }
     }
 }
 
