@@ -265,8 +265,11 @@ inherited prompt and PR toggle and previews the exact resulting instructions.
 
 Pickup is an atomic reservation, leaving the issue **unassigned**. Codex must
 run `hey-boss issue claim NUMBER`. Another agent cannot claim an unexpired
-reservation without explicit force. `--claim-timeout SECONDS` defaults to 120;
-missed deadlines stop Codex and free the slot. Stopping or restarting a worker
+reservation without explicit force. `--claim-timeout SECONDS` defaults to 600
+(ten minutes), starting at the first model activity. Queued model startup has a
+separate fifteen-minute deadline. Saved workers retain their configured timeout;
+use `--id WORKER_ID --claim-timeout 600` when starting an older saved worker to
+adopt the longer window. Missed deadlines stop Codex and free the slot. Stopping or restarting a worker
 reaps its agents, unassigns their unfinished issues, and makes those issues eligible
 immediately. Recovery does the same for a killed supervisor. Failed/blocked/timed
 out issues become eligible again while open and unassigned after a retry delay
