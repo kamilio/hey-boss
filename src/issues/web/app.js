@@ -270,10 +270,7 @@ function routeHash(route) {
 }
 function parseRoute() {
   const params = new URLSearchParams(location.hash.slice(1));
-  const project =
-    params.get("project") ||
-    storage.get("hey-boss-issues-project") ||
-    model.project.id;
+  const project = HeyBossUI.projectId(model.project.id);
   return {
     project,
     host: params.get("host") || model.defaultHost || "",
@@ -665,7 +662,6 @@ async function renderRoute() {
   clearTimeout(searchTimer);
   $("#issue-search").value = model.route.search;
   model.project = currentProject();
-  storage.set("hey-boss-issues-project", model.project.id);
   model.detail = null;
   model.signature = "";
   updateHeader();

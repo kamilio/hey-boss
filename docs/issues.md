@@ -168,8 +168,10 @@ to reach this endpoint can read all projects and act as Boss, including changing
 issues and controlling workers. There is no per-project access control. Host,
 Origin, fetch-site, and CSRF checks remain enforced. Responses use `no-store`,
 and HTTPS pages keep drafts and pending retry IDs only in page memory rather
-than browser storage. Drafts survive navigation and reconnects in the same page,
-but disappear on reload or close. If a write's result is uncertain, reconnect in
+than browser storage. Only the selected project ID is remembered across page
+loads, shared by Issues, Inbox, Mindmaps, and Workers. A project in the URL
+overrides that remembered selection. Drafts survive navigation and reconnects in
+the same page, but disappear on reload or close. If a write's result is uncertain, reconnect in
 that tab or inspect the saved issue before resubmitting after a reload. Displayed
 content necessarily reaches the phone's memory; this is not a guarantee against
 browser/OS snapshots or screenshots.
