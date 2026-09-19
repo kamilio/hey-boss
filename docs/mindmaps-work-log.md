@@ -460,3 +460,15 @@ items to shrink/wrap, including foreign project labels, and let project headings
 wrap long names. Actual browser measurement after rebuilding/reloading shows the
 same alias at 275 pixels with no metadata element extending beyond the viewport.
 Screenshot: `output/playwright/mm-long-alias-mobile.png`.
+
+Checked/applied the wrapping increment `81c746f` to the original checkout and
+advanced the delivery anchor. Local-only upgrade reported `updated`; actual
+installed build is `a9e607b2412ce7d6`. A fresh installed ephemeral server serves
+the verified wrapping stylesheet; it was terminated after the asset check.
+Result: `out/mindmap-installed-smoke/wrapping-result.json`.
+
+The one-hour endurance server remains the process started with build
+`a9d3929d4d0a8ab0`; subsequent CLI cycles use the replaced installed binary.
+The intervening runtime change is CSS only. At the 187.79-second sample, 81
+complete cycles had no failure and owned-server RSS was 12,192 KiB. The run is
+still pending; do not restart it merely because a tool wait yields or times out.
