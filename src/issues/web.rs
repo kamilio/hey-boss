@@ -191,7 +191,7 @@ pub fn serve(config: Config) -> Result<()> {
                 if let Backend::Local(path) = &app.backend {
                     let result = Store::open(path).and_then(|mut store| {
                         store.discover_projects(&projects)?;
-                        store.release_stale_claims(&app.actor.machine, super::worker::now())?;
+                        super::worker::recover(&mut store, &app.actor.machine)?;
                         Ok(())
                     });
                     if let Err(error) = result {
