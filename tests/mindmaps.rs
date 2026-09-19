@@ -1806,3 +1806,259 @@ fn issue_label_migration_preserves_existing_map_and_live_title() {
         "Short label"
     );
 }
+
+fn batch_file(f: &Fixture, edits: Value) -> String {
+    let path = f.root.join("batch.json");
+    std::fs::write(&path, edits.to_string()).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+#[test]
+fn batch_preview_atomic_commit_retry_and_resource_preservation() {
+    let f = Fixture::new();
+    f.issue(
+        "Atlas",
+        &[
+            "create",
+            "--title",
+            "Original issue",
+            "--body",
+            "Resource body",
+        ],
+    );
+    f.issue(
+        "Atlas",
+        &["pr", "add", "1", "https://github.com/org/repo/pull/1"],
+    );
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    f.run("Atlas", &["issue", "1", "--id", "followup"]);
+    f.issue(
+        "Atlas",
+        &["subtask", "create", "1", "--title", "Child issue"],
+    );
+    f.issue("Atlas", &["claim", "1"]);
+    let resource = f.issue("Atlas", &["view", "1"]);
+    let before = f.run("Atlas", &["show"]);
+    let version = before["version"].to_string();
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"edit","node":"issue:1","title":"Short label"},
+            {"command":"alias","node":"followup","alias":"short"},
+            {"command":"move","node":"followup","under":"root"}
+        ]),
+    );
+    let preview = f.run(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &file,
+            "--dry-run",
+            "--if-version",
+            &version,
+        ],
+    );
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["version"], before["version"].as_i64().unwrap() + 1);
+    assert_eq!(preview["changed_nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(f.run("Atlas", &["show"]), before);
+    let args = [
+        "batch",
+        "--file",
+        &file,
+        "--if-version",
+        &version,
+        "--request-id",
+        "batch-1",
+    ];
+    let saved = f.run("Atlas", &args);
+    assert_eq!(saved["version"], preview["version"]);
+    assert_eq!(f.run("Atlas", &args), saved);
+    let graph = f.run("Atlas", &["show"]);
+    assert_eq!(alias(&graph, "short")["title"], "Short label");
+    assert_eq!(
+        alias(&graph, "short")["parent_id"],
+        alias(&graph, "root")["id"]
+    );
+    assert_eq!(f.issue("Atlas", &["view", "1"]), resource);
+    assert!(saved.to_string().len() < 4096);
+    let noop = batch_file(
+        &f,
+        json!([
+            {"command":"edit","node":"short","title":"Short label"},
+            {"command":"move","node":"short","under":"root"}
+        ]),
+    );
+    assert_eq!(
+        f.run("Atlas", &["batch", "--file", &noop])["changed"],
+        false
+    );
+    assert_eq!(f.run("Atlas", &["show"]), graph);
+}
+
+#[test]
+fn invalid_batches_roll_back_every_edit_and_revision() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    f.run(
+        "Atlas",
+        &["add", "Child", "--id", "child", "--under", "root"],
+    );
+    f.run("Other", &["add", "Foreign", "--id", "foreign"]);
+    let before = f.run("Atlas", &["show"]);
+    for (edits, code) in [
+        (
+            json!([{ "command":"edit","node":"root","title":"Changed" }, {"command":"edit","node":"missing","title":"Missing"}]),
+            3,
+        ),
+        (
+            json!([{ "command":"edit","node":"root","title":"Changed" }, {"command":"move","node":"root","under":"child"}]),
+            4,
+        ),
+        (
+            json!([{ "command":"edit","node":"root","title":"Changed" }, {"command":"alias","node":"child","alias":"root"}]),
+            4,
+        ),
+        (
+            json!([{ "command":"edit","node":"root","title":"Same" }, {"command":"edit","node":"child","title":"Same"}]),
+            4,
+        ),
+        (
+            json!([{ "command":"edit","node":"root","title":"Changed" }, {"command":"move","node":"child","under":"Other::foreign"}]),
+            2,
+        ),
+        (
+            json!([{ "command":"remove","node":"root","recursive":true}]),
+            2,
+        ),
+        (
+            json!([{ "command":"edit","node":"root","title":"Changed","typo":true}]),
+            2,
+        ),
+    ] {
+        let file = batch_file(&f, edits);
+        f.fail("Atlas", &["batch", "--file", &file], code);
+        assert_eq!(f.run("Atlas", &["show"]), before);
+    }
+    let file = batch_file(
+        &f,
+        json!([{ "command":"edit","node":"root","title":"Changed" }]),
+    );
+    f.fail("Atlas", &["batch", "--file", &file, "--if-version", "0"], 4);
+    f.fail(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &file,
+            "--dry-run",
+            "--request-id",
+            "preview",
+        ],
+        2,
+    );
+    assert_eq!(f.run("Atlas", &["show"]), before);
+}
+
+#[test]
+fn batch_reads_stdin_and_empty_batches_are_harmless() {
+    let f = Fixture::new();
+    let mut command = f.cmd("Atlas", "mm", &["batch", "--file", "-"]);
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"[]").unwrap();
+    let result = success(child.wait_with_output().unwrap());
+    assert_eq!(result["changed"], false);
+    assert_eq!(result["version"], 0);
+    assert_eq!(result["changed_nodes"], json!([]));
+}
+
+#[test]
+fn batch_reorders_siblings_clears_labels_and_reports_net_changes_only() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    f.run("Atlas", &["add", "Other", "--id", "other"]);
+    f.issue("Atlas", &["create", "--title", "Live title"]);
+    f.run("Atlas", &["issue", "1", "--id", "issue"]);
+    f.run("Atlas", &["edit", "issue", "--title", "Old label"]);
+    let before = f.run("Atlas", &["show"]);
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"edit","node":"issue","clear_label":true},
+            {"command":"move","node":"issue","before":"root"}
+        ]),
+    );
+    let result = f.run("Atlas", &["batch", "--file", &file]);
+    assert_eq!(result["changed_nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(result["version"], before["version"].as_i64().unwrap() + 1);
+    let after = f.run("Atlas", &["show"]);
+    assert_eq!(alias(&after, "issue")["title"], "Live title");
+    assert_eq!(alias(&after, "issue")["position"], 0);
+    let noop = batch_file(
+        &f,
+        json!([
+            {"command":"edit","node":"root","title":"Temporary"},
+            {"command":"edit","node":"root","title":"Root"}
+        ]),
+    );
+    let result = f.run("Atlas", &["batch", "--file", &noop]);
+    assert_eq!(result["changed"], false);
+    assert_eq!(result["changed_nodes"], json!([]));
+    assert_eq!(f.run("Atlas", &["show"]), after);
+}
+
+#[test]
+fn batch_many_labels_have_one_revision_and_compact_receipts() {
+    let f = Fixture::new();
+    let mut edits = Vec::new();
+    for n in 1..=47 {
+        f.issue(
+            "Atlas",
+            &[
+                "create",
+                "--title",
+                &format!("Original issue {n}"),
+                "--body",
+                "Large body. ".repeat(1000).as_str(),
+            ],
+        );
+        f.run("Atlas", &["issue", &n.to_string()]);
+        edits.push(
+            json!({"command":"edit","node":format!("issue:{n}"),"title":format!("Label {n}")}),
+        );
+    }
+    let file = batch_file(&f, json!(edits));
+    let result = f.run(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &file,
+            "--if-version",
+            "47",
+            "--request-id",
+            "47-labels",
+        ],
+    );
+    assert_eq!(result["version"], 48);
+    assert_eq!(result["changed_nodes"].as_array().unwrap().len(), 47);
+    assert!(result.to_string().len() < 32768);
+    assert!(!result.to_string().contains("Large body"));
+    f.fail(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &batch_file(&f, json!([])),
+            "--request-id",
+            "47-labels",
+        ],
+        4,
+    );
+}

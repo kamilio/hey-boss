@@ -190,3 +190,47 @@ Search matches both titles. The underlying issue title and version stay unchange
 Cross-project issue references work the same way using their map alias or node ID.
 These edits support `--if-version` and `--request-id` like other map mutations;
 body edits remain unavailable for live issue references.
+
+### Atomic organization batches
+
+`mm batch --file edits.json` applies a JSON array of label edits, alias changes,
+and moves as one transaction. `--file -` reads stdin. Preview it with `--dry-run`;
+the preview executes the same validation and returns the proposed result without
+saving anything. Guard the preview and commit with the same map `--if-version`.
+
+```json
+[
+  {"command":"edit","node":"issue:12","title":"Keep replies safe"},
+  {"command":"edit","node":"issue:13","clear_label":true},
+  {"command":"alias","node":"followup","alias":"reply-followup"},
+  {"command":"move","node":"followup","under":"issue:12"}
+]
+```
+
+```sh
+hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
+hey-boss mm batch --file edits.json --if-version 42 --request-id organize-replies --json
+```
+
+All selectors resolve against the original map before any edits, so later entries
+can still use `followup` after its alias changes. Nodes, parents and sibling anchors
+must already exist in the selected map. Entries execute in input order; move fields
+`under`, `before` and `after` follow `mm move` semantics. Omit them to move a node to
+the root/end. Use `alias: null` to clear an alias. Edits accept titles and issue
+`clear_label`, preserving live issue content; bodies and resource mutations are
+not supported. Unknown fields and commands are rejected.
+
+Invalid selectors, alias collisions, duplicate requested labels, invalid nesting,
+cycles, or a stale version reject the whole transaction. Requested titles must be
+unique among saved map labels/titles; existing duplicate ordinary titles do not
+block unrelated moves or alias changes. Alias changes must be valid at each step;
+use a temporary alias to swap names. The batch supports 10,000 entries and 1 MiB
+of input. Issue titles, versions, ownership, subtasks, PR attachments and resource
+state remain unchanged.
+
+JSON results include `changed_nodes` with each changed node's stable `id` and compact
+`before`/`after` organization metadata, including siblings affected by reordering.
+`base_version` is the guarded revision; `version` is the resulting revision (the
+proposed revision for a dry run). A batch advances the map version once, and empty
+or net no-op batches leave it unchanged. Identical request-ID retries return the
+original receipt even after aliases change. Dry runs cannot use `--request-id`.

@@ -147,6 +147,15 @@ enum Action {
         #[command(flatten)]
         body: Body,
     },
+    /// Atomically organize labels, aliases and moves from a JSON array.
+    Batch {
+        /// JSON file; '-' reads stdin, up to 1 MiB.
+        #[arg(long)]
+        file: PathBuf,
+        /// Validate and preview the transaction without saving changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Set or clear a node's readable alias, preserving its identity and links.
     Alias {
         node: String,
@@ -238,6 +247,20 @@ impl Options {
                 body_mode: *bodies,
             },
             Some(Action::Projects) => Operation::Projects,
+            Some(Action::Batch { file, dry_run }) => {
+                let input = Body {
+                    body: None,
+                    file: Some(file.clone()),
+                }
+                .read()?
+                .unwrap();
+                Operation::Batch {
+                    edits: serde_json::from_str(&input)
+                        .map_err(|e| Error::invalid(format!("Invalid batch JSON: {e}")))?,
+                    dry_run: *dry_run,
+                    if_version: self.if_version,
+                }
+            }
             Some(Action::Add {
                 title,
                 body,
@@ -491,6 +514,28 @@ pub fn run(options: &Options) -> Result<()> {
             text.to_owned()
         }
     };
+    if matches!(options.action, Some(Action::Batch { .. })) {
+        println!(
+            "{} · map version {}",
+            if graph["dry_run"] == true {
+                "Preview"
+            } else if graph["changed"] == true {
+                "Saved"
+            } else {
+                "Unchanged"
+            },
+            graph["version"]
+        );
+        for node in graph["changed_nodes"].as_array().unwrap() {
+            println!(
+                "{}: {} → {}",
+                node["id"].as_str().unwrap(),
+                node["before"],
+                node["after"]
+            );
+        }
+        return Ok(());
+    }
     if request.operation.writes() {
         println!(
             "{} · map version {}",
