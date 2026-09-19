@@ -453,6 +453,18 @@ pub fn interactive(
         std::io::stdout().flush()?;
         let mut choice = String::new();
         std::io::stdin().read_line(&mut choice)?;
+        if !matches!(choice.trim(), "hey-boss" | "file") {
+            return Err(Error::new(
+                "cancelled",
+                "Planning cancelled; both versions preserved",
+            ));
+        }
+        // Draft eligibility must succeed before reconciliation writes either side.
+        // Cancellation above leaves even the issue's lifecycle untouched.
+        if let Some(operation) = pending.take() {
+            call(&sync, operation)?;
+        }
+        let current = call(&sync, Operation::View { number })?;
         match choice.trim() {
             "hey-boss" => seed(&plan, &current["issue"])?,
             "file" => {
