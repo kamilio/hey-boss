@@ -687,3 +687,13 @@ samples ranged from 14,304 to 18,416 KiB across 59 samples; clean server exit 0.
 Evidence: `out/mm-soak-pinned-hour-20260919/samples.jsonl`. The earlier unpinned
 run remains a failure caused by concurrent executable replacement; it is not
 counted as a passing endurance measurement.
+
+Delivered search navigation to original main as `1245d12`, then merged current
+main into the worktree; normalized delivery anchor is `469b53a`. The four focused
+web mindmap checks and JavaScript layout/index tests pass. Installation is now
+build `dff79018d18d7777`: all four served map assets match current-main source
+bytes, and the Codex/Agents/Claude skill copies match the repository skill.
+Installed native reads preserve a NUL-leading Unicode fixture: omitted body
+returns zero characters with body presence/assignment, preview returns 512,
+and full returns all 514. The isolated smoke server stopped cleanly.
+Evidence `out/mindmap-installed-current-20260919/result.json`.
