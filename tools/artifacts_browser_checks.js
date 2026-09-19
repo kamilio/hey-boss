@@ -3,9 +3,10 @@ async page => {
   const checks=[],errors=[];
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   page.on('pageerror',e=>errors.push(e.message));
+  await page.reload();
   if(!await page.locator('#artifact-editor').count())await page.getByRole('button',{name:'New artifact',exact:true}).click();
   await page.getByRole('textbox',{name:'Title',exact:true}).fill('Browser plan');
-  await page.getByRole('textbox',{name:'Markdown',exact:true}).fill('# Plan\n\nA **selected** phrase.\n\n- [x] Verified');
+  await page.getByRole('textbox',{name:'Markdown',exact:true}).fill('# Plan\n\n🐈'+'A'.repeat(79)+'**selected** phrase.\n\n- [x] Verified');
   await page.reload();
   await page.getByRole('textbox',{name:'Title',exact:true}).waitFor();
   check(await page.getByRole('textbox',{name:'Title',exact:true}).inputValue()==='Browser plan','New draft survives reload');
@@ -18,7 +19,7 @@ async page => {
   const {project,id,origin}=await page.evaluate(()=>{const p=new URLSearchParams(location.hash.slice(1));return {project:p.get('project'),id:p.get('artifact'),origin:location.origin};});
   check(!!id,'Created document has stable URL');
   await page.evaluate(()=>{const text=document.querySelector('#artifact-reading strong').firstChild,range=document.createRange();range.selectNodeContents(text);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);document.querySelector('#artifact-reading').dispatchEvent(new Event('pointerup'));});
-  check(await page.locator('#artifact-quote').innerText()==='selected','Selection anchors comment to rendered text');
+  check(await page.locator('#artifact-quote').innerText()==='selected','Unicode context anchors comment to rendered text');
   await page.getByRole('textbox',{name:'Add a comment',exact:true}).fill('Anchored discussion');
   await page.getByRole('button',{name:'Comment',exact:true}).click();
   await page.getByText('Anchored discussion',{exact:true}).waitFor();
