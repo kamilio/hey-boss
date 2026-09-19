@@ -21,15 +21,19 @@ disables the creator filter. Source and comment pagination have no fixed issue l
 Each imported issue keeps its title and labels. Its body contains the original
 Markdown, source URL, author, timestamps, assignees, milestone metadata, and every
 comment with its author, timestamps, and original URL. Source assignees are recorded
-as metadata; the destination starts unassigned. Imported comments are archived in
-the body rather than attributed to local agents. Embedded images and attachments
+as metadata; the destination starts unassigned. Each GitHub comment also becomes
+a discussion comment under the `github-import` actor, with its original author,
+timestamps, and URL in the comment text. The body archive is retained for complete
+reads and compatibility with earlier imports. Embedded images and attachments
 remain links to their original locations. Imports exceeding the destination's 1 MiB
 body limit fail without deleting the source.
 
 The command waits for the issue store to acknowledge the copy and reads it back.
 It then reads the source and all comments again, compares the snapshots, and checks
 the destination once more before issuing GitHub's `deleteIssue` mutation. A failed
-copy, verification, or destination transport check prevents deletion.
+copy, verification, or destination transport check prevents deletion. Discussion
+comments are verified through the paginated audit trail, including comments beyond
+the latest 20 shown by `issue view`.
 Deleting GitHub issues requires the relevant repository permissions. A failed or
 uncertain deletion leaves the verified destination copy available; retries only
 attempt source issues that still exist. GitHub does not provide
@@ -38,7 +42,9 @@ excluded completely.
 
 Import request IDs are derived from GitHub's stable issue node IDs, under a stable
 `github-import` actor, and scoped to the destination project. Retrying the same import
-reuses its copy even from another Codex session. If the source changed after a previous
+reuses its copy even from another Codex session. Comment request IDs include each
+GitHub comment's stable ID, so interrupted imports resume without duplicating
+comments. If the source changed after a previous
 copy, the retry reports a conflict instead of creating a duplicate or deleting the
 new content. Resolve the differing copies manually before continuing. Do not change
 the destination project when retrying an interrupted move. Global `--request-id`

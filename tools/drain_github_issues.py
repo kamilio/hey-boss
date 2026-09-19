@@ -11,6 +11,11 @@ BODY_LIMIT = 1024 * 1024
 IMPORT_AGENT = "github-import"
 
 
+def comment_body(comment):
+    info = {key: value for key, value in comment.items() if key != "body"}
+    return "GitHub comment:\n\n" + json.dumps(info, ensure_ascii=False, indent=2) + "\n\n" + (comment["body"] or "")
+
+
 def run_json(command, body=None):
     result = subprocess.run(command, input=body, capture_output=True, text=True, timeout=120)
     if result.returncode:
@@ -106,9 +111,7 @@ class Destination:
         body = (source["body"] or "") + "\n\n---\nGitHub source metadata:\n\n" + json.dumps(
             metadata, ensure_ascii=False, indent=2)
         for comment in source["comments"]:
-            info = {key: value for key, value in comment.items() if key != "body"}
-            body += "\n\n---\nGitHub comment:\n\n" + json.dumps(info, ensure_ascii=False, indent=2)
-            body += "\n\n" + (comment["body"] or "")
+            body += "\n\n---\n" + comment_body(comment)
         if len(body.encode("utf-8")) > BODY_LIMIT:
             raise RuntimeError("GitHub issue and comments exceed the destination's 1 MiB limit")
         key = "github-drain:" + source["node_id"]
@@ -117,6 +120,9 @@ class Destination:
             args += ["--label=" + label]
         saved = self.call(args, body)["issue"]
         number = saved["number"]
+        for comment in source["comments"]:
+            self.call(["comment", str(number), "--body", "-", "--request-id",
+                       key + ":comment:" + str(comment["id"])], comment_body(comment))
         if source["state"] == "closed":
             self.call(["close", str(number), "--request-id", key + ":close"])
         return number, body
@@ -127,6 +133,20 @@ class Destination:
                 or sorted(saved["labels"]) != source["labels"]
                 or saved["state"] != source["state"] or saved.get("deleted_at") is not None):
             raise RuntimeError("Destination copy differs from GitHub; original was retained")
+        if source["comments"]:
+            # View only returns the latest 20 comments. The paginated audit trail
+            # includes every immutable comment, even for long discussions.
+            comments, offset = [], 0
+            while offset is not None:
+                page = self.call(["history", str(number), "--limit", "100", "--offset", str(offset)])
+                comments.extend(event["data"]["body"] for event in page["events"]
+                                if event["action"] == "commented" and event["actor"] == IMPORT_AGENT)
+                next_offset = page["next_offset"]
+                if next_offset is not None and next_offset <= offset:
+                    raise RuntimeError("Destination history pagination did not advance; original was retained")
+                offset = next_offset
+            if comments != [comment_body(comment) for comment in source["comments"]]:
+                raise RuntimeError("Destination comments differ from GitHub; original was retained")
 
 
 def drain_one(github, destination, listed, author, state):

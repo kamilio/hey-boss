@@ -166,6 +166,38 @@ class DestinationTests(unittest.TestCase):
         self.assertIn(source["comments"][0]["body"], body)
         self.assertIn(source["comments"][0]["html_url"], body)
         self.assertEqual(len(self.dest.call(["list"])["issues"]), 1)
+        comments = self.dest.call(["view", str(number)])["comments"]
+        self.assertEqual(len(comments), 1)
+        self.assertIn(source["comments"][0]["body"], comments[0]["body"])
+        for field in ("author", "created_at", "updated_at", "html_url"):
+            self.assertIn(source["comments"][0][field], comments[0]["body"])
+
+    def test_all_comments_are_imported_and_verified_beyond_view_limit(self):
+        source = snapshot()
+        source["comments"] = [dict(source["comments"][0], id=i, body=f"Discussion {i}")
+                              for i in range(105)]
+        number, body = self.dest.copy(source)
+        self.dest.verify(source, number, body)
+        self.assertEqual(self.dest.copy(source), (number, body))
+        offset, comments = 0, []
+        while offset is not None:
+            page = self.dest.call(["history", str(number), "--limit", "100", "--offset", str(offset)])
+            comments.extend(event for event in page["events"] if event["action"] == "commented")
+            offset = page["next_offset"]
+        self.assertEqual(len(comments), 105)
+        for original, event in zip(source["comments"], comments):
+            self.assertIn(original["body"], event["data"]["body"])
+        # The archived issue body alone must not suffice for deletion.
+        call = self.dest.call
+        def missing_first_comment(args, body=None):
+            result = call(args, body)
+            if args[0] == "history":
+                result["events"] = [event for event in result["events"]
+                                    if event.get("data", {}).get("comment_id") != comments[0]["data"]["comment_id"]]
+            return result
+        with patch.object(self.dest, "call", side_effect=missing_first_comment):
+            with self.assertRaisesRegex(RuntimeError, "comments differ"):
+                self.dest.verify(source, number, body)
 
     def test_changed_source_conflicts_without_duplicate(self):
         source = snapshot()
@@ -174,6 +206,25 @@ class DestinationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "different operation"):
             self.dest.copy(source)
         self.assertEqual(len(self.dest.call(["list"])["issues"]), 1)
+
+    def test_interrupted_comment_import_resumes_without_duplicates(self):
+        source = snapshot()
+        source["comments"].append(dict(source["comments"][0], id=100, body="Second comment"))
+        github = Mock()
+        github.snapshot.return_value = source
+        call = self.dest.call
+        def interrupted(args, body=None):
+            if args[0] == "comment" and args[-1].endswith(":100"):
+                raise RuntimeError("comment transport failed")
+            return call(args, body)
+        with patch.object(self.dest, "call", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "comment transport failed"):
+                drain.drain_one(github, self.dest, {"number": 7}, "boss", "open")
+        github.delete.assert_not_called()
+        number = drain.drain_one(github, self.dest, {"number": 7}, "boss", "open")
+        comments = self.dest.call(["view", str(number)])["comments"]
+        self.assertEqual(len(comments), 2)
+        github.delete.assert_called_once_with("I_source")
 
     def test_edited_or_deleted_destination_fails_verification(self):
         source = snapshot()
@@ -260,7 +311,11 @@ print(json.dumps(result))
         result = self.cli()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout)["results"][0]["status"], "moved")
-        self.assertEqual(len(self.dest.call(["list"])["issues"]), 1)
+        issues = self.dest.call(["list"])["issues"]
+        self.assertEqual(len(issues), 1)
+        comments = self.dest.call(["view", str(issues[0]["number"])])["comments"]
+        self.assertEqual(len(comments), 1)
+        self.assertIn(snapshot()["comments"][0]["body"], comments[0]["body"])
 
 
 if __name__ == "__main__":
