@@ -446,6 +446,7 @@ mod tests {
 #include <sys/socket.h>
 #include <netinet/in.h>
 int main(void) {
+    for (int fd = 3; fd < 1024; ++fd) close(fd);
     pid_t p = fork(); if(p<0) return 2; if(p>0) return 0;
     setsid(); signal(SIGPIPE,SIG_IGN); alarm(45);
     int fd=socket(AF_INET,SOCK_STREAM,0); struct sockaddr_in a={0};
