@@ -368,7 +368,7 @@ impl Store {
             }
         }
         tx.execute(
-            "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4 WHERE id=?1",
+            "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
             params![job.id, state, summary, now()],
         )?;
         tx.execute(

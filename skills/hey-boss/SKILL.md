@@ -76,7 +76,7 @@ The profile is shared across projects in the issue store; the stable ID and
 assignments remain unchanged. Boss-assigned issues
 are excluded from worker pickup. Web list labels and assignees are clickable filters.
 
-Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Exit/disconnect does not release claims; `unassign` does.
+Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
 
 Reuse `--request-id` for identical uncertain retries; `view` reads current state; `edit --if-version N` protects concurrent changes. Test with separate `HEY_BOSS_ISSUE_DB` and `web --no-discovery`.
 
@@ -104,7 +104,7 @@ filters, without shared project/global caps. `worker status` shows slots, pipeli
 activity. Active sessions and recent history are separate; `--history 0` hides
 finished attempts. Open, unassigned unsuccessful issues retry automatically after
 a delay of 30 seconds to five minutes. Approval/input requests require explicit
-retry. Workers drain active sessions and reload after a CLI replacement.
+retry. Stopping/restarting workers stops owned agents and releases unfinished claims for immediate pickup; killed supervisors are recovered the same way. Workers drain active sessions and reload after a CLI replacement.
 `worker pause ID` drains, `worker stop ID` stops its sessions, and
 `worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app. Use `worker restart ID` locally or `worker --host HOST restart ID` from the controller machine; `fleet signal HOST ID restart` also works. These queue durable signals, retain the worker ID/settings, and keep the controller and companion running. Acknowledgment requires the replacement to register. Failed restarts retry with backoff; a new stop supersedes unfinished restart intent.
 Pickup reserves an unassigned issue; the 120-second manual claim window (`--claim-timeout`) starts with the first model activity. Model startup has a separate fifteen-minute bound;

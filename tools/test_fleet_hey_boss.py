@@ -528,7 +528,7 @@ class FleetTests(unittest.TestCase):
         state = self.root / 'restart-state'
         config = self.root / 'inventory.json'
         config.write_text('{"ssh_hosts":[]}')
-        environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.root / 'restart.db'), 'HEY_BOSS_FLEET_STATE': str(state), 'HEY_BOSS_FLEET_CONFIG': str(config), 'HEY_BOSS_FLEET_DESIRED': str(self.root / 'restart-desired.json'), 'HEY_BOSS_CODEX': str(ROOT / 'tests/fixtures/codex-worker.py')}
+        environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.root / 'restart.db'), 'HEY_BOSS_FLEET_STATE': str(state), 'HEY_BOSS_FLEET_CONFIG': str(config), 'HEY_BOSS_FLEET_DESIRED': str(self.root / 'restart-desired.json'), 'HEY_BOSS_CODEX': str(ROOT / 'tests/fixtures/codex-worker.py'), 'HEY_BOSS_TEST_CLI': str(BINARY)}
         environment.pop('HEY_BOSS_ISSUE_HOST', None)
         def command(*args):
             result = subprocess.run([str(BINARY), *args], env=environment, cwd=self.root, text=True, capture_output=True, timeout=20)
@@ -542,7 +542,9 @@ class FleetTests(unittest.TestCase):
                     return result
                 time.sleep(.1)
             self.fail('Worker lifecycle operation timed out')
-        worker = subprocess.Popen([str(BINARY), 'worker', '--project', 'Restart fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        (self.root / 'mode.txt').write_text('delay')
+        command('issue', '--project', 'Worker fixture', '--agent', 'human:fixture', '--json', 'create', '--title', 'Unfinished restart work')
+        worker = subprocess.Popen([str(BINARY), 'worker', '--project', 'Worker fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         controller = None
         replacement = None
         identifier = None
@@ -556,6 +558,7 @@ class FleetTests(unittest.TestCase):
             old_pid = value[0]['pid']
             old_config = value[0]['config']
             self.assertEqual(old_pid, worker.pid)
+            old_session = until(lambda: command('issue', '--project', 'Worker fixture', '--json', 'view', '1')['issue']['assignee'])
             controller = subprocess.Popen([str(BINARY), 'fleet', 'controller'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             until(lambda: (state / 'fleet.sock').exists())
             signal = command('worker', '--json', 'restart', identifier)
@@ -569,6 +572,10 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(next(w['config'] for w in current if w['id'] == identifier), old_config)
             self.assertIsNotNone(replacement)
             self.assertNotEqual(replacement, old_pid)
+            new_session = until(lambda: (owner if (owner := command('issue', '--project', 'Worker fixture', '--json', 'view', '1')['issue']['assignee']) and owner != old_session else None))
+            self.assertNotEqual(new_session, old_session)
+            runs = command('worker', '--id', identifier, '--json', 'status')['runs']
+            self.assertTrue(any(r['state'] == 'cancelled' and r['finished_at'] is not None for r in runs))
             self.assertIsNone(controller.poll(), 'Controller exited during worker restart')
             worker.wait(timeout=10)
             self.assertEqual(worker.returncode, 0, worker.stderr.read())

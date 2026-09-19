@@ -453,7 +453,7 @@ fn finalize_abandoned(store: &mut Store, machine: &str, id: &str) -> Result<()> 
     }
     Ok(())
 }
-fn recover(store: &mut Store, machine: &str) -> Result<()> {
+pub(crate) fn recover(store: &mut Store, machine: &str) -> Result<()> {
     store.prune_workers(machine)?;
     for (job, pid, start) in store.worker_orphans(machine)? {
         if alive(job.owner_pid, &job.owner_start) {
@@ -474,6 +474,7 @@ fn recover(store: &mut Store, machine: &str) -> Result<()> {
         }
         store.worker_finish(&job,"interrupted","The worker service stopped unexpectedly. The saved Codex session and issue history are retained. Review or retry this issue.")?;
     }
+    store.release_stale_claims(machine, now())?;
     Ok(())
 }
 
@@ -1142,10 +1143,20 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
             v["fleet"]["pending_changes"]
         );
     }
-    if v["eligible"] == 0 && v["active"] == 0 && v["fleet"]["role"] != "agent" {
+    if let Some(queue) = v["queue"].as_object() {
         println!(
-            "No eligible issues in this machine's queue. Issues on another machine require running the worker there (worker --host HOST --directory PATH)."
+            "Queue issues: {} open · {} assigned · {} eligible · {} excluded by tags · {} waiting",
+            queue["open"],
+            queue["assigned"],
+            queue["eligible"],
+            queue["tag_filtered"],
+            queue["waiting"]
         );
+        if queue["waiting"].as_i64().unwrap_or(0) > 0 {
+            println!(
+                "Waiting issues have active reservations, unfinished subtasks, retry holds or fleet allocation requirements."
+            );
+        }
     }
     println!(
         "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch Codex → manual claim → implement → finish",

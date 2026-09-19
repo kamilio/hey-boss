@@ -197,19 +197,26 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         );
     }
-    let eligible: i64 = db.query_row(
+    let (open, assigned, tag_filtered, eligible): (i64, i64, i64, i64) = db.query_row(
         &format!(
-            "SELECT count(*) FROM issues i JOIN projects p ON p.id=i.project_id WHERE {ELIGIBLE} {PICKUP_READY}"
+            "SELECT count(*),
+             coalesce(sum(i.assignee IS NOT NULL),0),
+             coalesce(sum(i.assignee IS NULL AND EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))),0),
+             coalesce(sum(CASE WHEN {ELIGIBLE} {PICKUP_READY} THEN 1 ELSE 0 END),0)
+             FROM issues i JOIN projects p ON p.id=i.project_id
+             WHERE i.state='open' AND i.deleted_at IS NULL AND p.hidden_at IS NULL
+             AND (json_array_length(?1)=0 OR i.project_id IN(SELECT value FROM json_each(?1)))"
         ),
         params![
             serde_json::to_string(&config.projects)?,
             serde_json::to_string(&config.tags)?
         ],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
+    let queue = json!({"open":open,"assigned":assigned,"tag_filtered":tag_filtered,"waiting":open-assigned-tag_filtered-eligible,"eligible":eligible});
     let fleet: Value = db.query_row("SELECT role,node,(SELECT count(*) FROM fleet_outbox) FROM fleet_meta WHERE id=1", [], |r| Ok(json!({"role":r.get::<_,String>(0)?,"node":r.get::<_,String>(1)?,"pending_changes":r.get::<_,i64>(2)?})))?;
     Ok(
-        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"runs":runs,"project":p}),
+        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"project":p}),
     )
 }
 pub(super) fn execute(

@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "claim_recovery.rs"]
+mod claim_recovery;
 #[path = "../mindmap/store.rs"]
 mod mindmap;
 #[path = "worker_registry.rs"]
@@ -845,6 +847,12 @@ impl Store {
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
         }
         tx.commit()?;
+        if matches!(&r.operation, Operation::ControlWorker { command, .. } if command == "stop_worker" || command == "stop")
+        {
+            // No process inspection or termination while holding the writer lock.
+            // A dead supervisor cannot observe its durable stop request itself.
+            super::worker::recover(self, &super::identity::machine()?)?;
+        }
         Ok(result)
     }
 

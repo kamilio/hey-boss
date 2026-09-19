@@ -277,6 +277,139 @@ fn unfinished_unassigned_issues_are_reserved_again_after_retry_delay() {
     }
 }
 #[test]
+fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
+    let f = Fixture::new("stop-releases-claim");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    worker.stop();
+    let issue = f.cli(&["view", "1"])["issue"].clone();
+    assert_eq!(issue["state"], "open");
+    assert!(issue["assignee"].is_null());
+    assert_eq!(f.cli(&["worker", "status"])["eligible"], 1);
+    let mut replacement = f.worker();
+    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    replacement.stop();
+}
+
+#[test]
+fn stopping_a_killed_supervisor_recovers_its_orphaned_agent_and_claim() {
+    let f = Fixture::new("killed-supervisor-release");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let running = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let id = running["worker_id"].as_str().unwrap();
+    worker.0.kill().unwrap();
+    worker.0.wait().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&f.root)
+        .env("HEY_BOSS_ISSUE_DB", &f.db)
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .args(["worker", "--json", "stop", id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+    let status = f.cli(&["worker", "status"]);
+    assert_eq!(status["active"], 0);
+    assert_eq!(status["eligible"], 1);
+}
+
+#[test]
+fn worker_queue_distinguishes_open_issues_from_pickup_eligibility() {
+    let f = Fixture::new("queue-counts");
+    f.setup(&[]);
+    f.cli(&["create", "--title", "Already claimed"]);
+    f.cli(&["claim", "2"]);
+    f.cli(&["create", "--title", "Boss work"]);
+    f.cli(&["assign-to-boss", "3"]);
+    let status = f.cli(&["worker", "status"]);
+    assert_eq!(
+        status["queue"],
+        serde_json::json!({
+            "open": 3, "assigned": 2, "tag_filtered": 0, "waiting": 0, "eligible": 1
+        })
+    );
+    assert_eq!(status["eligible"], 1);
+
+    f.cli(&["claim", "1"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&f.root)
+        .env("HEY_BOSS_ISSUE_DB", &f.db)
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .args([
+            "issue",
+            "--project",
+            "Worker fixture",
+            "--agent",
+            "human:worker-test",
+            "worker",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("3 open · 3 assigned · 0 eligible"), "{text}");
+    assert!(!text.contains("Issues on another machine"), "{text}");
+    assert!(
+        !text.contains("worker --host HOST --directory PATH"),
+        "{text}"
+    );
+}
+
+#[test]
+fn worker_queue_accounts_for_tags_and_waiting_subtasks() {
+    let f = Fixture::new("queue-filters");
+    f.setup(&[]);
+    f.cli(&["edit", "1", "--label", "ready"]);
+    f.cli(&[
+        "subtask", "create", "1", "--title", "Child", "--label", "ready",
+    ]);
+    f.cli(&["create", "--title", "Missing tag"]);
+    f.cli(&["create", "--title", "Assigned without tag"]);
+    f.cli(&["claim", "4"]);
+    let project = f.cli(&["projects"])["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let config = hey_boss::issues::worker::Settings {
+        projects: vec![project],
+        tags: vec!["ready".into()],
+        ..Default::default()
+    };
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute(
+        "INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('queue-worker','managed',?1,1,0)",
+        [serde_json::to_string(&config).unwrap()],
+    ).unwrap();
+    let status = f.cli(&["worker", "status"]);
+    assert_eq!(
+        status["queue"],
+        serde_json::json!({
+            "open": 4, "assigned": 1, "tag_filtered": 1, "waiting": 1, "eligible": 1
+        })
+    );
+    db.execute(
+        "UPDATE issue_workers SET config=json_set(config,'$.projects',json('[\"named:Other\"]'))",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        f.cli(&["worker", "status"])["queue"],
+        serde_json::json!({
+            "open": 0, "assigned": 0, "tag_filtered": 0, "waiting": 0, "eligible": 0
+        })
+    );
+}
+
+#[test]
 fn approval_hold_is_not_retried_automatically_even_after_delay() {
     let f = Fixture::new("approval-hold");
     fs::write(f.root.join("mode.txt"), "approval").unwrap();
@@ -790,7 +923,7 @@ fn worker_refreshes_order_before_each_reservation_and_preserves_tag_filters() {
     let result = f.wait(|s| {
         s["runs"]
             .as_array()
-            .is_some_and(|r| r.len() == 3 && r.iter().all(|r| r["finished_at"].is_number()))
+            .is_some_and(|r| r.len() == 4 && r.iter().all(|r| r["finished_at"].is_number()))
     });
     let turns: Vec<_> = f
         .transcript()
@@ -798,8 +931,9 @@ fn worker_refreshes_order_before_each_reservation_and_preserves_tag_filters() {
         .filter(|v| v["method"] == "turn/start")
         .map(|v| v["params"]["input"][0]["text"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(turns.len(), 3, "{result}");
-    for (text, number) in turns.iter().zip([1, 3, 2]) {
+    assert_eq!(turns.len(), 4, "{result}");
+    // Stopped unfinished work stays first and is eligible immediately.
+    for (text, number) in turns.iter().zip([1, 1, 3, 2]) {
         assert!(text.contains(&format!("issue view {number}`")), "{turns:?}");
     }
     assert_eq!(f.cli(&["view", "4"])["issue"]["state"], "open");

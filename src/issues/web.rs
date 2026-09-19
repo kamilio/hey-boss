@@ -189,8 +189,11 @@ pub fn serve(config: Config) -> Result<()> {
                 let projects =
                     super::discovery::projects(&crate::agents::scan(), &app.actor.machine);
                 if let Backend::Local(path) = &app.backend {
-                    let result =
-                        Store::open(path).and_then(|mut store| store.discover_projects(&projects));
+                    let result = Store::open(path).and_then(|mut store| {
+                        store.discover_projects(&projects)?;
+                        store.release_stale_claims(&app.actor.machine, super::worker::now())?;
+                        Ok(())
+                    });
                     if let Err(error) = result {
                         eprintln!("Project discovery: {error}");
                     }
