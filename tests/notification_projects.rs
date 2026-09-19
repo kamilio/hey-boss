@@ -62,6 +62,9 @@ impl Fixture {
                     Err(e) => panic!("{e}"),
                 }
             };
+            // macOS may inherit the listener's nonblocking mode. Wait for the
+            // client payload rather than racing its first write after accept.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
