@@ -171,10 +171,7 @@ impl Drop for Worker {
 #[test]
 fn codex_protocol_goal_completion_and_prompt_variables() {
     let f = Fixture::new("completed");
-    f.setup(&[
-        "--prompt",
-        "/goal Assign and implement `{{issue_command}}`. {{commit_instruction}}",
-    ]);
+    f.setup(&["--prompt", "/goal"]);
     let mut w = f.worker();
     let s = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(s["runs"][0]["state"], "completed");
@@ -193,10 +190,9 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
         .find(|v| v["method"] == "turn/start")
         .unwrap();
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("Assign and implement `hey-boss issue view 1`"));
     assert_eq!(
         text,
-        "Assign and implement `hey-boss issue view 1`. Commit your changes."
+        "Claim and implement `hey-boss issue view 1`.\n\nCommit your changes."
     );
     w.stop();
 }

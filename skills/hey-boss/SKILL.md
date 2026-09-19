@@ -7,6 +7,11 @@ description: Background notifications, project issues, and secrets kept out of a
 
 Notify once for substantial background results or essential blocking decisions. Keep active chat, routine progress, and tests in chat. One outcome sentence; brief details.
 
+Notification commands infer the project from Git/directory, or inherit
+`HEY_BOSS_ISSUE_PROJECT` in worker sessions. `--project` is optional and uses the
+same registry as `issue projects`: full IDs, unambiguous short names, or a new
+custom name. `--title` remains required.
+
 ```sh
 hey-boss alert --project Atlas --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
 hey-boss update --project Atlas --title Review 'Please review.' --file PATH --comments
@@ -110,7 +115,13 @@ Attach one or more with `hey-boss issue pr add NUMBER URL`; list/remove through
 `issue pr list/remove`. They remain visible in CLI and UI.
 Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
 A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The editable prompt is
-`Assign and implement \`{{issue_command}}\`. {{commit_instruction}}`.
+
+```text
+Claim and implement `{{issue_command}}`.
+
+{{commit_instruction}}
+```
+
 The project Instructions UI previews the exact two sentences: without a remote commit only; with a
 remote push main, or open/attach PRs when enabled. No hidden block is appended.
 Use `{{create_issue_command poe-code}}` in custom instructions to expand a create

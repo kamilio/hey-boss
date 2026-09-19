@@ -77,6 +77,15 @@ def atomic_copy(source, destination, mode=0o755):
             os.unlink(temporary)
 
 
+def install_shortcut(binary):
+    shortcut = binary.with_name('hb')
+    try:
+        shortcut.symlink_to(binary.name)
+    except FileExistsError:
+        # Preserve other commands, including dangling symlinks.
+        pass
+
+
 def desktop_app():
     plist = pathlib.Path.home() / 'Library/LaunchAgents/local.hey-boss.plist'
     if sys.platform != 'darwin' or not plist.exists():
@@ -156,6 +165,7 @@ def apply(source, binary, expected):
                         run(['systemctl', '--user', 'is-active', '--quiet', 'hey-boss-companion.service'])
                 if installed_id(binary) != expected:
                     raise RuntimeError('Installed CLI failed build verification')
+                install_shortcut(binary)
                 for root in ('.codex', '.agents', '.claude'):
                     skill = pathlib.Path.home() / root / 'skills/hey-boss/SKILL.md'
                     atomic_copy(source / 'skills/hey-boss/SKILL.md', skill, 0o644)

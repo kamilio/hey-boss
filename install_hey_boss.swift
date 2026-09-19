@@ -31,6 +31,10 @@ func installHeyBoss() -> [String: String] {
     try! Data(contentsOf: root.appendingPathComponent("target/release/hey-boss")).write(to: binary, options: .atomic)
     run("/usr/bin/swift", [root.appendingPathComponent("package_hey_boss.swift").path, staging.path, app.path])
     for executable in [binary, daemon] { try! files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path) }
+    let shortcut = binaries.appendingPathComponent("hb")
+    if !files.fileExists(atPath: shortcut.path) && (try? files.destinationOfSymbolicLink(atPath: shortcut.path)) == nil {
+        try! files.createSymbolicLink(atPath: shortcut.path, withDestinationPath: "hey-boss")
+    }
     run(binary.path, ["configure-agents", "--binary", binary.path])
     try! files.removeItem(at: staging)
     let setup = root.appendingPathComponent("out/hey-boss-setup")
