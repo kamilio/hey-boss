@@ -24,6 +24,19 @@
           "'": "&#39;",
         })[c],
     );
+  const kinds = new Map([
+    ["text", ["Topic", "subtasks"]],
+    ["markdown", ["Note", "docs"]],
+    ["issue", ["Issue", "issue"]],
+    ["pr", ["Pull request", "pull-request"]],
+    ["notification", ["Notice", "bell"]],
+    ["project", ["Project", "folder"]],
+  ]);
+  function kindIcon(kind) {
+    if (!kinds.has(kind)) kind = "text";
+    const [label, icon] = kinds.get(kind);
+    return `<span class="mindmap-kind mindmap-kind-${kind}" role="img" aria-label="${label}" title="${label}">${HeyBossUI.icon(icon)}</span>`;
+  }
   function displayTitle(node) {
     if (
       node.kind !== "pr" ||
@@ -483,22 +496,17 @@
             ? item.reference_project_name || item.reference_project
             : "";
         const meta = item.project
-          ? "PROJECT"
+          ? ""
           : item.kind === "issue"
-            ? `${source ? `${source} · ` : ""}ISSUE #${item.reference} · ${item.state || "Unavailable"}${item.assignee ? ` · ${this.assigneeName(item.assignee)}` : ""}`
-            : item.kind === "pr"
-              ? "PULL REQUEST"
-              : item.kind === "notification"
-                ? "PENDING NOTICE"
-                : item.kind === "markdown"
-                  ? "NOTE"
-                  : item.childCount
-                    ? `${item.childCount} TOPICS`
-                    : item.alias || "TOPIC";
+            ? `${source ? `${source} · ` : ""}#${item.reference} · ${item.state || "Unavailable"}${item.assignee ? ` · ${this.assigneeName(item.assignee)}` : ""}`
+            : item.childCount
+              ? `${item.childCount} topics`
+              : item.alias || "";
         const title = displayTitle(item);
+        const heading = `${kindIcon(item.project ? "project" : item.kind)}<span class="${item.project ? "map-project-title" : "map-card-title"}">${esc(title)}</span>`;
         const html = item.project
-          ? `<div class="map-project-title">${esc(item.title)}</div><span class="map-card-meta">${meta}</span>`
-          : `<button class="map-card${item.kind === "pr" ? " map-pr-card" : ""}" data-map-node="${esc(item.id)}" title="${esc(title)} · ${esc(meta)}" aria-label="${esc(title)}${item.assignee ? `, assigned to ${esc(this.assigneeName(item.assignee))}` : ""}" ${item.id === this.selected ? 'aria-pressed="true"' : ""}><span class="map-card-title">${esc(title)}</span><span class="map-card-meta">${esc(meta)}</span></button>${item.kind === "pr" ? `<a class="map-pr-open" data-map-resource="${esc(item.id)}" href="${esc(item.reference)}" target="_blank" rel="noopener noreferrer" aria-label="Open pull request ${esc(title)}">Open PR ↗</a>` : ""}${item.childCount ? `<button class="map-branch" data-map-toggle="${esc(item.id)}" aria-expanded="${item.expanded}" aria-label="${item.expanded ? "Collapse" : "Expand"} ${esc(title)}">${item.expanded ? "−" : item.childCount}</button>` : ""}`;
+          ? `<div class="map-card-heading">${heading}</div>`
+          : `<button class="map-card${item.kind === "pr" ? " map-pr-card" : ""}" data-map-node="${esc(item.id)}" title="${esc(title)} · ${kinds.get(item.kind)?.[0] || "Topic"}${meta ? ` · ${esc(meta)}` : ""}" aria-label="${esc(title)}${item.assignee ? `, assigned to ${esc(this.assigneeName(item.assignee))}` : ""}" ${item.id === this.selected ? 'aria-pressed="true"' : ""}><span class="map-card-heading">${heading}</span>${meta ? `<span class="map-card-meta">${esc(meta)}</span>` : ""}</button>${item.kind === "pr" ? `<a class="map-pr-open" data-map-resource="${esc(item.id)}" href="${esc(item.reference)}" target="_blank" rel="noopener noreferrer" title="Open pull request" aria-label="Open pull request ${esc(title)}">↗</a>` : ""}${item.childCount ? `<button class="map-branch" data-map-toggle="${esc(item.id)}" aria-expanded="${item.expanded}" aria-label="${item.expanded ? "Collapse" : "Expand"} ${esc(title)}">${item.expanded ? "−" : item.childCount}</button>` : ""}`;
         let card = existing;
         if (!card) {
           card = document.createElement("div");
@@ -564,7 +572,7 @@
       }
     }
   }
-  const api = { layout, inViewport, indexGraph, Mindmap, displayTitle };
+  const api = { layout, inViewport, indexGraph, Mindmap, displayTitle, kindIcon };
   if (typeof module !== "undefined") module.exports = api;
   else root.HeyBossMap = api;
 })(typeof window !== "undefined" ? window : globalThis);
