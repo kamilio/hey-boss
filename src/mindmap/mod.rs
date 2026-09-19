@@ -144,7 +144,12 @@ impl Operation {
                 if !["text", "markdown", "issue", "pr", "notification"].contains(&kind.as_str()) {
                     return Err(Error::invalid("Unknown mindmap node kind"));
                 }
-                crate::issues::identifier(title, "node title", 512)?;
+                let title_limit = if kind == "pr" && reference.as_deref() == Some(title.as_str()) {
+                    2048
+                } else {
+                    512
+                };
+                crate::issues::identifier(title, "node title", title_limit)?;
                 validate_body(body)?;
                 if let Some(alias) = alias {
                     validate_alias(alias)?;
@@ -169,7 +174,9 @@ impl Operation {
                     return Err(Error::invalid("edit requires --title, --body or --file"));
                 }
                 if let Some(title) = title {
-                    crate::issues::identifier(title, "node title", 512)?;
+                    // The store checks the ordinary label limit after resolving
+                    // the node; a PR can restore its full URL as the label.
+                    crate::issues::identifier(title, "node title", 2048)?;
                 }
                 if let Some(body) = body {
                     validate_body(body)?;

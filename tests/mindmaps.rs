@@ -1346,3 +1346,90 @@ fn readable_pr_labels_preserve_native_references_dependencies_and_export_links()
     assert_eq!(unchanged["changed"], false);
     assert_eq!(unchanged["node"]["updated_at"], node["updated_at"]);
 }
+
+#[test]
+fn long_pr_urls_work_for_explicit_and_typed_creation_with_bounded_custom_labels() {
+    let f = Fixture::new();
+    let url = format!(
+        "https://github.com/org/repo/pull/88?context={}",
+        "x".repeat(1500)
+    );
+    let explicit = f.run("Atlas", &["pr", &url, "--id", "long-pr"]);
+    let typed = f.run(
+        "Platform",
+        &[
+            "link",
+            &format!("pr:{url}"),
+            "pr:https://github.com/org/repo/pull/89",
+        ],
+    );
+    assert_eq!(explicit["node"]["reference"], url);
+    let platform = f.run("Platform", &["show"]);
+    assert!(
+        nodes(&platform)
+            .iter()
+            .any(|node| node["reference"] == url && node["title"] == url)
+    );
+    assert_eq!(typed["changed"], true);
+    f.run("Atlas", &["edit", "long-pr", "--title", "Readable PR"]);
+    f.run("Atlas", &["edit", "long-pr", "--title", &url]);
+    f.run("Atlas", &["edit", "long-pr", "--title", &format!("{url}/")]);
+    assert!(f.terminal("Atlas", &["view", "long-pr"]).contains(&url));
+    let long_label = "x".repeat(513);
+    f.fail("Atlas", &["edit", "long-pr", "--title", &long_label], 2);
+    f.fail("Atlas", &["add", &long_label], 2);
+    f.run("Atlas", &["add", "Ordinary topic", "--id", "topic"]);
+    f.fail("Atlas", &["edit", "topic", "--title", &url], 2);
+    f.fail("Client", &["pr", &url, "--title", &long_label], 2);
+    let trailing = f.run("Client", &["pr", &format!("{url}/"), "--id", "trailing"]);
+    assert_eq!(trailing["node"]["reference"], url);
+    f.run(
+        "Client",
+        &["edit", "trailing", "--title", &format!("{url}/")],
+    );
+    f.run("Client", &["remove", "trailing"]);
+    let too_long = format!(
+        "https://github.com/org/repo/pull/1?context={}",
+        "x".repeat(2048)
+    );
+    f.fail("Client", &["pr", &too_long], 2);
+    f.fail(
+        "Client",
+        &[
+            "link",
+            &format!("pr:{too_long}"),
+            "pr:https://github.com/org/repo/pull/2",
+        ],
+        2,
+    );
+    assert!(nodes(&f.run("Client", &["show"])).is_empty());
+}
+
+#[test]
+fn mirrored_issue_views_identify_the_resource_project_and_preserve_unavailable_references() {
+    let f = Fixture::new();
+    f.issue(
+        "Platform",
+        &["create", "--title", "Shared API", "--body", "Live resource"],
+    );
+    f.run(
+        "Atlas",
+        &["issue", "1", "--issue-project", "Platform", "--id", "api"],
+    );
+    let view = f.run("Atlas", &["view", "api"]);
+    assert_eq!(view["node"]["reference_project_name"], "Platform");
+    assert_eq!(view["node"]["reference_project"], "named:Platform");
+    assert!(
+        f.terminal("Atlas", &["view", "api"])
+            .contains("Platform · issue #1 · named:Platform")
+    );
+    f.issue("Platform", &["delete", "1"]);
+    let unavailable = f.run("Atlas", &["view", "api"]);
+    assert_eq!(unavailable["node"]["available"], false);
+    assert_eq!(unavailable["node"]["reference_project_name"], "Platform");
+    assert_eq!(unavailable["node"]["id"], view["node"]["id"]);
+    assert!(
+        f.terminal("Atlas", &["view", "api"])
+            .contains("(unavailable)")
+    );
+}

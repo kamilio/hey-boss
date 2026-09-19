@@ -403,6 +403,16 @@ pub fn run(options: &Options) -> Result<()> {
             }
             if node["kind"] == "pr" {
                 println!("\n{}", node["reference"].as_str().unwrap());
+            } else if node["kind"] == "issue" {
+                println!(
+                    "\n{} · issue #{} · {}",
+                    node["reference_project_name"]
+                        .as_str()
+                        .or_else(|| node["reference_project"].as_str())
+                        .unwrap_or("Unknown project"),
+                    node["reference"].as_str().unwrap(),
+                    node["reference_project"].as_str().unwrap()
+                );
             }
         } else {
             println!("This notification is not confirmed pending.");
