@@ -35,9 +35,6 @@ pub struct Options {
     claim_timeout: Option<u32>,
     #[arg(long)]
     json: bool,
-    /// Print the text display instead of the interactive terminal dashboard.
-    #[arg(long)]
-    plain: bool,
     /// Finished attempts shown separately from active sessions (0 hides history).
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=20))]
     history: u8,
@@ -238,19 +235,18 @@ pub fn run(o: &Options) -> Result<()> {
         c.reservation_seconds = seconds;
     }
     c.enabled = true;
-    issues::worker::serve_instance_with_display(
+    issues::worker::serve_instance_with_history(
         c,
         o.id.as_deref(),
         base,
         o.json,
         o.history as usize,
-        o.plain,
     )
 }
 
 fn dashboard_enabled(o: &Options) -> bool {
     use std::io::IsTerminal;
-    !o.json && !o.plain && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    !o.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 fn remote_arguments(o: &Options) -> Vec<String> {
@@ -283,7 +279,6 @@ fn remote_arguments(o: &Options) -> Vec<String> {
         (o.prs, "--prs"),
         (o.no_prs, "--no-prs"),
         (o.json, "--json"),
-        (o.plain, "--plain"),
     ] {
         if enabled {
             args.push(flag.into());
@@ -404,10 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_workers_preserve_explicit_text_display() {
-        let cli = TestCli::parse_from(["worker", "--plain", "--directory", "/repo"]);
-        assert!(remote_arguments(&cli.options).contains(&"--plain".into()));
-        assert!(!dashboard_enabled(&cli.options));
+    fn json_status_does_not_enable_the_dashboard() {
         let cli = TestCli::parse_from(["worker", "--json", "status"]);
         assert!(!dashboard_enabled(&cli.options));
     }
