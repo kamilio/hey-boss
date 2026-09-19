@@ -29,6 +29,19 @@ Issue assignments appear in its metadata and `mm view`; search also matches
 assignment names/IDs and resource states. Hidden projects are omitted from the
 normal viewer picker, but direct references can open them with a hidden label.
 
+The viewer opens a branching map. Drag or scroll to pan, pinch or Ctrl/⌘+scroll
+to zoom, and use Fit for an overview. The small overview also jumps to a location.
+Select a card to read its Markdown, native assignment/state and incoming/outgoing
+relationships; visible dependencies show directional arrows. Branch buttons and
+Expand/Collapse all control the hierarchy. Search reveals matching branches and
+keeps the search field focused. Outline switches to the complete nested reading
+view. Keyboard users can Tab to cards/controls, use arrow keys to pan the map,
+`+`/`-` to zoom, `0`/Home to fit, and Escape to close topic details.
+
+Large maps initially collapse their root branches. The map mounts cards near the
+viewport and omits offscreen branch edges; complete relationship descriptions
+remain in topic details. All viewer interactions remain read-only.
+
 Map reads use a 32 MiB response budget, including rendered Markdown. A full map or
 export that exceeds the budget returns an error before printing content. Use
 previews or omitted bodies for the outline and `view NODE` for individual text.

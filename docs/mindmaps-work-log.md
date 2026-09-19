@@ -527,3 +527,51 @@ Also reproduced the unmodified XMind SDK relationship read API on existing XML
 DOM nodes using Python 3.14.7: endpoint IDs and labeled/unlabeled titles worked.
 The research guide records exact scope; legacy workbook load/create limitations
 remain documented.
+
+## Visualization pass after the checkpoint
+
+The native goal now reads “Add me nice visualization for the mindmap, work on it
+for 4 hours, it must be super fast slick” (created 2026-09-19 15:47:01 UTC).
+Earlier eight-hour entries are historical implementation checkpoints. This
+visualization pass remains active and its requested duration is incomplete.
+
+Added a dependency-free branching map with HTML topic cards, curved SVG hierarchy,
+directional selected-node links, pan/zoom, touch dragging/pinching, branch collapse,
+Fit and clickable canvas overview. Details retain native issue context, rendered
+Markdown, live focused body reads and cross-project relationships. Outline remains
+available. Search reveals/highlights matches at a readable scale, preserves input
+focus and restores the earlier camera when cleared. Selection centers cards in
+the space beside the desktop inspector; direct links focus visible details.
+
+TDD: the layout test first failed with the missing renderer, then passed hierarchy
+ordering, spacing, branch colors, collapse, search ancestor paths, orphan roots,
+empty maps and viewport culling. A 10,000-node collapsed fixture computes 25 cards
+in roughly 2–4 ms locally. Added the JavaScript checks to CI and the renderer to
+same-origin HTTP asset coverage. No external drawing/runtime library is loaded.
+
+Actual browser checks on a 2,500-node/5,000-link fixture: Expand all mounted 7 cards
+initially and 12 after the measured pan; outline DOM stayed empty. Twenty automated
+wheel + two-animation-frame waits took 39–45 ms each including automation/frame
+waiting, not isolated draw timing. Evidence `out/mm-map-scale-pan-result.txt`.
+Mobile search kept input focus and showed a 168-CSS-pixel matching card. Selected
+long Markdown loaded 53,047 rendered characters, returned to preview, retained
+body keyboard focus, and caused no horizontal overflow. Native browser touch input
+starting on a card panned without selecting; a pinch changed zoom from 70% to 140%.
+Evidence `out/mm-map-touch-result.txt`. Cross-project native selection and backlinks
+worked; desktop selected issue showed assignment and a directional relationship.
+
+The focused-read checkpoint is committed on current main as `98ad110`; installed
+build `f527bf288bc6916e` and all three installed skill copies were verified. An
+installed focused preview has 512 Unicode characters. The visualization increment
+has not yet been delivered/installed. The fixed-build one-hour endurance run is
+active under `out/mm-soak-pinned-hour-20260919`, tool session 76982, port 63448,
+build `1a5650ac270a9abc`. Its outcome remains pending.
+
+Later pan instrumentation measured the actual draw method at 0.5–0.8 ms across
+twenty frames, with 12 cards, 13 SVG paths (including the arrow definition), and
+zero outline nodes. Instrumentation was restored afterward. Evidence:
+`out/mm-map-scale-draw-result.txt`. Tightened mobile chrome; at 390×844, the map
+navigation controls end at y=800.56 and stay visible without horizontal overflow.
+Opening cards now uses at least 80% scale. Topic details include child navigation
+(first 50, with complete Outline navigation for larger child lists), avoiding long
+pans on phones. Native child selection retained heading focus and assignment.

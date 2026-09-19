@@ -204,6 +204,9 @@ live; PRs accept title edits only. `view` prints the PR URL and export links its
 `view NODE --bodies preview|none|full` controls focused text reads (default full).
 Live issue assignments appear in the viewer and `view`; viewer search matches
 assignment names/IDs and state. Show less fetches a fresh preview after a full read.
+The web viewer opens a branching map with pan/zoom, collapsible branches and a
+clickable overview. Select cards for live details and relationships; Outline
+switches to nested reading. Search reveals matches without moving keyboard focus.
 `mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
 Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
 `mm view NODE` for one full live node, `show --bodies preview|none|full` to control
