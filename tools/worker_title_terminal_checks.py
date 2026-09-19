@@ -57,7 +57,9 @@ def check(binary, mode):
         root = pathlib.Path(directory).resolve()
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("HEY_BOSS_") and key not in ("TMUX", "TMUX_PANE", "TERM_PROGRAM")}
-        env.update(HEY_BOSS_ISSUE_DB=str(root / "issues.db"), TERM="xterm-256color")
+        # The empty queue never launches an agent; don't depend on a real Codex install.
+        env.update(HEY_BOSS_ISSUE_DB=str(root / "issues.db"), HEY_BOSS_CODEX=shutil.which("false"),
+                   TERM="xterm-256color")
         log = root / "tmux.args"
         fake = root / "bin"
         fake.mkdir()
