@@ -41,7 +41,9 @@ view. Keyboard users can Tab to cards/controls, use arrow keys to pan the map,
 
 Large maps initially collapse their root branches. The map mounts cards near the
 viewport and omits offscreen branch edges; complete relationship descriptions
-remain in topic details. All viewer interactions remain read-only.
+remain in topic details. Dependencies draw when both endpoints are nearby;
+dense relationship lists use pages of 50 entries, with every relationship
+available. All viewer interactions remain read-only.
 
 Map reads use a 32 MiB response budget, including rendered Markdown. A full map or
 export that exceeds the budget returns an error before printing content. Use

@@ -697,3 +697,23 @@ Installed native reads preserve a NUL-leading Unicode fixture: omitted body
 returns zero characters with body presence/assignment, preview returns 512,
 and full returns all 514. The isolated smoke server stopped cleanly.
 Evidence `out/mindmap-installed-current-20260919/result.json`.
+
+Dense hubs exposed a separate bottleneck: a 2,500-topic/4,999-link fixture with
+2,501 relationships incident to one topic drew all 2,501 dependency paths and
+mounted 10,010 inspector elements. Measured JavaScript draw calls took
+12.8–14.6 ms. Dependencies now draw only with both endpoints near the viewport;
+same-column connections curve outside the cards. Topic details page dense lists
+in groups of 50, retaining all targets/descriptions and usable pager focus.
+The inspected after screenshot has 10 dependency paths, 211 inspector elements,
+and draw calls of 1.1–1.2 ms, excluding paint. Evidence:
+`out/mm-map-star-before.txt`, `out/mm-map-star-after.txt`, and screenshots
+`output/playwright/mm-map-star-before.png`, `mm-map-star-after.png`.
+
+`tools/mindmap_relationship_browser_checks.js` passed 60 actual-browser assertions.
+It visits all 51 pages and compares every target ID and full description against
+the saved graph: 2,501 entries, no skips/duplicates, at most 50 entries and 211
+elements mounted. Pager remains inside the inspector and the last page leaves
+enabled keyboard focus. Evidence `out/mm-map-relationship-browser-result.txt`.
+The independent older-build UI endurance run continues; its native RSS samples
+vary rather than grow monotonically in early large-map samples. No indefinite
+memory conclusion yet.
