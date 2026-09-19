@@ -449,3 +449,14 @@ paths to the announced `/mm` URL. Corrected it to use the URL origin. Installed
 initial server RSS was 12,384 KiB. Started the one-hour installed run under
 `out/mm-soak-hour-20260919`; its outcome is pending and must not be reported as
 passed until its final result is observed.
+
+Delivered the endurance tool/log increment from `cf08bf8` to the original checkout
+after checking the patch; that commit is the current applied anchor. This tool is
+outside runtime source identity, so it requires no CLI replacement by itself.
+
+Mobile metadata boundary: a valid 128-byte alias occupied 921.75 CSS pixels and
+was clipped by the outline panel at a 390-pixel viewport. Allowed metadata flex
+items to shrink/wrap, including foreign project labels, and let project headings
+wrap long names. Actual browser measurement after rebuilding/reloading shows the
+same alias at 275 pixels with no metadata element extending beyond the viewport.
+Screenshot: `output/playwright/mm-long-alias-mobile.png`.
