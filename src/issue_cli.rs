@@ -108,6 +108,12 @@ impl Body {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Upgrade preflight; use the destination installation's state directory.
+    #[command(hide = true)]
+    Migrate {
+        #[arg(long)]
+        installation: PathBuf,
+    },
     /// Import GitHub issues and delete the originals only after verifying the copy.
     DrainGithub {
         /// Source GitHub repository; defaults to this checkout's GitHub repository.
@@ -645,12 +651,23 @@ impl Options {
                 force: *force,
             },
             Action::Restore { number } => Operation::Restore { number: *number },
-            Action::Rpc | Action::Web { .. } | Action::DrainGithub { .. } => unreachable!(),
+            Action::Rpc
+            | Action::Web { .. }
+            | Action::DrainGithub { .. }
+            | Action::Migrate { .. } => unreachable!(),
         })
     }
 }
 
 pub fn run(options: &Options) -> Result<()> {
+    if let Action::Migrate { installation } = &options.action {
+        let path = issues::database_path_for_installation(&installation.canonicalize()?)?;
+        Store::open(&path)?;
+        if options.json {
+            println!("{}", json!({"ok": true}));
+        }
+        return Ok(());
+    }
     if let Action::DrainGithub {
         repo,
         author,

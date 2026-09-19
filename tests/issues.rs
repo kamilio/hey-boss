@@ -1952,6 +1952,229 @@ fn drafts_are_persisted_block_claims_and_obey_project_settings() {
     assert_eq!(f.run("a", &["view", "1"])["issue"]["draft"], true);
 }
 
+// Model the released pre-draft schema without touching any live store.
+fn remove_draft_schema(f: &Fixture, version: i64) {
+    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan;
+        ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template;
+        ALTER TABLE mindmap_nodes DROP COLUMN display_label;").unwrap();
+    f.sql()
+        .pragma_update(None, "user_version", version)
+        .unwrap();
+}
+
+#[test]
+fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss() {
+    for version in [10, 11, 12] {
+        let f = Fixture::new();
+        f.run(
+            "session-a",
+            &["create", "--title", "Preserved", "--label", "ready"],
+        );
+        f.run("session-a", &["claim", "1"]);
+        f.run("session-a", &["comment", "1", "--body", "History"]);
+        f.run(
+            "session-a",
+            &["pr", "add", "1", "https://github.com/example/repo/pull/1"],
+        );
+        f.run("session-a", &["subtask", "create", "1", "--title", "Child"]);
+        f.run(
+            "session-a",
+            &[
+                "settings",
+                "set",
+                "--prompt",
+                "Keep instructions",
+                "--prs-enabled",
+            ],
+        );
+        let map = success(
+            Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+                .current_dir(&f.cwd)
+                .env("HEY_BOSS_ISSUE_DB", &f.db)
+                .env("GIT_CEILING_DIRECTORIES", &f.root)
+                .env_remove("HEY_BOSS_ISSUE_HOST")
+                .args([
+                    "mm",
+                    "add",
+                    "Release",
+                    "--id",
+                    "release",
+                    "--json",
+                    "--agent",
+                    "session-a",
+                ])
+                .output()
+                .unwrap(),
+        );
+        remove_draft_schema(&f, version);
+        if version == 11 {
+            // An additive migration previously stopped part way through.
+            f.sql()
+                .execute_batch(
+                    "ALTER TABLE issues ADD COLUMN draft INTEGER NOT NULL DEFAULT 0;
+                UPDATE issues SET draft=1 WHERE number=2;
+                ALTER TABLE project_settings ADD COLUMN plan_template TEXT NOT NULL DEFAULT 'plans/{timestamp}-{number}.md';
+                UPDATE project_settings SET plan_template='custom/{number}.md';",
+                )
+                .unwrap();
+        }
+        let listed = f.run("session-a", &["list", "--state", "all"]);
+        assert_eq!(listed["issues"].as_array().unwrap().len(), 2);
+        let viewed = f.run("session-a", &["view", "1"]);
+        assert_eq!(viewed["issue"]["title"], "Preserved");
+        assert_eq!(viewed["issue"]["assignee"], "session-a");
+        assert_eq!(viewed["issue"]["labels"], json!(["ready"]));
+        assert_eq!(viewed["issue"]["draft"], false);
+        assert!(viewed["issue"]["plan"].is_null());
+        assert_eq!(viewed["comments"][0]["body"], "History");
+        assert_eq!(
+            viewed["issue"]["pull_requests"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            f.run("session-a", &["subtask", "list", "1"])["issues"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        if version == 11 {
+            assert_eq!(f.run("session-a", &["view", "2"])["issue"]["draft"], true);
+        }
+        let settings = f.run("session-a", &["settings", "show"]);
+        assert_eq!(settings["prompt"], "Keep instructions");
+        assert_eq!(settings["prs_enabled"], true);
+        assert_eq!(settings["drafts_enabled"], true);
+        assert_eq!(
+            settings["plan_template"],
+            if version == 11 {
+                "custom/{number}.md"
+            } else {
+                "plans/{timestamp}-{number}.md"
+            }
+        );
+        f.run("session-a", &["projects"]);
+        f.run("session-a", &["edit", "1", "--title", "Edited"]);
+        f.run("session-a", &["settings", "set", "--no-drafts"]);
+        let read = success(
+            Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+                .current_dir(&f.cwd)
+                .env("HEY_BOSS_ISSUE_DB", &f.db)
+                .env("GIT_CEILING_DIRECTORIES", &f.root)
+                .env_remove("HEY_BOSS_ISSUE_HOST")
+                .args([
+                    "mm",
+                    "show",
+                    "--bodies",
+                    "none",
+                    "--json",
+                    "--agent",
+                    "session-a",
+                ])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(read["nodes"][0]["id"], map["node"]["id"]);
+        assert_eq!(read["nodes"][0]["title"], "Release");
+        assert_eq!(
+            f.sql()
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            12
+        );
+    }
+}
+
+#[test]
+fn failed_upgrade_rolls_back_all_columns_and_can_be_retried() {
+    let f = Fixture::new();
+    f.create();
+    f.run("session-a", &["settings", "set", "--prompt", "Preserved"]);
+    remove_draft_schema(&f, 10);
+    // The second table cannot be altered, after the issue columns were added.
+    f.sql()
+        .execute_batch(
+            "ALTER TABLE project_settings RENAME TO saved_settings;
+        CREATE VIEW project_settings AS SELECT * FROM saved_settings;",
+        )
+        .unwrap();
+    let failure = f.fail("session-a", &["list"], 1);
+    assert_eq!(failure["error"]["code"], "migration_error");
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("retry")
+    );
+    assert_eq!(
+        f.sql()
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        10
+    );
+    let columns: i64 = f
+        .sql()
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('issues') WHERE name IN ('draft','plan')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 0, "Earlier ALTER statements must roll back too");
+    f.sql()
+        .execute_batch(
+            "DROP VIEW project_settings; ALTER TABLE saved_settings RENAME TO project_settings;",
+        )
+        .unwrap();
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["title"],
+        "Reconnect"
+    );
+    assert_eq!(
+        f.run("session-a", &["settings", "show"])["prompt"],
+        "Preserved"
+    );
+}
+
+#[test]
+fn staged_upgrade_migrates_the_destination_state_before_replacement() {
+    let f = Fixture::new();
+    f.create();
+    remove_draft_schema(&f, 10);
+    let installation = f.root.join("bin/hey-boss");
+    fs::create_dir_all(installation.parent().unwrap()).unwrap();
+    fs::write(&installation, "old installed CLI").unwrap();
+    fs::write(
+        installation.with_file_name("hey-boss.state"),
+        f.db.parent().unwrap().to_str().unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .env_remove("HEY_BOSS_ISSUE_DB")
+        .env_remove("HEY_BOSS_STATE_DIR")
+        // Preflight is local even inside a remotely targeted worker session.
+        .env("HEY_BOSS_ISSUE_HOST", "must-not-connect.invalid")
+        .args(["issue", "migrate", "--json", "--installation"])
+        .arg(&installation)
+        .output()
+        .unwrap();
+    assert_eq!(success(output)["ok"], true);
+    assert_eq!(
+        fs::read_to_string(installation).unwrap(),
+        "old installed CLI"
+    );
+    assert_eq!(
+        f.sql()
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        12
+    );
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["title"],
+        "Reconnect"
+    );
+}
+
 #[test]
 fn interactive_requires_a_human_terminal_before_creating_anything() {
     let f = Fixture::new();
