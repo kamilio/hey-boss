@@ -574,6 +574,12 @@ impl Codex {
         }
     }
     fn check(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
+        if store.worker_model_expired(job)? {
+            return Err(Error::new(
+                "startup_timeout",
+                "Codex did not begin model work within 15 minutes. The session was stopped and the issue can retry.",
+            ));
+        }
         if store.worker_claim_expired(job)? {
             return Err(Error::new(
                 "claim_timeout",
@@ -886,6 +892,7 @@ fn run_thread(
         store.worker_event(&job.id, "/goal activated", Some(&result["goal"]))?;
     }
     let mut final_text = String::new();
+    let mut claim_window_started = false;
     let mut activity_text = String::new();
     let mut last_log = Instant::now() - Duration::from_secs(2);
     loop {
@@ -904,6 +911,20 @@ fn run_thread(
         let params = &value["params"];
         if params["threadId"].as_str().is_some_and(|id| id != session) {
             continue;
+        }
+        if !claim_window_started
+            && matches!(
+                method,
+                "item/started"
+                    | "item/agentMessage/delta"
+                    | "item/reasoning/textDelta"
+                    | "item/reasoning/summaryTextDelta"
+                    | "item/completed"
+            )
+            && params["item"]["type"] != "userMessage"
+        {
+            store.worker_begin_claim(&job.id)?;
+            claim_window_started = true;
         }
         match method {
             "thread/goal/updated" => {
@@ -1047,6 +1068,27 @@ fn run_thread(
 pub fn print_status(v: &Value, redraw: bool) {
     print_status_with_history(v, redraw, 3);
 }
+fn terminal_title(project_ids: &Value, projects: &Value) -> String {
+    let ids = project_ids.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let scope = if ids.is_empty() {
+        "all projects".into()
+    } else {
+        ids.iter()
+            .filter_map(Value::as_str)
+            .map(|id| {
+                projects
+                    .as_array()
+                    .and_then(|projects| projects.iter().find(|p| p["id"] == id))
+                    .and_then(|p| p["name"].as_str())
+                    .unwrap_or(id)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // Project names must not terminate the OSC sequence or inject terminal commands.
+    let scope: String = scope.chars().filter(|c| !c.is_control()).collect();
+    format!("hey-boss · {scope}")
+}
 pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) {
     if redraw {
         print!("\x1b[H\x1b[2J");
@@ -1157,7 +1199,7 @@ pub fn serve_instance_with_history(
     let machine = identity::machine()?;
     let mut store = Store::open(&path)?;
     // Ensure the caller's project exists before registration/selection.
-    store.execute(&super::Request {
+    let projects = store.execute(&super::Request {
         version: 1,
         project: project.clone(),
         project_override: None,
@@ -1203,7 +1245,7 @@ pub fn serve_instance_with_history(
     let mut last = String::new();
     let mut heartbeat = Instant::now() - Duration::from_secs(30);
     while !supervisor.stop.load(Ordering::Relaxed) {
-        let mut value = store.execute(&super::Request {
+        let value = store.execute(&super::Request {
             version: 1,
             project: project.clone(),
             project_override: None,
@@ -1212,12 +1254,29 @@ pub fn serve_instance_with_history(
                 worker_id: Some(id.clone()),
             },
             request_id: None,
-        })?;
+        });
+        let mut value = match value {
+            Ok(value) => value,
+            Err(error) if error.code == "database_busy" => {
+                eprintln!(
+                    "Worker status temporarily unavailable: {error}; retrying without stopping sessions"
+                );
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
         value["upgrading"] =
             json!(supervisor.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
         let signature = serde_json::to_string(&value)?;
         if tty || signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
+            if tty {
+                print!(
+                    "\x1b]0;{}\x07",
+                    terminal_title(&value["config"]["projects"], &projects["projects"])
+                );
+            }
             if json_output {
                 println!("{value}");
             } else {
@@ -1264,6 +1323,40 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_titles_describe_the_selected_project_scope() {
+        let projects = json!([
+            {"id":"github.com/kamilio/hey-boss","name":"hey-boss"},
+            {"id":"named:Atlas","name":"Atlas"}
+        ]);
+        assert_eq!(
+            terminal_title(&json!(["named:Atlas"]), &projects),
+            "hey-boss · Atlas"
+        );
+        assert_eq!(
+            terminal_title(
+                &json!(["github.com/kamilio/hey-boss", "named:Atlas"]),
+                &projects
+            ),
+            "hey-boss · hey-boss, Atlas"
+        );
+        assert_eq!(
+            terminal_title(&json!([]), &projects),
+            "hey-boss · all projects"
+        );
+        assert_eq!(
+            terminal_title(&json!(["named:new"]), &projects),
+            "hey-boss · named:new"
+        );
+    }
+    #[test]
+    fn terminal_titles_strip_control_characters_from_project_names() {
+        let projects = json!([{"id":"named:unsafe","name":"Atlas\u{7}\u{1b}[2J\n\u{9c}"}]);
+        assert_eq!(
+            terminal_title(&json!(["named:unsafe"]), &projects),
+            "hey-boss · Atlas[2J"
+        );
+    }
     fn project() -> Project {
         Project {
             id: "named:a'b $(touch nope)".into(),

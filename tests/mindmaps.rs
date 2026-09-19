@@ -1031,3 +1031,33 @@ fn alias_changes_keep_node_identity_and_cross_links_and_allow_resource_nodes() {
         4,
     );
 }
+
+#[test]
+fn schema_nine_migrates_and_map_reads_do_not_wait_for_an_existing_writer() {
+    let f = Fixture::new();
+    f.issue("Atlas", &["create", "--title", "Existing issue"]);
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    db.execute_batch("DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; PRAGMA user_version=9;").unwrap();
+    assert!(nodes(&f.run("Atlas", &["show"])).is_empty());
+    assert_eq!(
+        f.issue("Atlas", &["view", "1"])["issue"]["title"],
+        "Existing issue"
+    );
+    f.run("Atlas", &["issue", "1", "--id", "implementation"]);
+    db.execute_batch(
+        "BEGIN IMMEDIATE; UPDATE issues SET title='Uncommitted title' WHERE number=1;",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let map = f.run("Atlas", &["show", "--bodies", "preview"]);
+    assert_eq!(alias(&map, "implementation")["title"], "Existing issue");
+    assert_eq!(
+        f.run("Atlas", &["view", "implementation"])["node"]["title"],
+        "Existing issue"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "Mindmap reads waited for the SQLite writer lock"
+    );
+    db.execute_batch("ROLLBACK").unwrap();
+}

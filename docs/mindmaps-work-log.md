@@ -212,3 +212,22 @@ the initial dependency snapshot, including worker/store/web code. The original c
 has not been altered. Integrating these newer local dependencies into the isolated
 feature branch is the next delivery step; none of these snapshots should be silently
 published as a feature-only change.
+
+## Local dependency integration
+
+Created unpublished snapshot `4721445` on `dependency/mindmap-refresh-20260919` from
+the current original development tree, using a temporary Git index. The snapshot
+also includes newer local mobile and GitHub drain work; it remains local. Neither
+the original checkout nor its index/branch was changed.
+
+Merged the snapshot into the feature worktree. The store-open overlap required keeping
+the newer WAL/deferred-read behavior and adapting its schema guard/migration threshold
+to version 10. Additive mindmap indexes are installed only when absent so repeated
+reads do not contend with existing writers. New regression coverage upgrades an
+actual schema-9 fixture, preserves its issue, and reads both its map and a single
+node during an uncommitted writer transaction without seeing uncommitted text.
+
+After integration: 23 mindmap, 16 HTTP and 37 issue tests pass. Formatting, whitespace
+and JavaScript syntax checks pass. Browser focus navigation from a search with no
+matches revealed the requested last topic, cleared the obstructing search and focused
+the target while Connected. Installation and the final duration/audit remain pending.

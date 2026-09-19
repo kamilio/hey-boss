@@ -108,6 +108,23 @@ impl Body {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Import GitHub issues and delete the originals only after verifying the copy.
+    DrainGithub {
+        /// Source GitHub repository; defaults to this checkout's GitHub repository.
+        #[arg(long)]
+        repo: Option<String>,
+        /// GitHub login of the creator; defaults to the authenticated gh user.
+        #[arg(long, conflicts_with = "all_authors")]
+        author: Option<String>,
+        /// Include issues created by anyone instead of the default author filter.
+        #[arg(long)]
+        all_authors: bool,
+        #[arg(long, default_value = "open", value_parser = ["open", "closed", "all"])]
+        state: String,
+        /// Preview matching issues without creating or deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     #[command(skip)]
     GlobalSettings { operation: Operation },
     /// Project instructions and whether agents should create and attach PRs.
@@ -552,12 +569,55 @@ impl Options {
                 force: *force,
             },
             Action::Restore { number } => Operation::Restore { number: *number },
-            Action::Rpc | Action::Web { .. } => unreachable!(),
+            Action::Rpc | Action::Web { .. } | Action::DrainGithub { .. } => unreachable!(),
         })
     }
 }
 
 pub fn run(options: &Options) -> Result<()> {
+    if let Action::DrainGithub {
+        repo,
+        author,
+        all_authors,
+        state,
+        dry_run,
+    } = &options.action
+    {
+        if options.request_id.is_some() {
+            return Err(Error::invalid(
+                "drain-github generates stable per-source request IDs; omit --request-id",
+            ));
+        }
+        let mut command = std::process::Command::new("python3");
+        command.args(["-c", include_str!("../tools/drain_github_issues.py")]);
+        command.env("HEY_BOSS_DRAIN_BINARY", std::env::current_exe()?);
+        for (flag, value) in [
+            ("--repo", repo.as_deref()),
+            ("--author", author.as_deref()),
+            ("--project", options.project.as_deref()),
+            ("--host", options.host.as_deref()),
+        ] {
+            if let Some(value) = value {
+                command.arg(flag).arg(value);
+            }
+        }
+        if options.project.is_none() {
+            if let Some(project) = worker_project() {
+                command.arg("--project").arg(project);
+            }
+        }
+        command.arg("--state").arg(state);
+        for (enabled, flag) in [
+            (*all_authors, "--all-authors"),
+            (*dry_run, "--dry-run"),
+            (options.json, "--json"),
+        ] {
+            if enabled {
+                command.arg(flag);
+            }
+        }
+        std::process::exit(command.status()?.code().unwrap_or(1));
+    }
     if let Action::Worker {
         command: WorkerAction::Run,
     } = options.action
