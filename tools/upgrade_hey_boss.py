@@ -17,7 +17,7 @@ import tempfile
 import time
 
 IDENTITY = ('Cargo.toml', 'Cargo.lock', 'build.rs', 'src', 'skills/hey-boss',
-            'tools/upgrade_hey_boss.py', 'tools/fleet_hey_boss.py', 'hey_boss_daemon.swift',
+            'tools/upgrade_hey_boss.py', 'tools/fleet_hey_boss.py', 'tools/drain_github_issues.py', 'hey_boss_daemon.swift',
             'package_hey_boss.swift', 'setup_hey_boss.swift', 'assets')
 PAYLOAD = IDENTITY + ('tests', 'README.md', 'LICENSE')
 UPSTREAM = 'https://github.com/kamilio/hey-boss.git'
