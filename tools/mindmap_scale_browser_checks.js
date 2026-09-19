@@ -247,6 +247,13 @@ async function mindmapScaleChecks(page) {
       Math.abs(overviewCenter.y - world.height / 2) < 0.1,
     "Keyboard overview activation centers the complete map",
   );
+  await page.getByRole("link", { name: "Skip to outline", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  check(
+    await page.locator("#outline").isVisible() &&
+      await page.locator("#outline").evaluate((element) => element === document.activeElement),
+    "Skip link opens and focuses the reading outline",
+  );
   check(errors.length === 0, `Browser runtime errors: ${errors.join("; ")}`);
   return {
     passed,

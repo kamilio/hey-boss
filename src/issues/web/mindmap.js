@@ -312,7 +312,7 @@
   $("#map-fit").addEventListener("click", () => mapUI.fit()); $("#map-in").addEventListener("click", () => mapUI.zoom(1.2)); $("#map-out").addEventListener("click", () => mapUI.zoom(1/1.2));
   $("#close-inspector").addEventListener("click", closeInspector);
   document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#map-inspector").hidden && viewMode === "map") { event.preventDefault(); closeInspector(); } });
-  $(".skip").addEventListener("click", (event) => { event.preventDefault(); setView("outline"); $("#outline").focus(); $("#outline").scrollIntoView({ block: "start" }); });
+  $(".skip, .skip-link").addEventListener("click", (event) => { event.preventDefault(); setView("outline"); $("#outline").focus(); $("#outline").scrollIntoView({ block: "start" }); });
   window.addEventListener("hashchange", () => load());
   load();
 })();
