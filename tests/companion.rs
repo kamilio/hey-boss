@@ -304,8 +304,20 @@ fn rejected_legacy_item_does_not_block_later_notifications() {
     let good = state
         .join("queue")
         .join(format!("{}.json", queued["task_id"].as_str().unwrap()));
-    let entry: serde_json::Value = serde_json::from_slice(&std::fs::read(good).unwrap()).unwrap();
-    assert_eq!(entry["upstream"], "good-mac-task");
+    // The peer finishing its write does not mean the broker has persisted the reply.
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        let entry: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&good).unwrap()).unwrap();
+        if entry["upstream"] == "good-mac-task" {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "Replay acknowledgment was not saved: {entry}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(broker);
     std::fs::remove_dir_all(state).unwrap();
 }
