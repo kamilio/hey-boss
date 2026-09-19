@@ -3,6 +3,7 @@ const {
   layout,
   inViewport,
   indexGraph,
+  Mindmap,
 } = require("../src/issues/web/mindmap-map.js");
 const node = (id, parent_id = null) => ({ id, parent_id, title: id });
 const fixture = [
@@ -94,6 +95,52 @@ const unavailable = indexGraph(
 assert(!unavailable.documents.get("api").includes("morgan"));
 assert(unavailable.documents.get("api").includes("resource removed"));
 assert.equal(indexGraph([], [], () => "").documents.size, 0);
+// Fit must leave the complete graph in the usable desktop area beside details.
+const inspector = { hidden: false, offsetWidth: 340 };
+global.document = { getElementById: () => inspector };
+const fitted = {
+  selected: "topic",
+  data: { width: 1200, height: 300 },
+  element: { getBoundingClientRect: () => ({ width: 1110, height: 594 }) },
+  schedule() {},
+};
+Mindmap.prototype.fit.call(fitted);
+assert(fitted.camera.x >= 0);
+assert(
+  fitted.camera.x + fitted.data.width * fitted.camera.scale <= 1110 - 368,
+  "Fit keeps rightmost topics beside the open inspector",
+);
+inspector.hidden = true;
+Mindmap.prototype.fit.call(fitted);
+assert.equal(
+  fitted.camera.x + fitted.data.width * fitted.camera.scale / 2,
+  555,
+  "Closing details restores fitting to the full viewport",
+);
+const unobstructedScale = fitted.camera.scale;
+// During project navigation the preceding inspector can still be in the DOM.
+inspector.hidden = false;
+fitted.selected = null;
+Mindmap.prototype.fit.call(fitted);
+assert.equal(
+  fitted.camera.x + fitted.data.width * fitted.camera.scale / 2,
+  555,
+  "A preceding project's inspector does not narrow the new map",
+);
+fitted.selected = "topic";
+fitted.element.getBoundingClientRect = () => ({ width: 390, height: 420 });
+Mindmap.prototype.fit.call(fitted);
+assert.equal(
+  fitted.camera.x + fitted.data.width * fitted.camera.scale / 2,
+  195,
+  "Phone details remain an overlay without narrowing the map camera",
+);
+inspector.hidden = true;
+const phoneScale = fitted.camera.scale;
+Mindmap.prototype.fit.call(fitted);
+assert.equal(fitted.camera.scale, phoneScale);
+assert(unobstructedScale > phoneScale);
+delete global.document;
 const big = Array.from({ length: 10000 }, (_, i) =>
   node(`n${i}`, i < 25 ? null : `n${i % 25}`),
 );
