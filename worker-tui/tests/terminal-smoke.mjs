@@ -83,6 +83,21 @@ async function start() {
 async function wait(session, pattern) {
   await session.waitFor(pattern, { scope: "screen", timeout: 12000 });
 }
+// Automatic refresh disables controls briefly. A rendered Live footer can become
+// stale between observation and input; retry opening the modal, never confirming it.
+async function openConfirmation(session, key, title) {
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    await session.type(key);
+    try {
+      await session.waitFor(title, { scope: "screen", timeout: 500 });
+      return;
+    } catch (error) {
+      if (!error.message.includes("Timed out waiting for pattern")) throw error;
+    }
+  }
+  throw new Error(`Control confirmation did not open: ${title}`);
+}
 async function capture(session, name) {
   await session.waitForQuiet(100);
   const screen = await session.screen();
@@ -153,20 +168,17 @@ try {
   await session.send("\x1b[200~sp\x1b[201~"); // pasted controls are not key presses
   await delay(100);
   assert.deepEqual(await state(), {});
-  await session.type("s");
-  await wait(session, "Stop worker?");
+  await openConfirmation(session, "s", "Stop worker?");
   await capture(session, "confirmation");
   await session.press("Escape");
   assert.deepEqual(await state(), {}, "Cancelled confirmation changed the queue");
   await ready(session);
-  await session.type("p");
-  await wait(session, "Pause worker?");
+  await openConfirmation(session, "p", "Pause worker?");
   await session.press("Enter");
   await waitState({ alpha: "pause" });
   await wait(session, "Finishing work before pause");
   await ready(session);
-  await session.type("s");
-  await wait(session, "Stop worker?");
+  await openConfirmation(session, "s", "Stop worker?");
   await session.press("Enter");
   await waitState({ alpha: "stop" });
   await wait(session, "stopped");
