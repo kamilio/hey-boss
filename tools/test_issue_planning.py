@@ -128,6 +128,16 @@ class Planning(unittest.TestCase):
         self.assertEqual(issue['title'],'File title')
         self.assertEqual(issue['plan']['path'],'plan.md')
 
+    def test_assigned_issue_is_not_modified_when_drafting_is_rejected(self):
+        self.cli('create','--title','Assigned title','--body','Assigned body')
+        self.cli('claim','1')
+        (self.checkout/'plan.md').write_text('# Different file\n\nFile body\n')
+        before=self.cli('view','1')['issue']
+        code,out=self.human(['edit','1','--draft','--interactive','--file','plan.md'],'file')
+        self.assertNotEqual(code,0)
+        self.assertEqual(self.cli('view','1')['issue'],before)
+        self.assertFalse((self.checkout/'codex-args').exists())
+
     def test_remote_final_sync_is_required_and_uses_fleet_ssh_alias(self):
         self.cli('create','--title','Original','--draft')
         plan={'path':'plans/remote.md','checkout':'/remote/checkout','machine':'synthetic-remote','host':'unroutable-hostname'}
