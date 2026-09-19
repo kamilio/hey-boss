@@ -16,6 +16,12 @@ hey-boss mm web
 
 Use `--body -` to read Markdown from stdin, or `--file design.md` to copy a file. Bodies are stored in SQLite; later file changes do not update text nodes. Issue bodies and titles resolve from the issue store each time the map is loaded. `mm edit design --title 'Design' --file design.md` replaces supplied text fields.
 
+Terminal outlines show titles and relationships by default. `mm view design` reads
+one node's full current text; `mm show --bodies preview` includes up to 512 Unicode
+characters per body, and `--bodies full` includes complete bodies. JSON reads default
+to full bodies for compatibility; use `--bodies preview` or `none` for smaller map
+responses. `mm export` always includes complete bodies.
+
 The default project is the current Git repository, shared across worktrees. `--project Atlas` selects an unambiguous project name or a full project ID. `HEY_BOSS_ISSUE_PROJECT` is honored in worker sessions. `--host devbox` / `HEY_BOSS_ISSUE_HOST` use the authoritative SSH issue store, with no local fallback. Both machines need a CLI version with mindmap support.
 
 ## References and links
@@ -88,6 +94,13 @@ Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not fo
 The viewer supports project switching, nested collapse/expand, search through topics
 and link descriptions, incoming/outgoing dependency labels, Markdown bodies and
 cross-project navigation. Issue bodies sit behind an expandable “Issue details”
-control so the outline remains readable; text/Markdown topic bodies stay visible. Refresh reloads live resources. Maps are not writable through either `/api/mm` or the general `/api/action` web route. The ordinary issue and Inbox interfaces keep their existing editing behavior.
+control so the outline remains readable. Bodies initially show previews; “Read full
+text” loads one complete node and “Show less” restores its preview. Search examines
+titles, previews, loaded full text and link descriptions; it does not fetch every
+body. On the first visit to a map with more than 200 nodes, root sections start
+collapsed. Search reveals matching descendants and their ancestors, and following
+a relationship reveals its target. Refresh reloads live resources. Maps are not
+writable through either `/api/mm` or the general `/api/action` web route. The ordinary
+issue and Inbox interfaces keep their existing editing behavior.
 
 See [research and design rationale](mindmaps-research.md).

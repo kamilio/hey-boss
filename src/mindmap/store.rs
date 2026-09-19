@@ -1,6 +1,6 @@
 use super::{get_issue, resolve_project};
 use crate::issues::{Error, Project, Result};
-use crate::mindmap::Operation;
+use crate::mindmap::{BodyMode, Operation, project_body};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -26,6 +26,38 @@ fn get(db: &Connection, id: &str) -> Result<Value> {
     )
     .optional()?
     .ok_or_else(|| Error::new("not_found", format!("Mindmap node {id:?} was not found")))
+}
+fn projected_columns(mode: BodyMode) -> String {
+    let body = match mode {
+        BodyMode::Full => "body",
+        BodyMode::Preview => "substr(body,1,513)",
+        BodyMode::None => "''",
+    };
+    format!(
+        "{},(body<>'')",
+        COLUMNS
+            .split(',')
+            .map(|column| if column == "body" { body } else { column })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+fn projected_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let mut node = row(r)?;
+    node["has_body"] = json!(r.get::<_, bool>(12)?);
+    Ok(node)
+}
+fn get_projected(db: &Connection, id: &str, mode: BodyMode) -> Result<Value> {
+    db.query_row(
+        &format!(
+            "SELECT {} FROM mindmap_nodes WHERE id=?1",
+            projected_columns(mode)
+        ),
+        [id],
+        projected_row,
+    )
+    .optional()?
+    .ok_or_else(|| Error::new("not_found", "Mindmap node was not found"))
 }
 fn id(node: &Value) -> &str {
     node["id"].as_str().unwrap()
@@ -295,7 +327,15 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     let mut relationship = None;
     let mut changed = false;
     match op {
-        Operation::Show => {}
+        Operation::Show { .. } => {}
+        Operation::View { node } => {
+            let mut node = select(db, p, node, false, now, &mut touched)?;
+            let project = resolve_project(db, p, node["project_id"].as_str())?;
+            live(db, &mut node, BodyMode::Full)?;
+            return Ok(
+                json!({"ok":true,"project":project,"version":version(db,&project.id)?,"body_mode":"full","node":node,"nodes":[node],"external_nodes":[],"links":[]}),
+            );
+        }
         Operation::Projects => {
             let mut stmt=db.prepare("SELECT p.id,p.name,coalesce(m.version,0),count(n.id) FROM projects p LEFT JOIN mindmaps m ON m.project_id=p.id LEFT JOIN mindmap_nodes n ON n.project_id=p.id WHERE p.hidden_at IS NULL GROUP BY p.id HAVING count(n.id)>0 ORDER BY lower(p.name),p.id")?;
             let projects=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"version":r.get::<_,i64>(2)?,"node_count":r.get::<_,i64>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -524,7 +564,11 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     } else {
         p.clone()
     };
-    let mut graph = graph(db, &viewed_project)?;
+    let mode = match op {
+        Operation::Show { body_mode } => *body_mode,
+        _ => BodyMode::Full,
+    };
+    let mut graph = graph(db, &viewed_project, mode)?;
     graph["changed"] = json!(changed || !touched.is_empty());
     if let Some(node) = selected {
         graph["node"] = graph["nodes"]
@@ -544,7 +588,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     }
     Ok(graph)
 }
-fn live(db: &Connection, node: &mut Value) -> Result<()> {
+fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
     if node["kind"] == "issue" {
         let number = node["reference"].as_str().unwrap().parse().unwrap();
         match get_issue(
@@ -555,9 +599,11 @@ fn live(db: &Connection, node: &mut Value) -> Result<()> {
         ) {
             Ok(issue) => {
                 node["title"] = json!(issue.title);
+                node["has_body"] = json!(!issue.body.is_empty());
                 node["body"] = json!(issue.body);
                 node["state"] = json!(issue.state);
                 node["assignee"] = json!(issue.assignee);
+                node["resource_version"] = json!(issue.version);
             }
             Err(error) if error.code == "not_found" => {
                 node["available"] = json!(false);
@@ -569,18 +615,17 @@ fn live(db: &Connection, node: &mut Value) -> Result<()> {
         node["available"] = json!(false);
         node["state"] = json!("unavailable");
     }
-    node["body_html"] = json!(crate::markdown::render_fragment(
-        node["body"].as_str().unwrap_or("")
-    ));
+    project_body(node, mode);
     Ok(())
 }
-fn graph(db: &Connection, p: &Project) -> Result<Value> {
+fn graph(db: &Connection, p: &Project, mode: BodyMode) -> Result<Value> {
     use std::collections::{HashMap, HashSet};
     let mut stmt = db.prepare(&format!(
-        "SELECT {COLUMNS} FROM mindmap_nodes WHERE project_id=?1 ORDER BY position,created_at,id"
+        "SELECT {} FROM mindmap_nodes WHERE project_id=?1 ORDER BY position,created_at,id",
+        projected_columns(mode)
     ))?;
     let mut nodes = stmt
-        .query_map([&p.id], row)?
+        .query_map([&p.id], projected_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut stmt=db.prepare("SELECT l.source,l.target,l.kind,l.description,l.created_at FROM mindmap_links l JOIN mindmap_nodes s ON s.id=l.source JOIN mindmap_nodes t ON t.id=l.target WHERE s.project_id=?1 OR t.project_id=?1 ORDER BY l.created_at,l.source,l.target,l.kind")?;
     let mut links=stmt.query_map([&p.id],|r|Ok(json!({"from":r.get::<_,String>(0)?,"to":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"description":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?,"automatic":false})))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -590,12 +635,12 @@ fn graph(db: &Connection, p: &Project) -> Result<Value> {
         for field in ["from", "to"] {
             let key = link[field].as_str().unwrap();
             if known.insert(key.to_owned()) {
-                external.push(get(db, key)?);
+                external.push(get_projected(db, key, mode)?);
             }
         }
     }
     for node in nodes.iter_mut().chain(external.iter_mut()) {
-        live(db, node)?;
+        live(db, node, mode)?;
     }
     let explicit_prs: HashMap<&str, &str> = nodes
         .iter()
@@ -652,7 +697,7 @@ fn graph(db: &Connection, p: &Project) -> Result<Value> {
         for (project, number, name) in attachments {
             let saved: Option<String> = db.query_row("SELECT id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=?2 ORDER BY (project_id=?3) DESC,(project_id=?1) DESC,project_id,id LIMIT 1",params![project,number.to_string(),p.id],|r|r.get(0)).optional()?;
             let mut issue = if let Some(saved) = saved {
-                get(db, &saved)?
+                get_projected(db, &saved, mode)?
             } else {
                 json!({"id":format!("auto-issue:{project}:{number}"),"project_id":project,"project_name":name,"parent_id":null,"position":0,"kind":"issue","title":format!("Issue #{number}"),"body":"","reference":number.to_string(),"reference_project":project,"automatic":true,"resource_only":true,"available":true})
             };
@@ -660,13 +705,13 @@ fn graph(db: &Connection, p: &Project) -> Result<Value> {
                 links.push(json!({"from":issue["id"],"to":node["id"],"kind":"pull-request","description":null,"automatic":true}));
             }
             if known.insert(id(&issue).to_owned()) {
-                live(db, &mut issue)?;
+                live(db, &mut issue, mode)?;
                 external.push(issue);
             }
         }
     }
     nodes.extend(automatic);
     Ok(
-        json!({"ok":true,"project":p,"version":version(db,&p.id)?,"nodes":nodes,"external_nodes":external,"links":links}),
+        json!({"ok":true,"project":p,"version":version(db,&p.id)?,"body_mode":mode,"nodes":nodes,"external_nodes":external,"links":links}),
     )
 }

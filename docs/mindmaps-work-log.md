@@ -153,3 +153,37 @@ projection, response/receipt bounds, selector edge cases, deleted resource manag
 and qualified link inspection. The actual HTTP projection and read-only boundary
 checks also pass; the 36 issue regressions passed after additive index changes.
 The entire requested duration and delivery audit are still incomplete.
+
+## Third milestone: bounded bodies and large-map rendering
+
+Map reads support `full`, `preview` and `none` body modes. SQLite selects bounded
+prefixes for saved topic bodies, previews preserve Unicode boundaries, and complete
+source stays unchanged. `mm view NODE` reads one full live node, including qualified
+cross-project selectors and pending-only notices. Terminal outlines default to titles
+and relationships; JSON retains its full-body default and Markdown export stays full.
+The viewer uses previews and loads individual bodies on demand, with explicit failure
+and retry controls and generation/map/resource-version guards against stale results.
+
+Focused verification: 17 mindmap and 16 web tests pass. The new cases exercise
+40 large Unicode Markdown bodies, full single-node reads, terminal/JSON defaults,
+live issue text, pending notice views and both HTTP read-only boundaries. Formatting,
+JavaScript syntax and diff whitespace checks pass.
+
+Playwright verified a 52 KB note reaches its final sentence when loaded and returns
+to a short preview with “Show less”; keyboard focus remains on the body. A simulated
+503 leaves the preview visible and enables retry; retry loads complete text and clears
+the error. Expected HTTP 503/403 entries are recorded in the browser request log.
+A successful full-body response delayed by 750 ms while switching from Atlas to
+Platform did not insert Atlas content into Platform: zero full-body controls, zero
+body errors, correct project title and Connected status after the delayed reply.
+
+For a 2,500-node/5,000-link browser fixture, initial collapsed rendering had 25 rows
+and 672 DOM elements; expanded rendering had 2,500 rows and 60,097 elements. Collapsed
+branches now omit descendant DOM. Root sections of maps above 200 nodes start collapsed
+on first visit. Search covers titles, previews, loaded bodies and link descriptions;
+it does not fetch all complete bodies. The viewer had no horizontal overflow in the
+measured fixture. These are fixture observations, not a general performance guarantee.
+
+The original development checkout remains unchanged. A fresh upstream fetch still
+leaves the unpublished dependency baseline unresolved for publication. Installation,
+final requirement audit and the requested eight-hour duration remain incomplete.

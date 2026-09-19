@@ -160,6 +160,8 @@ hey-boss mm issue 12 --under release
 hey-boss mm link issue:12 Platform::api --kind depends-on --why 'API must land first'
 hey-boss mm link pr:https://github.com/org/repo/pull/2 pr:https://github.com/org/repo/pull/1 --kind depends-on
 hey-boss mm show
+hey-boss mm view release
+hey-boss mm show --bodies preview --json
 hey-boss mm web
 ```
 
@@ -171,3 +173,7 @@ one project; cycles are rejected. Automatic issue→PR relationships come from
 Inbox is reported explicitly. Map reads never complete notices or change issues.
 `mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
 `mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
+Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
+`mm view NODE` for one full live node, `show --bodies preview|none|full` to control
+map body size, and `export` for complete Markdown. The viewer loads 512-character
+previews and fetches full bodies on demand; search covers previews and loaded text.
