@@ -95,7 +95,7 @@ interface supports keyboard navigation and narrow screens. Appearance follows
 the system’s light/dark setting automatically, including live changes, with no
 theme switcher or saved override.
 
-Unsaved issue and comment drafts are saved in the browser's local storage, scoped
+On the local HTTP interface, unsaved issue and comment drafts are saved in the browser's local storage, scoped
 to project and issue. They survive navigation and reloads. Retry IDs also survive
 reloads, preventing duplicate writes after a lost response. Saved content lives
 in SQLite; browser drafts remain on that browser profile and origin until saved
