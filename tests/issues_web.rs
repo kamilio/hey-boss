@@ -1190,7 +1190,7 @@ fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_bound
     let web = Web::start();
     let body = "## Planning\n\n🧭 ".repeat(2000);
     let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
-    db.execute("INSERT INTO mindmap_nodes VALUES('n-long-web',?1,'long',NULL,0,'markdown','Long note',?2,NULL,NULL,1,1)",rusqlite::params![web.project,body]).unwrap();
+    db.execute("INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES('n-long-web',?1,'long',NULL,0,'markdown','Long note',?2,NULL,NULL,1,1)",rusqlite::params![web.project,body]).unwrap();
     let preview =
         web.ok(json!({"action":"mindmap","operation":{"command":"show","body_mode":"preview"}}));
     assert_eq!(preview["nodes"][0]["body_truncated"], true);

@@ -91,6 +91,8 @@ pub enum Operation {
         node: String,
         title: Option<String>,
         body: Option<String>,
+        #[serde(default)]
+        clear_label: bool,
         if_version: Option<i64>,
     },
     Alias {
@@ -169,11 +171,19 @@ impl Operation {
             Self::Edit {
                 title,
                 body,
+                clear_label,
                 if_version,
                 ..
             } => {
-                if title.is_none() && body.is_none() {
-                    return Err(Error::invalid("edit requires --title, --body or --file"));
+                if *clear_label && (title.is_some() || body.is_some()) {
+                    return Err(Error::invalid(
+                        "--clear-label cannot be combined with --title or body edits",
+                    ));
+                }
+                if title.is_none() && body.is_none() && !clear_label {
+                    return Err(Error::invalid(
+                        "edit requires --title, --body, --file or --clear-label",
+                    ));
                 }
                 if let Some(title) = title {
                     // The store checks the ordinary label limit after resolving

@@ -12,11 +12,11 @@ pub(super) const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS mindmap_reference_lookup ON mindmap_nodes(kind,reference_project,reference,project_id);
 CREATE INDEX IF NOT EXISTS issue_pr_canonical_url ON issue_pull_requests(rtrim(url,'/'),project_id,issue_number);
 ";
-const COLUMNS: &str = "id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at";
+const COLUMNS: &str = "id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at,display_label";
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(
-        json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"alias":r.get::<_,Option<String>>(2)?,"parent_id":r.get::<_,Option<String>>(3)?,"position":r.get::<_,i64>(4)?,"kind":r.get::<_,String>(5)?,"title":r.get::<_,String>(6)?,"body":r.get::<_,String>(7)?,"reference":r.get::<_,Option<String>>(8)?,"reference_project":r.get::<_,Option<String>>(9)?,"created_at":r.get::<_,i64>(10)?,"updated_at":r.get::<_,i64>(11)?,"automatic":false,"available":true}),
-    )
+    let mut node = json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"alias":r.get::<_,Option<String>>(2)?,"parent_id":r.get::<_,Option<String>>(3)?,"position":r.get::<_,i64>(4)?,"kind":r.get::<_,String>(5)?,"title":r.get::<_,String>(6)?,"body":r.get::<_,String>(7)?,"reference":r.get::<_,Option<String>>(8)?,"reference_project":r.get::<_,Option<String>>(9)?,"created_at":r.get::<_,i64>(10)?,"updated_at":r.get::<_,i64>(11)?,"automatic":false,"available":true});
+    node["display_label"] = json!(r.get::<_, Option<String>>(12)?);
+    Ok(node)
 }
 fn get(db: &Connection, id: &str) -> Result<Value> {
     db.query_row(
@@ -44,7 +44,7 @@ fn projected_columns(mode: BodyMode) -> String {
 }
 fn projected_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let mut node = row(r)?;
-    node["has_body"] = json!(r.get::<_, bool>(12)?);
+    node["has_body"] = json!(r.get::<_, bool>(13)?);
     Ok(node)
 }
 fn get_projected(db: &Connection, id: &str, mode: BodyMode) -> Result<Value> {
@@ -165,7 +165,7 @@ fn insert(db: &Connection, p: &Project, node: NewNode<'_>, now: i64) -> Result<V
     let position:i64=db.query_row("SELECT coalesce(max(position),-1)+1 FROM mindmap_nodes WHERE project_id=?1 AND parent_id IS ?2",params![p.id,parent],|r|r.get(0))?;
     let node = new_id()?;
     db.execute(
-        "INSERT INTO mindmap_nodes VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11)",
+        "INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11)",
         params![
             node,
             p.id,
@@ -404,28 +404,55 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             changed = true;
         }
         Operation::Edit {
-            node, title, body, ..
+            node,
+            title,
+            body,
+            clear_label,
+            ..
         } => {
             let node = select(db, p, node, false, now, &mut touched)?;
             same_project(&node, p)?;
-            if !["text", "markdown", "pr"].contains(&node["kind"].as_str().unwrap()) {
-                return Err(Error::invalid(
-                    "Reference nodes use live content; edit the underlying resource instead",
-                ));
+            if node["kind"] == "issue" {
+                if body.is_some() {
+                    return Err(Error::invalid(
+                        "Issue nodes accept --title or --clear-label only",
+                    ));
+                }
+                if let Some(title) = title {
+                    crate::issues::identifier(title, "node title", 512)?;
+                }
+                let label = if *clear_label { None } else { title.as_deref() };
+                changed = node["display_label"] != json!(label);
+                if changed {
+                    db.execute(
+                        "UPDATE mindmap_nodes SET display_label=?2,updated_at=?3 WHERE id=?1",
+                        params![id(&node), label, now],
+                    )?;
+                }
+                selected = Some(get(db, id(&node))?);
+            } else {
+                if *clear_label {
+                    return Err(Error::invalid("--clear-label requires an issue node"));
+                }
+                if !["text", "markdown", "pr"].contains(&node["kind"].as_str().unwrap()) {
+                    return Err(Error::invalid(
+                        "Reference nodes use live content; edit the underlying resource instead",
+                    ));
+                }
+                if node["kind"] == "pr" && body.is_some() {
+                    return Err(Error::invalid("PR nodes accept --title only"));
+                }
+                let title = title.as_deref().unwrap_or(node["title"].as_str().unwrap());
+                if node["kind"] != "pr" || node["reference"] != title.trim_end_matches('/') {
+                    crate::issues::identifier(title, "node title", 512)?;
+                }
+                let body = body.as_deref().unwrap_or(node["body"].as_str().unwrap());
+                changed = node["title"] != title || node["body"] != body;
+                if changed {
+                    db.execute("UPDATE mindmap_nodes SET title=?2,body=?3,kind=CASE WHEN kind IN ('text','markdown') AND length(?3)>0 THEN 'markdown' ELSE kind END,updated_at=?4 WHERE id=?1",params![id(&node),title,body,now])?;
+                }
+                selected = Some(get(db, id(&node))?);
             }
-            if node["kind"] == "pr" && body.is_some() {
-                return Err(Error::invalid("PR nodes accept --title only"));
-            }
-            let title = title.as_deref().unwrap_or(node["title"].as_str().unwrap());
-            if node["kind"] != "pr" || node["reference"] != title.trim_end_matches('/') {
-                crate::issues::identifier(title, "node title", 512)?;
-            }
-            let body = body.as_deref().unwrap_or(node["body"].as_str().unwrap());
-            changed = node["title"] != title || node["body"] != body;
-            if changed {
-                db.execute("UPDATE mindmap_nodes SET title=?2,body=?3,kind=CASE WHEN kind IN ('text','markdown') AND length(?3)>0 THEN 'markdown' ELSE kind END,updated_at=?4 WHERE id=?1",params![id(&node),title,body,now])?;
-            }
-            selected = Some(get(db, id(&node))?);
         }
         Operation::Alias { node, alias, .. } => {
             let node = select(db, p, node, false, now, &mut touched)?;
@@ -656,12 +683,14 @@ fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
             // octet_length reads the column's byte count from metadata and also
             // handles bodies beginning with NUL, unlike SQL text length/substr.
             let issue = db.query_row(
-                "SELECT title,state,assignee,version,octet_length(body)>0 FROM issues WHERE project_id=?1 AND number=?2 AND deleted_at IS NULL",
+                "SELECT title,state,assignee,version,octet_length(body)>0,labels FROM issues WHERE project_id=?1 AND number=?2 AND deleted_at IS NULL",
                 params![project,number],
-                |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,i64>(3)?,r.get::<_,bool>(4)?)),
+                |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,i64>(3)?,r.get::<_,bool>(4)?,r.get::<_,String>(5)?)),
             ).optional()?;
-            if let Some((title, state, assignee, version, has_body)) = issue {
+            if let Some((title, state, assignee, version, has_body, labels)) = issue {
                 node["title"] = json!(title);
+                node["labels"] =
+                    serde_json::from_str(&labels).map_err(|e| Error::invalid(e.to_string()))?;
                 node["body"] = json!("");
                 node["has_body"] = json!(has_body);
                 node["state"] = json!(state);
@@ -672,6 +701,7 @@ fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
                 node["state"] = json!("unavailable");
             }
             project_body(node, mode);
+            issue_display_title(node);
             return Ok(());
         }
         match get_issue(
@@ -682,6 +712,7 @@ fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
         ) {
             Ok(issue) => {
                 node["title"] = json!(issue.title);
+                node["labels"] = json!(issue.labels);
                 node["has_body"] = json!(!issue.body.is_empty());
                 node["body"] = json!(issue.body);
                 node["state"] = json!(issue.state);
@@ -699,7 +730,16 @@ fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
         node["state"] = json!("unavailable");
     }
     project_body(node, mode);
+    if node["kind"] == "issue" {
+        issue_display_title(node);
+    }
     Ok(())
+}
+fn issue_display_title(node: &mut Value) {
+    node["original_title"] = node["title"].clone();
+    if node["display_label"].is_string() {
+        node["title"] = node["display_label"].clone();
+    }
 }
 fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> Result<Value> {
     use std::collections::{HashMap, HashSet};

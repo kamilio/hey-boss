@@ -384,17 +384,17 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if app != 0 && app != APPLICATION_ID || version > 11 || version > 0 && app != APPLICATION_ID
+        if app != 0 && app != APPLICATION_ID || version > 12 || version > 0 && app != APPLICATION_ID
         {
             return Err(Error::invalid(
                 "Incompatible issue database; use the matching hey-boss version",
             ));
         }
-        if version < 11 {
+        if version < 12 {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
             let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if app != 0 && app != APPLICATION_ID || version > 11 {
+            if app != 0 && app != APPLICATION_ID || version > 12 {
                 return Err(Error::invalid(
                     "Incompatible issue database; use the matching hey-boss version",
                 ));
@@ -459,6 +459,10 @@ impl Store {
             if version < 11 {
                 tx.execute_batch("ALTER TABLE issues ADD COLUMN draft INTEGER NOT NULL DEFAULT 0; ALTER TABLE issues ADD COLUMN plan TEXT; ALTER TABLE project_settings ADD COLUMN drafts_enabled INTEGER NOT NULL DEFAULT 1; ALTER TABLE project_settings ADD COLUMN plan_template TEXT NOT NULL DEFAULT 'plans/{timestamp}-{number}.md';")?;
                 tx.pragma_update(None, "user_version", 11)?;
+            }
+            if version < 12 {
+                tx.execute_batch("ALTER TABLE mindmap_nodes ADD COLUMN display_label TEXT;")?;
+                tx.pragma_update(None, "user_version", 12)?;
             }
             tx.commit()?;
         }

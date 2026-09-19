@@ -243,7 +243,7 @@ fn live_issues_and_automatic_pr_links_follow_store_updates() {
     for node in ["api", "implementation"] {
         assert_eq!(f.run("Atlas", &["links", node])["links"], g["links"]);
     }
-    f.fail("Atlas", &["edit", "api", "--title", "Copied issue"], 2);
+    f.fail("Atlas", &["edit", "api", "--body", "Copied issue"], 2);
     f.issue("Platform", &["close", "1"]);
     assert_eq!(alias(&f.run("Atlas", &["show"]), "api")["state"], "closed");
     f.issue("Platform", &["pr", "remove", "1", url]);
@@ -532,7 +532,7 @@ fn mutation_and_idempotency_receipt_sizes_do_not_include_the_existing_map() {
     f.run("Atlas", &["add", "Root", "--id", "root"]);
     let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
     for i in 0..200 {
-        db.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',NULL,NULL,?2,'markdown',?3,?4,NULL,NULL,1,1)",rusqlite::params![format!("n-large-{i}"),i,format!("Large topic {i}"),"Existing map content. ".repeat(1000)]).unwrap();
+        db.execute("INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES(?1,'named:Atlas',NULL,NULL,?2,'markdown',?3,?4,NULL,NULL,1,1)",rusqlite::params![format!("n-large-{i}"),i,format!("Large topic {i}"),"Existing map content. ".repeat(1000)]).unwrap();
     }
     let result = f.run(
         "Atlas",
@@ -672,7 +672,7 @@ fn large_markdown_maps_have_small_utf8_safe_previews_and_full_single_node_reads(
     let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
     let body = "🧭 Planning the release. ".repeat(20000);
     for i in 0..40 {
-        db.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',?2,NULL,?3,'markdown',?4,?5,NULL,NULL,1,1)",rusqlite::params![format!("n-body-{i}"),format!("long-{i}"),i,format!("Long planning note {i}"),body]).unwrap();
+        db.execute("INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES(?1,'named:Atlas',?2,NULL,?3,'markdown',?4,?5,NULL,NULL,1,1)",rusqlite::params![format!("n-body-{i}"),format!("long-{i}"),i,format!("Long planning note {i}"),body]).unwrap();
     }
     let preview = f.run("Atlas", &["show", "--bodies", "preview"]);
     assert!(preview.to_string().len() < 120000);
@@ -1215,7 +1215,7 @@ fn oversized_relationship_maps_keep_mutations_and_focused_link_reads_available()
     let mut db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
     let tx = db.transaction().unwrap();
     for i in 0..66 {
-        tx.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',NULL,NULL,?2,'text',?3,'',NULL,NULL,1,1)",rusqlite::params![format!("n-description-{i}"),i,format!("Topic {i}")]).unwrap();
+        tx.execute("INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES(?1,'named:Atlas',NULL,NULL,?2,'text',?3,'',NULL,NULL,1,1)",rusqlite::params![format!("n-description-{i}"),i,format!("Topic {i}")]).unwrap();
     }
     let description = "x".repeat(16384);
     for i in 0..2100 {
@@ -1271,7 +1271,7 @@ fn large_pending_notice_bodies_are_bounded_without_losing_preview_or_single_node
     let mut db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
     let tx = db.transaction().unwrap();
     for i in 0..30 {
-        tx.execute("INSERT INTO mindmap_nodes VALUES(?1,'named:Atlas',?2,NULL,?3,'notification','Saved notice','',?2,'',1,1)",rusqlite::params![format!("n-notice-{i}"),format!("notice-{i}"),i]).unwrap();
+        tx.execute("INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES(?1,'named:Atlas',?2,NULL,?3,'notification','Saved notice','',?2,'',1,1)",rusqlite::params![format!("n-notice-{i}"),format!("notice-{i}"),i]).unwrap();
     }
     tx.commit().unwrap();
     let summary = "Pending review context. ".repeat(25000);
@@ -1668,5 +1668,141 @@ fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
     f.run(
         "Atlas",
         &["edit", "note", "--title", "Supervisor authorship"],
+    );
+}
+
+#[test]
+fn issue_map_labels_preserve_live_resources_versions_and_retries() {
+    let f = Fixture::new();
+    f.issue(
+        "Platform",
+        &[
+            "create",
+            "--title",
+            "Technical API title",
+            "--body",
+            "Live details",
+            "--label",
+            "ready",
+        ],
+    );
+    f.run(
+        "Atlas",
+        &["issue", "1", "--issue-project", "Platform", "--id", "api"],
+    );
+    f.issue("Platform", &["claim", "1"]);
+    let url = "https://github.com/example/repo/pull/30";
+    f.issue("Platform", &["pr", "add", "1", url]);
+    let before = f.issue("Platform", &["view", "1"]);
+    let map = f.run("Atlas", &["show"]);
+    let version = map["version"].to_string();
+    let args = [
+        "edit",
+        "api",
+        "--title",
+        "Simple API",
+        "--if-version",
+        &version,
+        "--request-id",
+        "short-label",
+    ];
+    let edited = f.run("Atlas", &args);
+    let labeled = f.run("Atlas", &["view", "api"]);
+    assert_eq!(labeled["node"]["title"], "Simple API");
+    assert_eq!(labeled["node"]["original_title"], "Technical API title");
+    assert_eq!(edited["node"]["display_label"], "Simple API");
+    assert_eq!(labeled["node"]["labels"], json!(["ready"]));
+    assert_eq!(labeled["node"]["assignee"], "human:test");
+    let no_op = f.run("Atlas", &["edit", "api", "--title", "Simple API"]);
+    assert_eq!(no_op["changed"], false);
+    assert_eq!(no_op["version"], edited["version"]);
+    assert!(
+        f.run("Atlas", &["links", "api"])["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link["automatic"] == true)
+    );
+    assert_eq!(f.run("Atlas", &args), edited);
+    assert_eq!(f.issue("Platform", &["view", "1"]), before);
+    assert!(f.terminal("Atlas", &["show"]).contains("Simple API"));
+    assert!(f.terminal("Atlas", &["export"]).contains("Simple API"));
+    assert!(
+        f.terminal("Atlas", &["view", "api"])
+            .contains("Technical API title")
+    );
+    f.fail(
+        "Atlas",
+        &["edit", "api", "--clear-label", "--if-version", &version],
+        4,
+    );
+    f.issue(
+        "Platform",
+        &[
+            "edit",
+            "1",
+            "--title",
+            "Updated technical title",
+            "--body",
+            "Updated details",
+        ],
+    );
+    for mode in ["none", "preview", "full"] {
+        let shown = f.run("Atlas", &["show", "--bodies", mode]);
+        assert_eq!(alias(&shown, "api")["title"], "Simple API");
+        assert_eq!(
+            alias(&shown, "api")["original_title"],
+            "Updated technical title"
+        );
+    }
+    assert_eq!(
+        f.run("Atlas", &["view", "api"])["node"]["body"],
+        "Updated details"
+    );
+    let before_clear = f.issue("Platform", &["view", "1"]);
+    let cleared = f.run("Atlas", &["edit", "api", "--clear-label"]);
+    assert_eq!(
+        f.run("Atlas", &["view", "api"])["node"]["title"],
+        "Updated technical title"
+    );
+    assert!(cleared["node"]["display_label"].is_null());
+    assert_eq!(f.issue("Platform", &["view", "1"]), before_clear);
+    assert_eq!(
+        f.run("Atlas", &["edit", "api", "--clear-label"])["changed"],
+        false
+    );
+    f.fail("Atlas", &["edit", "api", "--title", &"x".repeat(513)], 2);
+    f.run("Atlas", &["add", "Topic", "--id", "topic"]);
+    f.fail("Atlas", &["edit", "topic", "--clear-label"], 2);
+    f.issue("Atlas", &["create", "--title", "Local technical title"]);
+    f.run("Atlas", &["issue", "1"]);
+    assert_eq!(
+        f.run(
+            "Atlas",
+            &["edit", "issue:1", "--title", "Local short title"]
+        )["node"]["display_label"],
+        "Local short title"
+    );
+}
+
+#[test]
+fn issue_label_migration_preserves_existing_map_and_live_title() {
+    let f = Fixture::new();
+    f.issue("Atlas", &["create", "--title", "Existing issue"]);
+    let map = f.run("Atlas", &["issue", "1", "--id", "existing"]);
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    db.execute_batch(
+        "ALTER TABLE mindmap_nodes DROP COLUMN display_label; PRAGMA user_version=11;",
+    )
+    .unwrap();
+    drop(db);
+    let migrated = f.run("Atlas", &["show"]);
+    assert_eq!(migrated["version"], map["version"]);
+    assert_eq!(alias(&migrated, "existing")["id"], map["node"]["id"]);
+    assert_eq!(alias(&migrated, "existing")["title"], "Existing issue");
+    assert!(alias(&migrated, "existing")["display_label"].is_null());
+    assert_eq!(
+        f.run("Atlas", &["edit", "existing", "--title", "Short label"])["node"]["display_label"],
+        "Short label"
     );
 }

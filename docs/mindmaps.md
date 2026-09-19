@@ -179,3 +179,14 @@ navigation. Maps are not writable through either `/api/mm` or the general
 existing editing behavior.
 
 See [research and design rationale](mindmaps-research.md).
+
+### Short issue labels
+
+`hey-boss mm edit issue:12 --title 'Keep replies safe'` sets a label only for that
+issue reference in the current map. Use `--clear-label` to restore its live title.
+Cards, outlines and Markdown exports use the label; details retain the original
+live title, issue project/number, body, labels, assignment and PR relationships.
+Search matches both titles. The underlying issue title and version stay unchanged.
+Cross-project issue references work the same way using their map alias or node ID.
+These edits support `--if-version` and `--request-id` like other map mutations;
+body edits remain unavailable for live issue references.

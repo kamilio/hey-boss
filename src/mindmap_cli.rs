@@ -136,11 +136,14 @@ enum Action {
         #[command(flatten)]
         placement: Placement,
     },
-    /// Edit topic text/Markdown or a PR label; issues/notices use live content.
+    /// Edit topic text/Markdown or a map-only issue/PR label.
     Edit {
         node: String,
         #[arg(long)]
         title: Option<String>,
+        /// Restore a live issue's original title in this map.
+        #[arg(long, conflicts_with_all = ["title", "body", "file"])]
+        clear_label: bool,
         #[command(flatten)]
         body: Body,
     },
@@ -282,10 +285,16 @@ impl Options {
                 None,
                 placement,
             ),
-            Some(Action::Edit { node, title, body }) => Operation::Edit {
+            Some(Action::Edit {
+                node,
+                title,
+                body,
+                clear_label,
+            }) => Operation::Edit {
                 node: node.clone(),
                 title: title.clone(),
                 body: body.read()?,
+                clear_label: *clear_label,
                 if_version: self.if_version,
             },
             Some(Action::Alias { node, alias, .. }) => Operation::Alias {
@@ -413,6 +422,25 @@ pub fn run(options: &Options) -> Result<()> {
             if node["kind"] == "pr" {
                 println!("\n{}", node["reference"].as_str().unwrap());
             } else if node["kind"] == "issue" {
+                if let Some(title) = node["original_title"]
+                    .as_str()
+                    .filter(|_| node["display_label"].is_string())
+                {
+                    println!("\nOriginal title: {title}");
+                }
+                if let Some(labels) = node["labels"]
+                    .as_array()
+                    .filter(|labels| !labels.is_empty())
+                {
+                    println!(
+                        "Labels: {}",
+                        labels
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 println!(
                     "\n{} · issue #{} · {}",
                     node["reference_project_name"]
