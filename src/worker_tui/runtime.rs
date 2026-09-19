@@ -80,11 +80,21 @@ pub fn run(
     let (tx, results) = mpsc::channel();
     let background_cancel = cancelled.clone();
     let background = thread::spawn(move || {
+        let mut last_title = None;
         while let Ok(request) = rx.recv() {
             if background_cancel.load(Ordering::Relaxed) {
                 break;
             }
             let result = client.execute(&request, &background_cancel);
+            if let (Request::Refresh(_), Ok(snapshot)) = (&request, &result) {
+                let title = ui::worker_title(snapshot, snapshot["worker_id"].as_str());
+                if title != last_title {
+                    if let Some(title) = &title {
+                        super::terminal_name::set(title);
+                    }
+                    last_title = title;
+                }
+            }
             if tx.send((request, result)).is_err() {
                 break;
             }

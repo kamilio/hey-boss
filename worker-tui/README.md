@@ -31,6 +31,12 @@ Only the current worker appears. Starting a worker pins its own ID; `worker stat
 shows the latest worker, or use `--id WORKER_ID` to watch a specific one. A prominent
 AVAILABLE / BUSY badge and busy/available slot counts show its capacity. Pause and
 update states explain that existing sessions finish before pickup resumes.
+The header shows the selected worker's project names and checkout directory on
+separate lines, including while finishing work. Workers without a fixed directory
+show “Per-project checkouts”. iTerm tab titles and tmux window names use the same
+project and checkout context, including when viewing status from another directory.
+Naming is best-effort, runs in the background, and changes only when the context
+changes; tmux targets the original pane and times out after 500 milliseconds.
 
 Active work is the default view. Press h to switch to a separate completed-attempt
 history; completed attempts never consume slots. Selection follows session IDs
@@ -92,6 +98,7 @@ npm ci
 npm run test:terminal
 cargo build --locked --manifest-path ../Cargo.toml
 node tests/integrated-terminal.mjs
+python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
 ```
 
 The terminal walkthrough uses the terminal-pilot SDK and a temporary synthetic
