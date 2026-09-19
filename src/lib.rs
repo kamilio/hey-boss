@@ -6,6 +6,7 @@ pub mod health;
 /// SQLite-backed project issues and durable agent ownership.
 pub mod issues;
 pub mod markdown;
+pub mod mindmap;
 pub mod notices;
 pub mod syntax;
 use serde::{Deserialize, Serialize};

@@ -4,6 +4,7 @@ mod broker;
 mod companion;
 mod health_cli;
 mod issue_cli;
+mod mindmap_cli;
 mod secret_cli;
 mod upgrade_cli;
 mod worker_cli;
@@ -162,6 +163,9 @@ enum Command {
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
+    /// Project mindmaps with nested topics, live resources and cross-project links.
+    #[command(visible_alias = "mindmap")]
+    Mm(mindmap_cli::Options),
     /// Global profile settings shared across all projects.
     Settings(issue_cli::GlobalOptions),
     /// Run an independent Codex issue worker with its own slots and tag filter.
@@ -483,6 +487,7 @@ impl Cli {
             }
             Command::Secret(_)
             | Command::Issue(_)
+            | Command::Mm(_)
             | Command::Settings(_)
             | Command::Fleet { .. }
             | Command::Worker(_)
@@ -527,6 +532,7 @@ impl Cli {
         let output = match self.command {
             Command::Secret(_)
             | Command::Issue(_)
+            | Command::Mm(_)
             | Command::Settings(_)
             | Command::Fleet { .. }
             | Command::Worker(_)
@@ -750,6 +756,17 @@ fn run() -> std::io::Result<()> {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
                     eprintln!("hey-boss settings: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Mm(options) => {
+            if let Err(error) = mindmap_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss mm: {error}");
                 }
                 std::process::exit(error.exit_code());
             }

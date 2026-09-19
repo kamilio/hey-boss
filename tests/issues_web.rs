@@ -929,3 +929,150 @@ fn unavailable_inbox_does_not_block_the_issue_service() {
     assert_eq!(web.http("GET", "/inbox.js", &[], b"").status, 200);
     web.ok(json!({"action":"create","title":"Issues remain available","body":"","labels":[]}));
 }
+
+#[test]
+fn mindmap_assets_reads_and_authoring_boundary() {
+    let web = Web::start();
+    for (path, kind) in [
+        ("/mm", "text/html"),
+        ("/mindmap.js", "text/javascript"),
+        ("/mindmap.css", "text/css"),
+    ] {
+        let r = web.http("GET", path, &[], b"");
+        assert_eq!(r.status, 200);
+        assert!(r.headers.contains(kind));
+    }
+    let show = json!({"action":"mindmap","operation":{"command":"show"}});
+    let r = web.action(&web.project, show.clone(), None);
+    assert_eq!(r.status, 200);
+    assert!(r.json()["nodes"].as_array().unwrap().is_empty());
+    let add = json!({"action":"mindmap","operation":{"command":"add","title":"Forbidden","body":"","kind":"text","reference":null,"reference_project":null,"alias":"forbidden","under":null,"if_version":null}});
+    let r = web.action(&web.project, add.clone(), None);
+    assert_eq!(r.status, 403);
+    assert_eq!(r.json()["error"]["code"], "forbidden");
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("X-Hey-Boss-CSRF", web.token.as_str()),
+    ];
+    for operation in [
+        add,
+        json!({"action":"create","title":"Forbidden","body":"","labels":[]}),
+    ] {
+        let body = serde_json::to_vec(
+            &json!({"project":web.project,"operation":operation,"request_id":null}),
+        )
+        .unwrap();
+        assert_eq!(web.http("POST", "/api/mm", &headers, &body).status, 403);
+    }
+    let body =
+        serde_json::to_vec(&json!({"project":web.project,"operation":show,"request_id":null}))
+            .unwrap();
+    assert_eq!(web.http("POST", "/api/mm", &headers, &body).status, 200);
+    assert_eq!(
+        web.http(
+            "POST",
+            "/api/mm",
+            &[("Content-Type", "application/json")],
+            &body
+        )
+        .status,
+        403
+    );
+}
+
+#[path = "support/mindmap_inbox.rs"]
+mod mindmap_inbox_fixture;
+
+#[test]
+fn actual_web_mindmap_notification_completion_recovery_does_not_acknowledge_notices() {
+    let web = Web::start();
+    for args in [
+        vec!["notice", "review", "--id", "review"],
+        vec!["add", "Follow-up", "--id", "follow-up", "--under", "review"],
+    ] {
+        let o = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&web.root)
+            .env("HEY_BOSS_ISSUE_DB", web.root.join("issues.db"))
+            .env("HEY_BOSS_INBOX_SOCKET", web.root.join("inbox.sock"))
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .args([
+                "mm",
+                "--project",
+                &web.project,
+                "--agent",
+                "human:test",
+                "--json",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    }
+    let pending = json!([{"taskID":"review","status":"pending","title":"Review rollout","summary":"Pending review"}]);
+    let inbox = mindmap_inbox_fixture::Inbox::start(web.root.join("inbox.sock"), pending.clone());
+    let show = || web.ok(json!({"action":"mindmap","operation":{"command":"show"}}));
+    let g = show();
+    assert_eq!(g["nodes"].as_array().unwrap().len(), 2);
+    assert!(
+        g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["title"] == "Review rollout" && n["state"] == "pending")
+    );
+    inbox.tasks(json!([{"taskID":"review","status":"cancelled","title":"Cancelled"}]));
+    let g = show();
+    assert_eq!(g["nodes"].as_array().unwrap().len(), 1);
+    assert!(g["nodes"][0]["parent_id"].is_null());
+    inbox.unavailable();
+    let g = show();
+    assert_eq!(g["notifications"]["available"], false);
+    inbox.tasks(pending);
+    assert_eq!(show()["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(inbox.requests().len(), 4);
+    assert!(
+        inbox
+            .requests()
+            .iter()
+            .all(|r| r["command"] == "inbox_list")
+    );
+    assert!(inbox.path().exists());
+}
+
+#[test]
+fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_boundary() {
+    let web = Web::start();
+    let body = "## Planning\n\n🧭 ".repeat(2000);
+    let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
+    db.execute("INSERT INTO mindmap_nodes VALUES('n-long-web',?1,'long',NULL,0,'markdown','Long note',?2,NULL,NULL,1,1)",rusqlite::params![web.project,body]).unwrap();
+    let preview =
+        web.ok(json!({"action":"mindmap","operation":{"command":"show","body_mode":"preview"}}));
+    assert_eq!(preview["nodes"][0]["body_truncated"], true);
+    assert_eq!(
+        preview["nodes"][0]["body"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        512
+    );
+    let full = web.ok(json!({"action":"mindmap","operation":{"command":"view","node":"long"}}));
+    assert_eq!(full["node"]["body"], body);
+    assert!(
+        full["node"]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<h2>Planning</h2>")
+    );
+    let edit = json!({"action":"mindmap","operation":{"command":"edit","node":"long","title":"Forbidden","body":null,"if_version":null}});
+    assert_eq!(web.action(&web.project, edit, None).status, 403);
+    assert_eq!(
+        db.query_row(
+            "SELECT body FROM mindmap_nodes WHERE id='n-long-web'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        body
+    );
+}

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+<title>Mindmaps · Hey Boss</title><link rel="icon" href="/icon.png"><link rel="stylesheet" href="/mindmap.css"><script src="/mindmap.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#outline">Skip to outline</a>
+<header><a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Hey Boss</a><nav aria-label="Applications"><a href="/">Issues</a><a href="/#view=inbox">Inbox</a><a href="/mm" aria-current="page">Mindmaps</a></nav><span id="connection" role="status">Connecting…</span></header>
+<main>
+<div class="heading"><div><p class="eyebrow">Project mindmap</p><h1 id="title">The big picture</h1><p id="caption">Topics, work and dependencies in one outline.</p></div><label class="project-label">Project<select id="project" aria-label="Mindmap project"></select></label></div>
+<div class="toolbar"><label class="search">Search outline<input id="search" type="search" placeholder="Topics, issues, PRs or relationships…" autocomplete="off"></label><div class="actions"><button id="expand" type="button">Expand all</button><button id="collapse" type="button">Collapse all</button><button id="refresh" type="button">Refresh</button></div></div>
+<p id="error" role="alert" hidden></p><p id="inbox-warning" role="status" hidden></p>
+<section class="panel" aria-label="Project outline"><div class="panel-heading"><strong>Outline</strong><span id="count"></span></div><div id="outline" tabindex="-1"><p class="empty">Loading mindmap…</p></div></section>
+<footer><span id="revision"></span><span>Read-only viewer · Author with <code>hey-boss mm</code></span></footer>
+</main>
+</body></html>

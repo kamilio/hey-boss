@@ -169,3 +169,43 @@ shared queue order. Workers wait for unfinished reachable descendants, even
 through closed children, while deleted subtrees do not block pickup. Manual claims
 remain available. Use parent/child version checks and identical request IDs for
 uncertain retries. Fleet journals retain offline edits and conflicting payloads.
+
+## Mindmaps
+
+`hey-boss mm` shows a project's nested outline. Author from the CLI; `mm web` is a
+read-only viewer. `--project`, `--host`, `--agent`, `--json`, `--request-id` and
+mutation `--if-version` follow issue conventions. Use an isolated issue DB in tests.
+Mindmaps are not replicated to fleet agents; use `--host CONTROLLER` (or
+`HEY_BOSS_ISSUE_HOST`) there for authoritative reads/edits and the web viewer.
+
+```sh
+hey-boss mm add 'Release' --id release
+hey-boss mm issue 12 --under release
+hey-boss mm link issue:12 Platform::api --kind depends-on --why 'API must land first'
+hey-boss mm link pr:https://github.com/org/repo/pull/2 pr:https://github.com/org/repo/pull/1 --kind depends-on
+hey-boss mm show
+hey-boss mm view release
+hey-boss mm show --bodies preview --json
+hey-boss mm web
+```
+
+Aliases are project-local; qualify cross-project selectors as `PROJECT::alias`.
+Links add missing typed `issue:NUMBER`, `pr:URL` or `notice:TASK_ID` references atomically.
+Descriptions are optional; A depends-on B means A waits for B. Nesting stays within
+one project; cycles are rejected. Automatic issue→PR relationships come from
+`issue pr add/remove`. Only confirmed pending Inbox notices appear; an unavailable
+Inbox is reported explicitly. Map reads never complete notices or change issues.
+`mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
+`mm alias NODE NAME` changes a readable alias; `--clear` removes it without changing
+the generated node ID or links. Aliases must remain unique within their project.
+`mm pr URL --title LABEL` gives a PR a readable label; `mm edit NODE --title LABEL`
+changes it while preserving URL/attachments/dependencies. Issue and notice text stays
+live; PRs accept title edits only. `view` prints the PR URL and export links its label.
+`mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
+Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
+`mm view NODE` for one full live node, `show --bodies preview|none|full` to control
+map body size, and `export` for complete Markdown. The viewer loads 512-character
+previews and fetches full bodies on demand; search covers previews and loaded text.
+Reads have a 32 MiB response budget. If a complete map exceeds it, use preview/none
+bodies, `view NODE` for text, or `links NODE` for a focused read with bodies omitted.
+Mutations retain all saved content regardless of read size.
