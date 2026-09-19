@@ -25,6 +25,13 @@ async function mindmapControlsChecks(page) {
     await page.reload();
     await page.locator('#search').fill('release');
     await page.getByRole('button', {name:'Autumn release',exact:true}).click();
+    check(!await page.locator('#map-inspector').getByText('Topic details', {exact:true}).count(), `${viewport.width}: details omit the generic title`);
+    check(await page.getByRole('button', {name:'Close topic details',exact:true}).isVisible(), `${viewport.width}: details retain an accessible close button`);
+    check(await page.locator('#close-inspector').evaluate(button => {
+      const heading = button.parentElement.getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return box.x > heading.x + heading.width / 2;
+    }), `${viewport.width}: close button stays on the right`);
     await page.locator('#mindmap').scrollIntoViewIfNeeded();
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     for (const [selector, result] of Object.entries(await geometry())) {
