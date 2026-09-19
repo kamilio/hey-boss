@@ -5,6 +5,10 @@ async page => {
   await page.waitForFunction(() => model.csrf && model.project);
   for (const project of ['poe-code', 'Other']) await page.evaluate(project => api({action:'create', title:'Fixture', body:'', labels:[]}, project), project);
   const current = await page.evaluate(() => model.project.id);
+  await page.goto(base+'/#quick-issue=1');
+  await page.waitForFunction(() => document.querySelector('#quick-issue-dialog').open && !location.hash.includes('quick-issue'));
+  await page.keyboard.press('Escape');
+  checks.push('Desktop launch link opens quick add and consumes its flag');
   const open = async () => {
     await page.keyboard.press('Meta+Shift+K');
     await page.waitForFunction(() => document.querySelector('#quick-issue-dialog').open && document.querySelector('#quick-issue-context').textContent.startsWith('Create in'));
@@ -23,7 +27,7 @@ async page => {
     }, {project:route.project,number:Number(route.issue)});
     if (result.title !== title || result.body !== '' || !route.project.endsWith(projectName)) throw Error('Wrong created issue: '+JSON.stringify(result));
   };
-  for (const path of ['/#project='+encodeURIComponent(current), '/#project='+encodeURIComponent(current)+'&view=inbox', '/workers#project='+encodeURIComponent(current), '/mm#project='+encodeURIComponent(current)]) {
+  for (const path of ['/#project='+encodeURIComponent(current), '/#project='+encodeURIComponent(current)+'&view=inbox', '/workers#project='+encodeURIComponent(current), '/mm#project='+encodeURIComponent(current), '/mm?focus=1#project='+encodeURIComponent(current)]) {
     await page.goto(base+path);
     await create('Fix @poe-code from '+path.split('#')[0], 'Fix from '+path.split('#')[0], 'poe-code');
     checks.push('Create from '+path);
