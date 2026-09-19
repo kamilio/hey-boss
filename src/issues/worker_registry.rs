@@ -172,6 +172,13 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
             "managed".into(),
         )
     };
+    let mut stmt =
+        db.prepare("SELECT id,name FROM projects WHERE id IN (SELECT value FROM json_each(?1))")?;
+    let projects = stmt
+        .query_map([serde_json::to_string(&config.projects)?], |r| {
+            Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?}))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let active: i64 = db.query_row(
         "SELECT count(*) FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL",
         [&selected],
@@ -225,7 +232,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
         fleet["role"] = json!("companion");
     }
     Ok(
-        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"project":p}),
+        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"project":p,"projects":projects}),
     )
 }
 pub(super) fn execute(

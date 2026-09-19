@@ -51,7 +51,7 @@ fn color(state: &str) -> Color {
     }
 }
 
-fn scope(worker: &Value) -> String {
+fn scope(worker: &Value, snapshot: &Value) -> String {
     let projects: Vec<String> = worker["config"]["projects"]
         .as_array()
         .map(|projects| {
@@ -59,6 +59,12 @@ fn scope(worker: &Value) -> String {
                 .iter()
                 .map(|p| {
                     let id = text(p);
+                    if let Some(project) = snapshot["projects"]
+                        .as_array()
+                        .and_then(|projects| projects.iter().find(|project| project["id"] == *p))
+                    {
+                        return text(&project["name"]);
+                    }
                     id.strip_prefix("named:")
                         .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(&id))
                         .to_owned()
@@ -71,6 +77,28 @@ fn scope(worker: &Value) -> String {
     } else {
         projects.join(", ")
     }
+}
+
+fn checkout(worker: &Value) -> String {
+    let directory = text(&worker["config"]["directory"]);
+    if directory.is_empty() {
+        "Per-project checkouts".into()
+    } else {
+        directory
+    }
+}
+
+/// The tab follows the selected worker, not the dashboard's own directory.
+pub fn worker_title(snapshot: &Value, worker_id: Option<&str>) -> Option<String> {
+    let worker = snapshot["workers"]
+        .as_array()?
+        .iter()
+        .find(|w| w["id"].as_str() == worker_id)?;
+    Some(format!(
+        "hey-boss · {} · {}",
+        scope(worker, snapshot),
+        checkout(worker)
+    ))
 }
 
 fn elapsed(run: &Value, now_ms: i64) -> String {
@@ -112,8 +140,8 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         return;
     }
     let rows = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Min(6),
+        Constraint::Length(5),
+        Constraint::Min(5),
         Constraint::Length(2),
     ])
     .split(size);
@@ -129,29 +157,36 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         header.push(Line::from(vec![
             Span::raw(" HEY BOSS "),
             Span::styled(
+                format!(
+                    " {} · {}",
+                    scope(w, &app.snapshot),
+                    text(&w["config"]["name"])
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        header.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
                 format!(" {status} "),
                 Style::default()
                     .fg(Color::Black)
                     .bg(color(status))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {}", text(&w["config"]["name"])),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::raw(format!(
+                "  {active} busy · {} available / {slots} slots",
+                slots.saturating_sub(active)
+            )),
         ]));
-        header.push(Line::from(format!(
-            " {active} busy · {} available / {slots} slots · {} · {}",
-            slots.saturating_sub(active),
-            scope(w),
-            text(&w["id"])
-        )));
+        header.push(Line::from(format!(" {}", checkout(w))));
     } else {
         header.push(Line::from(if app.pending {
             " Connecting to queue…"
         } else {
             " No current worker. Start: hey-boss worker"
         }));
+        header.push(Line::default());
         header.push(Line::default());
     }
     let connection = if app.error.is_some() {

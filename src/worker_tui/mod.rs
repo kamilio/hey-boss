@@ -1,6 +1,7 @@
 //! Worker dashboard components. Rendering never performs IO or controls workers.
 pub mod backend;
 pub mod runtime;
+mod terminal_name;
 pub mod ui;
 
 use serde_json::Value;

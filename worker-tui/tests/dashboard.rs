@@ -14,6 +14,63 @@ fn snapshot() -> serde_json::Value {
 }
 
 #[test]
+fn worker_header_keeps_project_and_checkout_visible_while_draining() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["workers"][0]["config"]["projects"] = json!(["named:demo"]);
+    value["workers"][0]["config"]["directory"] = json!("/work/demo-checkout");
+    value["projects"] = json!([{"id":"named:demo","name":"Demo project"}]);
+    value["workers"][0]["upgrading"] = json!(true);
+    app.apply(value);
+    for width in [48, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            screen.contains("Demo project"),
+            "Project missing at width {width}"
+        );
+        assert!(
+            screen.contains("/work/demo-checkout"),
+            "Checkout missing at width {width}"
+        );
+        assert!(screen.contains("Finishing work before update"));
+    }
+}
+
+#[test]
+fn worker_header_describes_all_projects_without_inventing_a_checkout() {
+    let mut app = Dashboard::default();
+    app.apply(snapshot());
+    assert!(screen(&app).contains("All projects"));
+    assert!(screen(&app).contains("Per-project checkouts"));
+}
+
+#[test]
+fn tab_title_uses_the_selected_workers_scope_and_sanitizes_queue_text() {
+    let mut value = snapshot();
+    value["workers"][0]["config"]["projects"] =
+        json!(["named:demo", "github.com/kamilio/hey-boss"]);
+    value["workers"][0]["config"]["directory"] = json!("/work/demo\u{7}\u{1b}\u{9c}\u{202e}\n");
+    value["projects"] = json!([{"id":"named:demo","name":"Demo\u{7}\n"}]);
+    assert_eq!(
+        ui::worker_title(&value, Some("a")).as_deref(),
+        Some("hey-boss · Demo, hey-boss · /work/demo")
+    );
+    assert_eq!(
+        ui::worker_title(&value, Some("b")).as_deref(),
+        Some("hey-boss · All projects · Per-project checkouts")
+    );
+    assert_eq!(ui::worker_title(&value, Some("missing")), None);
+}
+
+#[test]
 fn navigation_preserves_session_and_worker_identity_across_reordering() {
     let mut app = Dashboard::default();
     app.apply(snapshot());
