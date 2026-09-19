@@ -550,7 +550,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             selected = Some(from);
         }
     }
-    if changed {
+    if changed && !matches!(op, Operation::Link { .. } | Operation::Unlink { .. }) {
         touched.insert(p.id.clone());
     }
     for project in &touched {
