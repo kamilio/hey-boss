@@ -945,6 +945,60 @@ fn model_queue_wait_does_not_consume_manual_claim_deadline() {
 }
 
 #[test]
+fn worker_startup_waits_for_transient_writer_contention() {
+    let f = Fixture::new("startup-writer-contention");
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&["--concurrency", "1"]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut worker = f.worker();
+    thread::sleep(Duration::from_secs(12));
+    assert!(
+        worker.0.try_wait().unwrap().is_none(),
+        "Worker exited before the startup write lock was released"
+    );
+    db.execute_batch("ROLLBACK").unwrap();
+    let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "completed");
+    worker.stop();
+}
+
+#[test]
+fn worker_shutdown_waits_for_writer_and_exits_successfully() {
+    let f = Fixture::new("shutdown-writer-contention");
+    fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    unsafe {
+        libc::kill(worker.0.id() as i32, libc::SIGTERM);
+    }
+    thread::sleep(Duration::from_secs(12));
+    db.execute_batch("ROLLBACK").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = worker.0.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "Worker failed to shut down cleanly: {status}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Worker failed to finish shutdown"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let status = f.cli(&["worker", "status"]);
+    assert!(status["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "cancelled");
+    assert!(!status["config"]["enabled"].as_bool().unwrap());
+}
+
+#[test]
 fn writer_contention_does_not_exit_worker_or_kill_claimed_session() {
     let f = Fixture::new("writer-contention");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
