@@ -20,7 +20,7 @@ mod workers;
 
 const APPLICATION_ID: i64 = 0x48424953;
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
@@ -38,11 +38,25 @@ struct Issue {
     version: i64,
     labels: Vec<String>,
     sort_order: i64,
+    draft: bool,
+    plan: Option<super::planning::Plan>,
 }
 fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
         sort_order: row.get(13)?,
+        draft: row.get(14)?,
+        plan: row
+            .get::<_, Option<String>>(15)?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    15,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         number: row.get(0)?,
         title: row.get(1)?,
         body: row.get(2)?,
@@ -170,7 +184,8 @@ fn validate(r: &Request) -> Result<()> {
             if_version,
             ..
         } => {
-            if title.is_none()
+            if matches!(&r.operation, Operation::Edit { draft: None, .. })
+                && title.is_none()
                 && text.is_none()
                 && add_labels.is_empty()
                 && remove_labels.is_empty()
@@ -369,17 +384,17 @@ impl Store {
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if app != 0 && app != APPLICATION_ID || version > 10 || version > 0 && app != APPLICATION_ID
+        if app != 0 && app != APPLICATION_ID || version > 11 || version > 0 && app != APPLICATION_ID
         {
             return Err(Error::invalid(
                 "Incompatible issue database; use the matching hey-boss version",
             ));
         }
-        if version < 10 {
+        if version < 11 {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
             let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if app != 0 && app != APPLICATION_ID || version > 10 {
+            if app != 0 && app != APPLICATION_ID || version > 11 {
                 return Err(Error::invalid(
                     "Incompatible issue database; use the matching hey-boss version",
                 ));
@@ -441,6 +456,10 @@ impl Store {
                 tx.execute_batch(mindmap::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 10)?;
             }
+            if version < 11 {
+                tx.execute_batch("ALTER TABLE issues ADD COLUMN draft INTEGER NOT NULL DEFAULT 0; ALTER TABLE issues ADD COLUMN plan TEXT; ALTER TABLE project_settings ADD COLUMN drafts_enabled INTEGER NOT NULL DEFAULT 1; ALTER TABLE project_settings ADD COLUMN plan_template TEXT NOT NULL DEFAULT 'plans/{timestamp}-{number}.md';")?;
+                tx.pragma_update(None, "user_version", 11)?;
+            }
             tx.commit()?;
         }
         let journal: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
@@ -495,6 +514,9 @@ impl Store {
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
         validate(r)?;
+        if let Operation::ReadPlan { plan } = &r.operation {
+            return super::planning::read_plan(plan);
+        }
         let write = r.operation.writes();
         // Existing-project reads use a WAL snapshot and do not compete with
         // worker reservations, event writes, or replica synchronization.
@@ -659,7 +681,7 @@ impl Store {
                         if *all { -1_i64 } else { i64::from(*limit) + 1 },
                         if *all { 0 } else { *offset }
                     ],
-                    |row| Ok((row_issue(row)?, row.get::<_, i64>(14)?)),
+                    |row| Ok((row_issue(row)?, row.get::<_, i64>(16)?)),
                 )?;
                 let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let more = !*all && found.len() > *limit as usize;
@@ -825,6 +847,8 @@ impl Store {
             }
             operation => mutate(&tx, &project, actor.unwrap(), operation, now)?,
         };
+        result["drafts_enabled"] =
+            registry::project_settings(&tx, &project)?["drafts_enabled"].clone();
         let settings = super::global_settings::read(&tx)?;
         result["boss"] =
             json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
@@ -914,6 +938,7 @@ fn create_issue(
             body,
             labels,
             at_top,
+            ..
         }
         | Operation::CreateSubtask {
             title,
@@ -924,6 +949,10 @@ fn create_issue(
         } => (title, body, labels, at_top),
         _ => unreachable!(),
     };
+    let draft = matches!(operation, Operation::Create { draft: true, .. });
+    if draft {
+        super::planning::drafts_allowed(db, project)?;
+    }
     let number: i64 = db.query_row(
         "SELECT next_number FROM projects WHERE id=?1",
         [&project.id],
@@ -946,8 +975,8 @@ fn create_issue(
             [&project.id],
         )?;
     }
-    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8)",
-        params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order])?;
+    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,draft) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8,?9)",
+        params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order,draft])?;
     db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,node FROM fleet_meta WHERE id=1 AND role='agent'", params![project.id,number])?;
     db.execute(
         "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",
@@ -1033,6 +1062,7 @@ fn mutate(
     let mut comment_id = None;
     match operation {
         Operation::Edit {
+            draft,
             title,
             body,
             add_labels,
@@ -1046,11 +1076,32 @@ fn mutate(
                     issue.version
                 )));
             }
+            if let Some(draft) = draft {
+                if *draft && !issue.draft {
+                    super::planning::can_draft(
+                        db,
+                        project,
+                        number,
+                        &issue.state,
+                        issue.assignee.as_deref(),
+                    )?;
+                }
+                issue.draft = *draft;
+            }
             if let Some(title) = title {
                 issue.title = title.clone();
             }
             if let Some(body) = body {
                 issue.body = body.clone();
+            }
+            if *draft == Some(false) && before["draft"] == true {
+                super::planning::final_sync(
+                    db,
+                    project,
+                    &mut issue.title,
+                    &mut issue.body,
+                    issue.plan.as_ref(),
+                )?;
             }
             let mut values: BTreeSet<_> = issue.labels.iter().cloned().collect();
             values.extend(add_labels.iter().cloned());
@@ -1061,10 +1112,48 @@ fn mutate(
             labels(&issue.labels)?;
             if serde_json::to_value(&issue)? != before {
                 action = "edited";
-                data = json!({"before":{"title":before["title"],"body":before["body"],"labels":before["labels"]},"after":{"title":issue.title,"body":issue.body,"labels":issue.labels}});
+                data = json!({"before":{"title":before["title"],"body":before["body"],"labels":before["labels"]},"after":{"title":issue.title,"body":issue.body,"labels":issue.labels,"draft":issue.draft}});
             }
         }
+        Operation::Undraft { .. } => {
+            if issue.draft || issue.plan.is_some() {
+                super::planning::final_sync(
+                    db,
+                    project,
+                    &mut issue.title,
+                    &mut issue.body,
+                    issue.plan.as_ref(),
+                )?;
+                issue.draft = false;
+                if serde_json::to_value(&issue)? != before {
+                    action = "undrafted";
+                }
+            }
+        }
+        Operation::BindPlan {
+            plan, if_version, ..
+        } => {
+            super::planning::drafts_allowed(db, project)?;
+            if (!issue.draft && issue.plan.is_none()) || *if_version != issue.version {
+                return Err(Error::conflict("Planning requires an unchanged draft"));
+            }
+            plan.validate()?;
+            if plan.machine != actor.machine
+                || plan.checkout != actor.cwd
+                || plan.host != actor.host
+            {
+                return Err(Error::invalid(
+                    "Bind the plan from its owning machine and checkout",
+                ));
+            }
+            issue.plan = Some(plan.clone());
+            action = "plan_bound";
+            data = json!({"plan":plan});
+        }
         Operation::Claim { force, .. } | Operation::AssignBoss { force, .. } => {
+            if issue.draft {
+                return Err(Error::conflict("Undraft the issue before claiming it"));
+            }
             registry::claim_lock(db, project, number, actor, *force)?;
             if issue.state != "open" {
                 return Err(Error::conflict("Reopen the issue before claiming it"));
@@ -1190,8 +1279,8 @@ fn mutate(
     if changed {
         issue.version += 1;
         issue.updated_at = now;
-        db.execute("UPDATE issues SET title=?3,body=?4,state=?5,assignee=?6,closed_by=?7,updated_at=?8,closed_at=?9,deleted_at=?10,version=?11,labels=?12 WHERE project_id=?1 AND number=?2",
-            params![project.id,number,issue.title,issue.body,issue.state,issue.assignee,issue.closed_by,now,issue.closed_at,issue.deleted_at,issue.version,serde_json::to_string(&issue.labels)?])?;
+        db.execute("UPDATE issues SET title=?3,body=?4,state=?5,assignee=?6,closed_by=?7,updated_at=?8,closed_at=?9,deleted_at=?10,version=?11,labels=?12,draft=?13,plan=?14 WHERE project_id=?1 AND number=?2",
+            params![project.id,number,issue.title,issue.body,issue.state,issue.assignee,issue.closed_by,now,issue.closed_at,issue.deleted_at,issue.version,serde_json::to_string(&issue.labels)?,issue.draft,issue.plan.as_ref().map(serde_json::to_string).transpose()?])?;
         if !action.is_empty() {
             event(db, &project.id, number, &actor.id, action, now, &data)?;
         }

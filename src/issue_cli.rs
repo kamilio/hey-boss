@@ -216,6 +216,10 @@ enum Action {
     /// Create an open, unassigned issue. The body defaults to empty.
     Create {
         #[arg(long)]
+        draft: bool,
+        #[arg(long)]
+        interactive: bool,
+        #[arg(long)]
         title: String,
         #[command(flatten)]
         body: Body,
@@ -224,6 +228,10 @@ enum Action {
     },
     /// Replace supplied fields; omitted fields are preserved.
     Edit {
+        #[arg(long)]
+        draft: bool,
+        #[arg(long)]
+        interactive: bool,
         number: i64,
         #[arg(long)]
         title: Option<String>,
@@ -237,6 +245,11 @@ enum Action {
         #[arg(long)]
         if_version: Option<i64>,
     },
+    /// Make a draft runnable, syncing its bound plan first.
+    Undraft { number: i64 },
+    #[command(hide = true)]
+    PlanSync,
+
     /// Show the calling session identity and resolved project.
     Whoami,
     /// Atomically assign an open issue to this session.
@@ -356,6 +369,12 @@ enum SettingsAction {
         prs_enabled: bool,
         #[arg(long)]
         no_prs: bool,
+        #[arg(long, conflicts_with = "no_drafts")]
+        drafts_enabled: bool,
+        #[arg(long)]
+        no_drafts: bool,
+        #[arg(long)]
+        plan_template: Option<String>,
     },
 }
 #[derive(Subcommand)]
@@ -442,13 +461,31 @@ impl Options {
                     prompt,
                     prs_enabled,
                     no_prs,
+                    drafts_enabled,
+                    no_drafts,
+                    plan_template,
                 } => {
-                    if boss_name.is_none() && prompt.is_none() && !prs_enabled && !no_prs {
+                    if boss_name.is_none()
+                        && prompt.is_none()
+                        && !prs_enabled
+                        && !no_prs
+                        && !drafts_enabled
+                        && !no_drafts
+                        && plan_template.is_none()
+                    {
                         return Err(Error::invalid(
-                            "Specify --boss-name, --prompt, --prs-enabled or --no-prs",
+                            "Specify --prompt, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
                         ));
                     }
                     Operation::ConfigureProject {
+                        drafts_enabled: if *drafts_enabled {
+                            Some(true)
+                        } else if *no_drafts {
+                            Some(false)
+                        } else {
+                            None
+                        },
+                        plan_template: plan_template.clone(),
                         boss_name: boss_name.clone(),
                         prompt: prompt.clone(),
                         prs_enabled: if *prs_enabled {
@@ -523,12 +560,28 @@ impl Options {
                 title,
                 body,
                 labels,
-            } => Operation::Create {
-                title: title.clone(),
-                body: body.read()?.unwrap_or_default(),
-                labels: labels.clone(),
-                at_top: false,
-            },
+                draft,
+                interactive,
+            } => {
+                if *interactive && body.file.as_deref() == Some(std::path::Path::new("-")) {
+                    return Err(Error::invalid(
+                        "Interactive --file requires an existing file in the checkout",
+                    ));
+                }
+                let imported = body.read()?.unwrap_or_default();
+                let (title, body) = if *interactive && body.file.is_some() {
+                    issues::planning::parse(&imported)?
+                } else {
+                    (title.clone(), imported)
+                };
+                Operation::Create {
+                    draft: *draft || *interactive,
+                    title,
+                    body,
+                    labels: labels.clone(),
+                    at_top: false,
+                }
+            }
             Action::Edit {
                 number,
                 title,
@@ -536,14 +589,23 @@ impl Options {
                 add_labels,
                 remove_labels,
                 if_version,
+                draft,
+                interactive,
             } => Operation::Edit {
+                draft: if *draft { Some(true) } else { None },
                 number: *number,
                 title: title.clone(),
-                body: body.read()?,
+                body: if *interactive && body.file.is_some() {
+                    None
+                } else {
+                    body.read()?
+                },
                 add_labels: add_labels.clone(),
                 remove_labels: remove_labels.clone(),
                 if_version: *if_version,
             },
+            Action::Undraft { number } => Operation::Undraft { number: *number },
+            Action::PlanSync => unreachable!(),
             Action::Claim { number, force } => Operation::Claim {
                 number: *number,
                 force: *force,
@@ -666,17 +728,34 @@ pub fn run(options: &Options) -> Result<()> {
             mindmap: false,
         });
     }
+    if matches!(options.action, Action::PlanSync) {
+        return issues::planning::daemon();
+    }
     let rpc = matches!(options.action, Action::Rpc);
     let mut value = if rpc {
         let raw = read_text(std::io::stdin(), issues::WIRE_LIMIT)?;
         let request: Request = serde_json::from_str(&raw)?;
         Store::open(&issues::database_path()?)?.execute(&request)?
     } else {
-        let operation = options.operation()?;
+        let interactive = match &options.action {
+            Action::Create { interactive, .. } | Action::Edit { interactive, .. } => *interactive,
+            _ => false,
+        };
+        if interactive {
+            issues::planning::require_terminal()?;
+        }
+        let operation = match &options.action {
+            Action::Edit {
+                number,
+                interactive: true,
+                ..
+            } => Operation::View { number: *number },
+            _ => options.operation()?,
+        };
         let cwd = std::env::current_dir()?.canonicalize()?;
         let machine = issues::identity::machine()?;
         let project = issues::identity::project(&cwd, &machine)?;
-        let actor = if operation.needs_actor() {
+        let actor = if operation.needs_actor() || interactive {
             Some(issues::identity::resolve(
                 options.agent.as_deref(),
                 &machine,
@@ -702,6 +781,31 @@ pub fn run(options: &Options) -> Result<()> {
             Some(host) => issues::remote::call(host, &request)?,
             None => Store::open(&issues::database_path()?)?.execute(&request)?,
         };
+        if interactive {
+            let file = match &options.action {
+                Action::Create { body, .. } | Action::Edit { body, .. } => body.file.as_deref(),
+                _ => None,
+            };
+            let pending = match &options.action {
+                Action::Edit {
+                    draft,
+                    title,
+                    body,
+                    add_labels,
+                    remove_labels,
+                    ..
+                } if *draft
+                    || title.is_some()
+                    || body.body.is_some()
+                    || !add_labels.is_empty()
+                    || !remove_labels.is_empty() =>
+                {
+                    Some(options.operation()?)
+                }
+                _ => None,
+            };
+            value = issues::planning::interactive(&request, host.as_deref(), value, file, pending)?;
+        }
         value["store"] = if let Some(host) = host {
             json!({"host":host})
         } else {
@@ -924,6 +1028,12 @@ fn print_text(value: &Value) {
     }
 }
 fn print_issue_line(issue: &Value) {
+    if issue["draft"] == true {
+        print!("Draft · ");
+    }
+    if let Some(path) = issue["plan"]["path"].as_str() {
+        println!("Plan: {path}");
+    }
     let state = if issue["deleted_at"].is_null() {
         text(&issue["state"])
     } else {
