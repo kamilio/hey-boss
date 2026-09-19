@@ -7,6 +7,15 @@ Server queue files contain notification text, questions, and remote origin metad
 Processes with access to the server account can submit items and read queued data;
 only connect servers you trust. No arbitrary command execution protocol is exposed.
 
+The issue web listener remains loopback-only. Opt-in `--mobile-origin` allows
+one exact Tailscale HTTPS origin for a private Serve proxy; it adds no application
+login. Tailnet grants/ACLs must limit the endpoint to trusted personal devices.
+Allowed devices can read all issue projects, act as Boss, and control workers.
+Never expose it through Funnel or a public proxy. The authoritative database is
+not copied to a mobile hub or phone. HTTPS issue pages do not persist drafts or
+retry payloads in browser storage, and HTTP responses use `no-store`; displayed
+contents still reach device memory and can be captured by the browser or OS.
+
 Desktop actions use the authenticated companion channel and execute immediately;
 they are never queued offline. Browser sessions are host- and connection-bound,
 HTTP(S)-only and origin-bound. SSH browser forwards listen on IPv4 loopback only.

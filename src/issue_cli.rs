@@ -151,6 +151,10 @@ enum Action {
         /// Disable background discovery of projects used by running local agents.
         #[arg(long)]
         no_discovery: bool,
+        /// Private Tailscale Serve HTTPS origin, e.g. https://mac.tailnet.ts.net:8443.
+        /// Keeps the listener on loopback; configure Tailscale Serve separately.
+        #[arg(long)]
+        mobile_origin: Option<String>,
     },
     /// List projects by recent activity, with open/closed issue counts.
     Projects {
@@ -631,9 +635,15 @@ pub fn run(options: &Options) -> Result<()> {
         }
         return issues::worker::serve();
     }
-    if let Action::Web { port, no_discovery } = options.action {
+    if let Action::Web {
+        port,
+        no_discovery,
+        ref mobile_origin,
+    } = options.action
+    {
         return issues::web::serve(issues::web::Config {
             port,
+            mobile_origin: mobile_origin.clone(),
             discover: !no_discovery,
             project: options.project.clone().or_else(worker_project),
             actor: options.agent.clone(),
