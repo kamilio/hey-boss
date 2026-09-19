@@ -618,3 +618,19 @@ exposes complete text when the card truncates it. The real browser verified
 `Platform · ISSUE #1 · open` and local `ISSUE #1 · open · Morgan`, preserving
 the existing accessible assignment name. JavaScript syntax/layout checks and
 the debug build passed.
+
+Delayed focused reads also used to steal focus after switching from Map to
+Outline. Completion/retry focus now follows the original reading focus only
+when the user has kept it. Actual delayed success and synthetic 503 reproductions
+preserve `view-outline`; an ordinary successful read still focuses the loaded
+body (53,046 rendered characters in this run). Before/after evidence:
+`out/mm-map-view-focus-before.txt`, `out/mm-map-view-focus-after.txt`, and
+`out/mm-map-view-focus-success-error.txt`. Mock routes were removed afterward.
+
+Expanded the actual browser fixture to 10,000 topics and 20,000 dependencies.
+Expanded panning mounted at most 12 cards/15 SVG paths. Thirty instrumented draw
+calls took 1–1.5 ms each, excluding browser paint; the expanded update took
+5.2 ms. Search reveals the result and keeps input focus. Seven full input-handler
+measurements ranged from 4.8 to 21.9 ms. Evidence:
+`out/mm-map-10k-draw-result.txt` and `out/mm-map-10k-input-result.txt`.
+Heap readings before/after this short sequence are not a memory-leak assessment.

@@ -84,6 +84,7 @@
     if (loadingBodies.has(id) || !graph) return;
     const ticket = generation, project = graph.project.id, signal = controller.signal, query = $("#search").value;
     loadingBodies.set(id, ticket); bodyErrors.delete(id); render();
+    const readingFocus = document.activeElement;
     try {
       let value;
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -111,6 +112,7 @@
       if (mode === "preview") { graph.nodes[graph.nodes.indexOf(current)] = fresh; fullBodies.delete(id); }
       else fullBodies.set(id, fresh);
       bodyVersions.set(id, value.version);
+      const retainReadingFocus = document.activeElement === readingFocus;
       loadingBodies.delete(id); render();
       if (!document.getElementById(id) && query && $("#search").value === query) {
         $("#search").value = "";
@@ -119,14 +121,15 @@
         render();
       }
       const focus = document.getElementById(`body-${id}`) || document.getElementById(id);
-      if (focus && document.activeElement !== $("#search")) { focus.tabIndex = -1; focus.focus({preventScroll:true}); }
+      if (focus && retainReadingFocus && document.activeElement !== $("#search")) { focus.tabIndex = -1; focus.focus({preventScroll:true}); }
     } catch (error) {
       if (ticket !== generation || error.name === "AbortError") return;
       bodyErrors.set(id,`${error.message}. ${mode === "preview" ? "Try Show less again." : "Retry to load the full text."}`);
     } finally {
       if (loadingBodies.get(id) === ticket) {
+        const retainReadingFocus = document.activeElement === readingFocus;
         loadingBodies.delete(id); render();
-        if (bodyErrors.has(id) && document.activeElement !== $("#search")) document.querySelector(`[data-${mode === "preview" ? "collapse" : "read"}-body="${id}"]`)?.focus({preventScroll:true});
+        if (bodyErrors.has(id) && retainReadingFocus && document.activeElement !== $("#search")) document.querySelector(`[data-${mode === "preview" ? "collapse" : "read"}-body="${id}"]`)?.focus({preventScroll:true});
       }
     }
   }
