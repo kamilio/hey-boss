@@ -41,7 +41,9 @@ impl Fixture {
             .env("HEY_BOSS_ISSUE_DB", &self.db)
             .env("GIT_CEILING_DIRECTORIES", &self.root)
             .env_remove("HEY_BOSS_ISSUE_HOST")
-            .env_remove("HEY_BOSS_ISSUE_PROJECT");
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .env_remove("HEY_BOSS_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID");
         c
     }
     fn notify(&self, command: &mut Command) -> Value {
@@ -181,7 +183,14 @@ fn overrides_use_shared_names_reject_ambiguity_and_preserve_hidden_state() {
     );
     let hidden = f
         .command(&f.cwd)
-        .args(["issue", "hide-project", "--project", "Atlas"])
+        .args([
+            "issue",
+            "hide-project",
+            "--project",
+            "Atlas",
+            "--agent",
+            "human:test",
+        ])
         .output()
         .unwrap();
     assert!(hidden.status.success());
