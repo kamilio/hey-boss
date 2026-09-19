@@ -5,7 +5,25 @@ const {
   indexGraph,
   Mindmap,
   displayTitle,
+  kindIcon,
 } = require("../src/issues/web/mindmap-map.js");
+global.HeyBossUI = { icon: name => `<svg data-icon="${name}"></svg>` };
+for (const [kind, label, icon] of [
+  ["text", "Topic", "subtasks"],
+  ["markdown", "Note", "docs"],
+  ["issue", "Issue", "issue"],
+  ["pr", "Pull request", "pull-request"],
+  ["notification", "Notice", "bell"],
+  ["project", "Project", "folder"],
+]) {
+  const html = kindIcon(kind);
+  assert(html.includes(`aria-label="${label}"`));
+  assert(html.includes(`title="${label}"`));
+  assert(html.includes(`data-icon="${icon}"`));
+  assert(!html.includes(`>${label}<`), "Type names are not visible text");
+}
+assert.equal(kindIcon('<script>'), kindIcon("text"), "Unknown kinds fall back to a safe topic icon");
+delete global.HeyBossUI;
 const pr = (reference, title = reference) => ({ kind: "pr", reference, title });
 assert.equal(displayTitle(pr("https://github.com/example/repo/pull/123")), "#123");
 assert.equal(displayTitle(pr("https://github.com/example/repo/pull/123/")), "#123");
