@@ -22,6 +22,12 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  const summary=task=>({...task,description:preview(task.description,240),question:preview(task.question,500)});
  const outcome=task=>({taskID:task.taskID,status:task.status,result:task.result,handledBy:task.handledBy,version:task.version});
  app.get('/api/tasks',auth,(req,res)=>res.json({tasks:store.summaries().map(summary),connected:Date.now()-bridgeSeen<30000,pushEnabled:!!req.device.subscription,vapidPublicKey:vapid?.publicKey??null,notifications:store.routing(now())}));
+ app.get('/api/issues',auth,(req,res)=>res.json({projects:store.issueProjects(),creations:store.issueSummaries(req.device.id),connected:store.issueConnected()}));
+ app.get('/api/issues/:id',auth,(req,res)=>res.json({creation:store.getIssueCreation(req.device.id,req.params.id)}));
+ app.post('/api/issues',auth,(req,res)=>{const creation=store.createIssue(req.device.id,req.body);change();res.status(creation.status==='pending'?202:200).json({creation});});
+ app.post('/api/bridge/issue-projects',bridge,(req,res)=>{store.setIssueProjects(req.body.projects);res.json({ok:true});});
+ app.get('/api/bridge/issues',bridge,(req,res)=>res.json({creations:store.pendingIssues()}));
+ app.post('/api/bridge/issues/:id/result',bridge,(req,res)=>{store.finishIssue(req.params.id,req.body);change();res.json({ok:true});});
  app.get('/api/tasks/:id',auth,(req,res)=>res.json({task:store.get(req.params.id)}));
  app.post('/api/tasks/:id/open',auth,(req,res)=>{const task=store.open(req.params.id);change();res.json({task:outcome(task)});});
  app.post('/api/notifications',auth,(req,res)=>{const preferences=store.setPreferences(req.body);change();res.json({notifications:{...preferences,...store.routing(now())}});});

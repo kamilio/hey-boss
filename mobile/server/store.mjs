@@ -12,6 +12,9 @@ export class HubStore{
    CREATE TABLE IF NOT EXISTS pairing(code TEXT PRIMARY KEY, expires INTEGER NOT NULL);
    CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, device TEXT NOT NULL, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, retry INTEGER NOT NULL DEFAULT 0);
    CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS issue_creations(id TEXT PRIMARY KEY,device TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',number INTEGER,error TEXT,created INTEGER NOT NULL);
+   CREATE INDEX IF NOT EXISTS issue_creations_pending ON issue_creations(status,created,id);
+   CREATE INDEX IF NOT EXISTS issue_creations_device ON issue_creations(device,created DESC);
    INSERT OR IGNORE INTO metadata VALUES('revision','0');`);
  }
  revision(){return Number(this.db.prepare("SELECT value FROM metadata WHERE key='revision'").get().value);}
@@ -72,6 +75,39 @@ export class HubStore{
   const confirmed=reliable&&presence.awaySince!=null&&presence.seenAt-presence.awaySince>=60000;
   const state=!presence?'unknown':stale?'offline':presence.unavailable?'locked':confirmed?'away':reliable&&presence.awaySince!=null?'confirming':'active';
   return {...preferences,macState:state,macIdleSeconds:reliable?presence.idleSeconds+Math.max(0,age)/1000:null,notifyPhone:preferences.mode==='always'||preferences.mode==='automatic'&&['away','locked','offline'].includes(state)};
+ }
+ issueProjects(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='issue_projects'").get();return row?JSON.parse(row.value):[];}
+ setIssueProjects(projects){
+  if(!Array.isArray(projects)||projects.length>10000||projects.some(p=>typeof p.id!=='string'||!p.id.trim()||Buffer.byteLength(p.id)>8192||typeof p.name!=='string'||!p.name.trim()||Buffer.byteLength(p.name)>1024))throw new HubError(400,'Invalid project registry');
+  this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_projects',?)").run(JSON.stringify(projects.map(({id,name})=>({id,name}))));
+  this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_bridge_seen',?)").run(String(Date.now()));
+ }
+ issueConnected(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='issue_bridge_seen'").get();return !!row&&Date.now()-Number(row.value)<30000;}
+ issueCreation(row){return {...JSON.parse(row.body),status:row.status,number:row.number,error:row.error,created:row.created};}
+ issueCreations(device){return this.db.prepare('SELECT * FROM issue_creations WHERE device=? ORDER BY created DESC LIMIT 100').all(device).map(row=>this.issueCreation(row));}
+ issueSummaries(device){return this.db.prepare("SELECT json_remove(body,'$.body') AS body,status,number,error,created FROM issue_creations WHERE device=? ORDER BY created DESC LIMIT 100").all(device).map(row=>this.issueCreation(row));}
+ getIssueCreation(device,id){const row=this.db.prepare('SELECT * FROM issue_creations WHERE device=? AND id=?').get(device,id);if(!row)throw new HubError(404,'This submission is no longer available');return this.issueCreation(row);}
+ pendingIssues(){return this.db.prepare("SELECT * FROM issue_creations WHERE status='pending' ORDER BY created,id LIMIT 5").all().map(row=>this.issueCreation(row));}
+ createIssue(device,value){return this.transaction(()=>{
+  const identifier=(text,max)=>typeof text==='string'&&text.trim()&&Buffer.byteLength(text)<=max&&!/[\p{Cc}]/u.test(text);
+  if(!value||typeof value.requestID!=='string'||!/^[-a-zA-Z0-9_]{1,128}$/.test(value.requestID))throw new HubError(400,'Invalid creation request ID; reload and try again');
+  if(!identifier(value.title,512))throw new HubError(400,'Enter a title of up to 512 bytes without control characters');
+  const body=value.body??'',labels=value.labels??[];
+  if(typeof body!=='string'||Buffer.byteLength(body)>1048576)throw new HubError(400,'Description must be text up to 1 MiB');
+  if(!Array.isArray(labels)||labels.length>50||labels.some(label=>!identifier(label,64)))throw new HubError(400,'Use up to 50 labels, each up to 64 bytes without control characters');
+  const payload=JSON.stringify({requestID:value.requestID,project:value.project,title:value.title,body,labels});
+  const existing=this.db.prepare('SELECT * FROM issue_creations WHERE id=?').get(value.requestID);
+  // Accepted retries remain readable even if their project later disappears.
+  if(existing){if(existing.device!==device||existing.body!==payload)throw new HubError(409,'This request ID already belongs to another submission');return this.issueCreation(existing);}
+  if(!this.issueProjects().some(project=>project.id===value.project))throw new HubError(400,'Choose a registered project. Reconnect the supervisor to refresh projects.');
+  if(this.db.prepare("SELECT COUNT(*) AS n FROM issue_creations WHERE status='pending'").get().n>=10000)throw new HubError(503,'The issue queue is full. Keep this draft and retry after the supervisor reconnects.');
+  this.db.prepare('INSERT INTO issue_creations(id,device,body,created) VALUES(?,?,?,?)').run(value.requestID,device,payload,Date.now());this.next();
+  return this.issueCreation(this.db.prepare('SELECT * FROM issue_creations WHERE id=?').get(value.requestID));
+ });}
+ finishIssue(id,result){
+  if(!result||!['synced','error'].includes(result.status)||result.status==='synced'&&(!Number.isSafeInteger(result.number)||result.number<1)||result.status==='error'&&(typeof result.error!=='string'||!result.error.trim()||Buffer.byteLength(result.error)>4096))throw new HubError(400,'Invalid issue delivery result');
+  if(!this.db.prepare('SELECT id FROM issue_creations WHERE id=?').get(id))throw new HubError(404,'Creation request not found');
+  const r=this.db.prepare("UPDATE issue_creations SET status=?,number=?,error=? WHERE id=? AND status='pending'").run(result.status,result.number??null,result.error??null,id);if(r.changes)this.next();
  }
  close(){this.db.close();}
 }
