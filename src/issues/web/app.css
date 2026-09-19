@@ -2432,3 +2432,15 @@ button.avatar.self:hover {
  .parent-breadcrumb a {max-width:100%;flex:1 1 160px;}
  .subtask-picker-body {padding:16px;}
 }
+#project-caption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#copy-create-command {
+  flex-shrink: 0;
+}
+#issue-heading > div {
+  min-width: 0;
+}

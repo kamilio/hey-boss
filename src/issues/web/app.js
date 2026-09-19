@@ -325,6 +325,7 @@ function updateHeader() {
   $("#hidden-project-banner").hidden = !p.hidden_at;
   $("#project-caption").textContent =
     p.id.startsWith("local:") || p.id.startsWith("named:") ? p.name : p.id;
+  $("#copy-create-command").disabled = false;
   $("#heading-count").textContent = p.open;
   $("#open-count").textContent = p.open;
   $("#closed-count").textContent = p.closed;
@@ -1139,6 +1140,34 @@ function closeEditor() {
   target.focus();
 }
 $("#new-issue").onclick = () => openEditor();
+$("#copy-create-command").onclick = async () => {
+  const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+  const host = model.route.host || model.defaultHost;
+  const command = `hey-boss issue create --project ${quote(model.project.id)}${host ? ` --host ${quote(host)}` : ""} --title '<title>' --body '<markdown>'`;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(command);
+    } else {
+      // Clipboard API is unavailable on HTTP pages outside localhost.
+      const field = document.createElement("textarea");
+      const focus = document.activeElement;
+      field.value = command;
+      field.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+      document.body.append(field);
+      try {
+        field.focus({preventScroll: true});
+        field.select();
+        if (!document.execCommand("copy")) throw new Error("Copy failed");
+      } finally {
+        field.remove();
+        focus?.focus({preventScroll: true});
+      }
+    }
+    toast("Agent command copied. Replace the title and Markdown placeholders.");
+  } catch {
+    toast("Could not copy the agent command. Allow clipboard access and try again.", true);
+  }
+};
 $("#editor-close").onclick = closeEditor;
 $("#editor-cancel").onclick = closeEditor;
 $("#editor-dialog").addEventListener("cancel", (e) => {
