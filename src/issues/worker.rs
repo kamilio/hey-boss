@@ -1047,6 +1047,27 @@ fn run_thread(
 pub fn print_status(v: &Value, redraw: bool) {
     print_status_with_history(v, redraw, 3);
 }
+fn terminal_title(project_ids: &Value, projects: &Value) -> String {
+    let ids = project_ids.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let scope = if ids.is_empty() {
+        "all projects".into()
+    } else {
+        ids.iter()
+            .filter_map(Value::as_str)
+            .map(|id| {
+                projects
+                    .as_array()
+                    .and_then(|projects| projects.iter().find(|p| p["id"] == id))
+                    .and_then(|p| p["name"].as_str())
+                    .unwrap_or(id)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // Project names must not terminate the OSC sequence or inject terminal commands.
+    let scope: String = scope.chars().filter(|c| !c.is_control()).collect();
+    format!("hey-boss · {scope}")
+}
 pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) {
     if redraw {
         print!("\x1b[H\x1b[2J");
@@ -1157,7 +1178,7 @@ pub fn serve_instance_with_history(
     let machine = identity::machine()?;
     let mut store = Store::open(&path)?;
     // Ensure the caller's project exists before registration/selection.
-    store.execute(&super::Request {
+    let projects = store.execute(&super::Request {
         version: 1,
         project: project.clone(),
         project_override: None,
@@ -1218,6 +1239,12 @@ pub fn serve_instance_with_history(
             json!(supervisor.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
         let signature = serde_json::to_string(&value)?;
         if tty || signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
+            if tty {
+                print!(
+                    "\x1b]0;{}\x07",
+                    terminal_title(&value["config"]["projects"], &projects["projects"])
+                );
+            }
             if json_output {
                 println!("{value}");
             } else {
@@ -1264,6 +1291,40 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_titles_describe_the_selected_project_scope() {
+        let projects = json!([
+            {"id":"github.com/kamilio/hey-boss","name":"hey-boss"},
+            {"id":"named:Atlas","name":"Atlas"}
+        ]);
+        assert_eq!(
+            terminal_title(&json!(["named:Atlas"]), &projects),
+            "hey-boss · Atlas"
+        );
+        assert_eq!(
+            terminal_title(
+                &json!(["github.com/kamilio/hey-boss", "named:Atlas"]),
+                &projects
+            ),
+            "hey-boss · hey-boss, Atlas"
+        );
+        assert_eq!(
+            terminal_title(&json!([]), &projects),
+            "hey-boss · all projects"
+        );
+        assert_eq!(
+            terminal_title(&json!(["named:new"]), &projects),
+            "hey-boss · named:new"
+        );
+    }
+    #[test]
+    fn terminal_titles_strip_control_characters_from_project_names() {
+        let projects = json!([{"id":"named:unsafe","name":"Atlas\u{7}\u{1b}[2J\n\u{9c}"}]);
+        assert_eq!(
+            terminal_title(&json!(["named:unsafe"]), &projects),
+            "hey-boss · Atlas[2J"
+        );
+    }
     fn project() -> Project {
         Project {
             id: "named:a'b $(touch nope)".into(),
