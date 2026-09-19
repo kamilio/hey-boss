@@ -9,7 +9,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: cargo test --locked
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py
-      - run: python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py
+      - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --release
