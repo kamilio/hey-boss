@@ -39,7 +39,8 @@ storage](docs/issues.md) for recovery, filtering, retry IDs, and a shared SSH ho
 Create project outlines with `hey-boss mm add 'Release' --id release`, reference work
 with `mm issue NUMBER --under release`, and explain dependencies with
 `mm link FROM TO --kind depends-on --description 'Why it depends'`.
-`mm web` serves a read-only nested-list viewer. Maps support cross-project references,
+`mm web` opens a read-only branching map with pan/zoom, collapsible topics, a
+clickable overview and an Outline view. Maps support cross-project references,
 live issues, automatic issue→PR links and pending-only notifications.
 See [mindmap commands](docs/mindmaps.md) and [tool research](docs/mindmaps-research.md).
 
