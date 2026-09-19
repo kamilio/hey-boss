@@ -56,7 +56,18 @@ impl From<std::io::Error> for Error {
 }
 impl From<rusqlite::Error> for Error {
     fn from(value: rusqlite::Error) -> Self {
-        Self::new("database_error", value.to_string())
+        let code = match &value {
+            rusqlite::Error::SqliteFailure(error, _)
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                "database_busy"
+            }
+            _ => "database_error",
+        };
+        Self::new(code, value.to_string())
     }
 }
 impl From<serde_json::Error> for Error {

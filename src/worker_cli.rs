@@ -45,6 +45,10 @@ pub struct Options {
 enum Action {
     #[command(visible_alias = "list")]
     Status,
+    /// Queue a durable restart through the fleet controller; keep the controller alive.
+    Restart {
+        id: String,
+    },
     Stop {
         id: String,
     },
@@ -53,6 +57,29 @@ enum Action {
     },
 }
 pub fn run(o: &Options) -> Result<()> {
+    if let Some(Action::Restart { id }) = &o.action {
+        let host = o
+            .host
+            .clone()
+            .or_else(|| {
+                std::env::var("HEY_BOSS_ISSUE_HOST")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_else(|| "local".into());
+        let value = hey_boss::fleet::call(
+            &serde_json::json!({"kind":"signal", "host":host, "worker":id, "signal":"restart"}),
+        )?;
+        if o.json {
+            println!("{value}");
+        } else {
+            println!(
+                "Restart queued for worker {id} on {host} (signal {}). Check hey-boss fleet status for acknowledgment.",
+                value["id"].as_str().unwrap_or("unknown")
+            );
+        }
+        return Ok(());
+    }
     if let Some(host) = o.host.clone().or_else(|| {
         std::env::var("HEY_BOSS_ISSUE_HOST")
             .ok()
@@ -80,6 +107,9 @@ pub fn run(o: &Options) -> Result<()> {
     };
     if let Some(action) = &o.action {
         let operation = match action {
+            Action::Restart { .. } => {
+                unreachable!("Restart is routed through the fleet controller")
+            }
             Action::Status => Operation::Workers {
                 worker_id: o.id.clone(),
             },
@@ -102,7 +132,7 @@ pub fn run(o: &Options) -> Result<()> {
             Action::Pause { id } => {
                 hey_boss::fleet::record_local_worker(id, None, "pause")?;
             }
-            Action::Status => {}
+            Action::Status | Action::Restart { .. } => {}
         }
         value["store"] = serde_json::json!({"host":issues::identity::host(),"database":issues::database_path()?});
         if o.json {
@@ -224,6 +254,7 @@ fn remote_arguments(o: &Options) -> Vec<String> {
     }
     match &o.action {
         Some(Action::Status) => args.push("status".into()),
+        Some(Action::Restart { id }) => args.extend(["restart".into(), id.clone()]),
         Some(Action::Stop { id }) => args.extend(["stop".into(), id.clone()]),
         Some(Action::Pause { id }) => args.extend(["pause".into(), id.clone()]),
         None => {}
