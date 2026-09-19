@@ -5,6 +5,7 @@
   let csrf = "", graph = null, projects = [], generation = 0, controller = null, boot = null;
   const collapsed = new Set(), openBodies = new Set();
   let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
+  let detailsHTML = "", detailsNode = null;
   const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
   const route = () => new URLSearchParams(location.hash.slice(1));
   const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
@@ -61,13 +62,23 @@
   }
   function details(nodes, incidents, visible) {
     const node = selected && visible.has(selected) ? nodes.get(selected) : null;
+    const container = $("#map-details");
     $("#map-inspector").hidden = !node;
-    if (!node) { $("#map-details").innerHTML = ""; return; }
+    if (!node) { container.innerHTML = ""; detailsHTML = ""; detailsNode = null; return; }
     const resource = node.kind === "issue" && node.available !== false ? `<a class="map-resource-link" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))} ↗</a>` : node.kind === "pr" ? `<a class="map-resource-link" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open pull request ↗</a>` : node.kind === "notification" ? `<a class="map-resource-link" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification ↗</a>` : "";
     const rel = relationships(node, nodes, incidents);
     const children = graph.nodes.filter(n => n.parent_id === node.id);
     const topics = children.length ? `<section class="topic-children" aria-label="Child topics"><h3>Topics <span>${children.length}</span></h3><ul>${children.slice(0,50).map(n => `<li><button type="button" data-select-topic="${esc(n.id)}">${esc(nodes.get(n.id).title)}</button></li>`).join("")}</ul>${children.length > 50 ? '<button type="button" data-topic-outline>View all in outline</button>' : ""}</section>` : "";
-    $("#map-details").innerHTML = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(node.title)}</h2><div class="meta"><span class="badge">${esc(node.kind)}</span>${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div>`;
+    const html = `<div id="${esc(node.id)}"><h2 tabindex="-1">${esc(node.title)}</h2><div class="meta"><span class="badge">${esc(node.kind)}</span>${node.state ? `<span>${esc(node.state)}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${node.assignee ? `<span>Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.available === false ? "<span>Resource unavailable</span>" : ""}</div>${resource}${node.has_body || node.body ? bodyContent(node) : ""}${topics}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(node.title)}">${rel}</ul>` : ""}</div>`;
+    if (html === detailsHTML) return;
+    const same = detailsNode === node.id, active = same && container.contains(document.activeElement) ? document.activeElement : null;
+    const heading = active?.matches("h2[tabindex]"), id = active?.id, read = active?.dataset.readBody, less = active?.dataset.collapseBody, topic = active?.dataset.selectTopic, outline = active?.hasAttribute("data-topic-outline"), href = active?.tagName === "A" ? active.getAttribute("href") : null;
+    container.innerHTML = html; detailsHTML = html; detailsNode = node.id;
+    if (!same) container.scrollTop = 0;
+    if (active) {
+      const target = heading ? container.querySelector("h2[tabindex]") : id ? document.getElementById(id) : read ? container.querySelector(`[data-read-body="${read}"]`) : less ? container.querySelector(`[data-collapse-body="${less}"]`) : topic ? container.querySelector(`[data-select-topic="${topic}"]`) : outline ? container.querySelector("[data-topic-outline]") : href ? [...container.querySelectorAll("a")].find(a => a.getAttribute("href") === href) : null;
+      (target && !target.disabled ? target : container.querySelector("h2[tabindex]"))?.focus({preventScroll:true});
+    }
   }
   async function readBody(id, mode = "full") {
     if (loadingBodies.has(id) || !graph) return;
@@ -155,7 +166,7 @@
       }
       details(nodes, incidents, visible); return;
     }
-    $("#map-details").innerHTML = "";
+    $("#map-details").innerHTML = ""; detailsHTML = ""; detailsNode = null;
     const tree = (parent = "") => {
       const list = (children.get(parent) || []).filter((n) => visible.has(n.id));
       if (!list.length) return "";
@@ -236,7 +247,8 @@
       while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
       mapUI.select(topic.dataset.selectTopic);
     } else if (event.target.closest("[data-topic-outline]")) {
-      collapsed.delete(selected); setView("outline"); document.getElementById(selected)?.scrollIntoView({block:"start"});
+      collapsed.delete(selected); setView("outline"); const target = document.getElementById(selected);
+      if (target) { target.tabIndex = -1; target.focus({preventScroll:true}); target.scrollIntoView({block:"start"}); }
     }
   });
   $("#outline").addEventListener("toggle", (event) => { const details = event.target; if (details.isConnected && details.dataset.bodyDetails) { details.open ? openBodies.add(details.dataset.bodyDetails) : openBodies.delete(details.dataset.bodyDetails); } }, true);
