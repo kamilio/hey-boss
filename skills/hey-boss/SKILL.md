@@ -174,6 +174,9 @@ Inbox is reported explicitly. Map reads never complete notices or change issues.
 `mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
 `mm alias NODE NAME` changes a readable alias; `--clear` removes it without changing
 the generated node ID or links. Aliases must remain unique within their project.
+`mm pr URL --title LABEL` gives a PR a readable label; `mm edit NODE --title LABEL`
+changes it while preserving URL/attachments/dependencies. Issue and notice text stays
+live; PRs accept title edits only. `view` prints the PR URL and export links its label.
 `mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
 Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
 `mm view NODE` for one full live node, `show --bodies preview|none|full` to control

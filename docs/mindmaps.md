@@ -37,7 +37,7 @@ The default project is the current Git repository, shared across worktrees. `--p
 
 ```sh
 hey-boss mm issue 3 --issue-project Platform --id api --under release
-hey-boss mm pr https://github.com/org/repo/pull/42 --id implementation-pr
+hey-boss mm pr https://github.com/org/repo/pull/42 --title 'Implementation' --id implementation-pr
 hey-boss mm notice TASK_ID --under release
 hey-boss mm link design implementation --description 'Implements the design'
 hey-boss mm link implementation Platform::api --kind depends-on --why 'API must land first'
@@ -57,6 +57,12 @@ them does not add saved nodes. When an issue is placed in multiple maps, the PR
 prefers its node in the current map, then in the issue's own project map. Trailing
 slash variants of the same PR attachment do not duplicate automatic nodes or links.
 Automatic links are not manually editable with `mm link/unlink`.
+
+PR labels default to their URLs. Supply `mm pr URL --title LABEL`, or use
+`mm edit implementation-pr --title 'Navigation polish'` to change a saved PR label.
+Its URL, issue attachments and dependency links remain intact. `mm view` prints the
+URL, and Markdown export makes the label a link to the PR. PRs accept title edits;
+issue and notification content stays live.
 
 Only notices confirmed pending in the current Inbox appear. Completed, read, cancelled or absent notices are omitted, while any child topics are promoted to their nearest visible ancestor. If the Inbox cannot be read, unverified notification nodes are hidden and an availability warning is shown. Saved references remain in the map. Opening the map does not mark a notice read, answer a question, or finish a review.
 

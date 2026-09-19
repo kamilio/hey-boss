@@ -388,15 +388,20 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
         } => {
             let node = select(db, p, node, false, now, &mut touched)?;
             same_project(&node, p)?;
-            if !["text", "markdown"].contains(&node["kind"].as_str().unwrap()) {
+            if !["text", "markdown", "pr"].contains(&node["kind"].as_str().unwrap()) {
                 return Err(Error::invalid(
                     "Reference nodes use live content; edit the underlying resource instead",
                 ));
             }
+            if node["kind"] == "pr" && body.is_some() {
+                return Err(Error::invalid("PR nodes accept --title only"));
+            }
             let title = title.as_deref().unwrap_or(node["title"].as_str().unwrap());
             let body = body.as_deref().unwrap_or(node["body"].as_str().unwrap());
             changed = node["title"] != title || node["body"] != body;
-            db.execute("UPDATE mindmap_nodes SET title=?2,body=?3,kind=CASE WHEN length(?3)>0 THEN 'markdown' ELSE kind END,updated_at=?4 WHERE id=?1",params![id(&node),title,body,now])?;
+            if changed {
+                db.execute("UPDATE mindmap_nodes SET title=?2,body=?3,kind=CASE WHEN kind IN ('text','markdown') AND length(?3)>0 THEN 'markdown' ELSE kind END,updated_at=?4 WHERE id=?1",params![id(&node),title,body,now])?;
+            }
             selected = Some(get(db, id(&node))?);
         }
         Operation::Alias { node, alias, .. } => {

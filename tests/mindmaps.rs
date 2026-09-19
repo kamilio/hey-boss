@@ -27,15 +27,34 @@ impl Fixture {
         c
     }
     fn default_cmd(&self, command: &str, args: &[&str]) -> Command {
+        self.command(command, args, true)
+    }
+    fn command(&self, command: &str, args: &[&str], json: bool) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
         c.current_dir(&self.root)
             .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
             .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent.sock"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
-            .args([command, "--agent", "human:test", "--json"])
-            .args(args);
+            .args([command, "--agent", "human:test"]);
+        if json {
+            c.arg("--json");
+        }
+        c.args(args);
         c
+    }
+    fn terminal(&self, project: &str, args: &[&str]) -> String {
+        let output = self
+            .command("mm", args, false)
+            .args(["--project", project])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
     }
     fn run(&self, p: &str, args: &[&str]) -> Value {
         success(self.cmd(p, "mm", args).output().unwrap())
@@ -1252,4 +1271,78 @@ fn foreign_endpoint_links_advance_only_the_maps_that_changed() {
     assert_eq!(affected_version(&created, "named:Platform"), Some(4));
     assert_eq!(affected_version(&created, "named:Client"), Some(4));
     assert_eq!(created["version"], 1);
+}
+
+#[test]
+fn readable_pr_labels_preserve_native_references_dependencies_and_export_links() {
+    let f = Fixture::new();
+    let url = "https://github.com/org/repo/pull/88";
+    f.issue("Platform", &["create", "--title", "Navigation"]);
+    f.issue("Platform", &["pr", "add", "1", url]);
+    let added = f.run(
+        "Atlas",
+        &[
+            "pr",
+            url,
+            "--title",
+            "Navigation [polish] <draft> & **scope**",
+            "--id",
+            "navigation",
+        ],
+    );
+    let id = added["node"]["id"].clone();
+    f.run(
+        "Atlas",
+        &[
+            "pr",
+            "https://github.com/org/repo/pull/89",
+            "--title",
+            "Rollout",
+            "--id",
+            "rollout",
+        ],
+    );
+    f.run(
+        "Atlas",
+        &[
+            "link",
+            "rollout",
+            "navigation",
+            "--kind",
+            "depends-on",
+            "--why",
+            "Navigation must land first",
+        ],
+    );
+    let before = f.run("Atlas", &["show"]);
+    let exported = f.terminal("Atlas", &["export"]);
+    let html = hey_boss::markdown::render_fragment(&exported);
+    assert!(html.contains("href=\"https://github.com/org/repo/pull/88\""));
+    assert!(html.contains("Navigation [polish] &lt;draft&gt; &amp; **scope**</a>"));
+    let viewed = f.terminal("Atlas", &["view", "navigation"]);
+    assert!(viewed.contains("Navigation [polish]"));
+    assert!(viewed.contains(url));
+    f.run("Atlas", &["edit", "navigation", "--title", "Navigation v2"]);
+    let after = f.run("Atlas", &["show"]);
+    let node = alias(&after, "navigation");
+    assert_eq!(node["id"], id);
+    assert_eq!(node["kind"], "pr");
+    assert_eq!(node["reference"], url);
+    assert_eq!(node["title"], "Navigation v2");
+    assert_eq!(after["links"], before["links"]);
+    assert!(
+        after["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link["automatic"] == true)
+    );
+    f.fail(
+        "Atlas",
+        &["edit", "navigation", "--body", "Copied PR content"],
+        2,
+    );
+    let unchanged = f.run("Atlas", &["edit", "navigation", "--title", "Navigation v2"]);
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(unchanged["node"]["updated_at"], node["updated_at"]);
 }

@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--nodes", type=int, default=2500)
     parser.add_argument("--links-per-node", type=int, default=2)
     parser.add_argument("--samples", type=int, default=3)
+    parser.add_argument("--format", choices=("json", "outline"), default="json")
     args = parser.parse_args()
     if not 2 <= args.nodes <= 10000 or not 0 <= args.links_per_node < args.nodes or not 1 <= args.samples <= 20:
         parser.error("Use 2..10000 nodes, fewer links-per-node than nodes, and 1..20 samples")
@@ -30,7 +31,9 @@ def main():
         env = dict(os.environ, HEY_BOSS_ISSUE_DB=str(root / "issues.db"), HEY_BOSS_INBOX_SOCKET=str(root / "absent.sock"))
         env.pop("HEY_BOSS_ISSUE_HOST", None)
         env.pop("HEY_BOSS_ISSUE_PROJECT", None)
-        command = [str(binary), "mm", "--project", "Scale", "--json"]
+        command = [str(binary), "mm", "--project", "Scale"]
+        if args.format == "json":
+            command.append("--json")
         subprocess.run(command, env=env, stdout=subprocess.DEVNULL, check=True)
         with sqlite3.connect(root / "issues.db") as db:
             roots = min(25, args.nodes)
@@ -47,10 +50,13 @@ def main():
             start = time.monotonic()
             reply = subprocess.run(command, env=env, capture_output=True, check=True)
             samples.append(time.monotonic() - start)
-            graph = json.loads(reply.stdout)
-            assert len(graph["nodes"]) == args.nodes
-            assert len(graph["links"]) == args.nodes * args.links_per_node
-        print(json.dumps({"nodes": args.nodes, "links": len(graph["links"]), "response_bytes": len(reply.stdout), "show_seconds": samples, "median_show_seconds": statistics.median(samples)}, indent=2))
+            if args.format == "json":
+                graph = json.loads(reply.stdout)
+                assert len(graph["nodes"]) == args.nodes
+                assert len(graph["links"]) == args.nodes * args.links_per_node
+            else:
+                assert sum(line.lstrip().startswith(b"- Planning topic ") for line in reply.stdout.splitlines()) == args.nodes
+        print(json.dumps({"format": args.format, "nodes": args.nodes, "links": args.nodes * args.links_per_node, "response_bytes": len(reply.stdout), "show_seconds": samples, "median_show_seconds": statistics.median(samples)}, indent=2))
 
 
 if __name__ == "__main__":

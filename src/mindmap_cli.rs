@@ -4,7 +4,7 @@ use hey_boss::{
     mindmap::{self, BodyMode, Operation},
 };
 use serde_json::Value;
-use std::{io::Read, path::PathBuf};
+use std::{collections::HashMap, io::Read, path::PathBuf};
 
 #[derive(Args)]
 #[command(
@@ -118,6 +118,9 @@ enum Action {
     /// Add a PR that can participate in dependency links.
     Pr {
         url: String,
+        /// Readable map label; defaults to the PR URL.
+        #[arg(long)]
+        title: Option<String>,
         #[command(flatten)]
         placement: Placement,
     },
@@ -128,7 +131,7 @@ enum Action {
         #[command(flatten)]
         placement: Placement,
     },
-    /// Replace supplied text/Markdown fields; resource nodes use their live content.
+    /// Edit topic text/Markdown or a PR label; issues/notices use live content.
     Edit {
         node: String,
         #[arg(long)]
@@ -251,8 +254,12 @@ impl Options {
                 issue_project.clone(),
                 placement,
             ),
-            Some(Action::Pr { url, placement }) => add(
-                url.clone(),
+            Some(Action::Pr {
+                url,
+                title,
+                placement,
+            }) => add(
+                title.clone().unwrap_or_else(|| url.clone()),
                 String::new(),
                 "pr",
                 Some(url.clone()),
@@ -394,6 +401,9 @@ pub fn run(options: &Options) -> Result<()> {
             if let Some(body) = node["body"].as_str().filter(|body| !body.is_empty()) {
                 println!("\n{body}");
             }
+            if node["kind"] == "pr" {
+                println!("\n{}", node["reference"].as_str().unwrap());
+            }
         } else {
             println!("This notification is not confirmed pending.");
         }
@@ -475,11 +485,12 @@ pub fn run(options: &Options) -> Result<()> {
             }
         );
     }
+    let labels = labels(&graph);
     for link in links {
         println!(
             "- {} → {} [{}]{}{}",
-            label(&graph, &link["from"]),
-            label(&graph, &link["to"]),
+            label(&labels, &link["from"]),
+            label(&labels, &link["to"]),
             link["kind"].as_str().unwrap(),
             link["description"]
                 .as_str()
@@ -502,28 +513,32 @@ pub fn run(options: &Options) -> Result<()> {
     }
     Ok(())
 }
-fn label(graph: &Value, id: &Value) -> String {
+fn labels(graph: &Value) -> HashMap<&str, String> {
     graph["nodes"]
         .as_array()
         .unwrap()
         .iter()
         .chain(graph["external_nodes"].as_array().unwrap())
-        .find(|n| n["id"] == *id)
         .map(|n| {
             let project = if n["project_id"] != graph["project"]["id"] {
                 format!("{}::", n["project_id"].as_str().unwrap())
             } else {
                 String::new()
             };
-            format!(
+            let label = format!(
                 "{project}{}",
                 n["alias"]
                     .as_str()
                     .or_else(|| n["title"].as_str())
                     .unwrap_or("Unknown")
-            )
+            );
+            (n["id"].as_str().unwrap(), label)
         })
-        .unwrap_or_else(|| id.as_str().unwrap_or("Unknown").into())
+        .collect()
+}
+fn label<'a>(labels: &'a HashMap<&str, String>, id: &'a Value) -> &'a str {
+    let id = id.as_str().unwrap_or("Unknown");
+    labels.get(id).map(String::as_str).unwrap_or(id)
 }
 fn outline(
     graph: &Value,
@@ -532,16 +547,44 @@ fn outline(
     markdown: bool,
     include_bodies: bool,
 ) {
-    for node in graph["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|n| n["parent_id"].as_str() == parent)
-    {
+    let mut children: HashMap<Option<&str>, Vec<&Value>> = HashMap::new();
+    for node in graph["nodes"].as_array().unwrap() {
+        children
+            .entry(node["parent_id"].as_str())
+            .or_default()
+            .push(node);
+    }
+    outline_nodes(&children, parent, depth, markdown, include_bodies);
+}
+fn outline_nodes(
+    children: &HashMap<Option<&str>, Vec<&Value>>,
+    parent: Option<&str>,
+    depth: usize,
+    markdown: bool,
+    include_bodies: bool,
+) {
+    for node in children.get(&parent).into_iter().flatten() {
+        let title = node["title"].as_str().unwrap_or("Untitled");
+        let title = if markdown && node["kind"] == "pr" {
+            format!(
+                "[{}](<{}>)",
+                markdown_text(title),
+                node["reference"]
+                    .as_str()
+                    .unwrap()
+                    .replace('\\', "%5C")
+                    .replace('<', "%3C")
+                    .replace('>', "%3E")
+            )
+        } else if markdown {
+            markdown_text(title)
+        } else {
+            title.to_owned()
+        };
         println!(
             "{}- {}{}{}{}",
             "  ".repeat(depth),
-            node["title"].as_str().unwrap_or("Untitled"),
+            title,
             if node["kind"] != "text" {
                 format!(" [{}]", node["kind"].as_str().unwrap())
             } else {
@@ -567,12 +610,22 @@ fn outline(
                 println!("{}{}", "  ".repeat(depth + 1), line);
             }
         }
-        outline(
-            graph,
+        outline_nodes(
+            children,
             node["id"].as_str(),
             depth + 1,
             markdown,
             include_bodies,
         );
     }
+}
+fn markdown_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
