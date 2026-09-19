@@ -394,6 +394,18 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     if request.method() == &Method::Get {
         let asset: Option<(&str, &[u8])> = match path.as_str() {
             "/" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
+            "/artifacts" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/artifacts.html"),
+            )),
+            "/artifacts.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/artifacts.js"),
+            )),
+            "/artifacts.css" => Some((
+                "text/css; charset=utf-8",
+                include_bytes!("web/artifacts.css"),
+            )),
             "/mm" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/mindmap.html"),
@@ -458,7 +470,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             _ => None,
         };
         if let Some((kind, data)) = asset {
-            if matches!(path.as_str(), "/" | "/mm" | "/workers") {
+            if matches!(path.as_str(), "/" | "/mm" | "/workers" | "/artifacts") {
                 let issues = path == "/";
                 let shell = include_str!("web/app-shell.html")
                     .replace(

@@ -102,6 +102,7 @@ function date(at) {
   }
   function projectNavigation(project) {
     const hash = new URLSearchParams({project});
+    if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
     $("#nav-mindmaps").href = `/mm#${hash}`;
     $("#nav-workers").href = `/workers#${hash}`;
     if (location.pathname !== "/") {
