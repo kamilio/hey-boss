@@ -114,18 +114,25 @@ fn canonical_ref(
         _ => Err(Error::invalid("Unknown reference type")),
     }
 }
-fn insert(
-    db: &Connection,
-    p: &Project,
-    title: &str,
-    body: &str,
-    kind: &str,
-    reference: Option<&str>,
-    ref_project: Option<&str>,
-    alias: Option<&str>,
-    parent: Option<&str>,
-    now: i64,
-) -> Result<Value> {
+struct NewNode<'a> {
+    title: &'a str,
+    body: &'a str,
+    kind: &'a str,
+    reference: Option<&'a str>,
+    ref_project: Option<&'a str>,
+    alias: Option<&'a str>,
+    parent: Option<&'a str>,
+}
+fn insert(db: &Connection, p: &Project, node: NewNode<'_>, now: i64) -> Result<Value> {
+    let NewNode {
+        title,
+        body,
+        kind,
+        reference,
+        ref_project,
+        alias,
+        parent,
+    } = node;
     let count: i64 = db.query_row(
         "SELECT count(*) FROM mindmap_nodes WHERE project_id=?1",
         [&p.id],
@@ -136,16 +143,16 @@ fn insert(
             "A project map supports at most 10000 nodes",
         ));
     }
-    if let Some(alias) = alias {
-        if db.query_row(
+    if let Some(alias) = alias
+        && db.query_row(
             "SELECT EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=?1 AND alias=?2)",
             params![p.id, alias],
             |r| r.get::<_, bool>(0),
-        )? {
-            return Err(Error::conflict(format!(
-                "Alias {alias:?} is already in use"
-            )));
-        }
+        )?
+    {
+        return Err(Error::conflict(format!(
+            "Alias {alias:?} is already in use"
+        )));
     }
     let (reference, ref_project) = match reference {
         Some(r) => {
@@ -173,7 +180,7 @@ fn insert(
             now
         ],
     )?;
-    Ok(get(db, &node)?)
+    get(db, &node)
 }
 fn select(
     db: &Connection,
@@ -234,13 +241,15 @@ fn select(
             let node = insert(
                 db,
                 &p,
-                &title,
-                "",
-                kind,
-                Some(&reference),
-                Some(&ref_project),
-                None,
-                None,
+                NewNode {
+                    title: &title,
+                    body: "",
+                    kind,
+                    reference: Some(&reference),
+                    ref_project: Some(&ref_project),
+                    alias: None,
+                    parent: None,
+                },
                 now,
             )?;
             touched.insert(p.id);
@@ -325,12 +334,12 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             "Mindmaps are not replicated on fleet agents; use --host CONTROLLER (or HEY_BOSS_ISSUE_HOST) to read and author the authoritative map",
         ));
     }
-    if let Some(expected) = expected(op) {
-        if expected != version(db, &p.id)? {
-            return Err(Error::conflict(
-                "Map changed; show it again and retry with the current version",
-            ));
-        }
+    if let Some(expected) = expected(op)
+        && expected != version(db, &p.id)?
+    {
+        return Err(Error::conflict(
+            "Map changed; show it again and retry with the current version",
+        ));
     }
     let mut touched = BTreeSet::new();
     let mut selected = None;
@@ -381,13 +390,15 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             selected = Some(insert(
                 db,
                 p,
-                title,
-                body,
-                kind,
-                reference.as_deref(),
-                reference_project.as_deref(),
-                alias.as_deref(),
-                parent.as_ref().map(id),
+                NewNode {
+                    title,
+                    body,
+                    kind,
+                    reference: reference.as_deref(),
+                    ref_project: reference_project.as_deref(),
+                    alias: alias.as_deref(),
+                    parent: parent.as_ref().map(id),
+                },
                 now,
             )?);
             changed = true;
@@ -465,12 +476,12 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
                     .as_ref()
                     .and_then(|a| a["parent_id"].as_str().map(str::to_owned))
             };
-            if let Some(a) = &anchor {
-                if a["parent_id"].as_str() != parent.as_deref() {
-                    return Err(Error::invalid(
-                        "Anchor must be a child of the destination parent",
-                    ));
-                }
+            if let Some(a) = &anchor
+                && a["parent_id"].as_str() != parent.as_deref()
+            {
+                return Err(Error::invalid(
+                    "Anchor must be a child of the destination parent",
+                ));
             }
             let descendants = descendants(db, id(&node))?;
             if parent.as_ref().is_some_and(|p| descendants.contains(p)) {

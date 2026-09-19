@@ -86,10 +86,10 @@ impl Inbox {
 impl Drop for Inbox {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Err(error) = self.thread.take().unwrap().join() {
-            if !std::thread::panicking() {
-                std::panic::resume_unwind(error);
-            }
+        if let Err(error) = self.thread.take().unwrap().join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(error);
         }
         std::fs::remove_file(&self.path).unwrap();
     }
