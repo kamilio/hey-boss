@@ -266,7 +266,9 @@ inherited prompt and PR toggle and previews the exact resulting instructions.
 Pickup is an atomic reservation, leaving the issue **unassigned**. Codex must
 run `hey-boss issue claim NUMBER`. Another agent cannot claim an unexpired
 reservation without explicit force. `--claim-timeout SECONDS` defaults to 120;
-missed deadlines stop Codex and free the slot. Failed/blocked/interrupted/timed
+missed deadlines stop Codex and free the slot. Stopping or restarting a worker
+reaps its agents, unassigns their unfinished issues, and makes those issues eligible
+immediately. Recovery does the same for a killed supervisor. Failed/blocked/timed
 out issues become eligible again while open and unassigned after a retry delay
 that grows from 30 seconds to at most five minutes. Input and approval requests
 require explicit retry; no decision is approved automatically. Claims and PR instructions are
@@ -374,12 +376,16 @@ closed issues. Closing with `--comment` saves the comment and state change in
 one transaction. Repeating `close` without a comment is a no-op; adding a closing
 comment to an already closed issue conflicts (use `comment` instead).
 
-Session exit, an idle period, or a lost connection never releases a claim.
+Workers check abandoned local claims every five seconds; web discovery checks
+them every fifteen seconds. A verified dead Codex or Claude process releases its
+open claims once sixty seconds have passed since its last recorded issue activity.
+Running agents retain claims even while idle. Remote and unverifiable processes
+retain claims; a lost connection alone does not prove that a session ended.
 `view` includes the assignee's saved session metadata and an advisory process
 status: `running`, `stale`, or `unknown`. Process start identity prevents PID reuse
 from looking like the original process. Other machines and unverifiable process
 metadata report `unknown`. A stale process can still represent a resumable
-session; takeover is explicit with `claim --force`.
+session; resuming it after automatic release requires claiming the issue again.
 
 IDs express cooperative ownership, not authentication or access control. Anyone
 with access to the database or its SSH account can select an explicit identity.
