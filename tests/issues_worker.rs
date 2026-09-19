@@ -570,6 +570,9 @@ fn replacing_cli_drains_active_sessions_then_restores_same_worker() {
     assert_eq!(still_running["version"], initial["version"]);
     assert_eq!(still_running["upgrading"], true);
     assert_eq!(still_running["workers"][0]["upgrading"], true);
+    // Unfinished work is eligible immediately after stop. Configure the next
+    // attempt before reload can pick it up, rather than racing its startup.
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
     f.control("stop", &run);
     let restored = f.wait(|s| {
         s["version"].as_i64().unwrap() > initial["version"].as_i64().unwrap()
@@ -577,8 +580,6 @@ fn replacing_cli_drains_active_sessions_then_restores_same_worker() {
     });
     assert_eq!(restored["worker_id"], id);
     assert_eq!(restored["upgrading"], false);
-    fs::write(f.root.join("mode.txt"), "completed").unwrap();
-    f.control("retry", &run);
     f.wait(|s| s["runs"][0]["state"] == "completed");
     worker.stop();
 }
