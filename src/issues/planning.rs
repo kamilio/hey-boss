@@ -103,16 +103,16 @@ pub fn parse(text: &str) -> Result<(String, String)> {
             })
         ) {
             let heading = &text[range.clone()];
-            let title = heading
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_start_matches('#')
-                .trim()
-                .trim_end_matches('#')
-                .trim()
-                .to_owned();
+            let line = heading.lines().next().unwrap_or("").trim();
+            let atx = line == "#" || line.starts_with("# ") || line.starts_with("#\t");
+            let mut title = if atx { line[1..].trim() } else { line };
+            if atx {
+                let without_hashes = title.trim_end_matches('#');
+                if without_hashes.ends_with([' ', '\t']) {
+                    title = without_hashes.trim_end();
+                }
+            }
+            let title = title.to_owned();
             super::identifier(&title, "plan title", 512)?;
             let body = format!("{}{}", &text[..range.start], &text[range.end..])
                 .trim()
@@ -146,7 +146,7 @@ fn local_read(plan: &Plan) -> Result<(String, String)> {
             "Plan sync is busy. Retry undrafting after reconciliation finishes.",
         )
     })?;
-    read(plan)
+    read(plan).map_err(|error| Error::new("plan_sync_failed", format!("Cannot sync plan {} on {}. Restore or fix the file, then retry undrafting. {error}",plan.path,plan.host)))
 }
 fn read(plan: &Plan) -> Result<(String, String)> {
     let file = plan.file().canonicalize()?;
@@ -618,6 +618,8 @@ mod tests {
             parse("```md\n# Example\n```\n\n# Real\n\nBody").unwrap(),
             ("Real".into(), "```md\n# Example\n```\n\n\nBody".into())
         );
+        assert_eq!(parse("# C#\n\nBody").unwrap().0, "C#");
+        assert_eq!(parse("# C# ###\n\nBody").unwrap().0, "C#");
         assert!(parse("## No title").is_err());
     }
     #[test]
