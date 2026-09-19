@@ -1423,7 +1423,7 @@ fn worker_status_reports_supervisor_connectivity_from_fleet_heartbeat() {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs_f64();
+        .as_secs() as f64;
     fs::write(
         state.join("fleet-agent-status.json"),
         serde_json::json!({"connected_at":timestamp,"last_sync":timestamp}).to_string(),
