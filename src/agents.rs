@@ -90,11 +90,19 @@ pub(crate) fn git_info(cwd: &str) -> Option<GitInfo> {
     let mut lines = locations.lines();
     let worktree = lines.next()?.to_owned();
     let common_dir = lines.next()?.to_owned();
-    let root = git_output(cwd, &["worktree", "list", "--porcelain"])
-        .and_then(|list| {
-            list.lines()
-                .find_map(|line| line.strip_prefix("worktree "))
-                .map(str::to_owned)
+    // Linked worktrees share the main checkout's .git directory. Enumerating
+    // hundreds of worktrees for every identity/status read is unnecessary.
+    let root = Path::new(&common_dir)
+        .file_name()
+        .filter(|name| *name == ".git")
+        .and_then(|_| Path::new(&common_dir).parent())
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| {
+            git_output(cwd, &["worktree", "list", "--porcelain"]).and_then(|list| {
+                list.lines()
+                    .find_map(|line| line.strip_prefix("worktree "))
+                    .map(str::to_owned)
+            })
         })
         .unwrap_or_else(|| worktree.clone());
     let origin = git_output(cwd, &["config", "--get", "remote.origin.url"])

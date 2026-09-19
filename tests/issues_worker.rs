@@ -933,3 +933,40 @@ fn parallel_worker_refreshes_subtask_readiness_before_reserving_parents() {
     );
     worker.stop();
 }
+
+#[test]
+fn model_queue_wait_does_not_consume_manual_claim_deadline() {
+    let f = Fixture::new("delay-model-start");
+    f.setup(&["--claim-timeout", "5"]);
+    let mut worker = f.worker();
+    f.wait(|s| s["runs"][0]["state"] == "awaiting_model");
+    thread::sleep(Duration::from_secs(5));
+    let status = f.cli(&["worker", "status"]);
+    assert!(status["runs"][0]["finished_at"].is_null());
+    f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
+    let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "claim_timeout");
+    worker.stop();
+}
+
+#[test]
+fn writer_contention_does_not_exit_worker_or_kill_claimed_session() {
+    let f = Fixture::new("writer-contention");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let running = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE; UPDATE issues SET title=title WHERE number=1")
+        .unwrap();
+    thread::sleep(Duration::from_secs(12));
+    assert!(
+        worker.0.try_wait().unwrap().is_none(),
+        "Worker exited during transient writer contention"
+    );
+    let current = f.cli(&["worker", "status"]);
+    assert_eq!(current["runs"][0]["pid"], running["runs"][0]["pid"]);
+    assert!(current["runs"][0]["finished_at"].is_null());
+    db.execute_batch("ROLLBACK").unwrap();
+    worker.stop();
+}

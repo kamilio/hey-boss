@@ -22,6 +22,7 @@ fn main() {
         "skills/hey-boss",
         "tools/upgrade_hey_boss.py",
         "tools/fleet_hey_boss.py",
+        "tools/drain_github_issues.py",
         "hey_boss_daemon.swift",
         "package_hey_boss.swift",
         "setup_hey_boss.swift",
