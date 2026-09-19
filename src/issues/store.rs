@@ -1,0 +1,1096 @@
+use super::{Actor, BODY_LIMIT, Error, Operation, Project, Request, Result, identifier};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "worker_registry.rs"]
+mod registry;
+#[path = "subtasks.rs"]
+mod subtasks;
+#[path = "worker_store.rs"]
+mod workers;
+
+const APPLICATION_ID: i64 = 0x48424953;
+const PAGE_BYTES: usize = 16 * 1024 * 1024;
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Issue {
+    number: i64,
+    title: String,
+    body: String,
+    state: String,
+    assignee: Option<String>,
+    created_by: String,
+    closed_by: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    closed_at: Option<i64>,
+    deleted_at: Option<i64>,
+    version: i64,
+    labels: Vec<String>,
+    sort_order: i64,
+}
+fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
+    let labels: String = row.get(12)?;
+    Ok(Issue {
+        sort_order: row.get(13)?,
+        number: row.get(0)?,
+        title: row.get(1)?,
+        body: row.get(2)?,
+        state: row.get(3)?,
+        assignee: row.get(4)?,
+        created_by: row.get(5)?,
+        closed_by: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        closed_at: row.get(9)?,
+        deleted_at: row.get(10)?,
+        version: row.get(11)?,
+        labels: serde_json::from_str(&labels).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+    })
+}
+fn get_issue(db: &Connection, project: &str, number: i64, deleted: bool) -> Result<Issue> {
+    let issue = db
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM issues WHERE project_id=?1 AND number=?2"),
+            params![project, number],
+            row_issue,
+        )
+        .optional()?;
+    issue
+        .filter(|i| deleted || i.deleted_at.is_none())
+        .ok_or_else(|| {
+            Error::new(
+                "not_found",
+                format!("Issue #{number} was not found in {project}"),
+            )
+        })
+}
+fn body(value: &str, nonempty: bool) -> Result<()> {
+    if value.len() > BODY_LIMIT || (nonempty && value.trim().is_empty()) {
+        return Err(Error::invalid(
+            "Markdown must be UTF-8 text up to 1 MiB; comments must not be blank",
+        ));
+    }
+    Ok(())
+}
+fn labels(values: &[String]) -> Result<()> {
+    if values.len() > 50 {
+        return Err(Error::invalid("Use at most 50 labels"));
+    }
+    for value in values {
+        identifier(value, "label", 64)?;
+    }
+    Ok(())
+}
+fn page(limit: u32) -> Result<()> {
+    if !(1..=100).contains(&limit) {
+        return Err(Error::invalid("--limit must be between 1 and 100"));
+    }
+    Ok(())
+}
+fn validate(r: &Request) -> Result<()> {
+    if r.version != 1 {
+        return Err(Error::invalid(
+            "Unsupported issue protocol version; upgrade hey-boss on both machines",
+        ));
+    }
+    identifier(&r.project.id, "project ID", 8192)?;
+    identifier(&r.project.name, "project name", 1024)?;
+    if let Some(value) = &r.project_override {
+        identifier(value, "project", 8192)?;
+    }
+    if let Some(actor) = &r.actor {
+        if serde_json::to_vec(actor)?.len() > 32 * 1024 {
+            return Err(Error::invalid("Agent metadata exceeds 32 KiB"));
+        }
+        identifier(&actor.id, "agent ID", 512)?;
+        identifier(&actor.machine, "machine ID", 256)?;
+        identifier(&actor.host, "host", 256)?;
+        identifier(&actor.kind, "agent kind", 64)?;
+        if actor.pid.is_some_and(|p| p < 2 || p > i32::MAX as u32) {
+            return Err(Error::invalid("Invalid agent PID"));
+        }
+        if let Some(id) = &actor.session_id {
+            identifier(id, "session ID", 256)?;
+        }
+    }
+    if r.operation.needs_actor() && r.actor.is_none() {
+        return Err(Error::new(
+            "identity_unavailable",
+            "This operation requires an agent identity",
+        ));
+    }
+    if let Some(key) = &r.request_id {
+        identifier(key, "request ID", 256)?;
+        if !r.operation.writes() {
+            return Err(Error::invalid("--request-id applies only to mutations"));
+        }
+    }
+    if r.operation.number().is_some_and(|n| n <= 0) {
+        return Err(Error::invalid("Issue number must be positive"));
+    }
+    match &r.operation {
+        Operation::Create {
+            title,
+            body: text,
+            labels: values,
+            ..
+        }
+        | Operation::CreateSubtask {
+            title,
+            body: text,
+            labels: values,
+            ..
+        } => {
+            identifier(title, "title", 512)?;
+            body(text, false)?;
+            labels(values)?;
+        }
+        Operation::Edit {
+            title,
+            body: text,
+            add_labels,
+            remove_labels,
+            if_version,
+            ..
+        } => {
+            if title.is_none()
+                && text.is_none()
+                && add_labels.is_empty()
+                && remove_labels.is_empty()
+            {
+                return Err(Error::invalid(
+                    "edit requires --title, --body, --file, --label, or --remove-label",
+                ));
+            }
+            if let Some(title) = title {
+                identifier(title, "title", 512)?;
+            }
+            if let Some(text) = text {
+                body(text, false)?;
+            }
+            labels(add_labels)?;
+            labels(remove_labels)?;
+            if if_version.is_some_and(|v| v < 1) {
+                return Err(Error::invalid("--if-version must be positive"));
+            }
+            if add_labels.iter().any(|l| remove_labels.contains(l)) {
+                return Err(Error::invalid("Cannot add and remove the same label"));
+            }
+        }
+        Operation::Move {
+            number,
+            before,
+            after,
+            if_order_version,
+        } => {
+            if before.is_some() && after.is_some()
+                || before.is_some_and(|n| n < 1 || n == *number)
+                || after.is_some_and(|n| n < 1 || n == *number)
+                || if_order_version.is_some_and(|v| v < 0)
+            {
+                return Err(Error::invalid(
+                    "Use one different positive issue as --before or --after; order version must be nonnegative",
+                ));
+            }
+        }
+        Operation::Comment { body: text, .. } => body(text, true)?,
+        Operation::Close {
+            comment: Some(text),
+            ..
+        } => body(text, true)?,
+        Operation::List {
+            state,
+            mine,
+            unassigned,
+            assignee,
+            labels: values,
+            limit,
+            search,
+            ..
+        } => {
+            if !["open", "closed", "all", "deleted"].contains(&state.as_str()) {
+                return Err(Error::invalid(
+                    "State must be open, closed, all, or deleted",
+                ));
+            }
+            if assignee.is_some() && (*mine || *unassigned) {
+                return Err(Error::invalid(
+                    "--assignee conflicts with --mine and --unassigned",
+                ));
+            }
+            if let Some(id) = assignee {
+                identifier(id, "assignee", 512)?;
+            }
+            if *mine && *unassigned {
+                return Err(Error::invalid("--mine conflicts with --unassigned"));
+            }
+            labels(values)?;
+            page(*limit)?;
+            if let Some(text) = search {
+                identifier(text, "search", 1024)?;
+            }
+        }
+        Operation::History { limit, .. } => page(*limit)?,
+        _ => {}
+    }
+    match &r.operation {
+        Operation::CreateSubtask { if_version, .. } => {
+            if if_version.is_some_and(|v| v < 1) {
+                return Err(Error::invalid("--if-version must be positive"));
+            }
+        }
+        Operation::AddSubtask {
+            number,
+            child,
+            if_version,
+            if_child_version,
+        }
+        | Operation::RemoveSubtask {
+            number,
+            child,
+            if_version,
+            if_child_version,
+        } => {
+            if *child < 1 || child == number {
+                return Err(Error::invalid(
+                    "Use a different positive issue number as the subtask",
+                ));
+            }
+            if if_version.is_some_and(|v| v < 1) || if_child_version.is_some_and(|v| v < 1) {
+                return Err(Error::invalid("Issue versions must be positive"));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn resolve_project(
+    db: &Connection,
+    detected: &Project,
+    override_id: Option<&str>,
+) -> Result<Project> {
+    let Some(value) = override_id else {
+        return Ok(detected.clone());
+    };
+    let exact = db
+        .query_row("SELECT id,name FROM projects WHERE id=?1", [value], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })
+        .optional()?;
+    if let Some(project) = exact {
+        return Ok(project);
+    }
+    let mut query = db.prepare("SELECT id,name FROM projects WHERE name=?1 ORDER BY id LIMIT 2")?;
+    let found = query
+        .query_map([value], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    match found.len() {
+        1 => return Ok(found.into_iter().next().unwrap()),
+        2 => {
+            return Err(Error::conflict(format!(
+                "Project name {value:?} is ambiguous; use its full project ID"
+            )));
+        }
+        _ => {}
+    }
+    if value == detected.id || value == detected.name {
+        return Ok(detected.clone());
+    }
+    // Canonical repository IDs and explicit custom names can be used outside a
+    // checkout. Short names are isolated from automatically detected repos.
+    Ok(Project {
+        id: if value.contains('/') || value.starts_with("local:") || value.starts_with("named:") {
+            value.into()
+        } else {
+            format!("named:{value}")
+        },
+        name: value
+            .rsplit('/')
+            .next()
+            .unwrap_or(value)
+            .strip_prefix("named:")
+            .unwrap_or_else(|| value.rsplit('/').next().unwrap_or(value))
+            .into(),
+    })
+}
+
+pub struct Store {
+    db: Connection,
+}
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+        // Existing file permissions are preserved; fresh databases and their
+        // SQLite sidecars are private to the user.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(Error::invalid("Issue database must be a regular file"));
+        }
+        let mut db = Connection::open(path)?;
+        db.busy_timeout(Duration::from_secs(10))?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+            let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if app != 0 && app != APPLICATION_ID || version > 9 {
+                return Err(Error::invalid(
+                    "Incompatible issue database; use the matching hey-boss version",
+                ));
+            }
+            if version == 0 {
+                let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
+                if tables != 0 {
+                    return Err(Error::invalid("Refusing to use a non-issue database"));
+                }
+                tx.execute_batch(SCHEMA)?;
+                tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+                tx.pragma_update(None, "user_version", 1)?;
+            } else if app != APPLICATION_ID {
+                return Err(Error::invalid("Refusing to use a non-issue database"));
+            }
+            if version < 2 {
+                tx.execute_batch("ALTER TABLE projects ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE projects ADD COLUMN activity_at INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE projects ADD COLUMN hidden_at INTEGER;
+                    UPDATE projects SET created_at=coalesce((SELECT min(created_at) FROM issues WHERE project_id=projects.id),0);
+                    UPDATE projects SET activity_at=coalesce((SELECT max(updated_at) FROM issues WHERE project_id=projects.id),created_at);
+                    CREATE INDEX project_activity ON projects(hidden_at,activity_at DESC);")?;
+                tx.pragma_update(None, "user_version", 2)?;
+            }
+            if version < 3 {
+                tx.execute_batch(workers::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 3)?;
+            }
+            if version < 4 {
+                tx.execute_batch(registry::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 4)?;
+            }
+            if version < 5 {
+                tx.execute_batch("ALTER TABLE issues ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+                    UPDATE issues SET sort_order=number;
+                    ALTER TABLE projects ADD COLUMN issue_order_version INTEGER NOT NULL DEFAULT 0;
+                    CREATE INDEX issue_sort_order ON issues(project_id,sort_order,number);
+                    CREATE INDEX worker_sort_order ON issues(sort_order,created_at,project_id,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;")?;
+                tx.pragma_update(None, "user_version", 5)?;
+            }
+            if version < 6 {
+                tx.execute_batch("ALTER TABLE project_settings ADD COLUMN boss_name TEXT NOT NULL DEFAULT 'Boss';")?;
+                tx.pragma_update(None, "user_version", 6)?;
+            }
+            if version < 7 {
+                tx.execute_batch(super::global_settings::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 7)?;
+            }
+            if version < 8 {
+                tx.execute_batch(subtasks::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 8)?;
+            }
+            if version < 9 {
+                tx.execute_batch(super::fleet::SCHEMA)?;
+                subtasks::migrate_sync(&tx)?;
+                tx.pragma_update(None, "user_version", 9)?;
+            }
+            tx.commit()?;
+        }
+        db.pragma_update(None, "journal_mode", "WAL")?;
+        db.pragma_update(None, "synchronous", "FULL")?;
+        db.execute_batch(super::fleet::SCHEMA)?;
+        // An early updater persisted runtime state inside strict Settings JSON.
+        // Normalize it without terminating supervisors that are still draining.
+        if db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get::<_, bool>(0))? {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            registry::migrate_runtime(&tx)?;
+            tx.commit()?;
+        }
+        Ok(Self { db })
+    }
+
+    pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        validate(r)?;
+        let write = r.operation.writes();
+        // First use registers a project, including list/whoami. Taking the write
+        // reservation before reading avoids read-to-write races between agents.
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if matches!(
+            r.operation,
+            Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
+        ) {
+            let result = super::global_settings::execute(&tx, r)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
+        identifier(&project.id, "project ID", 8192)?;
+        identifier(&project.name, "project name", 1024)?;
+        let actor = r.actor.as_ref();
+        let payload = serde_json::to_string(&r.operation)?;
+        if let (Some(key), Some(actor)) = (&r.request_id, actor) {
+            let previous: Option<(String, String)> = tx.query_row(
+                "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
+                params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            if let Some((old, response)) = previous {
+                if old != payload {
+                    return Err(Error::conflict(
+                        "Request ID was already used for a different operation",
+                    ));
+                }
+                return Ok(serde_json::from_str(&response)?);
+            }
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
+        if write {
+            let actor = actor.unwrap();
+            tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",
+                params![actor.id, serde_json::to_string(actor)?, now])?;
+        }
+        let mut result = match &r.operation {
+            Operation::Workers { .. }
+            | Operation::ConfigureWorker { .. }
+            | Operation::ControlWorker { .. }
+            | Operation::PreviewWorker { .. }
+            | Operation::ProjectSettings
+            | Operation::ConfigureProject { .. }
+            | Operation::PullRequests { .. }
+            | Operation::AddPullRequest { .. }
+            | Operation::RemovePullRequest { .. } => {
+                registry::execute(&tx, &project, &r.operation, actor)?
+            }
+            Operation::WorkerConfigure { .. }
+            | Operation::WorkerPool { .. }
+            | Operation::WorkerControl { .. } => {
+                return Err(Error::invalid(
+                    "Use independent worker operations or hey-boss worker; project and global worker limits are no longer supported",
+                ));
+            }
+            Operation::WorkerStatus => registry::execute(
+                &tx,
+                &project,
+                &Operation::Workers { worker_id: None },
+                actor,
+            )?,
+            Operation::WorkerPreview { .. } | Operation::WorkerRun { .. } => {
+                workers::execute(&tx, &project, &r.operation, now)?
+            }
+            Operation::Projects { include_hidden } => {
+                let mut query = tx.prepare("SELECT p.id,p.name,
+                    coalesce(sum(i.state='open' AND i.deleted_at IS NULL),0),
+                    coalesce(sum(i.state='closed' AND i.deleted_at IS NULL),0),
+                    coalesce(sum(i.deleted_at IS NOT NULL),0),
+                    coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL),0),
+                    p.activity_at,p.hidden_at,p.created_at
+                    FROM projects p LEFT JOIN issues i ON i.project_id=p.id
+                    WHERE ?1 OR p.hidden_at IS NULL GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
+                let projects = query.query_map([include_hidden], |row| Ok(json!({
+                    "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
+                    "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
+                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?
+                })))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut query = tx.prepare("SELECT DISTINCT j.value FROM issues i,json_each(i.labels) j WHERE i.project_id=?1 AND i.deleted_at IS NULL ORDER BY j.value")?;
+                let labels = query
+                    .query_map([&project.id], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut query = tx.prepare("SELECT DISTINCT assignee FROM issues WHERE project_id=?1 AND assignee IS NOT NULL AND deleted_at IS NULL ORDER BY assignee")?;
+                let assignees = query
+                    .query_map([&project.id], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                json!({"ok":true,"project":project,"projects":projects,"labels":labels,"assignees":assignees})
+            }
+            Operation::HideProject | Operation::RestoreProject => {
+                let changed = if matches!(r.operation, Operation::HideProject) {
+                    tx.execute(
+                        "UPDATE projects SET hidden_at=?2 WHERE id=?1 AND hidden_at IS NULL",
+                        params![project.id, now],
+                    )?
+                } else {
+                    tx.execute(
+                        "UPDATE projects SET hidden_at=NULL WHERE id=?1 AND hidden_at IS NOT NULL",
+                        [&project.id],
+                    )?
+                };
+                let hidden_at: Option<i64> = tx.query_row(
+                    "SELECT hidden_at FROM projects WHERE id=?1",
+                    [&project.id],
+                    |r| r.get(0),
+                )?;
+                json!({"ok":true,"project":project,"changed":changed>0,"hidden_at":hidden_at})
+            }
+            Operation::Whoami => json!({"ok":true,"project":project,"agent":actor}),
+            Operation::List {
+                state,
+                mine,
+                unassigned,
+                assignee,
+                labels,
+                search,
+                limit,
+                offset,
+                all,
+            } => {
+                let owner = if *mine {
+                    actor.map(|a| a.id.as_str())
+                } else {
+                    assignee.as_deref()
+                };
+                let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
+                let mut stmt = tx.prepare(&format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) FROM issues WHERE project_id=?1
+                    AND ((?2='deleted' AND deleted_at IS NOT NULL) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
+                    AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
+                    AND (?5 IS NULL OR instr(lower(title),lower(?5))>0 OR instr(lower(body),lower(?5))>0)
+                    AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
+                    ORDER BY sort_order,number LIMIT ?7 OFFSET ?8"))?;
+                let rows = stmt.query_map(
+                    params![
+                        project.id,
+                        state,
+                        owner,
+                        unassigned,
+                        search,
+                        serde_json::to_string(labels)?,
+                        if *all { -1_i64 } else { i64::from(*limit) + 1 },
+                        if *all { 0 } else { *offset }
+                    ],
+                    |row| Ok((row_issue(row)?, row.get::<_, i64>(14)?)),
+                )?;
+                let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                let more = !*all && found.len() > *limit as usize;
+                if !*all {
+                    found.truncate(*limit as usize);
+                }
+                let mut items = Vec::new();
+                for (issue, comment_count) in found {
+                    let mut value = serde_json::to_value(&issue)?;
+                    value.as_object_mut().unwrap().remove("body");
+                    value["comment_count"] = json!(comment_count);
+                    items.push(value);
+                }
+                let order_version: i64 = tx.query_row(
+                    "SELECT issue_order_version FROM projects WHERE id=?1",
+                    [&project.id],
+                    |r| r.get(0),
+                )?;
+                json!({"ok":true,"project":project,"order_version":order_version,"issues":items,"next_offset":if more { Some(u64::from(*offset) + u64::from(*limit)) } else { None }})
+            }
+            Operation::Move {
+                number,
+                before,
+                after,
+                if_order_version,
+            } => {
+                let order_version: i64 = tx.query_row(
+                    "SELECT issue_order_version FROM projects WHERE id=?1",
+                    [&project.id],
+                    |r| r.get(0),
+                )?;
+                if if_order_version.is_some_and(|v| v != order_version) {
+                    return Err(Error::conflict(
+                        "Issue order changed. Refresh the list and try again.",
+                    ));
+                }
+                let issue = get_issue(&tx, &project.id, *number, true)?;
+                let old = issue.sort_order;
+                let target = if let Some(anchor) = before {
+                    let anchor = get_issue(&tx, &project.id, *anchor, true)?.sort_order;
+                    anchor - i64::from(anchor > old)
+                } else if let Some(anchor) = after {
+                    let anchor = get_issue(&tx, &project.id, *anchor, true)?.sort_order;
+                    anchor + i64::from(anchor < old)
+                } else {
+                    tx.query_row(
+                        "SELECT max(sort_order) FROM issues WHERE project_id=?1",
+                        [&project.id],
+                        |r| r.get(0),
+                    )?
+                };
+                let changed = old != target;
+                if changed {
+                    tx.execute("UPDATE issues SET sort_order=CASE WHEN number=?2 THEN ?3 WHEN ?3<?4 THEN sort_order+1 ELSE sort_order-1 END WHERE project_id=?1 AND sort_order BETWEEN min(?3,?4) AND max(?3,?4)", params![project.id,number,target,old])?;
+                    tx.execute("UPDATE issues SET updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![project.id,number,now])?;
+                    tx.execute(
+                        "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",
+                        [&project.id],
+                    )?;
+                    event(
+                        &tx,
+                        &project.id,
+                        *number,
+                        &actor.unwrap().id,
+                        "reordered",
+                        now,
+                        &json!({"before":before,"after":after,"from":old,"to":target}),
+                    )?;
+                }
+                json!({"ok":true,"project":project,"issue":get_issue(&tx,&project.id,*number,true)?,"changed":changed,"order_version":order_version+i64::from(changed)})
+            }
+            Operation::View { number } => {
+                let issue = get_issue(&tx, &project.id, *number, true)?;
+                let mut stmt = tx.prepare("SELECT id,author,body,created_at FROM comments WHERE project_id=?1 AND issue_number=?2 ORDER BY id DESC LIMIT 21")?;
+                let mut comments = stmt.query_map(params![project.id, number], |row|
+                    Ok(json!({"id":row.get::<_,i64>(0)?,"author":row.get::<_,String>(1)?,"body":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?})))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut more = comments.len() > 20;
+                comments.truncate(20);
+                let mut bytes = serde_json::to_vec(&issue)?.len();
+                let mut count = 0;
+                for comment in &comments {
+                    bytes += serde_json::to_vec(comment)?.len();
+                    if bytes > PAGE_BYTES {
+                        more = true;
+                        break;
+                    }
+                    count += 1;
+                }
+                comments.truncate(count);
+                comments.reverse();
+                let assignee: Option<Actor> = if let Some(id) = &issue.assignee {
+                    let raw: String =
+                        tx.query_row("SELECT metadata FROM agents WHERE id=?1", [id], |r| {
+                            r.get(0)
+                        })?;
+                    Some(serde_json::from_str(&raw)?)
+                } else {
+                    None
+                };
+                json!({"ok":true,"project":project,"issue":issue,"comments":comments,"more_comments":more,"assignee_agent":assignee})
+            }
+            Operation::History {
+                number,
+                limit,
+                offset,
+            } => {
+                get_issue(&tx, &project.id, *number, true)?;
+                let mut stmt = tx.prepare("SELECT id,actor,action,created_at,data FROM events WHERE project_id=?1 AND issue_number=?2 ORDER BY id LIMIT ?3 OFFSET ?4")?;
+                let rows = stmt
+                    .query_map(params![project.id, number, limit + 1, offset], |row| {
+                        let data: String = row.get(4)?;
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            data,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut more = rows.len() > *limit as usize;
+                let mut events = Vec::new();
+                let mut bytes = 0;
+                for (id, actor, action, at, data) in rows.into_iter().take(*limit as usize) {
+                    let event = json!({"id":id,"actor":actor,"action":action,"created_at":at,"data":serde_json::from_str::<Value>(&data)?});
+                    bytes += serde_json::to_vec(&event)?.len();
+                    if bytes > PAGE_BYTES && !events.is_empty() {
+                        more = true;
+                        break;
+                    }
+                    events.push(event);
+                }
+                json!({"ok":true,"project":project,"events":events,"next_offset":if more { Some(u64::from(*offset) + events.len() as u64) } else { None }})
+            }
+            Operation::Subtasks { .. }
+            | Operation::CreateSubtask { .. }
+            | Operation::AddSubtask { .. }
+            | Operation::RemoveSubtask { .. } => {
+                subtasks::execute(&tx, &project, &r.operation, actor, now)?
+            }
+            Operation::Create { .. } => {
+                let issue = create_issue(&tx, &project, actor.unwrap(), &r.operation, now)?;
+                json!({"ok":true,"project":project,"issue":issue,"changed":true})
+            }
+            operation => mutate(&tx, &project, actor.unwrap(), operation, now)?,
+        };
+        let settings = super::global_settings::read(&tx)?;
+        result["boss"] =
+            json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
+        if let Some(issue) = result.get_mut("issue")
+            && let Some(number) = issue["number"].as_i64()
+        {
+            issue["pull_requests"] = json!(registry::pull_requests(&tx, &project.id, number)?);
+            if issue["assignee"] == "human:boss" {
+                issue["assignee_name"] = settings["boss_name"].clone();
+            }
+        }
+        if let Some(issues) = result["issues"].as_array_mut() {
+            for issue in issues {
+                if let Some(number) = issue["number"].as_i64() {
+                    issue["pull_requests"] =
+                        json!(registry::pull_requests(&tx, &project.id, number)?);
+                    if issue["assignee"] == "human:boss" {
+                        issue["assignee_name"] = settings["boss_name"].clone();
+                    }
+                }
+            }
+        }
+        subtasks::enrich(&tx, &project.id, &mut result)?;
+        if matches!(r.operation, Operation::Claim { .. }) {
+            result["instructions"] = json!(registry::claim_instructions(
+                &tx,
+                &project,
+                &result["issue"],
+                actor.unwrap()
+            )?);
+        }
+        if (r.operation.number().is_some() || matches!(r.operation, Operation::Create { .. }))
+            && result["changed"] == true
+        {
+            tx.execute(
+                "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
+                params![project.id, now],
+            )?;
+        }
+        if let (Some(key), Some(actor)) = (&r.request_id, actor) {
+            tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response) VALUES(?1,?2,?3,?4,?5)",
+                params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Register observed projects without undoing a user's hidden-project choice.
+    /// Repeated observations use the source's event time, never polling time.
+    pub fn discover_projects(&mut self, projects: &[(Project, i64)]) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (project, activity) in projects {
+            identifier(&project.id, "project ID", 8192)?;
+            identifier(&project.name, "project name", 1024)?;
+            let at = (*activity).clamp(0, now);
+            tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?4)
+                ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)
+                WHERE excluded.activity_at>projects.activity_at",params![project.id,project.name,now,at])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn create_issue(
+    db: &Connection,
+    project: &Project,
+    actor: &Actor,
+    operation: &Operation,
+    now: i64,
+) -> Result<Issue> {
+    let (title, body, labels, at_top) = match operation {
+        Operation::Create {
+            title,
+            body,
+            labels,
+            at_top,
+        }
+        | Operation::CreateSubtask {
+            title,
+            body,
+            labels,
+            at_top,
+            ..
+        } => (title, body, labels, at_top),
+        _ => unreachable!(),
+    };
+    let number: i64 = db.query_row(
+        "SELECT next_number FROM projects WHERE id=?1",
+        [&project.id],
+        |r| r.get(0),
+    )?;
+    super::fleet::check_create(db, &project.id, number)?;
+    db.execute(
+        "UPDATE projects SET next_number=next_number+1 WHERE id=?1",
+        [&project.id],
+    )?;
+    let labels: BTreeSet<_> = labels.iter().collect();
+    let sort_order: i64 = db.query_row(
+        "SELECT CASE WHEN ?2 THEN coalesce(min(sort_order),1) ELSE coalesce(max(sort_order),0)+1 END FROM issues WHERE project_id=?1",
+        params![project.id,at_top],
+        |r| r.get(0),
+    )?;
+    if *at_top {
+        db.execute(
+            "UPDATE issues SET sort_order=sort_order+1 WHERE project_id=?1",
+            [&project.id],
+        )?;
+    }
+    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8)",
+        params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order])?;
+    db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,node FROM fleet_meta WHERE id=1 AND role='agent'", params![project.id,number])?;
+    db.execute(
+        "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",
+        [&project.id],
+    )?;
+    let issue = get_issue(db, &project.id, number, false)?;
+    event(
+        db,
+        &project.id,
+        number,
+        &actor.id,
+        "created",
+        now,
+        &json!({"issue":issue}),
+    )?;
+    Ok(issue)
+}
+
+fn event(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    actor: &str,
+    action: &str,
+    now: i64,
+    data: &Value,
+) -> Result<()> {
+    db.execute("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![project,number,actor,action,now,serde_json::to_string(data)?])?;
+    Ok(())
+}
+fn ownership(issue: &Issue, actor: &Actor, force: bool) -> Result<()> {
+    if !force && issue.assignee.as_ref().is_some_and(|id| id != &actor.id) {
+        return Err(Error::conflict(format!(
+            "Issue #{} is claimed by {}; use --force for an intentional takeover or removal",
+            issue.number,
+            issue.assignee.as_deref().unwrap()
+        )));
+    }
+    Ok(())
+}
+fn comment(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    actor: &Actor,
+    body: &str,
+    now: i64,
+) -> Result<i64> {
+    db.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES(?1,?2,?3,?4,?5)", params![project,number,actor.id,body,now])?;
+    let id = db.last_insert_rowid();
+    event(
+        db,
+        project,
+        number,
+        &actor.id,
+        "commented",
+        now,
+        &json!({"comment_id":id,"body":body}),
+    )?;
+    Ok(id)
+}
+fn mutate(
+    db: &Connection,
+    project: &Project,
+    actor: &Actor,
+    operation: &Operation,
+    now: i64,
+) -> Result<Value> {
+    let number = operation.number().unwrap();
+    let mut issue = get_issue(
+        db,
+        &project.id,
+        number,
+        matches!(
+            operation,
+            Operation::Delete { .. } | Operation::Restore { .. }
+        ),
+    )?;
+    let before = serde_json::to_value(&issue)?;
+    let mut action = "";
+    let mut data = json!({});
+    let mut comment_id = None;
+    match operation {
+        Operation::Edit {
+            title,
+            body,
+            add_labels,
+            remove_labels,
+            if_version,
+            ..
+        } => {
+            if if_version.is_some_and(|v| v != issue.version) {
+                return Err(Error::conflict(format!(
+                    "Issue changed; current version is {}",
+                    issue.version
+                )));
+            }
+            if let Some(title) = title {
+                issue.title = title.clone();
+            }
+            if let Some(body) = body {
+                issue.body = body.clone();
+            }
+            let mut values: BTreeSet<_> = issue.labels.iter().cloned().collect();
+            values.extend(add_labels.iter().cloned());
+            for value in remove_labels {
+                values.remove(value);
+            }
+            issue.labels = values.into_iter().collect();
+            labels(&issue.labels)?;
+            if serde_json::to_value(&issue)? != before {
+                action = "edited";
+                data = json!({"before":{"title":before["title"],"body":before["body"],"labels":before["labels"]},"after":{"title":issue.title,"body":issue.body,"labels":issue.labels}});
+            }
+        }
+        Operation::Claim { force, .. } | Operation::AssignBoss { force, .. } => {
+            registry::claim_lock(db, project, number, actor, *force)?;
+            if issue.state != "open" {
+                return Err(Error::conflict("Reopen the issue before claiming it"));
+            }
+            let target = if matches!(operation, Operation::AssignBoss { .. }) {
+                "human:boss"
+            } else {
+                &actor.id
+            };
+            if issue.assignee.as_deref() != Some(target) {
+                ownership(&issue, actor, *force)?;
+            }
+            if target == "human:boss" {
+                let mut boss = actor.clone();
+                boss.id = target.into();
+                boss.kind = "human".into();
+                boss.session_id = None;
+                boss.pid = None;
+                boss.process_start = None;
+                boss.source = "Boss assignment".into();
+                db.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING", params![target,serde_json::to_string(&boss)?,now])?;
+            }
+            if issue.assignee.as_deref() != Some(target) {
+                action = "claimed";
+                data = json!({"previous_assignee":issue.assignee,"assignee":target,"forced":force});
+                issue.assignee = Some(target.into());
+            }
+        }
+        Operation::Unassign { force, .. } => {
+            ownership(&issue, actor, *force)?;
+            if issue.assignee.is_some() {
+                action = "unassigned";
+                data = json!({"previous_assignee":issue.assignee,"forced":force});
+                issue.assignee = None;
+            }
+        }
+        Operation::Comment { body, .. } => {
+            comment_id = Some(comment(db, &project.id, number, actor, body, now)?);
+        }
+        Operation::Close {
+            comment: text,
+            force,
+            ..
+        } => {
+            ownership(&issue, actor, *force)?;
+            if issue.state == "closed" && text.is_some() {
+                return Err(Error::conflict(
+                    "Issue is already closed; use comment to add further findings",
+                ));
+            }
+            if issue.state != "closed" {
+                if let Some(body) = text {
+                    comment_id = Some(comment(db, &project.id, number, actor, body, now)?);
+                }
+                action = "closed";
+                data = json!({"previous_assignee":issue.assignee,"forced":force});
+                issue.state = "closed".into();
+                issue.assignee = None;
+                issue.closed_by = Some(actor.id.clone());
+                issue.closed_at = Some(now);
+            }
+        }
+        Operation::Reopen { .. } => {
+            if issue.state != "open" {
+                action = "reopened";
+                data = json!({"previous_closed_by":issue.closed_by,"previous_closed_at":issue.closed_at});
+                issue.state = "open".into();
+                issue.assignee = None;
+                issue.closed_by = None;
+                issue.closed_at = None;
+            }
+        }
+        Operation::Delete { force, .. } => {
+            ownership(&issue, actor, *force)?;
+            if issue.deleted_at.is_none() {
+                action = "deleted";
+                data = json!({"previous_assignee":issue.assignee,"forced":force});
+                issue.deleted_at = Some(now);
+                issue.assignee = None;
+            }
+        }
+        Operation::Restore { .. } => {
+            if issue.deleted_at.is_some() {
+                action = "restored";
+                issue.deleted_at = None;
+            }
+        }
+        _ => unreachable!(),
+    }
+    let changed = !action.is_empty() || comment_id.is_some();
+    if changed {
+        issue.version += 1;
+        issue.updated_at = now;
+        db.execute("UPDATE issues SET title=?3,body=?4,state=?5,assignee=?6,closed_by=?7,updated_at=?8,closed_at=?9,deleted_at=?10,version=?11,labels=?12 WHERE project_id=?1 AND number=?2",
+            params![project.id,number,issue.title,issue.body,issue.state,issue.assignee,issue.closed_by,now,issue.closed_at,issue.deleted_at,issue.version,serde_json::to_string(&issue.labels)?])?;
+        if !action.is_empty() {
+            event(db, &project.id, number, &actor.id, action, now, &data)?;
+        }
+    }
+    Ok(json!({"ok":true,"project":project,"issue":issue,"changed":changed,"comment_id":comment_id}))
+}
+
+const SCHEMA: &str = "
+CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, next_number INTEGER NOT NULL CHECK(next_number>0));
+CREATE INDEX project_names ON projects(name);
+CREATE TABLE agents(id TEXT PRIMARY KEY, metadata TEXT NOT NULL CHECK(json_valid(metadata)), last_seen INTEGER NOT NULL);
+CREATE TABLE issues(
+ project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL CHECK(number>0),
+ title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','closed')),
+ assignee TEXT REFERENCES agents(id), created_by TEXT NOT NULL REFERENCES agents(id), closed_by TEXT REFERENCES agents(id),
+ created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER, deleted_at INTEGER,
+ version INTEGER NOT NULL CHECK(version>0), labels TEXT NOT NULL CHECK(json_valid(labels)),
+ PRIMARY KEY(project_id,number), CHECK(state='open' OR assignee IS NULL), CHECK(deleted_at IS NULL OR assignee IS NULL)
+);
+CREATE INDEX issue_queue ON issues(project_id,state,assignee,number) WHERE deleted_at IS NULL;
+CREATE TABLE comments(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, issue_number INTEGER NOT NULL,
+ author TEXT NOT NULL REFERENCES agents(id), body TEXT NOT NULL, created_at INTEGER NOT NULL,
+ FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number));
+CREATE INDEX issue_comments ON comments(project_id,issue_number,id);
+CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, issue_number INTEGER NOT NULL,
+ actor TEXT NOT NULL REFERENCES agents(id), action TEXT NOT NULL, created_at INTEGER NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
+ FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number));
+CREATE INDEX issue_events ON events(project_id,issue_number,id);
+CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TEXT NOT NULL REFERENCES agents(id), request_id TEXT NOT NULL,
+ payload TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(project_id,actor,request_id));
+";

@@ -10,3 +10,8 @@
 *.log
 hey-boss.state
 *_cookies.txt
+
+__pycache__/
+*.pyc
+
+.playwright-cli/
