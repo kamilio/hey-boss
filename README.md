@@ -120,6 +120,12 @@ hey-boss hide '<task_id>'
 
 The installer builds both executables and registers a launch agent. macOS starts the daemon at login so its menu-bar item is available, and can also start it when a command connects. Keep `hey-boss.state` beside the installed CLI; it records the chosen state directory. Re-run the installer to upgrade. Companion connections and overview require protocol-version metadata from the current installer and a matching daemon handshake; older installations report an upgrade error before new commands are sent. Update the server companion too so remote stale-socket cleanup is available. `cargo install` alone does not install the daemon.
 
+Use `hb` as a shortcut for any `hey-boss` command, such as `hb issue list` or
+`hb alert --title Ready 'Build passed'`. Cargo and Homebrew install both commands;
+source and companion installers and `hey-boss upgrade` create an adjacent `hb`
+symlink when that name is available. An existing `hb` command is preserved.
+The shortcut uses the same configuration, output, and exit status as `hey-boss`.
+
 Source and remote companion installation also allow `hey-boss` globally in Codex
 and Claude Code. Homebrew queues this step for first-run daemon setup because its
 post-install hook is sandboxed away from user configs. To apply it immediately,

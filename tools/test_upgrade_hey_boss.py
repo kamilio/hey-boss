@@ -100,11 +100,50 @@ class UpgradeTests(unittest.TestCase):
                     upgrade.apply(root, binary, '1234567890abcdef')
             self.assertEqual(binary.read_text(), 'previous binary')
 
+    def test_successful_upgrade_installs_shortcut(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source, binary = root / 'source', root / 'bin/hey-boss'
+            self.source(source)
+            binary.parent.mkdir()
+            binary.write_text('previous binary')
+            built = root / '.cache/hey-boss/build/release/hey-boss'
+            built.parent.mkdir(parents=True)
+            built.write_text('replacement binary')
+            with patch.dict(os.environ, HOME=directory), patch.object(upgrade, 'run'), patch.object(upgrade, 'desktop_app', return_value=None), patch.object(upgrade, 'installed_id', return_value='1234567890abcdef'):
+                upgrade.apply(source, binary, '1234567890abcdef')
+            self.assertEqual(binary.with_name('hb').read_text(), 'replacement binary')
+
     def test_ssh_host_cannot_inject_options(self):
         for host in ('-oProxyCommand=bad', 'devbox;touch bad', 'devbox bad', ''):
             with self.assertRaises(RuntimeError):
                 upgrade.ssh_command(host)
         self.assertEqual(upgrade.ssh_command('user@devbox')[-1], 'user@devbox')
+
+    def test_shortcut_follows_binary_replacement_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / 'hey-boss'
+            binary.write_text('old')
+            upgrade.install_shortcut(binary)
+            shortcut = binary.with_name('hb')
+            self.assertEqual(os.readlink(shortcut), 'hey-boss')
+            replacement = binary.with_name('replacement')
+            replacement.write_text('new')
+            upgrade.atomic_copy(replacement, binary)
+            upgrade.install_shortcut(binary)
+            self.assertEqual(shortcut.read_text(), 'new')
+
+    def test_shortcut_preserves_existing_command_and_dangling_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / 'hey-boss'
+            shortcut = binary.with_name('hb')
+            shortcut.write_text('another command')
+            upgrade.install_shortcut(binary)
+            self.assertEqual(shortcut.read_text(), 'another command')
+            shortcut.unlink()
+            shortcut.symlink_to('missing')
+            upgrade.install_shortcut(binary)
+            self.assertEqual(os.readlink(shortcut), 'missing')
 
 
 if __name__ == '__main__':
