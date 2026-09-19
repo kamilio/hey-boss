@@ -1,0 +1,4 @@
+- No PRs, straight to main
+- Commit small changes
+- TDD
+- Attention to performance
