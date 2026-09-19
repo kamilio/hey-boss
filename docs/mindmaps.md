@@ -31,6 +31,12 @@ remain available and never remove content to meet a read budget.
 
 The default project is the current Git repository, shared across worktrees. `--project Atlas` selects an unambiguous project name or a full project ID. `HEY_BOSS_ISSUE_PROJECT` is honored in worker sessions. `--host devbox` / `HEY_BOSS_ISSUE_HOST` use the authoritative SSH issue store, with no local fallback. Both machines need a CLI version with mindmap support.
 
+Mindmaps are not included in fleet's offline issue replicas. From a fleet agent,
+target its controller explicitly with `--host CONTROLLER` or
+`HEY_BOSS_ISSUE_HOST`; local map reads and edits report this requirement. The web
+viewer can use the same remote host. Standalone stores and controller stores
+support local maps normally.
+
 ## References and links
 
 `--id` assigns a readable alias, unique within a project. Commands also accept the generated `n-…` ID. `PROJECT::alias` resolves a node in another project's map; full project IDs disambiguate names. Aliases cannot contain colons or start with `n-`.

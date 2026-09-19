@@ -405,3 +405,25 @@ export fixture verifies title emphasis/brackets/code and explanatory text stay
 literal. The existing Markdown renderer still autolinks a bare URL; the test
 checks that `[ship](URL)` remains visible as literal syntax around that URL,
 rather than becoming a Markdown link labelled “ship”.
+
+## Authoritative maps on fleet machines
+
+Confirmed `tools/fleet_hey_boss.py` journals a fixed `TABLES` list that excludes
+mindmap tables. This feature does not introduce offline graph replication.
+Local map operations on a fleet agent now return an explicit requirement to use
+`--host CONTROLLER` / `HEY_BOSS_ISSUE_HOST`, instead of exposing an unsynchronized
+map as though it were authoritative. Existing local map data is preserved;
+standalone and controller stores retain ordinary local behavior. Documented the
+same host selection for CLI reads, edits and the web viewer in the guide/skill.
+
+31 mindmap tests pass after the guard. A focused follow-up fixture runs actual
+CLI/RPC with an SSH shim targeting a separate synthetic controller database:
+remote reads see its map, remote authoring saves there, and a failed transport
+returns an explicit no-local-fallback error. Reverting the fixture role confirms
+the caller's original map/version are unchanged. This exercises transport
+routing without claiming a real network/SSH fleet deployment.
+
+The export patch was delivered through checked incremental application to the
+original checkout; delivery anchor is `c47a1c1`. Its local source upgrade reported
+`updated` and installed build `b2ee3a6c43891a4d` was verified. Fleet guard/skill
+delivery is the next incremental update.
