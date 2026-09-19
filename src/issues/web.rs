@@ -501,9 +501,19 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                             ""
                         },
                     );
-                let html = std::str::from_utf8(data)
+                let mut html = std::str::from_utf8(data)
                     .unwrap()
                     .replace("<!--app-shell-->", &shell);
+                if path == "/mm"
+                    && request.url().split_once('?').is_some_and(|(_, query)| {
+                        query.split('&').any(|parameter| parameter == "focus=1")
+                    })
+                {
+                    html = html.replace(
+                        "<html lang=\"en\">",
+                        "<html lang=\"en\" class=\"mindmap-focus\">",
+                    );
+                }
                 return Ok((200, kind, html.into_bytes()));
             }
             return Ok((200, kind, data.to_vec()));

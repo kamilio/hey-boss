@@ -15,7 +15,7 @@
   let searchQuery = "", searchMatches = [], searchHit = null, mapHit = null;
   const fullBodies = new Map(), bodyVersions = new Map(), loadingBodies = new Map(), bodyErrors = new Map(), initializedProjects = new Set();
   const route = () => new URLSearchParams(location.hash.slice(1));
-  const mapUrl = (project, node) => `/mm#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
+  const mapUrl = (project, node) => `/mm${document.documentElement.classList.contains("mindmap-focus") ? "?focus=1" : ""}#${new URLSearchParams({ project, ...(node ? { node } : {}) })}`;
   const issueUrl = (node) => `/#${new URLSearchParams({ project: node.reference_project, issue: node.reference, ...(boot?.backend_host ? { host: boot.backend_host } : {}) })}`;
   const issueContext = (node) => `${node.reference_project !== graph.project.id ? `${node.reference_project_name || projects.find((p) => p.id === node.reference_project)?.name || node.reference_project} · ` : ""}issue #${node.reference}`;
   const nodeName = (node) => `${node.project_id !== graph.project.id ? `${node.project_name || projects.find((p) => p.id === node.project_id)?.name || node.project_id} · ` : ""}${HeyBossMap.displayTitle(node)}`;

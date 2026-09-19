@@ -1,4 +1,20 @@
 :root{--ink:var(--text);--soft:var(--accent-soft);--warn:var(--danger)}
+/* A compact project picker and map controls inside the native Mac window. */
+.mindmap-focus body{height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.mindmap-focus .brand,.mindmap-focus .header-divider,.mindmap-focus .header-right,.mindmap-focus .app-navigation,.mindmap-focus .page-heading,.mindmap-focus .page-footer{display:none}
+.mindmap-focus .app-header{height:54px;flex-shrink:0}
+.mindmap-focus .header-inner{padding:0 16px;max-width:none}
+.mindmap-focus .project-trigger{max-width:calc(100vw - 48px)}
+.mindmap-focus #main{max-width:none;width:100%;padding:12px 16px 16px;margin:0;min-height:0;flex:1;display:flex;flex-direction:column}
+.mindmap-focus .toolbar{margin-bottom:10px;flex-shrink:0}
+.mindmap-focus .search label{display:none}
+.mindmap-focus .panel{flex:1;min-height:0;display:flex;flex-direction:column;margin:0}
+.mindmap-focus .panel-heading{padding:6px 12px;flex-shrink:0}
+.mindmap-focus #map-panel{flex:1;min-height:0;display:flex;flex-direction:column}
+.mindmap-focus #mindmap{height:auto;min-height:0;flex:1}
+.mindmap-focus #map-help{flex-shrink:0;margin:0;padding:6px 12px}
+.mindmap-focus #outline{overflow:auto;min-height:0;flex:1}
+.mindmap-focus #error,.mindmap-focus #inbox-warning{flex-shrink:0;margin:0 0 10px;padding:8px}
 #map-panel button,.panel-heading button,.node button,#map-details button{padding:8px 12px}
 .search{display:flex;flex-direction:column;gap:5px;flex:1;font-size:12px;color:var(--muted)}
 .actions{display:flex;gap:8px}

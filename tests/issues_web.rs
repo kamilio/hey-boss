@@ -1045,6 +1045,28 @@ fn mindmap_assets_reads_and_authoring_boundary() {
     );
 }
 
+#[test]
+fn native_focus_is_available_without_inline_scripts_and_only_on_mindmaps() {
+    let web = Web::start();
+    for path in ["/mm?focus=1", "/mm?other=1&focus=1"] {
+        let response = web.http("GET", path, &[], b"");
+        assert_eq!(response.status, 200);
+        let html = String::from_utf8(response.body).unwrap();
+        assert!(html.contains("<html lang=\"en\" class=\"mindmap-focus\">"));
+        assert!(html.contains("id=\"project-trigger\""));
+        assert!(!html.contains("<script>"));
+    }
+    for path in ["/mm", "/mm?focus=0", "/?focus=1", "/workers?focus=1"] {
+        let response = web.http("GET", path, &[], b"");
+        assert_eq!(response.status, 200);
+        assert!(
+            !String::from_utf8(response.body)
+                .unwrap()
+                .contains("class=\"mindmap-focus\"")
+        );
+    }
+}
+
 #[path = "support/mindmap_inbox.rs"]
 mod mindmap_inbox_fixture;
 
