@@ -134,3 +134,6 @@ main button,main input{background:var(--solid);border:1px solid var(--line);bord
 
 /* Keep the shared shell within narrow phones, including reserved scrollbar width. */
 @media(max-width:380px){body{min-width:0}main{padding-inline:12px}.navigation-inner{padding-inline:12px;gap:12px}}
+
+/* Leave map navigation on screen beneath the shared phone header. */
+@media(max-width:700px){.app-navigation ~ main #mindmap{height:clamp(300px,calc(100svh - 430px),580px);min-height:300px}}
