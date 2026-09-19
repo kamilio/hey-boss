@@ -946,3 +946,38 @@ changes in the source snapshot. Only that owned upgrade and its compiler childre
 were interrupted; its stack confirms interruption during cargo build, before
 installation, and the public binary remained 7f1bd03789658ac1. No other installer
 was stopped. Final fleet installation and the requested duration remain pending.
+
+Imported committed project navigation and compact PR-card changes from main.
+Cross-page navigation passes 13 checks in Chrome and 13 in WebKit using a
+separate synthetic issue store: project selection survives links, reloads,
+special characters, explicit overrides and unavailable browser storage.
+Evidence `out/mm-project-navigation-chrome.txt` and
+`out/mm-project-navigation-webkit.txt`.
+
+The committed PR viewer passes 14 checks in each native browser: compact labels,
+custom titles, correct popup destination, inspector/outline links, search by both
+number and raw URL, and phone CTA geometry. Evidence
+`out/mm-native-pr-chrome.txt`, `out/mm-native-pr-webkit.txt`.
+All existing interaction checks also pass the newly compiled viewer: Chrome 40,
+WebKit 25, and each browser's 37 checks on the 10,000-node/20,000-link map
+(`out/mm-post-pr-core-*.txt`, `out/mm-post-pr-scale-*.txt`). A native Chrome
+keyboard check passes three assertions: the focused PR card can be panned fully
+offscreen, Tab reaches its PR action, and that action restores the card into
+view (`out/mm-native-pr-keyboard-check.txt`). An earlier frozen-asset probe also
+passed; no keyboard bug or additional product fix was inferred from it.
+
+Updated cached-search measurements, ten samples per query after warmup:
+Chrome ordinary-match medians 3.95–5ms, absent match 2.35ms, all-node query 8.6ms;
+WebKit ordinary-match medians 4–4.5ms, absent match 4ms, all-node query 12ms.
+All-node sampled p95/max was 13.1ms in Chrome and 21ms in WebKit. Mounted cards
+remained bounded (at most 19 for these queries). These measure synchronous input
+handler JavaScript, excluding paint and automation time; ten samples are not a
+broad device-performance guarantee. Evidence `out/mm-post-pr-search-timing.txt`
+and `out/mm-post-pr-search-timing-webkit.txt`.
+
+Loaded-page navigation timing was 72.6ms in Chrome and 52ms in WebKit; injected
+focused-read delays are separate API entries. The initial manual browser open
+hit a 60-second DOMContentLoaded timeout and is retained as unsuccessful startup
+evidence; the same handle subsequently completed its probe. It was not restarted
+on that observation timeout. Native HTTP checks returned promptly, and subsequent
+actual-browser navigation and interaction checks passed.
