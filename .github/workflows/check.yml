@@ -12,16 +12,16 @@ jobs:
       - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo build --locked --release
       - run: |
           mkdir -p out
           xcrun swiftc -O setup_hey_boss.swift -o out/hey-boss-setup
           xcrun swiftc -O -whole-module-optimization -parse-as-library hey_boss_daemon.swift -o out/hey-boss-daemon
           xcrun swiftc -g -Onone -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
-          (cd /tmp && HEY_BOSS_CLI_PATH="$GITHUB_WORKSPACE/target/release/hey-boss" "$GITHUB_WORKSPACE/out/hey-boss-test")
+          (cd /tmp && HEY_BOSS_CLI_PATH="$GITHUB_WORKSPACE/target/debug/hey-boss" "$GITHUB_WORKSPACE/out/hey-boss-test")
           swift package_hey_boss.swift out/hey-boss-daemon "out/Hey Boss.app"
           codesign --verify --strict "out/Hey Boss.app"
           plutil -lint "out/Hey Boss.app/Contents/Info.plist"
+      - run: cargo build --locked --release
       - run: cargo package --locked --allow-dirty
   linux:
     runs-on: ubuntu-latest
