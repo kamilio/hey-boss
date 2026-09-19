@@ -52,8 +52,13 @@ const esc = (value) =>
         c
       ],
   );
+// Private HTTPS mobile access keeps drafts and retry IDs in this page's memory.
+// No issue content is persisted on the phone; desktop HTTP retains saved drafts.
+const volatileStorage = new Map();
+const persistDrafts = location.protocol === "http:";
 const storage = {
   get(key) {
+    if (!persistDrafts) return volatileStorage.get(key) ?? null;
     try {
       return JSON.parse(localStorage.getItem(key));
     } catch {
@@ -61,11 +66,19 @@ const storage = {
     }
   },
   set(key, value) {
+    if (!persistDrafts) {
+      volatileStorage.set(key, structuredClone(value));
+      return;
+    }
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch {}
   },
   remove(key) {
+    if (!persistDrafts) {
+      volatileStorage.delete(key);
+      return;
+    }
     try {
       localStorage.removeItem(key);
     } catch {}
@@ -971,6 +984,12 @@ function renderDetail(value) {
   loadRelatedNotices(i.number, model.project.id, model.route.host);
   if (!deleted) {
     const input = $("#comment-body");
+    if (!persistDrafts) {
+      const note = document.createElement("p");
+      note.className = "field-help";
+      note.textContent = "Drafts stay in this tab. Save before reloading or closing it.";
+      input.closest(".markdown-editor").after(note);
+    }
     input.value =
       storage.get(draftKey("comment", model.project.id, i.number)) || "";
     input.oninput = () => {
@@ -1588,6 +1607,7 @@ $(".brand").onclick = (e) => {
   navigate({ view: "issues", issue: null, notice: "" });
 };
 async function boot() {
+  $("#mobile-draft-help").hidden = persistDrafts;
   try {
     const response = await fetch("/api/bootstrap", {
       signal: AbortSignal.any([AbortSignal.timeout(10000), pageRequests.signal]),
