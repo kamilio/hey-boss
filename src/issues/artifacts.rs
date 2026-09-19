@@ -124,11 +124,13 @@ fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
 }
 // The browser anchors against the rendered reading surface, not Markdown syntax.
 fn rendered_text(source: &str) -> String {
-    use pulldown_cmark::{Event, Options, Parser};
+    use pulldown_cmark::{Event, Parser};
     let mut text = String::new();
-    for event in Parser::new_ext(source, Options::all()) {
+    for event in Parser::new_ext(source, crate::markdown::parser_options()) {
         match event {
-            Event::Text(t) | Event::Code(t) => text.push_str(&t),
+            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                text.push_str(&t)
+            }
             Event::SoftBreak | Event::HardBreak => text.push(' '),
             Event::End(
                 pulldown_cmark::TagEnd::Paragraph

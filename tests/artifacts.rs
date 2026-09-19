@@ -135,3 +135,35 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
     );
     assert!(run(&mut store, json!({"command":"view","id":id}))["backlinks"][0]["title"].is_null());
 }
+
+#[test]
+fn selection_anchors_use_the_readers_markdown_dialect() {
+    let path = std::env::temp_dir().join(format!(
+        "hey-boss-artifact-punctuation-{}.db",
+        std::process::id()
+    ));
+    let mut store = Store::open(&path).unwrap();
+    let text =
+        "It's a \"quoted\" plan with literal $dollars$ and ~~changes~~.\n\n<mark>literal</mark>";
+    let created = run(
+        &mut store,
+        json!({"command":"create","title":"Plan","body":text}),
+    );
+    let id = created["artifact"]["id"].as_str().unwrap();
+    let commented = run(
+        &mut store,
+        json!({"command":"comment","id":id,"body":"Review this passage","quote":"It's a \"quoted\" plan with literal $dollars$ and changes."}),
+    );
+    assert_eq!(commented["comments"][0]["outdated"], false);
+    assert!(
+        created["artifact"]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("&lt;mark&gt;")
+    );
+    let commented = run(
+        &mut store,
+        json!({"command":"comment","id":id,"body":"Discuss the literal example","quote":"<mark>literal</mark>"}),
+    );
+    assert_eq!(commented["comments"][1]["outdated"], false);
+}
