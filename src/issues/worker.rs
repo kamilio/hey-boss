@@ -19,6 +19,7 @@ use std::{
 
 pub const DEFAULT_PROMPT: &str =
     "Claim and implement `{{issue_command}}`.\n\n{{commit_instruction}}";
+pub const DEFAULT_CLAIM_TIMEOUT_SECONDS: u32 = 600;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -44,7 +45,7 @@ impl Default for Settings {
             prompt: None,
             prs_enabled: None,
             use_goal: false,
-            reservation_seconds: 120,
+            reservation_seconds: DEFAULT_CLAIM_TIMEOUT_SECONDS,
             enabled: false,
         }
     }

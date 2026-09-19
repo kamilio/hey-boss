@@ -216,7 +216,7 @@ impl Store {
         Ok(())
     }
     pub(crate) fn worker_begin_claim(&self, id: &str) -> Result<()> {
-        self.db.execute("UPDATE worker_runs SET state='awaiting_claim',reservation_expires=?2+coalesce((SELECT json_extract(config,'$.reservation_seconds') FROM issue_workers WHERE id=worker_runs.worker_id),120)*1000 WHERE id=?1 AND state='awaiting_model' AND claimed_at IS NULL AND finished_at IS NULL", params![id, now()])?;
+        self.db.execute("UPDATE worker_runs SET state='awaiting_claim',reservation_expires=?2+coalesce((SELECT json_extract(config,'$.reservation_seconds') FROM issue_workers WHERE id=worker_runs.worker_id),?3)*1000 WHERE id=?1 AND state='awaiting_model' AND claimed_at IS NULL AND finished_at IS NULL", params![id, now(), crate::issues::worker::DEFAULT_CLAIM_TIMEOUT_SECONDS])?;
         Ok(())
     }
     pub(crate) fn worker_model_expired(&self, job: &Job) -> Result<bool> {

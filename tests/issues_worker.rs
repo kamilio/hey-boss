@@ -1268,6 +1268,59 @@ fn model_queue_wait_does_not_consume_manual_claim_deadline() {
 }
 
 #[test]
+fn default_claim_window_survives_past_two_minute_reasoning_timeout() {
+    let f = Fixture::new("past-two-minute-timeout");
+    fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
+    let run = &status["runs"][0];
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    // Replay 130 seconds of pre-claim reasoning without a long wall-clock test.
+    db.execute(
+        "UPDATE worker_runs SET reservation_expires=reservation_expires-130000 WHERE id=?1",
+        [run["id"].as_str().unwrap()],
+    )
+    .unwrap();
+    thread::sleep(Duration::from_millis(600));
+    let current = f.cli(&["worker", "status"]);
+    assert!(current["runs"][0]["finished_at"].is_null(), "{current}");
+    let mut claim = f.command(&["claim", "1"]);
+    claim.args([
+        "--agent",
+        &format!("codex:{}", run["session_id"].as_str().unwrap()),
+    ]);
+    let result = claim.output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    worker.stop();
+}
+
+#[test]
+fn default_claim_window_still_expires_after_ten_minutes() {
+    let f = Fixture::new("ten-minute-timeout");
+    fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
+    assert_eq!(status["config"]["reservation_seconds"], 600);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute(
+        "UPDATE worker_runs SET reservation_expires=reservation_expires-601000 WHERE id=?1",
+        [status["runs"][0]["id"].as_str().unwrap()],
+    )
+    .unwrap();
+    let expired = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(expired["runs"][0]["state"], "claim_timeout");
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+    worker.stop();
+}
+
+#[test]
 fn worker_startup_waits_for_transient_writer_contention() {
     let f = Fixture::new("startup-writer-contention");
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
