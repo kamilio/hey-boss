@@ -29,7 +29,7 @@ pub(crate) fn check_claim(
     let blocked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?3) OR ((SELECT role FROM fleet_meta WHERE id=1)='agent' AND NOT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node=?3))", params![project,number,machine], |r|r.get(0))?;
     if blocked {
         return Err(Error::conflict(
-            "This issue is reserved for another fleet machine, or has not been allocated to this agent. Synchronize before pickup.",
+            "This issue is reserved for another fleet machine, or has not been allocated to this machine. Synchronize before pickup.",
         ));
     }
     Ok(())
@@ -39,7 +39,7 @@ pub(crate) fn check_create(db: &Connection, project: &str, number: i64) -> Resul
     let allowed: bool = db.query_row("SELECT (SELECT role FROM fleet_meta WHERE id=1)<>'agent' OR EXISTS(SELECT 1 FROM fleet_number_ranges WHERE project_id=?1 AND ?2 BETWEEN first_number AND last_number)", params![project,number], |r|r.get(0))?;
     if !allowed {
         return Err(Error::conflict(
-            "The offline issue-number allocation is exhausted. Reconnect to the fleet controller to replenish it.",
+            "The offline issue-number allocation is exhausted. Reconnect to the fleet supervisor to replenish it.",
         ));
     }
     Ok(())

@@ -13,7 +13,7 @@ INSERT INTO issue_workers(id,kind,config,version,updated_at) SELECT 'legacy:'||w
 UPDATE worker_runs SET worker_id='legacy:'||project_id,claimed_at=started_at WHERE EXISTS(SELECT 1 FROM issue_workers WHERE id='legacy:'||worker_runs.project_id);
 ";
 // Call while holding the caller's write transaction: old updaters can write
-// this marker after Store::open, including while a supervisor is still alive.
+// this marker after Store::open, including while a worker is still alive.
 pub(super) fn migrate_runtime(db: &Connection) -> Result<()> {
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |row| row.get::<_, bool>(0))? {
         return Ok(());
@@ -215,8 +215,15 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
     )?;
     let queue = json!({"open":open,"assigned":assigned,"tag_filtered":tag_filtered,"waiting":open-assigned-tag_filtered-eligible,"eligible":eligible});
     let mut fleet: Value = db.query_row("SELECT role,node,(SELECT count(*) FROM fleet_outbox) FROM fleet_meta WHERE id=1", [], |r| Ok(json!({"role":r.get::<_,String>(0)?,"node":r.get::<_,String>(1)?,"pending_changes":r.get::<_,i64>(2)?})))?;
-    fleet["controller_connection"] =
+    fleet["supervisor_connection"] =
         crate::fleet::worker_connection(fleet["role"].as_str().unwrap_or_default());
+    // Older dashboards read this key; retain it during mixed-version upgrades.
+    fleet["controller_connection"] = fleet["supervisor_connection"].clone();
+    if fleet["role"] == crate::fleet::SUPERVISOR_ROLE {
+        fleet["role"] = json!("supervisor");
+    } else if fleet["role"] == crate::fleet::COMPANION_ROLE {
+        fleet["role"] = json!("companion");
+    }
     Ok(
         json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"project":p}),
     )

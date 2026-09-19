@@ -157,14 +157,17 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
     let connection = if app.error.is_some() {
         "unknown"
     } else {
-        app.snapshot["fleet"]["controller_connection"]["state"]
+        let fleet = &app.snapshot["fleet"];
+        fleet
+            .get("supervisor_connection")
+            .unwrap_or(&fleet["controller_connection"])["state"]
             .as_str()
             .unwrap_or("unknown")
     };
     let connection_label = match connection {
-        "local" => "Main: this machine".to_owned(),
-        "standalone" => "Main: not configured (local queue)".to_owned(),
-        state => format!("Main: {state}"),
+        "local" => "Supervisor: this machine".to_owned(),
+        "standalone" => "Supervisor: not configured (local queue)".to_owned(),
+        state => format!("Supervisor: {state}"),
     };
     header.push(Line::from(vec![
         Span::styled(
@@ -175,16 +178,21 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 _ => Color::Yellow,
             }),
         ),
-        Span::raw(if app.snapshot["fleet"]["role"] == "agent" {
-            format!(
-                " · {} changes waiting to sync",
-                app.snapshot["fleet"]["pending_changes"]
-                    .as_u64()
-                    .unwrap_or(0)
-            )
-        } else {
-            String::new()
-        }),
+        Span::raw(
+            if matches!(
+                app.snapshot["fleet"]["role"].as_str(),
+                Some("companion" | "agent")
+            ) {
+                format!(
+                    " · {} changes waiting to sync",
+                    app.snapshot["fleet"]["pending_changes"]
+                        .as_u64()
+                        .unwrap_or(0)
+                )
+            } else {
+                String::new()
+            },
+        ),
     ]));
     header.push(Line::from(vec![
         Span::styled(
@@ -247,7 +255,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         if app.history {
             "Completed attempts · no slots used"
         } else {
-            "Active sessions"
+            "Active agents"
         },
         true,
     );
@@ -256,7 +264,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             Paragraph::new(if app.history {
                 "No completed attempts. h: active work"
             } else {
-                "No active sessions. Waiting for eligible issues. h: history"
+                "No active agents. Waiting for eligible issues. h: history"
             })
             .wrap(Wrap { trim: true })
             .block(sessions_block),

@@ -153,7 +153,7 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Automatic controller, durable replicas, connected agents, and worker signals.
+    /// Fleet supervisor, machine companions, durable replicas, and worker controls.
     Fleet {
         #[command(subcommand)]
         action: hey_boss::fleet::Action,

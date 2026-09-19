@@ -23,7 +23,7 @@ The CLI's `HEY_BOSS_ISSUE_HOST` and `HEY_BOSS_ISSUE_DB` settings are inherited.
 This package is independent of the root crate. The main CLI embeds the same
 library source from `src/worker_tui`, so ordinary installation and fleet upgrades include the dashboard
 without installing a separate executable. `runtime::run` accepts a cancellation
-token so worker supervisors can restore the terminal before shutdown or reload.
+token so workers can restore the terminal before shutdown or reload.
 When started by `hey-boss worker`, q / Ctrl+C stops that worker and its sessions.
 With `worker status` or the standalone executable, quitting leaves workers running.
 
@@ -34,9 +34,9 @@ update states explain that existing sessions finish before pickup resumes.
 
 Active work is the default view. Press h to switch to a separate completed-attempt
 history; completed attempts never consume slots. Selection follows session IDs
-through refreshes. Main shows controller connectivity: this machine for the
-controller, connected/disconnected for fleet agents, or not configured for local
-queues. Agent connectivity uses the existing five-second heartbeat, expires after
+through refreshes. Supervisor shows connectivity: this machine for the
+supervisor, connected/disconnected for fleet companions, or not configured for local
+queues. Companion connectivity uses the existing five-second heartbeat, expires after
 fifteen seconds, and shows changes waiting to sync. Unknown means status could not
 be read. Request errors retain the last successful sessions, mark connectivity
 unknown, and retry every two seconds. Deleted workers in status dashboards trigger
@@ -79,7 +79,7 @@ terminal.draw(|frame| ui::render(frame, &dashboard))?;
 ```
 
 Set `dashboard.now_ms` from the wall clock when embedding live timers. The
-dashboard and renderer do not start a supervisor or change queue state.
+dashboard and renderer do not start a worker or change queue state.
 
 ## Verification
 

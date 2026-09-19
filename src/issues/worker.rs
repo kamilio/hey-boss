@@ -220,7 +220,7 @@ fn executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-pub struct Supervisor {
+pub struct Worker {
     pub stop: Arc<AtomicBool>,
     pub upgrading: Arc<AtomicBool>,
     reload: Arc<AtomicBool>,
@@ -241,7 +241,7 @@ pub fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Resul
     }
 }
 
-impl Supervisor {
+impl Worker {
     pub fn start(path: PathBuf) -> Result<Self> {
         Self::start_for(path, None)
     }
@@ -371,7 +371,7 @@ pub(crate) fn executable_identity(path: &Path) -> Option<(u64, u64, i64, i64, u6
         metadata.len(),
     ))
 }
-impl Drop for Supervisor {
+impl Drop for Worker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -395,12 +395,12 @@ pub(crate) fn install_signals_for_upgrade(
     .map_err(|e| Error::new("worker_error", e.to_string()))
 }
 pub fn serve() -> Result<()> {
-    let supervisor = Supervisor::start(super::database_path()?)?;
-    install_signals(supervisor.stop.clone())?;
+    let worker = Worker::start(super::database_path()?)?;
+    install_signals(worker.stop.clone())?;
     println!(
         "Hey Boss issue workers · monitoring enabled managed workers. Ctrl+C stops owned sessions."
     );
-    while !supervisor.stop.load(Ordering::Relaxed) {
+    while !worker.stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(200));
     }
     Ok(())
@@ -1157,7 +1157,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         );
     }
     println!("Projects: {}", v["config"]["projects"]);
-    if v["fleet"]["role"] == "agent" {
+    if matches!(v["fleet"]["role"].as_str(), Some("companion" | "agent")) {
         println!(
             "Fleet replica · {} local changes waiting to synchronize · workers can continue reserved work offline",
             v["fleet"]["pending_changes"]
@@ -1188,7 +1188,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
             .iter()
             .filter(|run| !run["finished_at"].is_null())
             .take(history_limit);
-        println!("Active sessions ({})", v["active"]);
+        println!("Active agents ({})", v["active"]);
         let mut printed_history = false;
         for run in active.chain(recent) {
             if !run["finished_at"].is_null() && !printed_history {
@@ -1277,8 +1277,8 @@ pub fn serve_instance_with_history(
         path: path.clone(),
         id: id.clone(),
     };
-    let supervisor = Supervisor::start_for(path, Some(id.clone()))?;
-    install_signals_for_upgrade(supervisor.stop.clone(), Some(supervisor.reload.clone()))?;
+    let worker = Worker::start_for(path, Some(id.clone()))?;
+    install_signals_for_upgrade(worker.stop.clone(), Some(worker.reload.clone()))?;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output;
     if tty {
         use crate::worker_tui::{backend::Client, runtime};
@@ -1298,16 +1298,16 @@ pub fn serve_instance_with_history(
                 history: history_limit > 0,
                 owned_worker: true,
             },
-            supervisor.stop.clone(),
+            worker.stop.clone(),
         )
         .map_err(|e| Error::new("worker_error", e.to_string()))?;
         if exit == runtime::Exit::Quit {
-            supervisor.reload.store(false, Ordering::Relaxed);
+            worker.reload.store(false, Ordering::Relaxed);
         }
     }
     let mut last = String::new();
     let mut heartbeat = Instant::now() - Duration::from_secs(30);
-    while !tty && !supervisor.stop.load(Ordering::Relaxed) {
+    while !tty && !worker.stop.load(Ordering::Relaxed) {
         let value = store.execute(&super::Request {
             version: 1,
             project: project.clone(),
@@ -1331,7 +1331,7 @@ pub fn serve_instance_with_history(
         };
         value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
         value["upgrading"] =
-            json!(supervisor.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
+            json!(worker.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
         let signature = serde_json::to_string(&value)?;
         if signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
             if json_output {
@@ -1345,15 +1345,15 @@ pub fn serve_instance_with_history(
             heartbeat = Instant::now();
         }
         for _ in 0..5 {
-            if supervisor.stop.load(Ordering::Relaxed) {
+            if worker.stop.load(Ordering::Relaxed) {
                 break;
             }
             thread::sleep(Duration::from_millis(200));
         }
     }
     let reload =
-        supervisor.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
-    drop(supervisor);
+        worker.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
+    drop(worker);
     if !reload && !store.worker_shutdown_requested(&id)? {
         crate::fleet::record_local_worker(&id, None, "stop")?;
     }

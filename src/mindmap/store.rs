@@ -331,7 +331,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
         })?;
     if replica {
         return Err(Error::invalid(
-            "Mindmaps are not replicated on fleet agents; use --host CONTROLLER (or HEY_BOSS_ISSUE_HOST) to read and author the authoritative map",
+            "Mindmaps are not replicated on fleet companions; use --host SUPERVISOR (or HEY_BOSS_ISSUE_HOST) to read and author the authoritative map",
         ));
     }
     if let Some(expected) = expected(op)

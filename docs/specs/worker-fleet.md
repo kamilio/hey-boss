@@ -16,35 +16,49 @@ Separate machine queues make existing work invisible and give users no reliable 
 
 ## Goals and Non-Goals
 
-The fleet MUST distribute desired configuration automatically, synchronize durable issue replicas, retain offline work, report connections and activity, and accept worker signals. The controller owns canonical queue order and conflict arbitration. Agents own their local execution processes and durable outgoing changes. Shared SQLite files over a network and consensus among multiple controllers are outside this contract.
+The fleet MUST distribute desired configuration automatically, synchronize durable issue replicas, retain offline work, report connections and activity, and accept worker signals. The supervisor owns canonical queue order and conflict arbitration. Companions own their local execution processes and durable outgoing changes. Shared SQLite files over a network and consensus among multiple supervisors are outside this contract.
 
 ## System Overview and Domain Model
 
-One controller maintains a configured inventory of SSH machines. Each agent has a stable machine ID, a local issue replica, local worker processes, an outgoing change journal, and an applied configuration revision. Workers retain stable IDs across restarts. An allocation identifies an issue by project ID and issue number and grants exclusive pickup to a machine. Connection state is distinct from worker execution state.
+The execution hierarchy is **Supervisor → Worker → Agent**. The supervisor
+coordinates the fleet and shared queue. A worker owns coding-agent processes,
+issue pickup, lifecycle and retries. An agent is a Codex coding session working
+on an issue. A companion is the per-machine service that synchronizes replicas
+and applies worker controls. CLI help, web labels, errors and documentation MUST
+use these terms consistently.
+
+One supervisor maintains a configured inventory of SSH machines. Each companion has a stable machine ID, a local issue replica, local worker processes, an outgoing change journal, and an applied configuration revision. Workers retain stable IDs across restarts. An allocation identifies an issue by project ID and issue number and grants exclusive pickup to a machine. Connection state is distinct from worker execution state.
 
 ## Protocol
 
-The transport MUST authenticate with configured SSH credentials and validate host keys. Protocol version 1 uses newline-delimited JSON over a persistent, bidirectional SSH channel. Frames MUST be bounded to 16 MiB. An agent sends `hello`, `heartbeat`, and `ack` messages. Heartbeats include durable outgoing changes, worker activity, configuration revision, and the pull cursor. The controller sends `configure`, `ping`, `pull`, and `signal` messages. Pulls carry journal receipts and a full initial snapshot or incremental canonical changes. Every signal has a stable request ID; replay MUST NOT apply it twice. Events have monotonic sequence numbers within a controller epoch. Connections MUST use a five-second heartbeat and become disconnected after fifteen seconds without a valid response.
+The CLI MUST accept `fleet supervisor` and `fleet companion`; legacy `fleet
+controller` and `fleet agent` commands MUST remain aliases. Persisted roles,
+service registrations, locks and protocol-v1 fields MUST remain compatible with
+existing installations. Status MUST expose the supervisor identity and connection
+using the new terminology while retaining legacy identity/connection keys for
+older clients. Worker stop/restart MUST leave the fleet supervisor running.
+
+The transport MUST authenticate with configured SSH credentials and validate host keys. Protocol version 1 uses newline-delimited JSON over a persistent, bidirectional SSH channel. Frames MUST be bounded to 16 MiB. A companion sends `hello`, `heartbeat`, and `ack` messages. Heartbeats include durable outgoing changes, worker activity, configuration revision, and the pull cursor. The supervisor sends `configure`, `ping`, `pull`, and `signal` messages. Pulls carry journal receipts and a full initial snapshot or incremental canonical changes. Every signal has a stable request ID; replay MUST NOT apply it twice. Events have monotonic sequence numbers within a supervisor epoch. Connections MUST use a five-second heartbeat and become disconnected after fifteen seconds without a valid response.
 
 ## Configuration
 
-The controller MUST derive its inventory from the existing machine configuration and distribute the controller identity, agent role, configuration revision, desired worker settings, and software build. Invalid configuration MUST leave the previous valid configuration active and expose an error. Agents MUST persist configuration atomically. The controller MUST reconcile reachable machines on startup, reconnect, configuration changes, and source changes. Deployment failures MUST be visible and retried with backoff. Explicit deployment MUST remain available.
+The supervisor MUST derive its inventory from the existing machine configuration and distribute the supervisor identity, companion role, configuration revision, desired worker settings, and software build. Invalid configuration MUST leave the previous valid configuration active and expose an error. Companions MUST persist configuration atomically. The supervisor MUST reconcile reachable machines on startup, reconnect, configuration changes, and source changes. Deployment failures MUST be visible and retried with backoff. Explicit deployment MUST remain available.
 
 ## Synchronization and Offline Processing
 
-Agents MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
+Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
-Agents MAY continue active work and pick up previously allocated work offline. Allocations MUST NOT expire solely because a machine disconnects. The controller and other agents MUST exclude another machine's allocations from pickup. Unallocated replicated issues MUST NOT be launched offline. Explicit human reassignment MAY revoke ownership and MUST be observable after synchronization. Offline issue creation MUST use controller-reserved number ranges; exhaustion MUST produce a visible error rather than collide with another machine.
+Companions MAY continue active work and pick up previously allocated work offline. Allocations MUST NOT expire solely because a machine disconnects. The supervisor and other companions MUST exclude another machine's allocations from pickup. Unallocated replicated issues MUST NOT be launched offline. Explicit human reassignment MAY revoke ownership and MUST be observable after synchronization. Offline issue creation MUST use supervisor-reserved number ranges; exhaustion MUST produce a visible error rather than collide with another machine.
 
-Concurrent changes to different fields MAY merge. Conflicting changes to the same field MUST be retained durably for review and MUST NOT silently overwrite canonical data. Offline completion MUST NOT close an issue whose requirements or ownership changed on the controller. Pending changes MUST survive agent, controller, and machine restarts. Local checkouts and process metadata MUST remain machine-specific. Fleet database operations MUST use the CLI bundled SQLite, version 3.51.3 or later, rather than the machine Python SQLite library.
+Concurrent changes to different fields MAY merge. Conflicting changes to the same field MUST be retained durably for review and MUST NOT silently overwrite canonical data. Offline completion MUST NOT close an issue whose requirements or ownership changed on the supervisor. Pending changes MUST survive companion, supervisor, and machine restarts. Local checkouts and process metadata MUST remain machine-specific. Fleet database operations MUST use the CLI bundled SQLite, version 3.51.3 or later, rather than the machine Python SQLite library.
 
 ## Signals and Recovery
 
-Pause MUST stop new pickup and retain active sessions. Resume MUST enable pickup. Stop MUST stop owned sessions before releasing capacity. Restart MUST stop the previous supervisor and its owned sessions before starting its replacement with the same worker ID and settings. It MUST leave the controller and companion running and MUST NOT acknowledge before the exact replacement registers. Lifecycle mutations MUST serialize across agent processes. Interrupted stop/start phases MUST survive process exits and exclude ordinary reconciliation until replay completes. Retry delays MUST be bounded to five minutes. A newer explicit control MUST supersede unfinished prior intent, and replay MUST NOT rewrite newer desired state. SSH heartbeats MUST remain responsive during a restart. Signals issued while disconnected MUST be queued and show pending state until acknowledged. A disconnected agent MUST continue its saved desired state without inventing new signals.
+Pause MUST stop new pickup and retain active sessions. Resume MUST enable pickup. Stop MUST stop owned sessions before releasing capacity. Restart MUST stop the previous worker and its owned agents before starting its replacement with the same worker ID and settings. It MUST leave the supervisor and companion running and MUST NOT acknowledge before the exact replacement registers. Lifecycle mutations MUST serialize across companion processes. Interrupted stop/start phases MUST survive process exits and exclude ordinary reconciliation until replay completes. Retry delays MUST be bounded to five minutes. A newer explicit control MUST supersede unfinished prior intent, and replay MUST NOT rewrite newer desired state. SSH heartbeats MUST remain responsive during a restart. Signals issued while disconnected MUST be queued and show pending state until acknowledged. A disconnected companion MUST continue its saved desired state without inventing new signals.
 
 ## Observability and Web Application
 
-The web view MUST show all configured machines, including offline machines; connection state; last heartbeat and synchronization; desired and applied configuration/build; active capacity; tasks; recent events; pending changes; conflicts; and signal acknowledgments. Worker history MUST be separated from active capacity. Browser mutations MUST use same-origin CSRF protection. Connected agents MUST send activity updates without requiring manual refresh.
+The web view MUST show all configured machines, including offline machines; connection state; last heartbeat and synchronization; desired and applied configuration/build; active capacity; tasks; recent events; pending changes; conflicts; and signal acknowledgments. Worker history MUST be separated from active capacity. Browser mutations MUST use same-origin CSRF protection. Connected companions MUST send activity updates without requiring manual refresh.
 
 ## Failure Model
 
@@ -54,11 +68,12 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 
 | Contract | Required evidence |
 | --- | --- |
+| Terminology and compatibility | Supervisor/companion help and legacy aliases; new status labels and old saved roles; worker restart preserves supervisor |
 | Durable offline changes | Disconnect, mutate and restart, reconnect, verify exactly one canonical result |
-| Exclusive pickup | Controller and two replicas compete; only allocated machine reserves |
+| Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique |
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |
-| Configuration | Revision change reaches agent, survives restart, and queues offline |
+| Configuration | Revision change reaches companion, survives restart, and queues offline |
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |
 | Connectivity | Heartbeat, EOF, timeout, and reconnect state transitions |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |

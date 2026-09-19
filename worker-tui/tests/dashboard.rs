@@ -222,20 +222,29 @@ fn busy_and_finishing_states_use_plain_language() {
 }
 
 #[test]
-fn controller_connectivity_remains_visible_with_stale_sessions() {
+fn supervisor_connectivity_remains_visible_with_stale_sessions() {
     let mut app = Dashboard::default();
     let mut value = snapshot();
-    value["fleet"] = json!({"role":"agent", "pending_changes":3,
-        "controller_connection":{"state":"connected", "last_sync":1}});
+    value["fleet"] = json!({"role":"companion", "pending_changes":3,
+        "supervisor_connection":{"state":"connected", "last_sync":1}});
     app.apply(value.clone());
-    assert!(screen(&app).contains("Main: connected"));
-    value["fleet"]["controller_connection"]["state"] = json!("disconnected");
+    assert!(screen(&app).contains("Supervisor: connected"));
+    value["fleet"]["supervisor_connection"]["state"] = json!("disconnected");
     app.apply(value);
-    assert!(screen(&app).contains("Main: disconnected"));
+    assert!(screen(&app).contains("Supervisor: disconnected"));
     assert!(screen(&app).contains("3 changes waiting to sync"));
     app.error = Some("Queue unavailable".into());
-    assert!(screen(&app).contains("Main: unknown"));
+    assert!(screen(&app).contains("Supervisor: unknown"));
     assert!(screen(&app).contains("Build dashboard"));
+}
+
+#[test]
+fn supervisor_connectivity_accepts_status_from_older_workers() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["fleet"] = json!({"role":"controller", "controller_connection":{"state":"local"}});
+    app.apply(value);
+    assert!(screen(&app).contains("Supervisor: this machine"));
 }
 
 #[test]

@@ -20,6 +20,10 @@ import time
 import uuid
 
 VERSION = 1
+# Compatibility boundary: keep protocol-v1 roles, service labels, filenames and
+# locks stable during rolling upgrades. User-facing terminology is Supervisor.
+SUPERVISOR_ROLE = 'controller'
+COMPANION_ROLE = 'agent'
 LIMIT = 16 * 1024 * 1024
 TABLES = {'projects': ['id'], 'agents': ['id'], 'issues': ['project_id', 'number'],
           'issue_subtasks': ['project_id', 'child_number'], 'comments': ['id'], 'events': ['id'], 'project_settings': ['project_id'],
@@ -198,7 +202,7 @@ def install_capture(db, role, node):
         db.execute('CREATE TABLE fleet_row_ids(origin TEXT NOT NULL,table_name TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER NOT NULL,PRIMARY KEY(origin,table_name,origin_id))')
         db.execute('INSERT INTO fleet_row_ids SELECT * FROM fleet_row_ids_legacy')
         db.execute('DROP TABLE fleet_row_ids_legacy')
-    if role == 'controller':
+    if role == SUPERVISOR_ROLE:
         for table in APPEND:
             db.execute('INSERT OR IGNORE INTO fleet_row_ids SELECT ?,?,id,id FROM ' + table, (node, table))
     for table in TABLES:
@@ -349,7 +353,7 @@ def accept_changes(db, node, changes):
             elif table == 'projects':
                 if old is None:
                     raise ValueError('New offline projects require registration before disconnection')
-                # Queue order and numbering are controller-owned; activity may merge.
+                # Queue order and numbering are supervisor-owned; activity may merge.
                 db.execute('UPDATE projects SET activity_at=max(activity_at,?) WHERE id=?', (after['activity_at'], after['id']))
             elif table == 'agents':
                 if after is not None:
@@ -416,7 +420,7 @@ def accept_changes(db, node, changes):
     return results
 
 
-def canonical_append(db, controller_node, table, row):
+def canonical_append(db, supervisor_node, table, row):
     origin = db.execute('SELECT origin,origin_id FROM fleet_row_ids WHERE table_name=? AND local_id=?', (table, row['id'])).fetchone()
     row = dict(row)
     if origin:
@@ -429,17 +433,17 @@ def canonical_append(db, controller_node, table, row):
                     data['comment_id'] = comment['origin_id']
                     row['data'] = encode(data)
         return {'origin': origin[0], 'row': row}
-    return {'origin': controller_node, 'row': row}
+    return {'origin': supervisor_node, 'row': row}
 
 
 def export_snapshot(db, node):
     if not db.in_transaction:
         db.execute('BEGIN IMMEDIATE')
-    controller_node = db.execute('SELECT node FROM fleet_meta WHERE id=1').fetchone()[0]
+    supervisor_node = db.execute('SELECT node FROM fleet_meta WHERE id=1').fetchone()[0]
     tables = {}
     for table in TABLES:
         rows = [dict(r) for r in db.execute('SELECT * FROM ' + table)]
-        tables[table] = [canonical_append(db, controller_node, table, r) for r in rows] if table in APPEND else rows
+        tables[table] = [canonical_append(db, supervisor_node, table, r) for r in rows] if table in APPEND else rows
     return {'tables': tables, 'cursor': db.execute('SELECT coalesce(max(seq),0) FROM fleet_outbox').fetchone()[0],
             'allocations': [dict(r) for r in db.execute('SELECT * FROM fleet_allocations')],
             'ranges': [dict(r) for r in db.execute('SELECT project_id,first_number,last_number FROM fleet_ranges WHERE node=?', (node,))]}
@@ -665,13 +669,13 @@ def worker_status():
 
 def ensure_worker(worker):
     config = worker['config']
-    # Create a worker definition first when it came from the controller.
+    # Create a worker definition first when it came from the supervisor.
     known = worker_overview()['workers']
     if not any(w['id'] == worker['id'] for w in known):
         request = {'version': 1, 'project': {'id': 'named:Fleet', 'name': 'Fleet'}, 'project_override': None,
                    'actor': local_actor(), 'operation': {'action': 'configure_worker', 'worker_id': None, 'config': config, 'if_version': None}, 'request_id': None}
         result = cli(['issue', 'rpc'], request)
-        # Stable IDs supplied by a controller must not be replaced by random IDs.
+        # Stable IDs supplied by a supervisor must not be replaced by random IDs.
         with connect_db(identity()[1]) as db:
             db.execute('UPDATE issue_workers SET id=? WHERE id=?', (worker['id'], result['worker_id']))
 
@@ -729,7 +733,7 @@ def start_worker(worker):
             time.sleep(.1)
         raise RuntimeError('Replacement worker did not register within 15 seconds')
     except BaseException:
-        # Only clean up the child we just created, never the controller/companion
+        # Only clean up the child we just created, never the supervisor/companion
         # or a PID recovered from an old registration.
         if process.poll() is None:
             process.terminate()
@@ -796,7 +800,7 @@ def apply_signal_locked(db, message):
     progress = json.loads(old['result']) if old and old['result'] and phase in ('stopping', 'starting') else {}
     prior = progress.get('prior_pid', worker['pid'])
     already_started = action == 'restart' and phase == 'starting' and worker['pid'] is not None and worker['pid'] != prior
-    config_path = STATE / ('fleet-main.json' if db.execute('SELECT role FROM fleet_meta WHERE id=1').fetchone()[0] == 'controller' else 'fleet-agent.json')
+    config_path = STATE / ('fleet-main.json' if db.execute('SELECT role FROM fleet_meta WHERE id=1').fetchone()[0] == SUPERVISOR_ROLE else 'fleet-agent.json')
     saved = read_json(config_path, {})
     for desired in saved.get('workers', []):
         if desired['id'] == worker['id']:
@@ -813,7 +817,7 @@ def apply_signal_locked(db, message):
             if worker['pid'] is None and worker['active'] == 0:
                 break
             if phase == 'starting' or time.monotonic() >= deadline:
-                raise RuntimeError('Previous supervisor or owned sessions have not stopped; no duplicate was launched')
+                raise RuntimeError('Previous worker or owned agents have not stopped; no duplicate was launched')
             time.sleep(.2)
     if action == 'pause':
         control_worker(worker['id'], 'pause')
@@ -837,16 +841,16 @@ def apply_signal_locked(db, message):
     return result
 
 
-def configure_agent(db, message):
+def configure_companion(db, message):
     with lifecycle_lock(wait=False) as acquired:
         if not acquired:
             return {'kind': 'ack', 'configuration_error': 'Worker restart in progress; configuration will retry'}
-        return configure_agent_locked(db, message)
+        return configure_companion_locked(db, message)
 
 
-def configure_agent_locked(db, message):
+def configure_companion_locked(db, message):
     previous = read_json(STATE / 'fleet-agent.json', {})
-    configured = {'role': 'agent', 'controller': message['controller'], 'revision': message['revision'],
+    configured = {'role': COMPANION_ROLE, 'controller': message['controller'], 'revision': message['revision'],
                   'workers': message.get('workers', previous.get('workers', []))}
     failures = configure_workers(db, configured['workers'])
     if failures:
@@ -920,7 +924,7 @@ def bootstrap_rows(db):
     state_set(db, 'bootstrap_last_seq', db.execute('SELECT coalesce(max(seq),0) FROM fleet_outbox').fetchone()[0])
 
 
-def agent_stdio():
+def companion_stdio():
     STATE.mkdir(parents=True, exist_ok=True)
     node, path = identity()
     with connect_db(path) as db:
@@ -960,7 +964,7 @@ def agent_stdio():
                 raise ValueError('Unsupported fleet protocol version')
             kind = message.get('kind')
             if kind == 'configure':
-                reply(configure_agent(db, message))
+                reply(configure_companion(db, message))
             elif kind == 'pull':
                 with db:
                     apply_pull(db, node, message['payload'], message.get('receipts', []))
@@ -1001,7 +1005,7 @@ def inventory():
     return hosts
 
 
-class Controller:
+class Supervisor:
     def __init__(self, path, node):
         self.path, self.node = path, node
         self.lock = threading.RLock()
@@ -1019,14 +1023,14 @@ class Controller:
         self.local_updated = time.time()
         self.source = (STATE / 'upgrade-source').read_text().strip() if (STATE / 'upgrade-source').exists() else None
         with connect_db(path) as db:
-            install_capture(db, 'controller', node)
+            install_capture(db, SUPERVISOR_ROLE, node)
             self.nodes = state_get(db, 'machines', {})
             for machine in self.nodes.values():
                 machine['state'] = 'disconnected'
                 if machine.get('deployment') == 'updating':
                     machine['deployment'] = 'outdated'
         if not (STATE / 'fleet-main.json').exists():
-            atomic_json(STATE / 'fleet-main.json', {'role': 'controller', 'workers': [{'id': w['id'], 'config': w['config'], 'intent': 'running' if w['config']['enabled'] else 'pause'} for w in self.local_workers]})
+            atomic_json(STATE / 'fleet-main.json', {'role': SUPERVISOR_ROLE, 'workers': [{'id': w['id'], 'config': w['config'], 'intent': 'running' if w['config']['enabled'] else 'pause'} for w in self.local_workers]})
 
     def event(self, host, kind, detail):
         with self.lock:
@@ -1045,10 +1049,14 @@ class Controller:
             with connect_db(self.path) as db:
                 signals = [dict(r) for r in db.execute('SELECT * FROM fleet_signals ORDER BY created_at DESC LIMIT 100')]
                 conflicts = [dict(r) for r in db.execute('SELECT id,node,seq,table_name,reason,created_at,substr(data,1,8192) AS saved_change FROM fleet_conflicts WHERE resolved=0 ORDER BY created_at DESC LIMIT 100')]
-            local = {'host': 'local', 'hostname': socket.gethostname(), 'node': self.node, 'role': 'controller', 'state': 'connected', 'heartbeat': self.local_updated, 'workers': self.local_workers, 'pending': 0, 'build': self.startup_build}
-            return {'ok': True, 'controller': self.node, 'epoch': self.epoch, 'sequence': self.sequence,
+            local = {'host': 'local', 'hostname': socket.gethostname(), 'node': self.node, 'role': 'supervisor', 'state': 'connected', 'heartbeat': self.local_updated, 'workers': self.local_workers, 'pending': 0, 'build': self.startup_build}
+            machines = json.loads(encode([v for k, v in self.nodes.items() if k != 'local']))
+            for machine in machines:
+                if machine.get('role') == COMPANION_ROLE:
+                    machine['role'] = 'companion'
+            return {'ok': True, 'supervisor': self.node, 'controller': self.node, 'epoch': self.epoch, 'sequence': self.sequence,
                     'desired_build': self.desired_build,
-                    'machines': [local, *json.loads(encode([v for k, v in self.nodes.items() if k != 'local']))], 'events': list(self.events), 'signals': signals, 'conflicts': conflicts}
+                    'machines': [local, *machines], 'events': list(self.events), 'signals': signals, 'conflicts': conflicts}
 
     def signal(self, request):
         with self.lock:
@@ -1097,7 +1105,7 @@ class Controller:
                     continue
                 if change.get('base_revision') != current:
                     identifier = key + ':' + str(change['local_revision'])
-                    db.execute('INSERT OR IGNORE INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at) VALUES(?,?,?,?,?,?,?)', (identifier, host, change['local_revision'], 'worker_configuration', encode(change), 'Controller configuration changed while local settings were edited', int(time.time()*1000)))
+                    db.execute('INSERT OR IGNORE INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at) VALUES(?,?,?,?,?,?,?)', (identifier, host, change['local_revision'], 'worker_configuration', encode(change), 'Supervisor configuration changed while local settings were edited', int(time.time()*1000)))
                 else:
                     definition = {k: change[k] for k in ('id', 'config', 'intent')}
                     old = next((w for w in updated if w['id'] == change['id']), None)
@@ -1158,6 +1166,7 @@ class Controller:
             process = None
             try:
                 self.update(host, state='connecting')
+                # Remote peers may still require the legacy agent command during upgrade.
                 script = 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"; hey-boss fleet agent --install >&2 && exec hey-boss fleet agent --stdio'
                 process = subprocess.Popen(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=yes', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', host, script],
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
@@ -1201,7 +1210,7 @@ class Controller:
                     workers = previous.get('desired_workers') or [{'id': w['id'], 'config': w['config'], 'intent': 'running' if w['config']['enabled'] else 'pause'} for w in hello['workers']]
                 workers = self.local_config(host, hello.get('local_config', []), workers)
                 revision = hashlib.sha256(encode({'controller': self.node, 'workers': workers}).encode()).hexdigest()[:16]
-                self.update(host, node=node, hostname=hello['hostname'], state='connected', role='agent', heartbeat=time.time(), build=hello['build'], workers=hello['workers'], desired_workers=workers, desired_revision=revision, applied_revision=hello.get('revision'), pending=hello.get('pending', 0), error=None)
+                self.update(host, node=node, hostname=hello['hostname'], state='connected', role=COMPANION_ROLE, heartbeat=time.time(), build=hello['build'], workers=hello['workers'], desired_workers=workers, desired_revision=revision, applied_revision=hello.get('revision'), pending=hello.get('pending', 0), error=None)
                 self.event(host, 'connected', 'Agent connected')
                 send(process.stdin, {'kind': 'configure', 'controller': self.node, 'revision': revision, 'workers': workers})
                 last_message = time.monotonic()
@@ -1307,7 +1316,7 @@ class Controller:
                     for discovered in observed:
                         if not any(w['id'] == discovered['id'] for w in desired):
                             desired.append({'id': discovered['id'], 'config': discovered['config'], 'intent': 'running' if discovered['config']['enabled'] else 'pause'})
-                    main = {'role': 'controller', 'workers': desired, 'revision': hashlib.sha256(encode(desired).encode()).hexdigest()[:16]}
+                    main = {'role': SUPERVISOR_ROLE, 'workers': desired, 'revision': hashlib.sha256(encode(desired).encode()).hexdigest()[:16]}
                     atomic_json(STATE / 'fleet-main.json', main)
                 with connect_db(self.path) as db:
                     failures = configure_workers(db, desired)
@@ -1359,7 +1368,7 @@ class Controller:
                         if self.nodes.get(entry['host'], {}).get('deployment') == 'outdated':
                             self.schedule_deploy(entry['host'])
                 if os.environ.get('HEY_BOSS_FLEET_SUPERVISED') == '1' and subprocess.check_output([str(BINARY), '--version'], text=True).strip() != self.startup_build:
-                    self.event('local', 'deployment', 'Controller reloading updated software')
+                    self.event('local', 'deployment', 'Supervisor reloading updated software')
                     STOP.set()
             except Exception as error:
                 self.event('local', 'error', str(error))
@@ -1383,12 +1392,12 @@ def local_request(value):
         return json.loads(output)
 
 
-def controller():
+def supervisor():
     STATE.mkdir(parents=True, exist_ok=True)
     lock = open(STATE / 'fleet-controller.lock', 'a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     node, path = identity()
-    app = Controller(path, node)
+    app = Supervisor(path, node)
     socket_path = STATE / 'fleet.sock'
     socket_path.unlink(missing_ok=True)
     class Handler(socketserver.StreamRequestHandler):
@@ -1419,7 +1428,7 @@ def controller():
                 elif value.get('kind') == 'signal':
                     result = app.signal(value)
                 else:
-                    raise ValueError('Unknown controller request')
+                    raise ValueError('Unknown supervisor request')
             except (BrokenPipeError, ConnectionResetError):
                 return
             except Exception as error:
@@ -1438,7 +1447,7 @@ def controller():
 
 def install_service(role):
     STATE.mkdir(parents=True, exist_ok=True)
-    command = [str(BINARY), 'fleet', role]
+    command = [str(BINARY), 'fleet', 'supervisor' if role == SUPERVISOR_ROLE else 'companion']
     if sys.platform == 'darwin':
         import plistlib
         label = 'local.hey-boss-fleet-' + role
@@ -1452,7 +1461,8 @@ def install_service(role):
     elif sys.platform.startswith('linux'):
         path = pathlib.Path.home() / '.config/systemd/user' / ('hey-boss-fleet-' + role + '.service')
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('[Unit]\nDescription=Hey Boss fleet ' + role + '\n[Service]\nExecStart=' + shlex.join(command) + '\nEnvironment=HEY_BOSS_FLEET_SUPERVISED=1\nKillMode=process\nRestart=always\nRestartSec=10\n[Install]\nWantedBy=default.target\n')
+        name = 'supervisor' if role == SUPERVISOR_ROLE else 'companion'
+        path.write_text('[Unit]\nDescription=Hey Boss fleet ' + name + '\n[Service]\nExecStart=' + shlex.join(command) + '\nEnvironment=HEY_BOSS_FLEET_SUPERVISED=1\nKillMode=process\nRestart=always\nRestartSec=10\n[Install]\nWantedBy=default.target\n')
         subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
         subprocess.run(['systemctl', '--user', 'enable', '--now', path.name], check=True)
         subprocess.run(['systemctl', '--user', 'restart', path.name], check=True)
@@ -1460,7 +1470,7 @@ def install_service(role):
         raise RuntimeError('Automatic startup requires macOS launchd or Linux systemd')
 
 
-def agent_daemon():
+def companion_daemon():
     STATE.mkdir(parents=True, exist_ok=True)
     lock = open(STATE / 'fleet-agent.lock', 'a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1493,10 +1503,10 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     setup = sub.add_parser('setup')
     setup.add_argument('--source')
-    sub.add_parser('controller')
-    agent = sub.add_parser('agent')
-    agent.add_argument('--stdio', action='store_true')
-    agent.add_argument('--install', action='store_true')
+    sub.add_parser('supervisor', aliases=['controller'])
+    companion = sub.add_parser('companion', aliases=['agent'])
+    companion.add_argument('--stdio', action='store_true')
+    companion.add_argument('--install', action='store_true')
     sub.add_parser('status')
     sig = sub.add_parser('signal')
     sig.add_argument('host')
@@ -1512,20 +1522,20 @@ def main():
                 raise ValueError('Source must be a hey-boss checkout')
             STATE.mkdir(parents=True, exist_ok=True)
             (STATE / 'upgrade-source').write_text(str(source) + '\n')
-        install_service('controller')
-        print('Automatic fleet controller started. Workers view: http://127.0.0.1:4781/workers')
-    elif args.command == 'controller':
-        controller()
-    elif args.command == 'agent':
+        install_service(SUPERVISOR_ROLE)
+        print('Automatic fleet supervisor started. Workers view: http://127.0.0.1:4781/workers')
+    elif args.command in ('supervisor', 'controller'):
+        supervisor()
+    elif args.command in ('companion', 'agent'):
         if args.install:
             version = subprocess.check_output([str(BINARY), '--version'], text=True).strip()
             if read_json(STATE / 'fleet-agent-service.json', {}).get('build') != version:
-                install_service('agent')
+                install_service(COMPANION_ROLE)
                 atomic_json(STATE / 'fleet-agent-service.json', {'build': version})
         elif args.stdio:
-            agent_stdio()
+            companion_stdio()
         else:
-            agent_daemon()
+            companion_daemon()
     elif args.command == 'status':
         print(json.dumps(local_request({'kind': 'status'}), indent=2))
     elif args.command == 'signal':
