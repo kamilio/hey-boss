@@ -115,7 +115,13 @@ Attach one or more with `hey-boss issue pr add NUMBER URL`; list/remove through
 `issue pr list/remove`. They remain visible in CLI and UI.
 Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
 A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The editable prompt is
-`Assign and implement \`{{issue_command}}\`. {{commit_instruction}}`.
+
+```text
+Claim and implement `{{issue_command}}`.
+
+{{commit_instruction}}
+```
+
 The project Instructions UI previews the exact two sentences: without a remote commit only; with a
 remote push main, or open/attach PRs when enabled. No hidden block is appended.
 Use `{{create_issue_command poe-code}}` in custom instructions to expand a create

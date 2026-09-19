@@ -221,7 +221,9 @@ returned by the claim command. Persistent sessions can be resumed with
 The default prompt is exactly two dynamic sentences:
 
 ```text
-Assign and implement `{{issue_command}}`. {{commit_instruction}}
+Claim and implement `{{issue_command}}`.
+
+{{commit_instruction}}
 ```
 
 `{{issue_command}}` retrieves the reserved issue. Without a Git remote the

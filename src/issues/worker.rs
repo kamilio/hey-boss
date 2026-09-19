@@ -17,7 +17,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const DEFAULT_PROMPT: &str = "Assign and implement `{{issue_command}}`. {{commit_instruction}}";
+pub const DEFAULT_PROMPT: &str =
+    "Claim and implement `{{issue_command}}`.\n\n{{commit_instruction}}";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
