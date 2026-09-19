@@ -1482,6 +1482,34 @@ class MobileIssues:
             # Lost acknowledgments replay the same native idempotency key.
             self.call('/api/bridge/issues/' + request_id + '/result', outcome)
 
+        self.sync_artifacts(projects, visible)
+
+    def sync_artifacts(self, projects, visible):
+        for request in self.call('/api/bridge/artifacts').get('requests', []):
+            request_id = request['id']
+            if not isinstance(request_id, str) or not 0 < len(request_id) <= 128 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in request_id):
+                raise ValueError('Invalid artifact transport ID')
+            project = projects.get(request.get('project'))
+            operation = request.get('operation', {})
+            resource_read = operation.get('action') == 'view' or operation.get('action') == 'mindmap' and operation.get('operation', {}).get('command') in ('view', 'show')
+            if operation.get('action') != 'artifact' and not resource_read:
+                outcome = {'ok': False, 'error': {'code': 'invalid_input', 'message': 'Only artifact operations are accepted'}}
+            elif project is None:
+                outcome = {'ok': False, 'error': {'code': 'not_found', 'message': 'Project is no longer registered'}}
+            else:
+                writing = not resource_read and operation.get('operation', {}).get('command') not in ('list', 'view', 'links', 'preview')
+                key = 'artifact-mobile:' + request_id if writing else None
+                accepted = False
+                if writing and project['id'] not in visible:
+                    with contextlib.closing(sqlite3.connect(self.path)) as db:
+                        accepted = db.execute('SELECT EXISTS(SELECT 1 FROM requests WHERE project_id=? AND actor=? AND request_id=?)',
+                            (project['id'], 'human:boss', key)).fetchone()[0]
+                if project['id'] not in visible and not accepted:
+                    outcome = {'ok': False, 'error': {'code': 'not_found', 'message': 'Project is hidden; restore it before accessing artifacts'}}
+                else:
+                    outcome = self.rpc(operation, project, key)
+            self.call('/api/bridge/artifacts/' + request_id + '/result', outcome)
+
     def loop(self):
         while not STOP.is_set():
             try:

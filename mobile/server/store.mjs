@@ -15,6 +15,8 @@ export class HubStore{
    CREATE TABLE IF NOT EXISTS issue_creations(id TEXT PRIMARY KEY,device TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',number INTEGER,error TEXT,created INTEGER NOT NULL);
    CREATE INDEX IF NOT EXISTS issue_creations_pending ON issue_creations(status,created,id);
    CREATE INDEX IF NOT EXISTS issue_creations_device ON issue_creations(device,created DESC);
+   CREATE TABLE IF NOT EXISTS artifact_requests(id TEXT PRIMARY KEY,device TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',result TEXT,created INTEGER NOT NULL);
+   CREATE INDEX IF NOT EXISTS artifact_requests_pending ON artifact_requests(status,created);
    INSERT OR IGNORE INTO metadata VALUES('revision','0');`);
  }
  revision(){return Number(this.db.prepare("SELECT value FROM metadata WHERE key='revision'").get().value);}
@@ -110,4 +112,25 @@ export class HubStore{
   const r=this.db.prepare("UPDATE issue_creations SET status=?,number=?,error=? WHERE id=? AND status='pending'").run(result.status,result.number??null,result.error??null,id);if(r.changes)this.next();
  }
  close(){this.db.close();}
+ artifactRequest(device,value){return this.transaction(()=>{
+  const commands=['list','view','preview','create','edit','archive','comment','resolve','link','unlink','links'];
+  const resourceRead=value?.operation?.action==='view'||value?.operation?.action==='mindmap'&&['view','show'].includes(value.operation.operation?.command);
+  if(!value||!resourceRead&&(value.operation?.action!=='artifact'||!commands.includes(value.operation.operation?.command))||value.host)throw new HubError(400,'Only project artifact operations are accepted');
+  const reading=resourceRead||['list','view','links','preview'].includes(value.operation.operation.command);
+  if(!reading&&(typeof value.request_id!=='string'||!/^[-a-zA-Z0-9_]{1,128}$/.test(value.request_id)))throw new HubError(400,'An artifact mutation request ID is required');
+  const id=reading?token():value.request_id;
+  const payload=JSON.stringify({project:value.project,operation:value.operation});
+  if(Buffer.byteLength(payload)>2*1048576)throw new HubError(400,'Artifact request is too large');
+  const existing=this.db.prepare('SELECT * FROM artifact_requests WHERE id=?').get(id);
+  if(existing){if(existing.device!==device||existing.payload!==payload)throw new HubError(409,'ID belongs to another request');return this.artifactResult(device,id);}
+  if(!this.issueProjects().some(p=>p.id===value.project))throw new HubError(400,'Choose a registered project; reconnect the supervisor to refresh projects');
+  if(this.db.prepare("SELECT count(*) AS n FROM artifact_requests WHERE device=? AND status='pending'").get(device).n>=100)throw new HubError(503,'Too many pending requests; reconnect the supervisor');
+  // This is a transport journal, never an authoritative artifact store.
+  this.db.prepare("DELETE FROM artifact_requests WHERE status='done' AND created<?").run(Date.now()-7*86400000);
+  this.db.prepare('INSERT INTO artifact_requests(id,device,payload,created) VALUES(?,?,?,?)').run(id,device,payload,Date.now());
+  return this.artifactResult(device,id);
+ });}
+ artifactResult(device,id){const row=this.db.prepare('SELECT * FROM artifact_requests WHERE device=? AND id=?').get(device,id);if(!row)throw new HubError(404,'Artifact request not found');return {id:row.id,status:row.status,result:row.result?JSON.parse(row.result):null};}
+ pendingArtifacts(){return this.db.prepare("SELECT id,payload FROM artifact_requests WHERE status='pending' ORDER BY created,id LIMIT 10").all().map(r=>({id:r.id,...JSON.parse(r.payload)}));}
+ finishArtifact(id,result){if(typeof result?.ok!=='boolean'||Buffer.byteLength(JSON.stringify(result))>32*1048576)throw new HubError(400,'Invalid artifact transport result');if(!this.db.prepare('SELECT id FROM artifact_requests WHERE id=?').get(id))throw new HubError(404,'Artifact request not found');this.db.prepare("UPDATE artifact_requests SET status='done',result=? WHERE id=? AND status='pending'").run(JSON.stringify(result),id);}
 }

@@ -51,7 +51,7 @@ every five seconds, using the existing `mobile.json` beside its authoritative
 `issues.db`. Run `hey-boss fleet setup` if the supervisor is not installed. Only
 the supervisor consumes this queue; companions receive issues through fleet sync.
 Upgrade the CLI with `hey-boss upgrade --source /path/to/hey-boss` and deploy the
-mobile app with `flyctl deploy --ha=false` from `mobile/`.
+mobile app with `flyctl deploy --config mobile/fly.toml --dockerfile mobile/Dockerfile --ha=false` from the repository root.
 
 **Pending** means the submission is saved on the phone or accepted into Fly's
 persistent SQLite queue, as indicated on screen. Accepted submissions survive an

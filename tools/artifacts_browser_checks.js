@@ -3,6 +3,7 @@ async page => {
   const checks=[],errors=[];
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   page.on('pageerror',e=>errors.push(e.message));
+  if(!await page.locator('#artifact-editor').count())await page.getByRole('button',{name:'New artifact',exact:true}).click();
   await page.getByRole('textbox',{name:'Title',exact:true}).fill('Browser plan');
   await page.getByRole('textbox',{name:'Markdown',exact:true}).fill('# Plan\n\nA **selected** phrase.\n\n- [x] Verified');
   await page.reload();

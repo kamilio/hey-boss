@@ -3,7 +3,7 @@ import {Button,TextField,TextArea} from '@radix-ui/themes';
 import {emptyIssueDraft,loadIssueDraft,saveIssueDraft,issuePayload} from './issue-draft';
 
 export default function Issues({api}){
- const [draft,setDraft]=useState(()=>loadIssueDraft(localStorage));
+ const [draft,setDraft]=useState(()=>{const draft=loadIssueDraft(localStorage);if(!draft.submitted){try{const project=JSON.parse(localStorage.getItem("hey-boss-issues-project"));if(typeof project==="string"&&project)draft.project=project;}catch{}}return draft;});
  const [state,setState]=useState({projects:[],creations:[],connected:false});
  const [error,setError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
  const current=useRef(draft),running=useRef(false),mounted=useRef(true);
@@ -65,7 +65,7 @@ export default function Issues({api}){
   <form className="issue-form glass" onSubmit={submit}>
    <h2>Create an issue</h2>
    <label htmlFor="issue-project">Project</label>
-   <select id="issue-project" required value={draft.project} disabled={draft.submitted} onChange={e=>change('project',e.target.value)}>
+   <select id="issue-project" required value={draft.project} disabled={draft.submitted} onChange={e=>{change('project',e.target.value);try{localStorage.setItem('hey-boss-issues-project',JSON.stringify(e.target.value));}catch{}}}>
     <option value="">Select a project</option>
     {draft.project&&!state.projects.some(p=>p.id===draft.project)&&<option value={draft.project}>{draft.project}</option>}
     {state.projects.map(project=><option key={project.id} value={project.id}>{project.name}</option>)}
@@ -85,7 +85,7 @@ export default function Issues({api}){
   <div className="issue-deliveries"><h2>Your submissions</h2><p className="fine">{state.connected?'Supervisor connected':'Supervisor offline — accepted issues stay queued on the server.'}</p>
    {!state.creations.length&&<p className="fine">Your submitted issues will appear here.</p>}
    {state.creations.map(creation=><article className="issue-delivery glass" key={creation.requestID}>
-    <span className="fine">{state.projects.find(p=>p.id===creation.project)?.name||creation.project}</span><h3>{creation.title}</h3>
+    <a href={`/project-resource#${new URLSearchParams({project:creation.project,issue:creation.number})}`} hidden={!creation.number}>Open issue and artifacts</a><span className="fine">{state.projects.find(p=>p.id===creation.project)?.name||creation.project}</span><h3>{creation.title}</h3>
     <p role="status">{creation.status==='synced'?`Synced · #${creation.number}`:creation.status==='error'?'Error':'Pending — waiting for the supervisor'}</p>
     {creation.status==='error'&&<><p className="reader-error">{creation.error}</p><Button variant="soft" disabled={draft.submitted} onClick={()=>restore(creation)}>Edit saved draft</Button></>}
    </article>)}

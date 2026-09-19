@@ -683,3 +683,5 @@ such as `@github.com/kamilio/poe-code` when names are ambiguous. Mentions are re
 from the submitted title. Repeated mentions must identify the same project.
 Unknown projects and conflicting mentions show an error; email addresses stay
 unchanged, and `\@poe-code` keeps literal `@poe-code` text in the title.
+
+Persistent project Markdown documents, revision-checked editing, comments and issue/mindmap links are available through **Artifacts** in the web menu and `hey-boss artifact`. See [Project artifacts](docs/artifacts.md).

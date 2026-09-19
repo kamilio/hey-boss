@@ -79,5 +79,33 @@ class MobileIssuesTests(unittest.TestCase):
                 self.bridge.sync()
         self.assertEqual(self.results, [])
 
+    def test_artifact_bridge_replays_one_document_and_reports_conflicts(self):
+        request = {'id': 'artifact-create', 'project': 'named:Phone tests', 'operation': {
+            'action': 'artifact', 'operation': {'command': 'create', 'title': 'Phone plan', 'body': '# Plan', 'issue': 1}}}
+        results = []
+        def hub(path, body=None):
+            if path == '/api/bridge/artifacts':
+                return {'requests': [request]}
+            if path.endswith('/result'):
+                results.append(body)
+            return {'ok': True}
+        projects = {'named:Phone tests': {'id': 'named:Phone tests', 'name': 'Phone tests'}}
+        with mock.patch.object(self.bridge, 'call', side_effect=hub):
+            self.bridge.sync_artifacts(projects, set(projects))
+            self.bridge.sync_artifacts(projects, set(projects))
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['artifact']['id'], results[1]['artifact']['id'])
+        with fleet.connect_db(self.path) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM artifacts').fetchone()[0], 1)
+        artifact = results[0]['artifact']['id']
+        request.update(id='artifact-edit', operation={'action': 'artifact', 'operation': {
+            'command': 'edit', 'id': artifact, 'body': 'Updated', 'if_version': 1}})
+        with mock.patch.object(self.bridge, 'call', side_effect=hub):
+            self.bridge.sync_artifacts(projects, set(projects))
+        request['id'] = 'stale-edit'
+        with mock.patch.object(self.bridge, 'call', side_effect=hub):
+            self.bridge.sync_artifacts(projects, set(projects))
+        self.assertEqual(results[-1]['error']['code'], 'conflict')
+
 if __name__ == '__main__':
     unittest.main()
