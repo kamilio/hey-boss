@@ -1030,3 +1030,25 @@ clicks, theme styles and horizontal bounds passed across dark/light themes at
 `out/mm-search-arrow-style-before.txt`, `out/mm-search-controls-after-chrome.txt`,
 `out/mm-search-controls-after-webkit.txt`; the updated screenshot was reviewed.
 This small HTML-only refinement needs one final fleet build/assets check.
+
+All four pinned browser endurance runs completed successfully at the 19:40 UTC
+deadline: large-map baseline 3,238 rounds / 97,140 assertions (9,688 seconds),
+focus baseline 892 / 16,948 (7,520 seconds), post-touch/Safari pin 144 / 9,360
+(4,330 seconds), and final navigation-strip CSS pin 42 / 11,550 (1,452 seconds).
+Each terminal tool result exited zero, reached its deadline and reported zero
+failures. These are distinct pinned UI editions; the final CSS pin precedes the
+header simplification and icon refinement. Final editions have separate native
+integration checks. Evidence `out/mm-stability-final-summary.json` and the four
+`out/mm-*-ui-soak-20260919/samples.jsonl` files.
+
+Browser RSS sampling completed with 126 samples per tracked group. First/last
+ten-sample medians (KiB): large Chrome 706,192 / 509,704; focus Chrome
+580,728 / 478,872; later Chrome 606,152 / 357,184; WebKit launcher
+53,040 / 42,776. Large native server sampling completed with 317 samples,
+range 5,104–275,664 KiB and first/last medians 165,200 / 86,368. These are OS
+process observations under changing system load, not JavaScript heap measures;
+Chrome sums can double-count shared memory, and WebKit content processes that
+reparented are excluded. Finite runs do not establish indefinite leak freedom.
+The earlier small-fixture native hour has separate RSS evidence and is not this
+10,000-node server. Final fleet/native integration is awaiting the concurrent
+native-window/shared quick-add changes; no other installer was stopped.
