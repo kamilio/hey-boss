@@ -783,3 +783,22 @@ intentionally covers the map controls. Evidence:
 `out/mm-map-fit-test-before.txt`, `out/mm-map-fit-stale-test-before.txt`.
 The 30 general browser assertions also passed with the Fit adjustment on the
 10,000-node/20,000-link fixture (`out/mm-map-scale-fit-checks.txt`).
+
+Fit is installed as build `d0f12d7313009daa` with all four served assets
+matching main `27814be` (`out/mm-installed-fit-assets-result.json`). A real
+Atlas→Platform project switch retains the whole-width camera: initial transform
+equals manual Fit (`out/mm-map-fit-project-switch.txt`, two assertions).
+
+The overview was mapping clicks across the entire padded button instead of its
+canvas. It now maps the drawn canvas coordinates and clamps padding clicks to
+the graph boundary. Added three phone/keyboard browser assertions, bringing the
+general suite to 33. The corrected regression check fails against the preceding
+HEAD renderer served through an isolated mock route, and passes current assets;
+the mock route is removed in finally. Click tests compare the browser's actual
+event coordinates because Chrome quantizes mouse coordinates. Earlier probes
+that assumed fractional click precision are retained as unsuccessful evidence.
+Authoritative evidence: `out/mm-map-overview-baseline-regression.txt`,
+`out/mm-map-overview-checks-final.txt`. Six additional desktop checks on the
+expanded 1,117,172-unit-high world pass at 1280 and 900 pixels, including padding
+boundaries (`out/mm-map-overview-large-final.txt`). Layout/index assertions,
+JavaScript syntax, own whitespace and debug compilation pass.
