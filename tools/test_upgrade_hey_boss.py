@@ -17,7 +17,7 @@ class UpgradeTests(unittest.TestCase):
     def source(self, root):
         for name in upgrade.PAYLOAD:
             path = root / name
-            if name in ('src', 'skills/hey-boss', 'assets', 'tests'):
+            if name in ('src', 'worker-tui/src', 'skills/hey-boss', 'assets', 'tests'):
                 path.mkdir(parents=True)
                 (path / 'fixture').write_text(name)
             else:
@@ -33,6 +33,16 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(upgrade.build_id(left), upgrade.build_id(right))
             (right / 'tools/upgrade_hey_boss.py').write_text('Changed updater')
             self.assertNotEqual(upgrade.build_id(left), upgrade.build_id(right))
+
+    def test_worker_dashboard_sources_are_deployed_and_hashed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.source(root)
+            self.assertIn('worker-tui/Cargo.toml', upgrade.PAYLOAD)
+            self.assertIn('worker-tui/src', upgrade.PAYLOAD)
+            original = upgrade.build_id(root)
+            (root / 'worker-tui/src/runtime.rs').write_text('Changed dashboard')
+            self.assertNotEqual(original, upgrade.build_id(root))
 
     def test_unreachable_host_does_not_stop_remaining_rollout(self):
         with tempfile.TemporaryDirectory() as directory:
