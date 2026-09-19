@@ -273,7 +273,15 @@ out issues become eligible again while open and unassigned after a retry delay
 that grows from 30 seconds to at most five minutes. Input and approval requests
 require explicit retry; no decision is approved automatically. Claims and PR instructions are
 returned by the claim command. Persistent sessions can be resumed with
-`codex resume SESSION_ID`. Approval requests block for manual resumption.
+`codex resume SESSION_ID`. Workers automatically resume the latest unfinished
+Codex session for an eligible issue on the same machine and checkout, including
+after stop/start, restart, a killed supervisor, or a timeout retry. The original
+prompt template is rendered again so the resumed agent claims the issue before
+continuing. Starting a worker with a new worker ID also resumes available sessions.
+Each attempt has a new run ID while retaining its Codex session ID. Existing
+claims still block pickup; completed attempts start a fresh session if reopened.
+A resume failure retains the saved session ID for retry rather than discarding
+the conversation. Approval requests still block for explicit manual retry.
 
 The default prompt is exactly two dynamic sentences:
 

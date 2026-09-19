@@ -450,8 +450,9 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_deferred_subtasks' AND type='table')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url')", [], |r| r.get::<_, i64>(0))? < 2 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history')", [], |r| r.get::<_, i64>(0))? < 3 {
             db.execute_batch(mindmap::INDEXES)?;
+            db.execute_batch(workers::HISTORY_INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
         // Normalize it without terminating supervisors that are still draining.

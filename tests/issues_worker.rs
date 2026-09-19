@@ -282,14 +282,163 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
     let mut worker = f.worker();
-    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let first = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let session = first["runs"][0]["session_id"].clone();
     worker.stop();
     let issue = f.cli(&["view", "1"])["issue"].clone();
     assert_eq!(issue["state"], "open");
     assert!(issue["assignee"].is_null());
     assert_eq!(f.cli(&["worker", "status"])["eligible"], 1);
+    f.cli(&["claim", "1"]);
     let mut replacement = f.worker();
-    f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    f.wait(|s| s["worker_id"] != first["worker_id"] && s["active"] == 0);
+    assert_eq!(
+        f.cli(&["view", "1"])["issue"]["assignee"],
+        "human:worker-test"
+    );
+    f.cli(&["unassign", "1"]);
+    let resumed =
+        f.wait(|s| s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number());
+    assert_eq!(resumed["runs"][0]["session_id"], session);
+    assert_eq!(
+        f.cli(&["view", "1"])["issue"]["assignee"],
+        format!("codex:{}", session.as_str().unwrap())
+    );
+    let protocol = f.transcript();
+    assert_eq!(
+        protocol
+            .iter()
+            .filter(|v| v["method"] == "thread/start")
+            .count(),
+        1
+    );
+    let resume = protocol
+        .iter()
+        .find(|v| v["method"] == "thread/resume")
+        .unwrap();
+    assert_eq!(resume["params"]["threadId"], session);
+    let prompts: Vec<_> = protocol
+        .iter()
+        .filter(|v| v["method"] == "turn/start")
+        .map(|v| v["params"]["input"][0]["text"].clone())
+        .collect();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], prompts[1]);
+    replacement.stop();
+}
+
+#[test]
+fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
+    let f = Fixture::new("timeout-resume");
+    fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
+    f.setup(&["--claim-timeout", "5"]);
+    let mut worker = f.worker();
+    let timed_out = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(timed_out["runs"][0]["state"], "claim_timeout");
+    let session = timed_out["runs"][0]["session_id"].clone();
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+    worker.stop();
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute("UPDATE worker_runs SET finished_at=0", [])
+        .unwrap();
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    let mut replacement = f.worker();
+    let resumed = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    assert_eq!(resumed["runs"][0]["session_id"], session);
+    assert_eq!(
+        f.cli(&["view", "1"])["issue"]["assignee"],
+        format!("codex:{}", session.as_str().unwrap())
+    );
+    replacement.stop();
+}
+
+#[test]
+fn a_completed_session_is_not_resumed_when_the_issue_is_reopened() {
+    let f = Fixture::new("completed-session-reopen");
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let completed = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(completed["runs"][0]["state"], "completed");
+    let session = completed["runs"][0]["session_id"].clone();
+    worker.stop();
+    f.cli(&["reopen", "1"]);
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    let mut replacement = f.worker();
+    let reopened =
+        f.wait(|s| s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number());
+    assert_ne!(reopened["runs"][0]["session_id"], session);
+    assert!(
+        !f.transcript()
+            .iter()
+            .any(|v| v["method"] == "thread/resume")
+    );
+    replacement.stop();
+}
+
+#[test]
+fn saved_sessions_are_not_reused_on_another_machine_or_checkout() {
+    for mismatch in ["machine", "checkout"] {
+        let f = Fixture::new(&format!("resume-{mismatch}-mismatch"));
+        fs::write(f.root.join("mode.txt"), "delay").unwrap();
+        f.setup(&[]);
+        let mut worker = f.worker();
+        let first = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+        let session = first["runs"][0]["session_id"].clone();
+        worker.stop();
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        if mismatch == "machine" {
+            db.execute("UPDATE worker_runs SET machine='another-machine'", [])
+                .unwrap();
+        } else {
+            db.execute(
+                "UPDATE worker_runs SET job=json_set(job,'$.config.cwd','/another-checkout')",
+                [],
+            )
+            .unwrap();
+        }
+        let mut replacement = f.worker();
+        let current = f.wait(|s| {
+            s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number()
+        });
+        assert_ne!(current["runs"][0]["session_id"], session, "{mismatch}");
+        assert!(
+            !f.transcript()
+                .iter()
+                .any(|v| v["method"] == "thread/resume")
+        );
+        replacement.stop();
+    }
+}
+
+#[test]
+fn a_resume_error_preserves_the_saved_session_for_retry() {
+    let f = Fixture::new("resume-error");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let first = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let session = first["runs"][0]["session_id"].clone();
+    worker.stop();
+    fs::write(f.root.join("mode.txt"), "resume-unavailable").unwrap();
+    let mut replacement = f.worker();
+    let failed =
+        f.wait(|s| s["runs"][0]["state"] == "failed" && s["runs"][0]["finished_at"].is_number());
+    assert_eq!(failed["runs"][0]["session_id"], session);
+    assert!(
+        failed["runs"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("locked by another writer")
+    );
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+    assert_eq!(
+        f.transcript()
+            .iter()
+            .filter(|v| v["method"] == "thread/start")
+            .count(),
+        1
+    );
     replacement.stop();
 }
 
@@ -674,13 +823,30 @@ fn orphan_recovery_stops_process_and_preserves_session() {
     let s = f.wait(|s| s["runs"][0]["state"] == "running");
     let pid = s["runs"][0]["pid"].as_u64().unwrap() as i32;
     let session = s["runs"][0]["session_id"].clone();
+    let old_run = s["runs"][0]["id"].clone();
     let _ = w.0.kill();
     let _ = w.0.wait();
     let mut replacement = f.worker();
-    let s = f.wait(|s| s["runs"][0]["finished_at"].is_number());
-    assert_eq!(s["runs"][0]["state"], "interrupted");
-    assert_eq!(s["runs"][0]["session_id"], session);
-    assert_eq!(s["active"], 0);
+    f.wait(|s| {
+        s["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["pid"] == replacement.0.id() && w["active"] == 1)
+            && f.cli(&["view", "1"])["issue"]["assignee"]
+                == format!("codex:{}", session.as_str().unwrap())
+    });
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    let old_state: String = db
+        .query_row(
+            "SELECT state FROM worker_runs WHERE id=?1",
+            [old_run.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_state, "interrupted");
+    let active_session: String = db.query_row("SELECT session_id FROM worker_runs WHERE owner_pid=?1 AND claimed_at IS NOT NULL AND finished_at IS NULL", [replacement.0.id()], |r| r.get(0)).unwrap();
+    assert_eq!(active_session, session.as_str().unwrap());
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     replacement.stop();
 }

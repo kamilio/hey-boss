@@ -476,9 +476,19 @@ pub(super) fn reserve(
                 source: "unclaimed worker reservation".into(),
             };
             let issue = json!(get_issue(&tx, &project.id, number, false)?);
+            // Thread rollouts and unfinished checkout edits belong to this host
+            // and directory. A completed latest attempt starts fresh when reopened.
+            let resume_session: Option<String> = tx.query_row(
+                "SELECT coalesce(session_id,json_extract(job,'$.resume_session')) FROM worker_runs
+                 WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
+                  ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
+                 AND state!='completed' AND json_extract(job,'$.config.cwd')=?4",
+                params![project.id, number, machine, config.cwd], |r| r.get::<_, Option<String>>(0),
+            ).optional()?.flatten();
             let job = Job {
                 id: id.clone(),
                 worker_id: worker_id.clone(),
+                resume_session,
                 project: project.clone(),
                 issue,
                 comments: vec![],
@@ -488,7 +498,7 @@ pub(super) fn reserve(
                 owner_start: owner_start.clone(),
                 machine: machine.into(),
             };
-            tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000])?;
+            tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires,session_id) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11,?12)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000,job.resume_session])?;
             tx.commit()?;
             return Ok(Some(job));
         }
