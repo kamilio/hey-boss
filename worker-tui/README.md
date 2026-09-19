@@ -5,6 +5,13 @@ requests run on a background thread; keyboard input and rendering stay responsiv
 during slow local or SSH requests. Only changed terminal cells are written.
 
 ```sh
+hey-boss worker                          # Start a worker with its dashboard
+hey-boss worker status                   # Watch workers without starting one
+hey-boss worker --host devbox status      # Watch an SSH host
+hey-boss worker --plain status            # One-shot text output
+hey-boss worker --json status             # Machine-readable output
+
+# Optional standalone executable using the same library:
 cargo install --locked --path worker-tui
 hey-boss-worker-tui
 hey-boss-worker-tui --host devbox --directory /home/me/hey-boss
@@ -14,8 +21,12 @@ hey-boss-worker-tui --id WORKER_ID --history
 Requires an installed hey-boss version supporting `worker --json status` and an
 interactive macOS or Linux terminal. `--binary PATH` selects a development CLI.
 The CLI's `HEY_BOSS_ISSUE_HOST` and `HEY_BOSS_ISSUE_DB` settings are inherited.
-This package is independent of the root crate, so it can be built and installed
-without changing the native app or worker runtime.
+This package is independent of the root crate. The main CLI embeds the same
+library source from `src/worker_tui`, so ordinary installation and fleet upgrades include the dashboard
+without installing a separate executable. `runtime::run` accepts a cancellation
+token so worker supervisors can restore the terminal before shutdown or reload.
+When started by `hey-boss worker`, q / Ctrl+C stops that worker and its sessions.
+With `worker status` or the standalone executable, quitting leaves workers running.
 
 Workers appear on the left, with state and busy/total slots. The selected worker
 lists project scope and its ID to distinguish workers with similar names. It
@@ -74,6 +85,8 @@ cargo build --locked --manifest-path worker-tui/Cargo.toml
 cd worker-tui
 npm ci
 npm run test:terminal
+cargo build --locked --manifest-path ../Cargo.toml
+node tests/integrated-terminal.mjs
 ```
 
 The terminal walkthrough uses the terminal-pilot SDK and a temporary synthetic

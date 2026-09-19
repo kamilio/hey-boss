@@ -181,6 +181,8 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "Cargo.lock",
                     "build.rs",
                     "src",
+                    "worker-tui/Cargo.toml",
+                    "worker-tui/src",
                     "tests",
                     "skills/hey-boss",
                     "README.md",

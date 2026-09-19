@@ -2,9 +2,12 @@
 
 Licensed under [MIT](LICENSE).
 
-For installed versions with issue workers, [the worker terminal dashboard](worker-tui/README.md)
-shows live sessions, activity, queue state, and worker controls. Install it with
-`cargo install --locked --path worker-tui`, then run `hey-boss-worker-tui`.
+The [worker terminal dashboard](worker-tui/README.md) shows live sessions,
+activity, queue state, and worker controls. Run `hey-boss worker` to start a worker
+with the dashboard, or `hey-boss worker status` to watch existing workers.
+It is included in normal installations and SSH companion upgrades. Use `--plain`
+for a text display or `--json` for scripts. Quitting a started worker stops its
+sessions; quitting a status dashboard leaves workers running.
 
 Native macOS notifications and questions for coding agents. Short updates stack by project; Read update opens a Markdown preview. Rust library and CLI, Swift/AppKit daemon, SQLite history. No Python or Electron.
 
