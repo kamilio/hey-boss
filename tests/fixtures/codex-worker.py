@@ -7,6 +7,7 @@ import uuid
 import subprocess
 import os
 import re
+import time
 
 session = str(uuid.uuid4())
 goal = None
@@ -45,7 +46,7 @@ for line in sys.stdin:
             assert notification.returncode == 0, notification.stderr.decode()
             assert json.loads(notification.stdout)['status'] == 'pending'
         match = re.search(r"issue view (\d+)", text)
-        if mode not in ('unclaimed', 'delay-unclaimed'):
+        if mode not in ('unclaimed', 'delay-unclaimed', 'delay-model-start'):
             assert match, text
             assert os.environ['HEY_BOSS_ISSUE_PROJECT'] == 'named:Worker fixture'
             retrieved = subprocess.run([os.environ['HEY_BOSS_TEST_CLI'], 'issue', '--json', 'view', match[1]], capture_output=True)
@@ -61,7 +62,14 @@ for line in sys.stdin:
     if method == 'turn/start':
         if mode == 'disconnect':
             sys.exit(9)
-        if mode in ('delay', 'delay-unclaimed'):
+        if mode == 'delay-model-start':
+            time.sleep(6)
+            send({'method': 'item/started', 'params': {'threadId': session, 'item': {'type': 'reasoning'}}})
+            continue
+        if mode == 'delay-unclaimed':
+            send({'method': 'item/started', 'params': {'threadId': session, 'item': {'type': 'reasoning'}}})
+            continue
+        if mode == 'delay':
             continue
         if mode == 'approval':
             send({'id': 'approval-1', 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': session, 'command': 'synthetic privileged operation'}})

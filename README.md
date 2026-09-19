@@ -624,3 +624,11 @@ hey-boss issue subtask remove 12 15
 
 Nested relationships, queue sorting and offline sync are covered in
 [the issue guide](docs/issues.md#subtasks).
+
+### Remote worker restart
+
+Run `hey-boss worker --host HOST restart WORKER_ID` on the fleet controller machine, or use Restart on `/workers`. For a local worker use `hey-boss worker restart WORKER_ID`. These controls require `hey-boss fleet setup`. Check `hey-boss fleet status` for the durable signal acknowledgment; queued does not mean restarted.
+
+The controller and companion remain alive. The agent stops the old worker and its owned Codex sessions, then starts a replacement with the same ID and saved settings. It acknowledges only after the replacement registers. A cross-process lock prevents reconciliation from launching a duplicate; interrupted requests replay safely and failures retry with a delay capped at five minutes. A new Stop request supersedes an unfinished restart. Restart explicitly cancels active sessions; Pause drains them. If the old worker or its sessions cannot stop, the agent reports the error and does not launch a duplicate.
+
+Worker and browser reads use WAL snapshots; migration writes run only when needed. A temporary SQLite lock during worker status refresh retries without shutting down Codex sessions. Browser discovery uses its own connection. Git identity checks avoid enumerating all worktrees for ordinary checkouts. The manual claim window starts at the first model activity, with a separate fifteen-minute wait for model startup, so a queued model does not consume the claim deadline.
