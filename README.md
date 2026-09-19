@@ -2,6 +2,10 @@
 
 Licensed under [MIT](LICENSE).
 
+For installed versions with issue workers, [the worker terminal dashboard](worker-tui/README.md)
+shows live sessions, activity, queue state, and worker controls. Install it with
+`cargo install --locked --path worker-tui`, then run `hey-boss-worker-tui`.
+
 Native macOS notifications and questions for coding agents. Short updates stack by project; Read update opens a Markdown preview. Rust library and CLI, Swift/AppKit daemon, SQLite history. No Python or Electron.
 
 Project issues for agents are stored in SQLite, including Markdown bodies,
