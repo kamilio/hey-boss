@@ -1,4 +1,5 @@
 mod agent_permissions;
+mod artifact_cli;
 mod autoconnect;
 mod broker;
 mod companion;
@@ -163,6 +164,9 @@ enum Command {
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
+    /// Persistent project Markdown artifacts, comments and resource links.
+    #[command(visible_alias = "artifacts")]
+    Artifact(artifact_cli::Options),
     /// Project mindmaps with nested topics, live resources and cross-project links.
     #[command(visible_alias = "mindmap")]
     Mm(mindmap_cli::Options),
@@ -486,6 +490,7 @@ impl Cli {
                 )
             }
             Command::Secret(_)
+            | Command::Artifact(_)
             | Command::Issue(_)
             | Command::Mm(_)
             | Command::Settings(_)
@@ -531,6 +536,7 @@ impl Cli {
         };
         let output = match self.command {
             Command::Secret(_)
+            | Command::Artifact(_)
             | Command::Issue(_)
             | Command::Mm(_)
             | Command::Settings(_)
@@ -767,6 +773,17 @@ fn run() -> std::io::Result<()> {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
                     eprintln!("hey-boss mm: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Artifact(options) => {
+            if let Err(error) = artifact_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss artifact: {error}");
                 }
                 std::process::exit(error.exit_code());
             }
