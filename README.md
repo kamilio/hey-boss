@@ -237,6 +237,24 @@ same ID and settings before picking up more issues. Workers started before this
 handoff feature need a one-time restart. Unreachable hosts do not prevent the other machines from updating;
 rerun the command after reconnecting to retry them.
 
+## Move GitHub issues into a project
+
+`hey-boss issue drain-github` imports issues from the checkout's GitHub repository
+and deletes each original only after verifying the saved copy and checking for
+source changes. It preserves Markdown, labels, comments, source metadata, and
+closed state. Python 3 and an authenticated GitHub CLI (`gh`) are required.
+
+```sh
+hey-boss issue drain-github --dry-run
+hey-boss issue drain-github
+hey-boss issue drain-github --repo owner/repo --author octocat --project target
+```
+
+The creator filter defaults to the authenticated GitHub user. Use `--all-authors`
+to include everyone or `--state all` to include closed issues. Retries reuse the
+same destination copy. See [GitHub drain](docs/github-drain.md) for verification,
+failure handling, and the remaining race with GitHub's unconditional deletion.
+
 ## Remote server companion
 
 After your usual VPN/SFT authentication (`d` connects to the SSH alias `devbox`),

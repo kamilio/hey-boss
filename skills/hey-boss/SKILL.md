@@ -75,6 +75,17 @@ Claim before work; stop on conflict (exit 4). Never force another session's clai
 
 Reuse `--request-id` for identical uncertain retries; `view` reads current state; `edit --if-version N` protects concurrent changes. Test with separate `HEY_BOSS_ISSUE_DB` and `web --no-discovery`.
 
+## GitHub issue imports
+
+`hey-boss issue drain-github --dry-run` previews issues created by the authenticated
+GitHub user. Omit `--dry-run` to copy them into the current project and delete each
+GitHub original after read-back verification and a source-change check. Requires
+Python 3 and authenticated `gh`. Use `--author LOGIN`, `--all-authors`, `--repo
+OWNER/REPO`, `--project PROJECT`, or `--state all` to override the defaults.
+Retries reuse the copy; conflicts retain the original. Do not change the target
+project when retrying. GitHub deletion is unconditional, so a last-moment edit can
+still race the final check. See `docs/github-drain.md` in the source repository.
+
 ## Issue workers
 
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
