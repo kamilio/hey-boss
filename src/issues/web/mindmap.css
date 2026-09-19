@@ -3,3 +3,5 @@
 .resource-details{margin:6px 0;color:var(--muted);font-size:13px}.resource-details summary{cursor:pointer}.resource-details .body{font-size:15px}
 
 .read-body{padding:4px 9px;font-size:12px;margin-top:3px}.body-error{color:var(--warn);font-size:13px}.read-body:disabled{cursor:wait;opacity:.65}
+
+.meta>*{min-width:0;max-width:100%;overflow-wrap:anywhere}.heading h1{overflow-wrap:anywhere}
