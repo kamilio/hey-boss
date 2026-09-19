@@ -41,13 +41,17 @@ pub fn render_fragment(source: &str) -> String {
     }
     body
 }
-fn render_body(source: &str, source_map: bool) -> String {
-    let options = Options::ENABLE_TABLES
+/// Share the reader's dialect with document selection matching.
+pub(crate) fn parser_options() -> Options {
+    Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_GFM
-        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+}
+fn render_body(source: &str, source_map: bool) -> String {
+    let options = parser_options();
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(source.match_indices('\n').map(|(i, _)| i + 1))
