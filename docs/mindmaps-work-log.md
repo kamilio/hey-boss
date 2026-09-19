@@ -324,3 +324,44 @@ Thus the worktree binary is proven, while actual installed availability is not y
 delivered. Help/version checks did not access or migrate a real issue database.
 Next delivery work must reconcile newer original development before installing a
 coherent local build and skill; do not replace it with an older dependency snapshot.
+
+## Installed delivery verification
+
+Fresh local dependency snapshot `22b6bba`, parent `4721445`, has the same tree as
+the reconciled dependency snapshot. Its source build ID is `cd9c1b256d76f225`, matching
+the installed predecessor exactly. The source delivery therefore preserves the
+already-installed user development baseline.
+
+Checked and applied the feature-only patch from that snapshot to `19cac67` in the
+original checkout: 25 files, 4,404 insertions and 21 deletions. Existing user development
+is preserved, and the original index remains unstaged. The original checkout now
+contains the feature; earlier untouched-checkout statements describe prior milestones.
+Local ref `delivery/mindmap-applied-20260919` records `19cac67` as the applied anchor.
+Use changes after this anchor for later delivery updates, checking current original
+state before applying. Nothing has been published.
+
+Original and feature source identities both matched `0d1bb89f8c1de2a6`. The local-only
+upgrader's initial check reported the installed predecessor outdated. By the apply
+call, the installed build already matched; the upgrader reported `current`. Verified
+actual installed `/opt/homebrew/bin/hey-boss --version` and `mm --help`: mindmap commands
+are available. All three installed skill copies (.codex/.agents/.claude) match the
+repository guide. Upgrade source remains the original development checkout.
+
+Actual installed CLI end-to-end smoke uses `out/mindmap-installed-smoke/issues.db`
+and the synthetic Inbox: issue creation and PR attachment, nested outline, readable
+PR labels, automatic relationships, cross-project dependency with description,
+one-step typed PR dependency creation, aliases, pending/read notice filtering,
+single-node text and focused links all pass. Its projected Atlas map has five visible
+nodes and three links; pending notification availability is confirmed.
+
+Started a fresh server from the installed command on an ephemeral port against that
+fixture. `/mm` serves successfully and the preview API returns the map. Alias writes
+through both `/api/mm` and `/api/action` return HTTP 403/forbidden; direct SQLite checks
+confirm the saved alias remains unchanged. The temporary smoke server was terminated
+after checks. Results are saved under `out/mindmap-installed-smoke/`; production data
+was not used for these checks.
+
+Delivery is now proven for the installed local command. The full goal remains active:
+continue the requested eight-hour work period, inspect cross-project resource labels
+and unavailable-resource navigation, check long PR URL authorship consistency, and
+perform the final requirement audit before readiness notification/completion.
