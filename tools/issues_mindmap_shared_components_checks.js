@@ -23,7 +23,7 @@ async page => {
   if(route==='/')issueShell=shell;else check(JSON.stringify(shell)===JSON.stringify(issueShell),'Headers share size and theme');
   await page.locator('#project-trigger').click();
   check(await page.locator('#project-search').evaluate(el=>el===document.activeElement),route+' picker focuses search');
-  await page.locator('#project-search').fill('beta');
+  await page.locator('#project-search').fill('BETA PROJECT');
   check(await page.locator('.project-activity time').count()===1,route+' uses shared activity formatting');
   check(await page.locator('.project-option').count()===1,route+' filters projects');
   await page.keyboard.press('ArrowDown');
