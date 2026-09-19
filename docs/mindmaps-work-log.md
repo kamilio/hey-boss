@@ -731,3 +731,9 @@ Adjusted internal spacing/padding while retaining the 84-pixel card geometry.
 The real browser now gives 39 pixels to the two title lines and 12 to metadata;
 before/after dark screenshots were inspected. Evidence:
 `out/mm-map-wrapped-title-before.txt`, `out/mm-map-wrapped-title-after.txt`.
+
+Wrapped-label spacing is delivered as main `2be96fd` and installed build
+`a5abc690832f1982`. The four served assets match current-main bytes; evidence
+`out/mm-installed-label-assets-result.json`. The 320×740 wrapped-label screenshot
+was inspected too: full unscaled 39/12-pixel line heights, no horizontal overflow.
+This stylesheet change retains all card/edge layout dimensions.
