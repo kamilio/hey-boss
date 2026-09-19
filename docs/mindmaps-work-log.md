@@ -317,3 +317,10 @@ request was only `inbox_list`; no notice mutation occurred.
 
 The original checkout and installed CLI/skill remain unchanged. Further audit/delivery
 work and the requested eight-hour duration remain incomplete.
+
+Installed-command preflight: `/opt/homebrew/bin/hey-boss` reports version 0.1.0,
+build `cd9c1b256d76f225`; `hey-boss mm --help` rejects the unrecognized subcommand.
+Thus the worktree binary is proven, while actual installed availability is not yet
+delivered. Help/version checks did not access or migrate a real issue database.
+Next delivery work must reconcile newer original development before installing a
+coherent local build and skill; do not replace it with an older dependency snapshot.
