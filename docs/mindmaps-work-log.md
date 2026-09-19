@@ -802,3 +802,19 @@ Authoritative evidence: `out/mm-map-overview-baseline-regression.txt`,
 expanded 1,117,172-unit-high world pass at 1280 and 900 pixels, including padding
 boundaries (`out/mm-map-overview-large-final.txt`). Layout/index assertions,
 JavaScript syntax, own whitespace and debug compilation pass.
+
+A concurrent shared-UI update in the original checkout replaces `.skip` with
+`.skip-link`. Its mindmap script still bound `.skip`, causing a null listener
+exception before load. Preserve all concurrent shell, CSS and picker edits;
+the skip handler now accepts either class. An isolated browser reproduction
+serves the current shared shell/assets with unchanged read APIs: before throws
+and leaves count blank, after loads `2 nodes · 1 link` without page errors and
+opens/focuses Outline via the renamed link. Mock routes are removed in finally.
+Evidence `out/mm-map-shared-shell-before.txt`,
+`out/mm-map-shared-shell-after.txt` (two assertions). Added the keyboard skip
+assertion to the general suite; all 34 pass on the original shell too
+(`out/mm-map-scale-shell-checks.txt`). The first mock attempt intercepted the
+read endpoint too and remains unsuccessful evidence; final exact asset routes
+leave native reads intact. Debug compilation, syntax and own whitespace pass.
+The overview install attempt met an active concurrent upgrader and did not
+change the installed binary. Wait for it; never remove locks or kill it.
