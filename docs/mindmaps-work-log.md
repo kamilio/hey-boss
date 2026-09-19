@@ -427,3 +427,25 @@ The export patch was delivered through checked incremental application to the
 original checkout; delivery anchor is `c47a1c1`. Its local source upgrade reported
 `updated` and installed build `b2ee3a6c43891a4d` was verified. Fleet guard/skill
 delivery is the next incremental update.
+
+Fleet guard/skill changes from `6657bb7` were checked and applied to the original
+checkout; the delivery anchor advanced to that commit. Local-only installation
+reported `updated`, and actual installed build is `a9d3929d4d0a8ab0`. Isolated
+installed replica reads and writes return exit 2 with the authoritative-host
+instruction, preserving the one existing note. All three installed skill copies
+match the current repository guide. Results:
+`out/mindmap-installed-smoke/replica-guard-result.json`.
+
+Added `tools/soak_mindmaps.py` for a fresh database under this checkout's `out/`.
+It exercises a real persistent viewer server during repeated CLI issue/text/link
+edits, 512-character Unicode previews, full body reads, focused body-free link
+reads, pending/read/unavailable synthetic Inbox snapshots and forbidden writes
+through both web routes. Samples include owned-server RSS and SQLite integrity;
+Inbox requests are recorded. It terminates its own server/socket in cleanup.
+
+The first preflight failed before any cycle because the harness appended API
+paths to the announced `/mm` URL. Corrected it to use the URL origin. Installed
+30-second preflight passed 13 complete cycles and clean service shutdown;
+initial server RSS was 12,384 KiB. Started the one-hour installed run under
+`out/mm-soak-hour-20260919`; its outcome is pending and must not be reported as
+passed until its final result is observed.
