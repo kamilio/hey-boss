@@ -283,3 +283,37 @@ rescans the node array at each hierarchy level), review optional readable PR tit
 for big-picture authoring, and exercise installed CLI/skill delivery against the latest
 original development state. The original checkout remains untouched; no readiness
 notification has been sent and the eight-hour goal is not complete.
+
+## Terminal scalability and readable PR labels
+
+Extended the isolated benchmark with a terminal outline mode. A 10,000-node,
+20,000-link debug outline took 64.356 seconds before optimizing CLI display. Terminal
+rendering repeatedly scanned every node for children and again for each link label.
+The renderer now builds child and label indexes once, preserving sibling order.
+The same fixture after the change returned 1,673,328 bytes and all 10,000 topic rows
+in 0.516/0.530/0.529 seconds (median 0.529). These are local debug measurements.
+
+PR creation accepts `--title LABEL`; saved PR labels can be changed with `edit --title`.
+URLs, native issue attachments, identities and dependency links stay intact. PRs accept
+title edits only; issue and notice text remains live. Single-node terminal views show
+the URL and Markdown export links the label to the PR. Export escapes literal node
+title punctuation so labels containing brackets, angle brackets or emphasis characters
+retain their text when rendered. Unchanged edits no longer rewrite updated timestamps.
+Documentation and the repository skill include the new option.
+
+27 mindmap and 16 HTTP tests pass, including rendered Markdown export, native PR URLs,
+automatic relationships, dependencies, label edits and no-op timestamps. Formatting
+and diff whitespace checks pass.
+
+The old demo handle 7830 was confirmed terminal: it exited during the earlier schema
+guard merge error, rather than merely timing out. Recreated it with the durable
+`tools/serve_mindmap_fixture.py` runner, which confines databases to `out/`, serves a
+synthetic read-only Inbox, records requests and reloads after binary changes. New
+live demo handle: 28591, port 59479, the same preserved fixture DB. Browser verification
+shows Navigation polish → Project outline, correct GitHub URL, pending Review release,
+hidden read notice, Connected status and no mobile horizontal overflow. Screenshot
+`output/playwright/mm-pr-label-mobile.png` was visually inspected. The recorded bridge
+request was only `inbox_list`; no notice mutation occurred.
+
+The original checkout and installed CLI/skill remain unchanged. Further audit/delivery
+work and the requested eight-hour duration remain incomplete.
