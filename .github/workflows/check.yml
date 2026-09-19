@@ -17,7 +17,7 @@ jobs:
           mkdir -p out
           xcrun swiftc -O setup_hey_boss.swift -o out/hey-boss-setup
           xcrun swiftc -O -whole-module-optimization -parse-as-library hey_boss_daemon.swift -o out/hey-boss-daemon
-          xcrun swiftc -O -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
+          xcrun swiftc -g -Onone -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
           (cd /tmp && HEY_BOSS_CLI_PATH="$GITHUB_WORKSPACE/target/release/hey-boss" "$GITHUB_WORKSPACE/out/hey-boss-test")
           swift package_hey_boss.swift out/hey-boss-daemon "out/Hey Boss.app"
           codesign --verify --strict "out/Hey Boss.app"
