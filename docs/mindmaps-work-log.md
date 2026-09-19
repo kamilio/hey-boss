@@ -472,3 +472,12 @@ The one-hour endurance server remains the process started with build
 The intervening runtime change is CSS only. At the 187.79-second sample, 81
 complete cycles had no failure and owned-server RSS was 12,192 KiB. The run is
 still pending; do not restart it merely because a tool wait yields or times out.
+
+Later observed actual termination of that run at round 99 / 231.09 seconds:
+HTTP 403 “Reload the page to reconnect to this server” after CLI replacement.
+The source upgrade renews web tokens even in existing server processes, and
+the viewer already recovers by fetching bootstrap/retrying the read. The harness
+did not yet model this recovery. Added a single bootstrap/token retry for its
+read commands only; intentional forbidden authoring requests are never retried.
+The failed run was stopped cleanly. A fresh run is required; its earlier samples
+do not establish a completed one-hour result.
