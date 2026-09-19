@@ -251,6 +251,8 @@
       });
       for (const event of ["pointerup", "pointercancel", "lostpointercapture"])
         element.addEventListener(event, (e) => {
+          // Touch capture can move from a card to the map while a drag continues.
+          if (event === "lostpointercapture" && e.target !== element) return;
           this.points.delete(e.pointerId);
           if (!this.points.size) element.classList.remove("panning");
         });

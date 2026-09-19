@@ -862,3 +862,27 @@ now includes initial control visibility at all three sizes and passes 37 checks.
 Evidence `out/mm-map-shared-phone-height-before.txt`,
 `out/mm-map-phone-height-widths-first.txt` (320-only partial fix), and
 `out/mm-map-shared-phone-height-final.txt` (complete pass).
+
+Expanded pan frame probe on the current native shared UI: 10,000 topics and
+20,000 links, 1,117,172-unit-high expanded world, 239 sampled animation frames
+after warmup. Median interval 10ms, p95 10.9ms, maximum 11ms; no intervals over
+34ms or recorded long tasks. Ten cards and 13 SVG paths remained mounted.
+These are local test-environment observations, not an all-device FPS guarantee.
+Evidence `out/mm-map-expanded-frame-cadence.txt`.
+
+Native continuous touch exposed a gesture bug missed by the earlier one-move
+probe: a card drag moved 12px once, then all later movements stopped. Moving
+capture from the card's span to the map emitted a bubbling lostpointercapture
+from the span; the map incorrectly deleted its gesture point. Only the map's
+own lost capture now ends its tracked gesture. Pointer up/cancel still clear
+points from any target. Evidence `out/mm-map-touch-continuous-before.txt`.
+
+New `tools/mindmap_touch_browser_checks.js` fails the second pan-step assertion
+on the baseline and passes 15 checks on current native code: six 12×4px drag
+steps, no unintended selection, six pinch steps with expected zoom, cancellation
+cleanup, and a fresh selecting tap. It sends native Chrome touch input through
+CDP, with gesture cancellation in finally. The first after-run attempted an
+empty cancel before a gesture and hit a protocol error; corrected cleanup safely
+ignores that no-gesture error. Final evidence `out/mm-map-touch-checks-before.txt`
+and `out/mm-map-touch-checks-after.txt`. Layout/index, syntax, own whitespace and
+debug compilation pass.
