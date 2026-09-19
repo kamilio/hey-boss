@@ -892,6 +892,7 @@ fn run_thread(
         store.worker_event(&job.id, "/goal activated", Some(&result["goal"]))?;
     }
     let mut final_text = String::new();
+    let mut claim_window_started = false;
     let mut activity_text = String::new();
     let mut last_log = Instant::now() - Duration::from_secs(2);
     loop {
@@ -911,16 +912,19 @@ fn run_thread(
         if params["threadId"].as_str().is_some_and(|id| id != session) {
             continue;
         }
-        if matches!(
-            method,
-            "item/started"
-                | "item/agentMessage/delta"
-                | "item/reasoning/textDelta"
-                | "item/reasoning/summaryTextDelta"
-                | "item/completed"
-        ) && params["item"]["type"] != "userMessage"
+        if !claim_window_started
+            && matches!(
+                method,
+                "item/started"
+                    | "item/agentMessage/delta"
+                    | "item/reasoning/textDelta"
+                    | "item/reasoning/summaryTextDelta"
+                    | "item/completed"
+            )
+            && params["item"]["type"] != "userMessage"
         {
             store.worker_begin_claim(&job.id)?;
+            claim_window_started = true;
         }
         match method {
             "thread/goal/updated" => {
