@@ -1013,3 +1013,20 @@ It includes all seven-width navigation checks. This pin retains the original
 inspector header; the subsequently committed header simplification is imported
 for the final native installation check, whose controls suite now has 126
 assertions per browser. Final native/fleet results remain pending.
+
+All three machines were verified current at 19:27:35 UTC on build
+8c3cfd2036b3f657 (`out/mm-final-fleet-upgrade.json`), and its six served Map
+assets match committed main (`out/mm-installed-shared-assets-final.json`).
+Actual installed-native checks passed Chrome 40 core plus 126 controls and
+WebKit 25 core plus 126 controls. Screenshots were reviewed, including the
+simplified inspector header. Evidence `out/mm-final-native-audit.json` and
+`out/mm-final-native-{core,controls}-{chrome,webkit}.txt`.
+
+That visual review found unthemed search-match arrows: dark-mode native gray
+backgrounds and square corners remained after the shared-theme integration.
+The arrows now use the existing shared icon-button component. Real next/previous
+clicks, theme styles and horizontal bounds passed across dark/light themes at
+1280, 390 and 320 pixels in each browser (24 checks each). Evidence
+`out/mm-search-arrow-style-before.txt`, `out/mm-search-controls-after-chrome.txt`,
+`out/mm-search-controls-after-webkit.txt`; the updated screenshot was reviewed.
+This small HTML-only refinement needs one final fleet build/assets check.
