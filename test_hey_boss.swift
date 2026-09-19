@@ -5,12 +5,14 @@ import ImageIO
 import zlib
 import SQLite3
 import Carbon
+import WebKit
 
 func audit() {
     // Preserve the last completed check in CI logs if an optimized precondition traps.
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MINDMAP_ONLY"] == "1" { auditNativeMindmap(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
     auditQuickIssue()
@@ -19,6 +21,7 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENTS_ONLY"] == "1" { _ = auditAgentOverview(); return }
     auditMachineHealth()
+    auditNativeMindmap()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("hey-boss-test-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try! FileManager.default.removeItem(at: root) }
@@ -125,6 +128,39 @@ func audit() {
     auditCommentComposer(root: root)
     auditMultilineSourceComment(root: root)
     print("Passed: grouping threshold, CTA dismissal, preview with local/web/unsupported links, project isolation, queued questions, Unicode answers, durable history, Markdown links")
+}
+
+func auditNativeMindmap() {
+    let viewer = NativeMindmapViewer()
+    var browserURLs: [URL] = []
+    var destinations: [URL] = []
+    viewer.openExternal = { browserURLs.append($0); return true }
+    viewer.launcher.probe = { $0(true) }
+    viewer.launcher.openURL = { url in
+        destinations.append(url)
+        viewer.show(URL(string: "about:blank")!)
+        return true
+    }
+    viewer.open(cli: nil)
+    precondition(viewer.window.isVisible, "Mindmaps opens a native window")
+    precondition(destinations.last?.path == "/mm")
+    precondition(destinations.last?.query == "focus=1", "Native viewer requests the focused web map")
+    precondition(browserURLs.isEmpty, "Opening Mindmaps must not launch the browser")
+    precondition(viewer.browser.configuration.websiteDataStore.isPersistent, "Project selection survives daemon restarts")
+    let window = viewer.window
+    viewer.window.close()
+    viewer.open(cli: nil)
+    precondition(viewer.window === window && viewer.window.isVisible, "Reopen reuses the native window")
+    let map = URL(string: "http://127.0.0.1:4781/mm#project=named%3AAtlas&node=topic")!
+    precondition(viewer.policy(for: map) == .allow, "Map relationships remain native")
+    let issue = URL(string: "http://127.0.0.1:4781/#project=named%3AAtlas&issue=1")!
+    precondition(viewer.policy(for: issue) == .cancel && browserURLs.last == issue, "Issue links open in the browser")
+    let pr = URL(string: "https://github.com/example/repo/pull/1")!
+    precondition(viewer.policy(for: pr) == .cancel && browserURLs.last == pr, "PR links open in the browser")
+    let count = browserURLs.count
+    precondition(viewer.policy(for: URL(string: "file:///tmp/private")!) == .cancel && browserURLs.count == count)
+    viewer.window.close()
+    print("Passed: native mindmap window, focused URL, persistent project storage, reopen and resource links")
 }
 
 func auditQuickIssue() {
