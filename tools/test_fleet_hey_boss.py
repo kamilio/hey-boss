@@ -130,6 +130,31 @@ class FleetTests(unittest.TestCase):
     def issue(self, db):
         return dict(db.execute('SELECT * FROM issues WHERE number=1').fetchone())
 
+    def test_pre_draft_journal_rows_replay_after_schema_upgrade(self):
+        row = self.issue(self.main)
+        row.pop('draft')
+        row.pop('plan')
+        row['body'] = 'Durable pre-upgrade journal'
+        with self.agent:
+            fleet.apply_pull(self.agent, 'agent', {'changes': [{'seq': 100, 'table_name': 'issues', 'before_json': None, 'after_json': fleet.encode(row)}], 'cursor': 100, 'allocations': [], 'ranges': []}, [])
+        updated = self.issue(self.agent)
+        self.assertEqual(updated['body'], row['body'])
+        self.assertEqual(updated['draft'], 0)
+        self.assertIsNone(updated['plan'])
+        settings = {'project_id': PROJECT, 'prompt': None, 'prs_enabled': 0, 'version': 1, 'boss_name': 'Boss'}
+        with self.agent:
+            fleet.put_row(self.agent, 'project_settings', settings)
+        saved = self.agent.execute('SELECT drafts_enabled,plan_template FROM project_settings WHERE project_id=?', (PROJECT,)).fetchone()
+        self.assertEqual(tuple(saved), (1, 'plans/{timestamp}-{number}.md'))
+
+    def test_legacy_row_upgrade_still_rejects_missing_required_fields(self):
+        row = self.issue(self.main)
+        row.pop('draft')
+        row.pop('plan')
+        row.pop('body')
+        with self.assertRaisesRegex(ValueError, 'Schema mismatch'):
+            fleet.put_row(self.agent, 'issues', row)
+
     def test_offline_changes_survive_reopen_and_sync(self):
         self.edit(self.agent, body='Offline implementation notes')
         self.agent.close()
