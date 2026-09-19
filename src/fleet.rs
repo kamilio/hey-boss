@@ -49,6 +49,32 @@ pub fn socket_path() -> std::io::Result<PathBuf> {
     .join(".local/share/hey-boss/fleet.sock"))
 }
 
+/// Read the fleet's existing heartbeat without contacting the controller.
+/// Missing or unreadable status is unknown, never evidence of a live connection.
+pub fn worker_connection(role: &str) -> Value {
+    use serde_json::json;
+    if role != "agent" {
+        return json!({"state": if role == "controller" { "local" } else { "standalone" }});
+    }
+    let status = socket_path()
+        .ok()
+        .and_then(|path| std::fs::read(path.with_file_name("fleet-agent-status.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let Some(status) = status else {
+        return json!({"state":"unknown"});
+    };
+    let Some(heartbeat) = status["connected_at"].as_f64() else {
+        return json!({"state":"unknown"});
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or_default();
+    // The controller pings every five seconds and times out after fifteen.
+    let connected = (0.0..=15.0).contains(&(now - heartbeat));
+    json!({"state": if connected { "connected" } else { "disconnected" }, "last_sync":status["last_sync"]})
+}
+
 pub fn call(value: &Value) -> crate::issues::Result<Value> {
     let mut stream = UnixStream::connect(socket_path()?).map_err(|e| {
         crate::issues::Error::new(

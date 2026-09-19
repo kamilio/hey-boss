@@ -1342,3 +1342,50 @@ fn writer_contention_does_not_exit_worker_or_kill_claimed_session() {
     db.execute_batch("ROLLBACK").unwrap();
     worker.stop();
 }
+
+#[test]
+fn worker_status_reports_controller_connectivity_from_fleet_heartbeat() {
+    let f = Fixture::new("controller-connectivity");
+    f.cli(&["create", "--title", "Connectivity fixture"]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute("UPDATE fleet_meta SET role='agent' WHERE id=1", [])
+        .unwrap();
+    let state = f.root.join("fleet-state");
+    fs::create_dir_all(&state).unwrap();
+    let read_status = || {
+        let output = f
+            .command(&["worker", "status"])
+            .env("HEY_BOSS_FLEET_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["fleet"]["controller_connection"]
+            .clone()
+    };
+    assert_eq!(read_status()["state"], "unknown");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    fs::write(
+        state.join("fleet-agent-status.json"),
+        serde_json::json!({"connected_at":timestamp,"last_sync":timestamp}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(read_status()["state"], "connected");
+    assert_eq!(read_status()["last_sync"], timestamp);
+    fs::write(
+        state.join("fleet-agent-status.json"),
+        r#"{"connected_at":1,"last_sync":1}"#,
+    )
+    .unwrap();
+    assert_eq!(read_status()["state"], "disconnected");
+    fs::write(state.join("fleet-agent-status.json"), "broken").unwrap();
+    assert_eq!(read_status()["state"], "unknown");
+    db.execute("UPDATE fleet_meta SET role='controller' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(read_status()["state"], "local");
+    db.execute("UPDATE fleet_meta SET role='standalone' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(read_status()["state"], "standalone");
+}
