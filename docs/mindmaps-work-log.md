@@ -886,3 +886,32 @@ empty cancel before a gesture and hit a protocol error; corrected cleanup safely
 ignores that no-gesture error. Final evidence `out/mm-map-touch-checks-before.txt`
 and `out/mm-map-touch-checks-after.txt`. Layout/index, syntax, own whitespace and
 debug compilation pass.
+
+WebKit compatibility pass: all 37 large-map/navigation assertions pass current
+shared UI (`out/mm-webkit-scale-final-1826.txt`). Its focused-read suite exposed
+an actual overlapping-read focus bug: mouse clicks on text buttons do not give
+them focus in WebKit. Both pending reads retained the Outline container identity;
+the first response focused its body, then the second response left focus there.
+The independent timeline reproduction confirms that sequence in
+`out/mm-webkit-overlap-probe-before-retry.txt`. The first probe used the wrong
+heading selector and is retained as a harness failure, not bug evidence.
+
+The clicked full/preview control now receives focus explicitly before the pending
+read renders. That makes the newer topic the focus owner in both browsers.
+Chrome and WebKit each pass six shell and 19 focus assertions after the fix:
+`out/mm-chrome-focus-safari-fix.txt`, `out/mm-webkit-focus-final-after.txt`.
+Focused-read route cleanup waits for pending handlers, so a failed assertion does
+not create a secondary already-handled-route error. Syntax, layout/index, own
+whitespace and native debug build passed. Imported main's latest shared-page
+commit into the worktree; the entire merged index was checked equal to main
+before committing the merge.
+
+Deployment audit: Fly's health check passes and all four built frontend files
+(index, CSS, main JS and Markdown worker) exactly match the live HTTPS assets
+(`out/mm-fly-assets-1825.json`). The mindmap is served by the native CLI, not that
+mobile bundle. Installed-native asset verification correctly found the earlier
+renderer missing the continuous-touch fix. Updating expected HTML composition
+for the new Workers slot eliminated a verifier-only HTML mismatch; the five
+other shared files matched (`out/mm-installed-shared-assets-1825.json`). Final
+native installation and runtime checks remain pending while another upgrade
+owns the lock.

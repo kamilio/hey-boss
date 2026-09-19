@@ -100,7 +100,7 @@ async function mindmapFocusChecks(page) {
           `${mode}: ${failed ? "failed" : "successful"} read preserves the specific relationship`,
         );
       } finally {
-        await page.unroute("**/api/mm");
+        await page.unroute("**/api/mm", { behavior: "wait" });
       }
     }
   }
@@ -133,7 +133,7 @@ async function mindmapFocusChecks(page) {
       "Newer read focuses its loaded body despite intervening rendering",
     );
   } finally {
-    await page.unroute("**/api/mm");
+    await page.unroute("**/api/mm", { behavior: "wait" });
   }
   for (const mode of ["Map", "Outline"]) {
     await page.reload();
