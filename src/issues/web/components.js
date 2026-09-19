@@ -125,7 +125,7 @@ function date(at) {
       if (project) {
         const hash = new URLSearchParams({project:project.id});
         $("#nav-mindmaps").href = `/mm#${hash}`;
-        if (location.pathname === "/mm") $("#nav-issues").href = `/#${hash}`;
+        if (location.pathname !== "/") $("#nav-issues").href = `/#${hash}`;
       }
       if (!$("#project-menu").hidden) this.render();
     }

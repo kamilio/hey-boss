@@ -454,7 +454,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             _ => None,
         };
         if let Some((kind, data)) = asset {
-            if path == "/" || path == "/mm" {
+            if matches!(path.as_str(), "/" | "/mm" | "/workers") {
                 let issues = path == "/";
                 let shell = include_str!("web/app-shell.html")
                     .replace(
@@ -483,7 +483,19 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     )
                     .replace(
                         "<!--mindmap-current-->",
-                        if issues { "" } else { " aria-current=\"page\"" },
+                        if path == "/mm" {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--workers-current-->",
+                        if path == "/workers" {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
                     );
                 let html = std::str::from_utf8(data)
                     .unwrap()

@@ -6,21 +6,23 @@
     <meta name="color-scheme" content="light dark" />
     <title>Workers · Hey Boss</title>
     <link rel="icon" href="/icon.png" />
+    <link rel="stylesheet" href="/components.css" />
     <link rel="stylesheet" href="/fleet.css" />
+    <script src="/components.js" defer></script>
     <script src="/fleet.js" defer></script>
   </head>
   <body>
-    <a class="skip" href="#machines">Skip to workers</a>
-    <header><a class="brand" href="/"><img src="/icon.png" width="30" height="30" alt="" />Hey Boss</a><nav aria-label="Main navigation"><a href="/#view=inbox">Inbox</a><a href="/">Issues</a><a href="/workers" aria-current="page">Workers</a><a href="/mm">Mindmaps</a></nav><span id="live" role="status">Connecting…</span></header>
-    <main>
-      <div class="heading"><div><p class="eyebrow">YOUR WORKFORCE</p><h1>Workers</h1><p class="intro">Connected machines. Independent workers. One synchronized queue.</p></div><button id="refresh" type="button">Refresh</button></div>
+    <a class="skip-link" href="#main">Skip to workers</a>
+    <!--app-shell-->
+    <main id="main" tabindex="-1">
+      <div class="page-heading"><div><div class="eyebrow"><span data-icon="user"></span>Your workforce</div><h1>Workers</h1><p class="page-description">Connected machines. Independent workers. One synchronized queue.</p></div><button class="button" id="refresh" type="button"><span data-icon="refresh"></span>Refresh</button></div>
       <div id="error" class="error" role="alert" hidden></div>
       <section id="overview" class="overview" aria-label="Fleet overview"></section>
       <div class="section-heading"><h2>Machines</h2><span>Work continues while disconnected</span></div>
       <section id="machines" class="machines" aria-label="Machines and workers" tabindex="-1"><p>Loading your machines…</p></section>
-      <section class="activity"><div class="section-heading"><h2>Recent activity</h2><span id="event-count"></span></div><ol id="events" aria-label="Recent fleet events"></ol></section>
-      <section id="conflicts" class="activity" hidden><h2>Changes needing review</h2><p>These changes are saved. Canonical data was preserved.</p><ul id="conflict-list"></ul></section>
+      <section class="activity glass"><div class="section-heading"><h2>Recent activity</h2><span id="event-count"></span></div><ol id="events" aria-label="Recent fleet events"></ol></section>
+      <section id="conflicts" class="activity glass" hidden><h2>Changes needing review</h2><p>These changes are saved. Canonical data was preserved.</p><ul id="conflict-list"></ul></section>
+      <footer class="page-footer"><span class="footer-mark" data-icon="spark"></span><span>Changes are saved locally and synchronized whenever connected.</span><span class="footer-product">Hey Boss Workers</span></footer>
     </main>
-    <footer>Configuration is distributed automatically. Changes are saved locally and synchronized whenever connected.</footer>
   </body>
 </html>
