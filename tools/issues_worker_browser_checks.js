@@ -10,15 +10,15 @@ async page => {
  const storedPrompt=await page.locator('#project-prompt').inputValue();
  check(await page.locator('#project-settings-form button[type=submit]').isDisabled(),'Save disabled until changed');
  check(!(await page.locator('#project-settings-dialog').innerText()).includes('SQLite'),'No storage implementation text');
- await page.locator('#project-prompt').fill('Assign and implement `{{issue_command}}`. {{commit_instruction}}');
+ await page.locator('#project-prompt').fill('Claim and implement `{{issue_command}}`.\n\n{{commit_instruction}}');
  await page.locator('#project-prs').uncheck();await page.waitForFunction(()=>document.querySelector('#project-instructions-preview').textContent.endsWith('push to main.'));
- check((await preview()).startsWith('Assign and implement `hey-boss issue view'),'Exact default preview');
+ check((await preview()).startsWith('Claim and implement `hey-boss issue view <number>`.\n\n'),'Exact default preview');
  check(!(await preview()).includes('--project'),'Issue commands use current project');
  await page.locator('#project-prs').check();await page.waitForFunction(()=>document.querySelector('#project-instructions-preview').textContent.includes('attach every PR'));
  check(!(await preview()).includes('--project'),'PR command uses current project');
  const before=await preview();await page.locator('#project-prompt').fill('/goal');check((await preview())===before,'Typing keeps previous preview visible');
  await page.waitForFunction(()=>!document.querySelector('#project-goal-indicator').hidden && document.querySelector('#project-instructions-preview').getAttribute('aria-busy')==='false');
- check((await preview()).startsWith('Assign and implement `hey-boss issue view') && (await preview()).includes('attach every PR'),'Bare /goal uses full default instructions');
+ check((await preview()).startsWith('Claim and implement `hey-boss issue view <number>`.\n\n') && (await preview()).includes('attach every PR'),'Bare /goal uses full default instructions');
  check(await page.locator('#project-settings-dialog input[type=checkbox]').count()===1,'Only PR checkbox, no goal toggle');
  await page.locator('#project-prompt').fill('/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}');await page.waitForFunction(()=>document.querySelector('#project-instructions-preview').textContent.includes('\nCommit'));
  check((await preview()).startsWith('Assign and implement `hey-boss issue view'),'Multiline /goal preserves first sentence');

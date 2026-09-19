@@ -487,18 +487,27 @@ fn opening_web_does_not_start_standalone_workers() {
 #[test]
 fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
     let web = Web::start();
-    for prompt in [
-        "/goal",
-        "/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}",
+    for (prompt, use_goal, expected) in [
+        (
+            None,
+            false,
+            "Claim and implement `hey-boss issue view <number>`.\n\nCommit your changes.",
+        ),
+        (
+            Some("/goal"),
+            true,
+            "Claim and implement `hey-boss issue view <number>`.\n\nCommit your changes.",
+        ),
+        (
+            Some("/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}"),
+            true,
+            "Assign and implement `hey-boss issue view <number>`.\nCommit your changes.",
+        ),
     ] {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
-        assert_eq!(value["use_goal"], true);
+        assert_eq!(value["use_goal"], use_goal);
         let text = value["prompt"].as_str().unwrap();
-        assert!(
-            text.starts_with("Assign and implement `hey-boss issue view <number>`."),
-            "{value}"
-        );
-        assert!(text.ends_with("Commit your changes."));
+        assert_eq!(text, expected);
         assert!(!text.contains("--project"));
         assert_eq!(value["objective"], text);
     }
