@@ -18,9 +18,9 @@
       <div class="page-heading"><div><div class="eyebrow"><span data-icon="user"></span>Your workforce</div><h1>Workers</h1><p class="page-description">The supervisor coordinates workers. Workers manage Codex agents.</p></div><button class="button" id="refresh" type="button"><span data-icon="refresh"></span>Refresh</button></div>
       <div id="error" class="error" role="alert" hidden></div>
       <section id="overview" class="overview" aria-label="Fleet overview"></section>
-      <div class="section-heading"><h2>Machines</h2><span>Work continues while disconnected</span></div>
-      <section id="machines" class="machines" aria-label="Machines and workers" tabindex="-1"><p>Loading your machines…</p></section>
-      <section class="activity glass"><div class="section-heading"><h2>Recent activity</h2><span id="event-count"></span></div><ol id="events" aria-label="Recent fleet events"></ol></section>
+      <p id="copy-status" class="sr-only" role="status"></p>
+      <section id="machines" class="machines" aria-label="Supervisor, workers and agents" tabindex="-1"><p>Loading running workers…</p></section>
+      <details class="activity glass"><summary>Recent fleet activity · <span id="event-count"></span></summary><ol id="events" aria-label="Recent fleet events"></ol></details>
       <section id="conflicts" class="activity glass" hidden><h2>Changes needing review</h2><p>These changes are saved. Canonical data was preserved.</p><ul id="conflict-list"></ul></section>
       <footer class="page-footer"><span class="footer-mark" data-icon="spark"></span><span>Changes are saved locally and synchronized whenever connected.</span><span class="footer-product">Hey Boss Workers</span></footer>
     </main>

@@ -1,310 +1,69 @@
-/* Fleet content only;
-   theme, shell, controls and surfaces live in components.css. */
-:root {
-  --green-bg:#20745d12;
-  --amber:#9a650b;
-  --amber-bg:#9a650b12;
-  --red:var(--danger);
-  --red-bg:#b6455912
-}
-
-@media(prefers-color-scheme:dark) {
-  :root {
-  --amber:#eac17a
-}
-
-}
-
-h2 {
-  font-size:17px;
-  margin:0;
-  letter-spacing:-.01em
-}
-.overview {
-  display:grid;
-  grid-template-columns:repeat(4,1fr);
-  gap:14px;
-  margin-bottom:36px
-}
-.metric {
-  padding:18px 22px
-}
-.metric strong {
-  display:block;
-  font-size:28px;
-  font-weight:650;
-  letter-spacing:-.03em
-}
-.metric span {
-  font-size:12px;
-  color:var(--muted)
-}
-.section-heading {
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  margin:0 0 14px;
-  gap:12px
-}
-.section-heading>span {
-  font-size:12px;
-  color:var(--muted)
-}
-.machines {
-  display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:18px
-}
-.machine {
-  overflow:hidden
-}
-.machine-header {
-  padding:20px 22px 14px;
-  display:flex;
-  justify-content:space-between;
-  align-items:flex-start;
-  gap:16px
-}
-.machine-title {
-  font-size:17px;
-  font-weight:650;
-  margin:0;
-  overflow-wrap:anywhere
-}
-.machine-subtitle {
-  font-size:12px;
-  color:var(--muted);
-  margin:3px 0 0;
-  overflow-wrap:anywhere
-}
-.badge {
-  font-size:11px;
-  padding:4px 9px;
-  border-radius:20px;
-  font-weight:650;
-  white-space:nowrap;
-  background:var(--amber-bg);
-  color:var(--amber)
-}
-.badge.connected {
-  background:var(--green-bg);
-  color:var(--green)
-}
-.badge.disconnected {
-  background:var(--red-bg);
-  color:var(--red)
-}
-.machine-meta {
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:7px 15px;
-  padding:0 22px 18px;
-  color:var(--muted);
-  font-size:12px
-}
-.machine-meta b {
-  font-weight:500;
-  color:var(--text)
-}
-.machine-notice {
-  font-size:12px;
-  margin:0 22px 16px;
-  padding:10px 12px;
-  border-radius:8px;
-  background:var(--amber-bg);
-  color:var(--amber);
-  overflow-wrap:anywhere
-}
-.worker {
-  border-top:1px solid var(--line);
-  padding:17px 22px
-}
-.worker-heading {
-  display:flex;
-  justify-content:space-between;
-  gap:12px;
-  align-items:center
-}
-.worker-heading h3 {
-  font-size:13px;
-  font-weight:650;
-  margin:0
-}
-.capacity {
-  font-size:12px;
-  color:var(--muted);
-  white-space:nowrap
-}
-.bar {
-  height:4px;
-  margin:11px 0;
-  border-radius:4px;
-  background:var(--line);
-  overflow:hidden
-}
-.bar div {
-  height:100%;
-  background:var(--accent);
-  border-radius:4px
-}
-.worker-project {
-  font-size:11px;
-  color:var(--muted);
-  overflow-wrap:anywhere;
-  margin:0 0 11px
-}
-.run {
-  padding:8px 0;
-  border-top:1px solid var(--line);
-  font-size:12px
-}
-.run strong {
-  font-weight:600;
-  display:block
-}
-.run small {
-  display:block;
-  color:var(--muted);
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  max-width:100%
-}
-.controls {
-  display:flex;
-  gap:7px;
-  margin-top:13px;
-  flex-wrap:wrap
-}
-.controls button {
-  font-size:11px;
-  padding:5px 10px
-}
-.controls button.danger {
-  color:var(--red)
-}
-.empty {
-  color:var(--muted);
-  font-size:12px;
-  margin:5px 0
-}
-.signal-state {
-  font-size:11px;
-  color:var(--amber);
-  margin:9px 0 0
-}
-.history {
-  margin-top:12px;
-  color:var(--muted);
-  font-size:11px
-}
-.history summary {
-  cursor:pointer
-}
-.history p {
-  margin:5px 0
-}
-.activity {
-  margin-top:30px;
-  padding:22px
-}
-.activity ol,.activity ul {
-  margin:0;
-  padding:0;
-  list-style:none
-}
-.activity li {
-  display:flex;
-  gap:16px;
-  padding:10px 0;
-  border-top:1px solid var(--line);
-  font-size:12px
-}
-.activity time {
-  color:var(--muted);
-  flex:0 0 70px
-}
-.activity .event-host {
-  font-weight:600;
-  min-width:130px;
-  overflow-wrap:anywhere
-}
-.activity .event-detail {
-  color:var(--muted);
-  overflow-wrap:anywhere
-}
-.error {
-  background:var(--red-bg);
-  color:var(--red);
-  padding:12px 16px;
-  border-radius:9px;
-  margin-bottom:18px
-}
-.offline-run {
-  color:var(--amber)
-}
-#conflict-list details {
-  min-width:0;
-  width:100%
-}
-#conflict-list summary {
-  cursor:pointer;
-  overflow-wrap:anywhere
-}
-#conflict-list pre {
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-  font-size:11px;
-  max-height:240px;
-  overflow:auto
-}
-
-
-
+/* Fleet content; shared theme and controls live in components.css. */
+:root { --amber:#9a650b; --amber-bg:#9a650b12; --red:var(--danger); --red-bg:#b6455912 }
+@media(prefers-color-scheme:dark) { :root { --amber:#eac17a } }
+.overview { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:24px }
+.metric { padding:18px 22px }
+.metric strong { display:block; font-size:28px; font-weight:650; letter-spacing:-.03em }
+.metric span { font-size:12px; color:var(--muted) }
+.machines { display:grid; gap:16px }
+.supervisor { overflow:hidden }
+.machine-header { padding:20px 22px; display:flex; gap:16px }
+.machine-title { font-size:17px; font-weight:650; margin:0; overflow-wrap:anywhere }
+.machine-subtitle { font-size:12px; color:var(--muted); margin:3px 0 0; overflow-wrap:anywhere }
+.worker-tree { margin:0 22px 22px; padding-left:22px; border-left:2px solid var(--line) }
+.worker { position:relative; border-top:1px solid var(--line); padding:18px 0 }
+.worker-tree>.worker::before { content:""; position:absolute; left:-24px; top:28px; width:16px; border-top:2px solid var(--line) }
+.worker-heading { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center }
+.worker-heading h3 { font-size:14px; font-weight:650; margin:0; overflow-wrap:anywhere }
+.capacity { font-size:12px; color:var(--muted) }
+.worker-project { font-size:12px; color:var(--muted); overflow-wrap:anywhere; margin:4px 0 12px }
+.agents { margin-left:10px; padding-left:16px; border-left:2px solid var(--line) }
+.run { padding:10px 0; font-size:12px; min-width:0 }
+.run+.run { border-top:1px solid var(--line) }
+.run-heading { display:flex; justify-content:space-between; align-items:baseline; gap:12px }
+.run strong { font-weight:600; overflow-wrap:anywhere }
+.duration { font-variant-numeric:tabular-nums; font-weight:600; white-space:nowrap; flex-shrink:0 }
+.run-meta { display:flex; gap:6px 12px; flex-wrap:wrap; align-items:center; margin-top:4px; color:var(--muted) }
+.run-event { display:block; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; max-height:72px; overflow:auto; margin-top:4px }
+.copy-session { font-size:11px }
+.controls { display:flex; gap:7px; margin-top:12px; flex-wrap:wrap }
+.controls button { font-size:11px; padding:6px 10px }
+.controls button.danger { color:var(--red) }
+.empty { color:var(--muted); font-size:12px; margin:8px 0 }
+.signal-state { font-size:12px; color:var(--amber); margin:9px 0 0 }
+.history { margin-top:12px; color:var(--muted); font-size:12px }
+summary { cursor:pointer }
+.secondary { padding:16px 22px; min-width:0 }
+.secondary>summary { font-size:13px; font-weight:600 }
+.secondary>.worker { margin-top:12px }
+.offline-machine,.diagnostic-machine { margin-top:18px }
+.offline-machine>.worker { margin-left:12px }
+.machine-meta { display:flex; flex-wrap:wrap; gap:7px 15px; margin-top:8px; color:var(--muted); font-size:12px }
+.machine-meta b { font-weight:500; color:var(--text) }
+.machine-notice { font-size:12px; margin:12px 0; padding:10px 12px; border-radius:8px; background:var(--amber-bg); color:var(--amber); overflow-wrap:anywhere }
+.activity { margin-top:24px; padding:20px 22px }
+.activity>summary { font-size:13px; font-weight:600 }
+.activity ol,.activity ul { margin:12px 0 0; padding:0; list-style:none }
+.activity li { display:flex; gap:16px; padding:10px 0; border-top:1px solid var(--line); font-size:12px }
+.activity time { color:var(--muted); flex:0 0 70px }
+.activity .event-host { font-weight:600; min-width:130px; overflow-wrap:anywhere }
+.activity .event-detail { color:var(--muted); overflow-wrap:anywhere; min-width:0 }
+.error { background:var(--red-bg); color:var(--red); padding:12px 16px; border-radius:9px; margin-bottom:18px }
+.offline-run { color:var(--amber) }
+#conflict-list details { min-width:0; width:100% }
+#conflict-list summary { overflow-wrap:anywhere }
+#conflict-list pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; max-height:240px; overflow:auto }
+.clipboard-input { position:fixed; left:-9999px; top:0 }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
 @media(max-width:760px) {
-  .overview {
-  grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:10px;
-  margin-bottom:25px
-}
-.metric {
-  padding:14px 18px
-}
-.machines {
-  grid-template-columns:1fr
-}
-.section-heading>span {
-  font-size:10px
-}
-.activity {
-  padding:16px
-}
-.activity li {
-  gap:8px;
-  flex-wrap:wrap
-}
-.activity .event-host {
-  min-width:100px
-}
-.activity .event-detail {
-  flex-basis:100%;
-  padding-left:78px
-}
-
-}
-
-@media(max-width:380px) {
-  .metric {
-  padding:12px
-}
-.machine-header,.worker {
-  padding-inline:16px
-}
-.machine-meta {
-  padding-inline:16px
-}
-.worker-heading {
-  flex-wrap:wrap
-}
-
+  .overview { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px }
+  .metric { padding:14px 18px }
+  .machine-header { padding:18px 16px }
+  .worker-tree { margin:0 16px 16px; padding-left:14px }
+  .worker-tree>.worker::before { left:-16px; width:10px }
+  .agents { margin-left:0; padding-left:10px }
+  .secondary,.activity { padding:16px }
+  .activity li { gap:8px; flex-wrap:wrap }
+  .activity .event-host { min-width:100px }
+  .activity .event-detail { flex-basis:100% }
 }
