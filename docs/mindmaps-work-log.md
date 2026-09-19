@@ -981,3 +981,16 @@ hit a 60-second DOMContentLoaded timeout and is retained as unsuccessful startup
 evidence; the same handle subsequently completed its probe. It was not restarted
 on that observation timeout. Native HTTP checks returned promptly, and subsequent
 actual-browser navigation and interaction checks passed.
+
+The final installed dark/phone review reproduced a controls-overlap bug: open
+selected-topic details covered the overview at all seven tested widths, and
+covered Fit/zoom at 390 and 320 pixels. A reusable browser regression fails on
+the installed baseline. Topic details now leave a navigation strip clear below
+them, preserving their scrollable body. Chrome and WebKit each pass 105
+assertions across 1600, 900, 820, 701, 700, 390 and 320-pixel viewports, including
+actual pointer hit targets, real zoom/Fit/overview clicks with details open,
+readable details height and control reachability after closing. These checks
+used the native installed server with only the new CSS route-overridden;
+final installed-build verification remains pending. Evidence
+`out/mm-controls-baseline-failure.txt`, `out/mm-controls-after-chrome.txt` and
+`out/mm-controls-after-webkit.txt`.
