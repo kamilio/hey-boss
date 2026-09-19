@@ -11,6 +11,7 @@ async function mindmapKindChecks(page) {
     ["pr", "Pull request", "Ship reconnect"],
     ["notification", "Notice", "Review release"],
   ];
+  await page.unroute("**/api/mm");
   await page.route("**/api/mm", async route => {
     const response = await route.fetch();
     const graph = await response.json();
@@ -26,7 +27,7 @@ async function mindmapKindChecks(page) {
     await route.fulfill({response, json: graph});
   });
   await page.setViewportSize({width: 1280, height: 900});
-  await page.reload();
+  await page.reload({waitUntil: "domcontentloaded"});
   await page.locator('[data-map-node="kind-text"]').waitFor();
   for (const [kind, label, title] of kinds) {
     await page.locator('#search').fill(title);
@@ -55,9 +56,17 @@ async function mindmapKindChecks(page) {
   for (const width of [1280, 390]) {
     await page.setViewportSize({width, height: 900});
     await page.getByRole('button', {name: 'Fit', exact: true}).click();
-    const card = await page.locator('[data-map-node="kind-pr"]').boundingBox();
-    const icon = await page.locator('[data-map-node="kind-pr"] .mindmap-kind').boundingBox();
-    const action = await open.boundingBox();
+    // Read one frame: Fit schedules a camera update, which can otherwise move
+    // the card between separate boundingBox calls.
+    const {card, icon, action} = await page.evaluate(async () => {
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const card = document.querySelector('[data-map-node="kind-pr"]');
+      return {
+        card: card.getBoundingClientRect().toJSON(),
+        icon: card.querySelector('.mindmap-kind').getBoundingClientRect().toJSON(),
+        action: document.querySelector('.map-pr-open').getBoundingClientRect().toJSON(),
+      };
+    });
     check(icon.x >= card.x && icon.x + icon.width <= card.x + card.width, `Icon fits the ${width}px card`);
     check(action.x >= card.x && action.x + action.width <= card.x + card.width, `PR action fits the ${width}px card`);
   }
