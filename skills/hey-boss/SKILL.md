@@ -147,3 +147,27 @@ shared queue order. Workers wait for unfinished reachable descendants, even
 through closed children, while deleted subtrees do not block pickup. Manual claims
 remain available. Use parent/child version checks and identical request IDs for
 uncertain retries. Fleet journals retain offline edits and conflicting payloads.
+
+## Mindmaps
+
+`hey-boss mm` shows a project's nested outline. Author from the CLI; `mm web` is a
+read-only viewer. `--project`, `--host`, `--agent`, `--json`, `--request-id` and
+mutation `--if-version` follow issue conventions. Use an isolated issue DB in tests.
+
+```sh
+hey-boss mm add 'Release' --id release
+hey-boss mm issue 12 --under release
+hey-boss mm link issue:12 Platform::api --kind depends-on --why 'API must land first'
+hey-boss mm link pr:https://github.com/org/repo/pull/2 pr:https://github.com/org/repo/pull/1 --kind depends-on
+hey-boss mm show
+hey-boss mm web
+```
+
+Aliases are project-local; qualify cross-project selectors as `PROJECT::alias`.
+Links add missing typed `issue:NUMBER`, `pr:URL` or `notice:TASK_ID` references atomically.
+Descriptions are optional; A depends-on B means A waits for B. Nesting stays within
+one project; cycles are rejected. Automatic issue→PR relationships come from
+`issue pr add/remove`. Only confirmed pending Inbox notices appear; an unavailable
+Inbox is reported explicitly. Map reads never complete notices or change issues.
+`mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
+`mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
