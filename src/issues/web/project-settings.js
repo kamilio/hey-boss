@@ -11,6 +11,8 @@ function projectSettingsDraft() {
   return {
     prompt: $("#project-prompt").value,
     prs_enabled: $("#project-prs").checked,
+    drafts_enabled: $("#project-drafts").checked,
+    plan_template: $("#project-plan-template").value,
   };
 }
 function projectSettingsChanged() {
@@ -52,6 +54,8 @@ $("#project-settings-trigger").onclick = async () => {
     projectSettingsVersion = value.version;
     $("#project-prompt").value = value.prompt;
     $("#project-prs").checked = value.prs_enabled;
+    $("#project-drafts").checked = value.drafts_enabled;
+    $("#project-plan-template").value = value.plan_template;
     projectSettingsOriginal = projectSettingsDraft();
     $("#project-prompt").disabled = false;
     $("#project-prs").disabled = false;
@@ -151,3 +155,6 @@ for (const selector of ["#project-prompt", "#project-prs"]) {
     previewProjectInstructions();
   });
 }
+
+$("#project-drafts").onchange = projectSettingsChanged;
+$("#project-plan-template").oninput = projectSettingsChanged;

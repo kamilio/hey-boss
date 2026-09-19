@@ -1231,3 +1231,64 @@ fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_bound
         body
     );
 }
+
+#[test]
+fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
+    let w = Web::start();
+    let created =
+        w.ok(json!({"action":"create","title":"Plan","body":"Old body","labels":[],"draft":true}));
+    assert_eq!(created["issue"]["draft"], true);
+    w.ok(json!({"action":"configure_project","drafts_enabled":false}));
+    assert_ne!(
+        w.action(
+            &w.project,
+            json!({"action":"create","title":"Disabled","body":"","labels":[],"draft":true}),
+            None
+        )
+        .status,
+        200
+    );
+    let db = rusqlite::Connection::open(w.root.join("issues.db")).unwrap();
+    let machine: String = db
+        .query_row(
+            "SELECT json_extract(metadata,'$.machine') FROM agents WHERE id='human:boss'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let plan =
+        json!({"path":"plan.md","checkout":w.root,"machine":machine,"host":"synthetic-owner"});
+    db.execute(
+        "UPDATE issues SET plan=?1 WHERE number=1",
+        [plan.to_string()],
+    )
+    .unwrap();
+    assert_ne!(
+        w.action(&w.project, json!({"action":"undraft","number":1}), None)
+            .status,
+        200
+    );
+    assert_eq!(
+        w.ok(json!({"action":"view","number":1}))["issue"]["draft"],
+        true
+    );
+    fs::write(w.root.join("plan.md"), "# Final title\n\nFinal body\n").unwrap();
+    let issue=w.ok(json!({"action":"edit","number":1,"draft":false,"title":"Stale editor","body":"Stale body","add_labels":[],"remove_labels":[]}));
+    assert_eq!(issue["issue"]["draft"], false);
+    assert_eq!(issue["issue"]["title"], "Final title");
+    assert_eq!(issue["issue"]["body"], "Final body");
+    assert_ne!(
+        w.action(
+            &w.project,
+            json!({"action":"edit","number":1,"draft":true,"add_labels":[],"remove_labels":[]}),
+            None
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        w.action(&w.project, json!({"action":"read_plan","plan":plan}), None)
+            .status,
+        403
+    );
+}
