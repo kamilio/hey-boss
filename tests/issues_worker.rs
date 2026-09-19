@@ -413,8 +413,7 @@ fn replacing_cli_drains_active_sessions_then_restores_same_worker() {
     let replacement = directory.join("hey-boss.new");
     fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &replacement).unwrap();
     fs::rename(replacement, binary).unwrap();
-    thread::sleep(Duration::from_millis(1200));
-    let still_running = f.cli(&["worker", "status"]);
+    let still_running = f.wait(|status| status["upgrading"] == true);
     assert_eq!(still_running["active"], 1);
     assert_eq!(still_running["runs"][0]["id"], run);
     assert_eq!(still_running["version"], initial["version"]);
