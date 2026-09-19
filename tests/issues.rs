@@ -1903,3 +1903,32 @@ fn schema_eight_graph_sync_migration_keeps_links_and_reinstates_safe_upsert() {
     f.sql().execute_batch("INSERT INTO issue_subtasks SELECT * FROM issue_subtasks WHERE child_number=2 ON CONFLICT(project_id,child_number) DO UPDATE SET parent_number=excluded.parent_number;").unwrap();
     assert_eq!(f.run("session-a", &["view", "1"]), before);
 }
+
+#[test]
+fn existing_project_reads_open_and_query_while_another_connection_owns_writer() {
+    let f = Fixture::new();
+    f.create();
+    let writer = f.sql();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE issues SET title=title WHERE number=1")
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(f.run("reader", &["view", "1"])["issue"]["number"], 1);
+    assert_eq!(
+        f.run("reader", &["list"])["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        f.run("reader", &["worker", "status"])["ok"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "Read requests waited for the SQLite writer lock"
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+}

@@ -680,6 +680,30 @@ def config_directory(worker):
     return worker['config'].get('directory') or str(pathlib.Path.home())
 
 
+@contextlib.contextmanager
+def lifecycle_lock(wait=True):
+    """Serialize launch/configuration across the agent daemon and SSH sessions."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    fd = os.open(STATE / 'fleet-worker-control.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, 'w') as lock:
+        deadline = time.monotonic() + 40
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not wait:
+                    yield False
+                    return
+                if time.monotonic() >= deadline or STOP.is_set():
+                    raise RuntimeError('Worker lifecycle is busy; retry the same signal ID')
+                time.sleep(.1)
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def start_worker(worker):
     ensure_worker(worker)
     args = [str(BINARY), 'worker', '--id', worker['id'], '--json']
@@ -692,7 +716,29 @@ def start_worker(worker):
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fd, stderr=subprocess.STDOUT, env=environment, cwd=config_directory(worker), start_new_session=True)
     finally:
         os.close(fd)
-    return process.pid
+    # Popen succeeding is not proof of a working worker. Do not acknowledge
+    # until this exact child owns the durable registration.
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError('Replacement worker exited during startup; inspect its fleet-worker log')
+            selected = worker_overview(worker['id'])
+            if any(w['id'] == worker['id'] and w['pid'] == process.pid for w in selected['workers']):
+                return process.pid
+            time.sleep(.1)
+        raise RuntimeError('Replacement worker did not register within 15 seconds')
+    except BaseException:
+        # Only clean up the child we just created, never the controller/companion
+        # or a PID recovered from an old registration.
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
 
 
 def control_worker(worker_id, command):
@@ -702,44 +748,85 @@ def control_worker(worker_id, command):
 
 
 def apply_signal(db, message):
-    old = db.execute('SELECT state,result FROM fleet_signals WHERE id=?', (message['id'],)).fetchone()
-    if old and old['state'] == 'acknowledged':
+    with lifecycle_lock():
+        old = db.execute('SELECT worker,signal,state,result FROM fleet_signals WHERE id=?', (message['id'],)).fetchone()
+        if old and (old['worker'], old['signal']) != (message['worker'], message['signal']):
+            raise ValueError('Signal ID already has a different payload')
+        progress = json.loads(old['result']) if old and old['result'] and old['state'] in ('stopping', 'starting') else {}
+        if progress.get('retry_at', 0) > time.time():
+            return {'id': message['id'], 'state': 'pending', 'error': progress.get('error', 'Worker restart will retry')}
+        try:
+            return apply_signal_locked(db, message)
+        except Exception as error:
+            row = db.execute('SELECT state,result FROM fleet_signals WHERE id=?', (message['id'],)).fetchone()
+            if row and isinstance(error, ValueError):
+                receipt = {'id': message['id'], 'state': 'failed', 'worker': message['worker'], 'signal': message['signal'], 'error': str(error)}
+                db.execute("UPDATE fleet_signals SET state='failed',result=? WHERE id=?", (encode(receipt), message['id']))
+                db.commit()
+            elif row and row['state'] in ('stopping', 'starting'):
+                current = json.loads(row['result']) if row['result'] else {}
+                failures = progress.get('failures', 0) + 1
+                current.update(failures=failures, retry_at=time.time() + min(300, 5 * 2 ** min(failures, 6)), error=str(error))
+                db.execute('UPDATE fleet_signals SET result=? WHERE id=?', (encode(current), message['id']))
+                db.commit()
+            raise
+
+
+def apply_signal_locked(db, message):
+    action = message['signal']
+    if action not in ('pause', 'resume', 'stop', 'restart'):
+        raise ValueError('Unknown signal')
+    old = db.execute('SELECT worker,signal,state,result FROM fleet_signals WHERE id=?', (message['id'],)).fetchone()
+    if old and (old['worker'], old['signal']) != (message['worker'], action):
+        raise ValueError('Signal ID already has a different payload')
+    if old and old['state'] in ('acknowledged', 'superseded', 'failed'):
         return json.loads(old['result'])
-    db.execute("INSERT OR IGNORE INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)", (message['id'], 'local', message['worker'], message['signal'], time.time()))
+    db.execute("INSERT OR IGNORE INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)", (message['id'], 'local', message['worker'], action, time.time()))
     db.commit()
     worker = next((w for w in worker_status() if w['id'] == message['worker']), None)
     if not worker:
         raise ValueError('Worker not found on this machine')
-    action = message['signal']
+    # A newer explicit control supersedes unfinished intent for this worker.
+    # Replayed older requests then return a terminal receipt instead of undoing it.
+    for previous in db.execute("SELECT id,signal FROM fleet_signals WHERE worker=? AND id<>? AND state IN ('stopping','starting')", (worker['id'], message['id'])).fetchall():
+        receipt = {'id': previous['id'], 'state': 'superseded', 'signal': previous['signal'], 'worker': worker['id'], 'superseded_by': message['id']}
+        db.execute("UPDATE fleet_signals SET state='superseded',result=? WHERE id=?", (encode(receipt), previous['id']))
+    db.commit()
     phase = old['state'] if old else 'pending'
-    prior = json.loads(old['result']).get('prior_pid') if old and old['result'] and phase != 'acknowledged' else worker['pid']
+    progress = json.loads(old['result']) if old and old['result'] and phase in ('stopping', 'starting') else {}
+    prior = progress.get('prior_pid', worker['pid'])
     already_started = action == 'restart' and phase == 'starting' and worker['pid'] is not None and worker['pid'] != prior
     config_path = STATE / ('fleet-main.json' if db.execute('SELECT role FROM fleet_meta WHERE id=1').fetchone()[0] == 'controller' else 'fleet-agent.json')
     saved = read_json(config_path, {})
     for desired in saved.get('workers', []):
         if desired['id'] == worker['id']:
-            desired['intent'] = 'stop' if action in ('stop', 'restart') else action if action == 'pause' else 'running'
+            desired['intent'] = 'stop' if action in ('stop', 'restart') else 'pause' if action == 'pause' else 'running'
     atomic_json(config_path, saved)
-    if action in ('stop', 'restart') and not already_started and phase != 'starting':
-        db.execute("UPDATE fleet_signals SET state='stopping',result=? WHERE id=?", (encode({'prior_pid': prior}), message['id']))
-        db.commit()
-        control_worker(worker['id'], 'stop_worker')
+    if action in ('stop', 'restart') and not already_started:
+        if phase != 'starting':
+            db.execute("UPDATE fleet_signals SET state='stopping',result=? WHERE id=?", (encode({'prior_pid': prior}), message['id']))
+            db.commit()
+            control_worker(worker['id'], 'stop_worker')
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
+        while True:
             worker = next(w for w in worker_status() if w['id'] == worker['id'])
             if worker['pid'] is None and worker['active'] == 0:
                 break
+            if phase == 'starting' or time.monotonic() >= deadline:
+                raise RuntimeError('Previous supervisor or owned sessions have not stopped; no duplicate was launched')
             time.sleep(.2)
-        else:
-            raise RuntimeError('Previous supervisor has not stopped; no duplicate was launched')
     if action == 'pause':
         control_worker(worker['id'], 'pause')
     elif action == 'resume' and worker['pid']:
         control_worker(worker['id'], 'start')
     elif action in ('resume', 'restart') and not already_started:
+        if worker['active']:
+            raise RuntimeError('Owned sessions are still active; no duplicate was launched')
         db.execute("UPDATE fleet_signals SET state='starting',result=? WHERE id=?", (encode({'prior_pid': prior}), message['id']))
         db.commit()
-        start_worker(worker)
+        pid = start_worker(worker)
+        db.execute("UPDATE fleet_signals SET result=? WHERE id=?", (encode({'prior_pid': prior, 'replacement_pid': pid}), message['id']))
+        db.commit()
     for desired in saved.get('workers', []):
         if desired['id'] == worker['id']:
             desired['intent'] = 'running' if action in ('restart', 'resume') else action
@@ -751,6 +838,13 @@ def apply_signal(db, message):
 
 
 def configure_agent(db, message):
+    with lifecycle_lock(wait=False) as acquired:
+        if not acquired:
+            return {'kind': 'ack', 'configuration_error': 'Worker restart in progress; configuration will retry'}
+        return configure_agent_locked(db, message)
+
+
+def configure_agent_locked(db, message):
     previous = read_json(STATE / 'fleet-agent.json', {})
     configured = {'role': 'agent', 'controller': message['controller'], 'revision': message['revision'],
                   'workers': message.get('workers', previous.get('workers', []))}
@@ -765,7 +859,11 @@ def configure_agent(db, message):
 
 def configure_workers(db, workers):
     failures = []
+    changing = {r['worker'] for r in db.execute("SELECT worker FROM fleet_signals WHERE state IN ('stopping','starting')")}
     for desired in workers:
+        if desired['id'] in changing:
+            failures.append(desired['id'] + ': Worker restart in progress; configuration will retry')
+            continue
         try:
             ensure_worker(desired)
             row = db.execute('SELECT config,version FROM issue_workers WHERE id=?', (desired['id'],)).fetchone()
@@ -780,8 +878,19 @@ def configure_workers(db, workers):
     return failures
 
 def reconcile_workers(config):
+    with lifecycle_lock(wait=False) as acquired:
+        if acquired:
+            reconcile_workers_locked(config)
+
+
+def reconcile_workers_locked(config):
     known = worker_status()
+    # A durable interrupted restart owns lifecycle intent until replay completes.
+    with connect_db(identity()[1]) as db:
+        changing = {r['worker'] for r in db.execute("SELECT worker FROM fleet_signals WHERE state IN ('stopping','starting')")}
     for desired in config.get('workers', []):
+        if desired['id'] in changing:
+            continue
         try:
             worker = next((w for w in known if w['id'] == desired['id']), None)
             intent = desired.get('intent', 'running' if desired['config'].get('enabled') else 'pause')
@@ -826,6 +935,23 @@ def agent_stdio():
                           'projects': [dict(r) for r in db.execute('SELECT * FROM projects')],
                           'local_config': [w for w in read_json(STATE / 'fleet-agent.json', {}).get('workers', []) if 'local_revision' in w],
                           'workers': worker_status(), 'cursor': state_get(db, 'cursor'), 'revision': state_get(db, 'revision'), 'pending': db.execute('SELECT count(*) FROM fleet_outbox').fetchone()[0]})
+        signal_queue = queue.Queue(maxsize=100)
+        output_lock = threading.Lock()
+        def reply(message):
+            with output_lock:
+                send(sys.stdout, message)
+        def signals():
+            with connect_db(path) as signal_db:
+                while True:
+                    message = signal_queue.get()
+                    if message is None:
+                        return
+                    try:
+                        result = apply_signal(signal_db, message)
+                    except Exception as error:
+                        result = {'id': message['id'], 'state': 'failed' if isinstance(error, ValueError) else 'pending', 'error': str(error)}
+                    reply({'kind': 'ack', 'signal': result})
+        threading.Thread(target=signals, daemon=True).start()
         while raw := sys.stdin.readline(LIMIT + 1):
             if len(raw.encode()) > LIMIT:
                 raise ValueError('Fleet frame exceeds 16 MiB')
@@ -834,22 +960,21 @@ def agent_stdio():
                 raise ValueError('Unsupported fleet protocol version')
             kind = message.get('kind')
             if kind == 'configure':
-                send(sys.stdout, configure_agent(db, message))
+                reply(configure_agent(db, message))
             elif kind == 'pull':
                 with db:
                     apply_pull(db, node, message['payload'], message.get('receipts', []))
                 atomic_json(STATE / 'fleet-agent-status.json', {'connected_at': time.time(), 'last_sync': time.time()})
                 reconcile_workers(read_json(STATE / 'fleet-agent.json', {}))
-                send(sys.stdout, {'kind': 'ack', 'cursor': state_get(db, 'cursor'), 'pending': db.execute('SELECT count(*) FROM fleet_outbox').fetchone()[0]})
+                reply({'kind': 'ack', 'cursor': state_get(db, 'cursor'), 'pending': db.execute('SELECT count(*) FROM fleet_outbox').fetchone()[0]})
             elif kind == 'signal':
                 try:
-                    result = apply_signal(db, message)
-                except Exception as error:
-                    result = {'id': message['id'], 'state': 'failed', 'error': str(error)}
-                send(sys.stdout, {'kind': 'ack', 'signal': result})
+                    signal_queue.put_nowait(message)
+                except queue.Full:
+                    reply({'kind': 'ack', 'signal': {'id': message['id'], 'state': 'pending', 'error': 'Worker control queue is busy'}})
             elif kind == 'ping':
                 atomic_json(STATE / 'fleet-agent-status.json', {'connected_at': time.time(), 'last_sync': state_get(db, 'last_sync')})
-                send(sys.stdout, {'kind': 'heartbeat', 'at': time.time(), 'workers': worker_status(), 'changes': journal(db), 'cursor': state_get(db, 'cursor'),
+                reply({'kind': 'heartbeat', 'at': time.time(), 'workers': worker_status(), 'changes': journal(db), 'cursor': state_get(db, 'cursor'),
                                   'local_config': [w for w in read_json(STATE / 'fleet-agent.json', {}).get('workers', []) if 'local_revision' in w],
                                   'pending': db.execute('SELECT count(*) FROM fleet_outbox').fetchone()[0], 'conflicts': db.execute('SELECT count(*) FROM fleet_conflicts WHERE resolved=0').fetchone()[0], 'revision': state_get(db, 'revision')})
             else:
@@ -926,6 +1051,10 @@ class Controller:
                     'machines': [local, *json.loads(encode([v for k, v in self.nodes.items() if k != 'local']))], 'events': list(self.events), 'signals': signals, 'conflicts': conflicts}
 
     def signal(self, request):
+        with self.lock:
+            return self.signal_locked(request)
+
+    def signal_locked(self, request):
         host, worker, action = request['host'], request['worker'], request['signal']
         if host != 'local' and host not in {h['host'] for h in inventory()}:
             raise ValueError('Machine is not in the configured inventory')
@@ -937,6 +1066,7 @@ class Controller:
             if old:
                 if (old['host'], old['worker'], old['signal']) != (host, worker, action):
                     raise ValueError('Signal ID already has a different payload')
+                return {'ok': True, 'id': identifier, 'state': old['state']}
             else:
                 db.execute("INSERT INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)", (identifier, host, worker, action, time.time()))
         path = DESIRED
@@ -952,6 +1082,10 @@ class Controller:
         return {'ok': True, 'id': identifier, 'state': 'pending'}
 
     def local_config(self, host, changes, workers):
+        with self.lock:
+            return self.local_config_locked(host, changes, workers)
+
+    def local_config_locked(self, host, changes, workers):
         if not changes:
             return workers
         current = hashlib.sha256(encode({'controller': self.node, 'workers': workers}).encode()).hexdigest()[:16]
@@ -1123,7 +1257,7 @@ class Controller:
                             send(process.stdin, {'kind': 'signal', **{k: pending[k] for k in ('id', 'worker', 'signal')}})
                         current = next(h for h in inventory() if h['host'] == host).get('workers', workers)
                         updated = hashlib.sha256(encode({'controller': self.node, 'workers': current}).encode()).hexdigest()[:16]
-                        if updated != revision:
+                        if updated != revision or self.nodes.get(host, {}).get('configuration_error'):
                             workers, revision = current, updated
                             send(process.stdin, {'kind': 'configure', 'controller': self.node, 'revision': revision, 'workers': workers})
                             self.update(host, desired_workers=workers, desired_revision=revision)
@@ -1162,18 +1296,19 @@ class Controller:
             try:
                 hosts = inventory()
                 observed = worker_status()
-                main = read_json(STATE / 'fleet-main.json', {})
-                if any('local_revision' in w for w in main.get('workers', [])):
-                    saved = read_json(DESIRED, {})
-                    main['workers'] = [{k: w[k] for k in ('id', 'config', 'intent')} for w in main['workers']]
-                    saved.setdefault('machines', {}).setdefault('local', {})['workers'] = main['workers']
-                    atomic_json(DESIRED, saved)
-                desired = read_json(DESIRED, {}).get('machines', {}).get('local', {}).get('workers', main.get('workers', []))
-                for discovered in observed:
-                    if not any(w['id'] == discovered['id'] for w in desired):
-                        desired.append({'id': discovered['id'], 'config': discovered['config'], 'intent': 'running' if discovered['config']['enabled'] else 'pause'})
-                main = {'role': 'controller', 'workers': desired, 'revision': hashlib.sha256(encode(desired).encode()).hexdigest()[:16]}
-                atomic_json(STATE / 'fleet-main.json', main)
+                with self.lock:
+                    main = read_json(STATE / 'fleet-main.json', {})
+                    if any('local_revision' in w for w in main.get('workers', [])):
+                        saved = read_json(DESIRED, {})
+                        main['workers'] = [{k: w[k] for k in ('id', 'config', 'intent')} for w in main['workers']]
+                        saved.setdefault('machines', {}).setdefault('local', {})['workers'] = main['workers']
+                        atomic_json(DESIRED, saved)
+                    desired = read_json(DESIRED, {}).get('machines', {}).get('local', {}).get('workers', main.get('workers', []))
+                    for discovered in observed:
+                        if not any(w['id'] == discovered['id'] for w in desired):
+                            desired.append({'id': discovered['id'], 'config': discovered['config'], 'intent': 'running' if discovered['config']['enabled'] else 'pause'})
+                    main = {'role': 'controller', 'workers': desired, 'revision': hashlib.sha256(encode(desired).encode()).hexdigest()[:16]}
+                    atomic_json(STATE / 'fleet-main.json', main)
                 with connect_db(self.path) as db:
                     failures = configure_workers(db, desired)
                 if failures:
@@ -1194,12 +1329,12 @@ class Controller:
                         self.threads[host] = thread
                         thread.start()
                 with connect_db(self.path) as db:
-                    local_signals = [dict(r) for r in db.execute("SELECT * FROM fleet_signals WHERE host='local' AND state='pending' ORDER BY created_at")]
+                    local_signals = [dict(r) for r in db.execute("SELECT * FROM fleet_signals WHERE host='local' AND state IN ('pending','stopping','starting') ORDER BY created_at")]
                     for pending in local_signals:
                         try:
                             apply_signal(db, pending)
                         except Exception as error:
-                            db.execute("UPDATE fleet_signals SET state='failed',result=? WHERE id=?", (str(error), pending['id']))
+                            self.event('local', 'signal', pending['id'] + ': ' + str(error))
                 if self.source:
                     # Fingerprint source in a separate process, with a debounce before deployment.
                     result = subprocess.run([str(BINARY), 'upgrade', '--source', self.source, '--local-only', '--check', '--json'], capture_output=True, text=True, timeout=20)
@@ -1329,7 +1464,20 @@ def agent_daemon():
     STATE.mkdir(parents=True, exist_ok=True)
     lock = open(STATE / 'fleet-agent.lock', 'a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _, path = identity()
     while not STOP.is_set():
+        with lifecycle_lock(wait=False) as acquired:
+            if acquired:
+                with connect_db(path) as db:
+                    interrupted = [dict(r) for r in db.execute("SELECT * FROM fleet_signals WHERE host='local' AND state IN ('stopping','starting') ORDER BY created_at")]
+                # Release the lock before apply_signal reacquires it.
+        if acquired:
+            for pending in interrupted:
+                try:
+                    with connect_db(path) as db:
+                        apply_signal(db, pending)
+                except Exception as error:
+                    atomic_json(STATE / 'fleet-agent-error.json', {'worker': pending['worker'], 'error': str(error), 'at': time.time()})
         config = read_json(STATE / 'fleet-agent.json', {})
         if config:
             try:

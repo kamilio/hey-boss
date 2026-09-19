@@ -101,8 +101,8 @@ finished attempts. Open, unassigned unsuccessful issues retry automatically afte
 a delay of 30 seconds to five minutes. Approval/input requests require explicit
 retry. Workers drain active sessions and reload after a CLI replacement.
 `worker pause ID` drains, `worker stop ID` stops its sessions, and
-`worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app.
-Pickup reserves an unassigned issue for 120 seconds (`--claim-timeout`);
+`worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app. Use `worker restart ID` locally or `worker --host HOST restart ID` from the controller machine; `fleet signal HOST ID restart` also works. These queue durable signals, retain the worker ID/settings, and keep the controller and companion running. Acknowledgment requires the replacement to register. Failed restarts retry with backoff; a new stop supersedes unfinished restart intent.
+Pickup reserves an unassigned issue; the 120-second manual claim window (`--claim-timeout`) starts with the first model activity. Model startup has a separate fifteen-minute bound;
 **the agent must claim manually** using `hey-boss issue claim NUMBER`.
 Claim output includes project instructions and PR attachment commands.
 PRs are disabled by default; project settings or `worker --prs` enable them.

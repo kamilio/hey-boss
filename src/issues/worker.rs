@@ -574,6 +574,12 @@ impl Codex {
         }
     }
     fn check(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
+        if store.worker_model_expired(job)? {
+            return Err(Error::new(
+                "startup_timeout",
+                "Codex did not begin model work within 15 minutes. The session was stopped and the issue can retry.",
+            ));
+        }
         if store.worker_claim_expired(job)? {
             return Err(Error::new(
                 "claim_timeout",
@@ -905,6 +911,17 @@ fn run_thread(
         if params["threadId"].as_str().is_some_and(|id| id != session) {
             continue;
         }
+        if matches!(
+            method,
+            "item/started"
+                | "item/agentMessage/delta"
+                | "item/reasoning/textDelta"
+                | "item/reasoning/summaryTextDelta"
+                | "item/completed"
+        ) && params["item"]["type"] != "userMessage"
+        {
+            store.worker_begin_claim(&job.id)?;
+        }
         match method {
             "thread/goal/updated" => {
                 store.worker_event(
@@ -1203,7 +1220,7 @@ pub fn serve_instance_with_history(
     let mut last = String::new();
     let mut heartbeat = Instant::now() - Duration::from_secs(30);
     while !supervisor.stop.load(Ordering::Relaxed) {
-        let mut value = store.execute(&super::Request {
+        let value = store.execute(&super::Request {
             version: 1,
             project: project.clone(),
             project_override: None,
@@ -1212,7 +1229,18 @@ pub fn serve_instance_with_history(
                 worker_id: Some(id.clone()),
             },
             request_id: None,
-        })?;
+        });
+        let mut value = match value {
+            Ok(value) => value,
+            Err(error) if error.code == "database_busy" => {
+                eprintln!(
+                    "Worker status temporarily unavailable: {error}; retrying without stopping sessions"
+                );
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
         value["upgrading"] =
             json!(supervisor.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
