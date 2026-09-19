@@ -121,6 +121,7 @@
         node.id,
         [
           node.title,
+          node.original_title,
           titles.get(node.id),
           node.body,
           node.state,

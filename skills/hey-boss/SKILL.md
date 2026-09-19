@@ -211,7 +211,10 @@ Inbox is reported explicitly. Map reads never complete notices or change issues.
 the generated node ID or links. Aliases must remain unique within their project.
 `mm pr URL --title LABEL` gives a PR a readable label; `mm edit NODE --title LABEL`
 changes it while preserving URL/attachments/dependencies. Issue and notice text stays
-live; PRs accept title edits only. `view` prints the PR URL and export links its label.
+live; issue and PR nodes accept title edits only. `mm edit issue:12 --title LABEL`
+sets a map-only issue label; `mm edit issue:12 --clear-label` restores its live
+title. Details retain the original title and search matches both titles.
+`view` prints the PR URL and export links its label.
 `view NODE --bodies preview|none|full` controls focused text reads (default full).
 Live issue assignments appear in the viewer and `view`; viewer search matches
 assignment names/IDs and state. Show less fetches a fresh preview after a full read.

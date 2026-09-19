@@ -194,3 +194,9 @@ console.log(
     layoutMilliseconds: performance.now() - start,
   }),
 );
+
+const labeledIssue = {id: "short-issue", kind: "issue", title: "Keep replies safe", original_title: "Technical response ordering regression", display_label: "Keep replies safe"};
+assert.equal(displayTitle(labeledIssue), "Keep replies safe");
+const labeledIndex = indexGraph([labeledIssue], [], () => "");
+assert(labeledIndex.documents.get(labeledIssue.id).includes("keep replies safe"));
+assert(labeledIndex.documents.get(labeledIssue.id).includes("technical response ordering regression"));
