@@ -60,6 +60,8 @@ hey-boss mm move design --under release
 hey-boss mm move design --before implementation
 hey-boss mm move design --after implementation
 hey-boss mm move design                  # move to the root/end
+hey-boss mm alias design architecture
+hey-boss mm alias architecture --clear
 hey-boss mm remove design
 hey-boss mm remove release --recursive
 hey-boss mm projects
@@ -67,6 +69,11 @@ hey-boss mm export > roadmap.md
 ```
 
 An anchor supplies the destination parent unless `--under` is supplied; then the anchor must be its child. Nesting stays within one project, supports 32 levels and rejects cycles. A project supports 10,000 saved nodes. A referenced resource has one saved node per map; use aliases to place and link it. Removal with children requires `--recursive`. Deleting a map node removes its links and never deletes its issue, PR or notice.
+
+`mm alias NODE NAME` changes a topic or resource node's alias; `--clear` removes it.
+The generated node ID, nesting and links stay intact. The new alias must be unique
+within the selected project. Identical request-ID retries still resolve after the
+original alias has changed.
 
 ## Automation and concurrency
 

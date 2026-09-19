@@ -136,6 +136,14 @@ enum Action {
         #[command(flatten)]
         body: Body,
     },
+    /// Set or clear a node's readable alias, preserving its identity and links.
+    Alias {
+        node: String,
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        alias: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// Move to a parent/root, optionally before or after a sibling.
     Move {
         node: String,
@@ -263,6 +271,11 @@ impl Options {
                 node: node.clone(),
                 title: title.clone(),
                 body: body.read()?,
+                if_version: self.if_version,
+            },
+            Some(Action::Alias { node, alias, .. }) => Operation::Alias {
+                node: node.clone(),
+                alias: alias.clone(),
                 if_version: self.if_version,
             },
             Some(Action::Move {

@@ -187,3 +187,28 @@ measured fixture. These are fixture observations, not a general performance guar
 The original development checkout remains unchanged. A fresh upstream fetch still
 leaves the unpublished dependency baseline unresolved for publication. Installation,
 final requirement audit and the requested eight-hour duration remain incomplete.
+
+## Fourth milestone: authoring identity and transactional coverage
+
+`mm alias NODE NAME` and `mm alias NODE --clear` change readable selectors while
+preserving generated identity, hierarchy and links. They work for saved resource
+nodes as well as topics. Collision/validation errors roll back; unchanged aliases
+do not increment revisions. Request receipts permit retrying the old selector after
+it has been renamed. Documentation and repository skill describe the behavior.
+
+22 mindmap and 16 HTTP tests pass. New end-to-end cases verify Git worktrees share
+their default map, worker project environment overrides work, explicit projects take
+precedence, ambiguous names require full IDs, simultaneous versioned edits commit
+one change, simultaneous identical retries create one node, and recursive deletion
+increments each affected neighboring project exactly once. Alias lifecycle coverage
+checks cross-project projection and preserved links, resources, retries and conflicts.
+
+On the collapsed 2,500-node fixture, searching for the last topic revealed that node
+and its ancestor with seven visible rows and no horizontal overflow. Focus navigation
+now clears a search that would otherwise hide an existing requested target.
+
+A comparison against the original development checkout found 19 files changed since
+the initial dependency snapshot, including worker/store/web code. The original checkout
+has not been altered. Integrating these newer local dependencies into the isolated
+feature branch is the next delivery step; none of these snapshots should be silently
+published as a feature-only change.

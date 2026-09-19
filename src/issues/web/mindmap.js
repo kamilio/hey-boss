@@ -97,7 +97,8 @@
     const nodes = allNodes(); let node = nodes.get(target);
     while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
     render();
-    const element = document.getElementById(target);
+    let element = document.getElementById(target);
+    if (!element && nodes.has(target) && $("#search").value) { $("#search").value = ""; render(); element = document.getElementById(target); }
     if (element) { element.classList.add("highlight"); element.scrollIntoView({ block: "center" }); element.tabIndex = -1; element.focus({ preventScroll: true }); }
   }
   async function load({ refresh = false } = {}) {

@@ -22,20 +22,18 @@ impl Fixture {
         Self { root }
     }
     fn cmd(&self, project: &str, command: &str, args: &[&str]) -> Command {
+        let mut c = self.default_cmd(command, args);
+        c.args(["--project", project]);
+        c
+    }
+    fn default_cmd(&self, command: &str, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
         c.current_dir(&self.root)
             .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
             .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent.sock"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
-            .args([
-                command,
-                "--project",
-                project,
-                "--agent",
-                "human:test",
-                "--json",
-            ])
+            .args([command, "--agent", "human:test", "--json"])
             .args(args);
         c
     }
@@ -766,5 +764,270 @@ fn terminal_outline_defaults_to_titles_but_view_and_export_keep_bodies() {
     assert_eq!(
         alias(&f.run("Atlas", &["show"]), "plan")["body"],
         "A complete planning note."
+    );
+}
+
+#[test]
+fn repository_defaults_share_maps_across_worktrees_and_honor_worker_override() {
+    let f = Fixture::new();
+    let repository = f.root.join("repository");
+    let worktree = f.root.join("worktree");
+    std::fs::create_dir_all(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "Fixture",
+    ]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:example/mindmap-default.git",
+    ]);
+    git(&[
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "fixture-worktree",
+        worktree.to_str().unwrap(),
+    ]);
+    let added = success(
+        f.default_cmd("mm", &["add", "Release", "--id", "release"])
+            .current_dir(&repository)
+            .output()
+            .unwrap(),
+    );
+    let other = success(
+        f.default_cmd("mm", &["show"])
+            .current_dir(&worktree)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(other["project"]["id"], added["project"]["id"]);
+    assert_eq!(nodes(&other).len(), 1);
+    assert_eq!(alias(&other, "release")["title"], "Release");
+    let overridden = success(
+        f.default_cmd("mm", &["add", "Worker plan", "--id", "worker"])
+            .current_dir(&worktree)
+            .env("HEY_BOSS_ISSUE_PROJECT", "WorkerProject")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(overridden["project"]["id"], "named:WorkerProject");
+    let explicit = success(
+        f.cmd("ExplicitProject", "mm", &["add", "Explicit plan"])
+            .current_dir(&worktree)
+            .env("HEY_BOSS_ISSUE_PROJECT", "WorkerProject")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(explicit["project"]["id"], "named:ExplicitProject");
+    let after = success(
+        f.default_cmd("mm", &["show"])
+            .current_dir(&repository)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(nodes(&after).len(), 1);
+}
+
+#[test]
+fn ambiguous_project_names_require_full_ids_for_maps_and_link_endpoints() {
+    let f = Fixture::new();
+    let first = "github.com/first/shared";
+    let second = "github.com/second/shared";
+    f.run(first, &["add", "First API", "--id", "api"]);
+    f.run(second, &["add", "Second API", "--id", "api"]);
+    f.run("Atlas", &["add", "Release", "--id", "release"]);
+    f.fail("shared", &["show"], 4);
+    f.fail("Atlas", &["link", "release", "shared::api"], 4);
+    assert!(
+        f.run("Atlas", &["show"])["links"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    f.run("Atlas", &["link", "release", &format!("{second}::api")]);
+    assert_eq!(
+        f.run("Atlas", &["show"])["external_nodes"][0]["title"],
+        "Second API"
+    );
+}
+
+#[test]
+fn concurrent_versions_and_request_retries_commit_one_mutation() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    let first = f
+        .cmd(
+            "Atlas",
+            "mm",
+            &["edit", "root", "--title", "First", "--if-version", "1"],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let second = f
+        .cmd(
+            "Atlas",
+            "mm",
+            &["edit", "root", "--title", "Second", "--if-version", "1"],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let outputs = [
+        first.wait_with_output().unwrap(),
+        second.wait_with_output().unwrap(),
+    ];
+    assert_eq!(outputs.iter().filter(|o| o.status.success()).count(), 1);
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|o| o.status.code() == Some(4))
+            .count(),
+        1
+    );
+    assert_eq!(f.run("Atlas", &["show"])["version"], 2);
+    let args = [
+        "add",
+        "Retried plan",
+        "--id",
+        "retry",
+        "--request-id",
+        "concurrent-retry",
+        "--if-version",
+        "2",
+    ];
+    let first = f
+        .cmd("Atlas", "mm", &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let second = f
+        .cmd("Atlas", "mm", &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        success(first.wait_with_output().unwrap()),
+        success(second.wait_with_output().unwrap())
+    );
+    let map = f.run("Atlas", &["show"]);
+    assert_eq!(map["version"], 3);
+    assert_eq!(nodes(&map).len(), 2);
+}
+
+#[test]
+fn recursive_deletion_advances_each_cross_project_neighbor_once() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Release", "--id", "release"]);
+    f.run(
+        "Atlas",
+        &["add", "API", "--id", "api", "--under", "release"],
+    );
+    f.run("Atlas", &["add", "UI", "--id", "ui", "--under", "release"]);
+    f.run("Platform", &["add", "Shared API", "--id", "shared"]);
+    f.run("Client", &["add", "Client", "--id", "client"]);
+    f.run("Atlas", &["link", "api", "Platform::shared"]);
+    f.run("Platform", &["link", "shared", "Atlas::ui"]);
+    f.run("Client", &["link", "client", "Atlas::ui"]);
+    let before: Vec<_> = ["Atlas", "Platform", "Client"]
+        .iter()
+        .map(|p| f.run(p, &["show"])["version"].as_i64().unwrap())
+        .collect();
+    f.run("Atlas", &["remove", "release", "--recursive"]);
+    for (project, version) in ["Atlas", "Platform", "Client"].iter().zip(before) {
+        let map = f.run(project, &["show"]);
+        assert_eq!(map["version"], version + 1);
+        assert!(map["links"].as_array().unwrap().is_empty());
+    }
+    assert_eq!(nodes(&f.run("Platform", &["show"])).len(), 1);
+    assert_eq!(nodes(&f.run("Client", &["show"])).len(), 1);
+}
+
+#[test]
+fn alias_changes_keep_node_identity_and_cross_links_and_allow_resource_nodes() {
+    let f = Fixture::new();
+    let created = f.run("Atlas", &["add", "Release", "--id", "release"]);
+    let id = created["node"]["id"].as_str().unwrap();
+    f.run("Platform", &["add", "API", "--id", "api"]);
+    f.run(
+        "Atlas",
+        &["link", "release", "Platform::api", "--kind", "depends-on"],
+    );
+    let before = f.run("Atlas", &["show"]);
+    let renamed = f.run(
+        "Atlas",
+        &["alias", "release", "roadmap", "--request-id", "rename"],
+    );
+    assert_eq!(renamed["node"]["id"], id);
+    assert_eq!(renamed["node"]["alias"], "roadmap");
+    // An identical retry succeeds even though the original selector no longer exists.
+    assert_eq!(
+        f.run(
+            "Atlas",
+            &["alias", "release", "roadmap", "--request-id", "rename"]
+        ),
+        renamed
+    );
+    let after = f.run("Atlas", &["show"]);
+    assert_eq!(after["links"], before["links"]);
+    assert_eq!(
+        after["version"].as_i64(),
+        before["version"].as_i64().map(|v| v + 1)
+    );
+    assert_eq!(
+        f.run("Platform", &["show"])["external_nodes"][0]["alias"],
+        "roadmap"
+    );
+    f.fail("Atlas", &["view", "release"], 3);
+    let unchanged = f.run("Atlas", &["alias", "roadmap", "roadmap"]);
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(unchanged["version"], after["version"]);
+    f.run("Atlas", &["add", "Other", "--id", "occupied"]);
+    f.fail("Atlas", &["alias", "roadmap", "occupied"], 4);
+    for alias in ["n-reserved", "other::topic", "issue:1"] {
+        f.fail("Atlas", &["alias", "roadmap", alias], 2);
+    }
+    f.run("Atlas", &["alias", "roadmap", "--clear"]);
+    assert!(f.run("Atlas", &["view", id])["node"]["alias"].is_null());
+    assert_eq!(f.run("Atlas", &["show"])["links"], before["links"]);
+    f.issue("Atlas", &["create", "--title", "Live issue"]);
+    f.run("Atlas", &["issue", "1"]);
+    f.run("Atlas", &["alias", "issue:1", "implementation"]);
+    assert_eq!(
+        f.run("Atlas", &["view", "implementation"])["node"]["title"],
+        "Live issue"
+    );
+    f.fail("Atlas", &["alias", "Platform::api", "renamed"], 2);
+    f.fail(
+        "Atlas",
+        &["alias", "implementation", "work", "--if-version", "0"],
+        4,
     );
 }

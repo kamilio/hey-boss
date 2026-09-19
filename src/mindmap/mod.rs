@@ -61,6 +61,11 @@ pub enum Operation {
         body: Option<String>,
         if_version: Option<i64>,
     },
+    Alias {
+        node: String,
+        alias: Option<String>,
+        if_version: Option<i64>,
+    },
     Move {
         node: String,
         under: Option<String>,
@@ -112,12 +117,7 @@ impl Operation {
                 crate::issues::identifier(title, "node title", 512)?;
                 validate_body(body)?;
                 if let Some(alias) = alias {
-                    crate::issues::identifier(alias, "node alias", 128)?;
-                    if alias.contains(':') || alias.starts_with("n-") {
-                        return Err(Error::invalid(
-                            "Aliases cannot contain ':' or start with 'n-'",
-                        ));
-                    }
+                    validate_alias(alias)?;
                 }
                 if ["issue", "pr", "notification"].contains(&kind.as_str()) && reference.is_none() {
                     return Err(Error::invalid("Reference node requires a reference"));
@@ -143,6 +143,14 @@ impl Operation {
                 }
                 if let Some(body) = body {
                     validate_body(body)?;
+                }
+                *if_version
+            }
+            Self::Alias {
+                alias, if_version, ..
+            } => {
+                if let Some(alias) = alias {
+                    validate_alias(alias)?;
                 }
                 *if_version
             }
@@ -185,6 +193,15 @@ impl Operation {
         }
         Ok(())
     }
+}
+fn validate_alias(alias: &str) -> Result<()> {
+    crate::issues::identifier(alias, "node alias", 128)?;
+    if alias.contains(':') || alias.starts_with("n-") {
+        return Err(Error::invalid(
+            "Aliases cannot contain ':' or start with 'n-'",
+        ));
+    }
+    Ok(())
 }
 fn validate_body(body: &str) -> Result<()> {
     if body.len() > BODY_LIMIT {
