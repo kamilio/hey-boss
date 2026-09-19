@@ -414,6 +414,14 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 include_bytes!("web/fleet.js"),
             )),
             "/app.css" => Some(("text/css; charset=utf-8", include_bytes!("web/app.css"))),
+            "/components.css" => Some((
+                "text/css; charset=utf-8",
+                include_bytes!("web/components.css"),
+            )),
+            "/components.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/components.js"),
+            )),
             "/app.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/app.js"),
@@ -446,6 +454,42 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             _ => None,
         };
         if let Some((kind, data)) = asset {
+            if path == "/" || path == "/mm" {
+                let issues = path == "/";
+                let shell = include_str!("web/app-shell.html")
+                    .replace(
+                        "<!--header-actions-->",
+                        if issues {
+                            include_str!("web/issue-header-actions.html")
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--profile-->",
+                        if issues {
+                            include_str!("web/issue-profile.html")
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--project-action-->",
+                        if issues {
+                            include_str!("web/issue-project-action.html")
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--mindmap-current-->",
+                        if issues { "" } else { " aria-current=\"page\"" },
+                    );
+                let html = std::str::from_utf8(data)
+                    .unwrap()
+                    .replace("<!--app-shell-->", &shell);
+                return Ok((200, kind, html.into_bytes()));
+            }
             return Ok((200, kind, data.to_vec()));
         }
         if path == "/api/fleet/status" {

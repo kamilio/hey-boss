@@ -3,6 +3,10 @@
   const $ = (s) => document.querySelector(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   let csrf = "", graph = null, projects = [], generation = 0, controller = null, boot = null;
+  HeyBossUI.icons();
+  const projectPicker = new HeyBossUI.ProjectPicker({
+    onSelect(project) { $("#search").value = ""; location.hash = new URLSearchParams({project}).toString(); },
+  });
   const collapsed = new Set(), openBodies = new Set();
   let viewMode = "map", selected = null, mapQuery = "", mapSearchCamera = null;
   let detailsHTML = "", detailsNode = null;
@@ -230,7 +234,7 @@
   }
   async function load({ refresh = false } = {}) {
     const ticket = ++generation; controller?.abort(); controller = new AbortController();
-    $("#connection").textContent = "Loading…";
+    $("#connection span").textContent = "Loading…";
     try {
       if (!csrf || refresh) {
         const response = await fetch("/api/bootstrap", { signal: controller.signal });
@@ -253,21 +257,21 @@
         initializedProjects.add(graph.project.id);
       }
       if (!projects.some((p) => p.id === graph.project.id)) projects.push(graph.project);
-      $("#project").innerHTML = projects.filter((p) => p.hidden_at == null || p.id === graph.project.id).map((p) => `<option value="${esc(p.id)}" ${p.id === graph.project.id ? "selected" : ""}>${esc(p.name)}${p.hidden_at != null ? " (hidden)" : ""}</option>`).join("");
+      projectPicker.update(projects, graph.project);
       $("#title").textContent = graph.project.name;
-      $("#caption").textContent = graph.project.id;
+      $("#caption").textContent = "Topics, work and dependencies in one map.";
       document.title = `${graph.project.name} · Mindmap · Hey Boss`;
-      $("#connection").textContent = "Connected"; $("#error").hidden = true;
+      $("#connection").classList.remove("offline"); $("#connection span").textContent = "Connected"; $("#error").hidden = true;
       $("#inbox-warning").hidden = graph.notifications?.available !== false;
       $("#inbox-warning").textContent = graph.notifications?.available === false ? `Notifications unavailable: ${graph.notifications.error}` : "";
       render(); reveal();
     } catch (error) {
       if (ticket !== generation || error.name === "AbortError") return;
-      $("#connection").textContent = "Disconnected"; $("#error").hidden = false;
+      $("#connection").classList.add("offline"); $("#connection span").textContent = "Disconnected"; $("#error").hidden = false;
       $("#error").textContent = `${error.message}. Refresh to retry.${graph ? " Showing the last loaded outline." : ""}`;
     }
   }
-  $("#project").addEventListener("change", () => { $("#search").value = ""; location.hash = new URLSearchParams({ project: $("#project").value }).toString(); });
+
   $("#search").addEventListener("input", render);
   function searchMatch(step) {
     if (!searchMatches.length) return;
