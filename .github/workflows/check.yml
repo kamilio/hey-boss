@@ -30,7 +30,9 @@ jobs:
       # The runner owns non-dumpable processes. Health cleanup deliberately refuses
       # to proceed without a complete procfs inspection, so its real-process tests
       # need permission to inspect those processes. Keep other tests unprivileged.
-      - run: cargo test --locked -- --skip health::
-      - run: sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" cargo test --locked --lib health::
+      - run: |
+          cargo test --locked -- --skip health::
+      - run: |
+          sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" cargo test --locked --lib health::
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py
       - run: cargo clippy --locked --all-targets -- -D warnings
