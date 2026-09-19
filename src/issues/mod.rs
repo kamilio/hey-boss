@@ -254,6 +254,11 @@ pub enum Operation {
         number: i64,
         body: String,
     },
+    ResolveComment {
+        number: i64,
+        comment_id: i64,
+        resolved: bool,
+    },
     Close {
         number: i64,
         comment: Option<String>,
@@ -334,6 +339,7 @@ impl Operation {
             | Self::AssignBoss { number, .. }
             | Self::Unassign { number, .. }
             | Self::Comment { number, .. }
+            | Self::ResolveComment { number, .. }
             | Self::Close { number, .. }
             | Self::Reopen { number }
             | Self::Delete { number, .. }

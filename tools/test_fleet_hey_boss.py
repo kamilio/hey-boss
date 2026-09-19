@@ -187,6 +187,44 @@ class FleetTests(unittest.TestCase):
         data = json.loads(self.agent.execute("SELECT data FROM events WHERE action='commented'").fetchone()[0])
         self.assertEqual(data['comment_id'], comment)
 
+    def test_comment_resolution_remaps_foreign_comment_ids_and_syncs_both_ways(self):
+        def cli(path, *args):
+            environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(path)}
+            environment.pop('HEY_BOSS_ISSUE_HOST', None)
+            result = subprocess.run([str(BINARY), 'issue', '--project', 'Fleet tests', '--agent', 'human:fixture', '--json', *args], cwd=self.root, env=environment, capture_output=True, check=True)
+            return json.loads(result.stdout)
+
+        # Reserve local ID 1 independently on both machines before syncing.
+        foreign_id = cli(self.main_path, 'comment', '1', '--body', 'Supervisor feedback')['comment_id']
+        cli(self.agent_path, 'comment', '1', '--body', 'Agent note')
+        _, initial_receipts = self.upload()
+        with self.main:
+            snapshot = fleet.export_snapshot(self.main, 'agent')
+        with self.agent:
+            fleet.apply_pull(self.agent, 'agent', snapshot, initial_receipts)
+        local_id = self.agent.execute("SELECT id FROM comments WHERE body='Supervisor feedback'").fetchone()[0]
+        self.assertNotEqual(local_id, foreign_id)
+        cli(self.agent_path, 'resolve-comment', '1', str(local_id))
+        changes, receipts = self.upload()
+        self.assertTrue(all(receipt['state'] == 'applied' for receipt in receipts), receipts)
+        comments = cli(self.main_path, 'view', '1')['comments']
+        self.assertTrue(next(c for c in comments if c['body'] == 'Supervisor feedback')['resolved'])
+        self.assertFalse(next(c for c in comments if c['body'] == 'Agent note')['resolved'])
+        # Acknowledgment loss must not duplicate the resolution event.
+        with self.main:
+            self.assertEqual(fleet.accept_changes(self.main, 'agent', changes), receipts)
+            snapshot = fleet.export_snapshot(self.main, 'agent')
+        with self.agent:
+            fleet.apply_pull(self.agent, 'agent', snapshot, receipts)
+        self.assertEqual(self.agent.execute("SELECT count(*) FROM events WHERE action='comment_resolved'").fetchone()[0], 1)
+        cli(self.main_path, 'unresolve-comment', '1', str(foreign_id))
+        with self.main:
+            snapshot = fleet.export_snapshot(self.main, 'agent')
+        with self.agent:
+            fleet.apply_pull(self.agent, 'agent', snapshot, [])
+        comments = cli(self.agent_path, 'view', '1')['comments']
+        self.assertFalse(next(c for c in comments if c['id'] == local_id)['resolved'])
+
     def test_allocations_are_exclusive_and_survive_disconnect(self):
         with self.main:
             fleet.allocate(self.main, 'other', self.workers)

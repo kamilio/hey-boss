@@ -15,6 +15,8 @@ hey-boss issue create --title 'Fix reconnect' --body 'Reconnect after waking fro
 hey-boss issue view 1
 hey-boss issue claim 1
 hey-boss issue comment 1 --body 'Reproduced on the latest build.'
+hey-boss issue resolve-comment 1 42
+hey-boss issue unresolve-comment 1 42
 hey-boss issue edit 1 --body '## Expected behavior
 Reconnect after waking and preserve pending notifications.'
 hey-boss issue close 1 --comment 'Fixed in commit abc123.'
@@ -22,6 +24,13 @@ hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 
 Bodies and comments are Markdown text stored directly in SQLite. No Markdown
 file is required. `create` allows an empty body; comments must contain text.
+
+Each comment has a subtle **Resolve** action. Resolved comments collapse into a
+compact row; **Show comment** expands their original content, and **Unresolve**
+restores the full card. Resolution persists across reloads and fleet sync without
+changing the text, author, or comment count. CLI commands take the issue number
+and comment ID. Resolution and unresolution appear in the activity history.
+
 `edit` replaces only supplied fields; `--body ''` deliberately clears the body.
 Titles are required on creation, nonblank, and limited to 512 UTF-8 bytes.
 

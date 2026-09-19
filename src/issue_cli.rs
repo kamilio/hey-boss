@@ -267,6 +267,10 @@ enum Action {
         #[command(flatten)]
         body: Body,
     },
+    /// Resolve a comment while preserving its content.
+    ResolveComment { number: i64, comment_id: i64 },
+    /// Reopen a resolved comment.
+    UnresolveComment { number: i64, comment_id: i64 },
     /// Complete an issue and clear its claim, preserving attribution.
     Close {
         number: i64,
@@ -557,6 +561,12 @@ impl Options {
                 body: body
                     .read()?
                     .ok_or_else(|| Error::invalid("comment requires --body or --file"))?,
+            },
+            Action::ResolveComment { number, comment_id }
+            | Action::UnresolveComment { number, comment_id } => Operation::ResolveComment {
+                number: *number,
+                comment_id: *comment_id,
+                resolved: matches!(self.action, Action::ResolveComment { .. }),
             },
             Action::Close {
                 number,
@@ -880,9 +890,14 @@ fn print_text(value: &Value) {
     if let Some(comments) = value["comments"].as_array() {
         for comment in comments {
             println!(
-                "\nComment {} · {}\n{}",
+                "\nComment {} · {}{}\n{}",
                 comment["id"],
                 line(&comment["author"]),
+                if comment["resolved"] == true {
+                    " · resolved"
+                } else {
+                    ""
+                },
                 markdown(&comment["body"])
             );
         }
