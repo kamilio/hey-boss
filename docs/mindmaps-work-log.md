@@ -265,3 +265,21 @@ existing-project read-under-writer-lock issue regression passes after the change
 Next audit items include project-revision behavior when both link endpoints belong
 to projects other than the invoking project, installation/delivery reconciliation,
 and final requirement checks. The requested eight-hour goal remains active.
+
+## Foreign link revisions
+
+Linking two nodes in other projects no longer increments the unrelated invoking
+project's revision. Link/unlink already records endpoint projects and any implicit
+reference-node creations; the generic revision update now applies only to other
+node mutations. Regression coverage verifies both endpoint maps advance exactly once,
+the unrelated outline remains unchanged, identical links are no-ops, unlinking behaves
+the same way, and implicit foreign PR creation advances its owning map once.
+26 mindmap tests pass; formatting and diff whitespace checks pass. Documentation
+clarifies that optimistic guards check the selected map, so link authors should select
+an endpoint project when using `--if-version`.
+
+Further useful audit work: measure terminal outline rendering at 10,000 nodes (it still
+rescans the node array at each hierarchy level), review optional readable PR titles
+for big-picture authoring, and exercise installed CLI/skill delivery against the latest
+original development state. The original checkout remains untouched; no readiness
+notification has been sent and the eight-hour goal is not complete.

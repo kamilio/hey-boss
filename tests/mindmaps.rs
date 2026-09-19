@@ -1180,3 +1180,76 @@ fn large_pending_notice_bodies_are_bounded_without_losing_preview_or_single_node
             .all(|request| request["command"] == "inbox_list")
     );
 }
+
+#[test]
+fn foreign_endpoint_links_advance_only_the_maps_that_changed() {
+    let f = Fixture::new();
+    let affected_version = |receipt: &Value, project: &str| {
+        receipt["affected_projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["project"] == project)
+            .and_then(|entry| entry["version"].as_i64())
+    };
+    f.run("Atlas", &["add", "Unrelated outline", "--id", "outline"]);
+    f.run("Platform", &["add", "API", "--id", "api"]);
+    f.run("Client", &["add", "Release", "--id", "release"]);
+    let linked = f.run(
+        "Atlas",
+        &[
+            "link",
+            "Platform::api",
+            "Client::release",
+            "--kind",
+            "depends-on",
+        ],
+    );
+    assert_eq!(linked["version"], 1);
+    assert_eq!(affected_version(&linked, "named:Platform"), Some(2));
+    assert_eq!(affected_version(&linked, "named:Client"), Some(2));
+    assert_eq!(affected_version(&linked, "named:Atlas"), None);
+    assert_eq!(f.run("Atlas", &["show"])["version"], 1);
+    assert!(
+        f.run("Atlas", &["show"])["links"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let unchanged = f.run(
+        "Atlas",
+        &[
+            "link",
+            "Platform::api",
+            "Client::release",
+            "--kind",
+            "depends-on",
+        ],
+    );
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(f.run("Platform", &["show"])["version"], 2);
+    f.run(
+        "Atlas",
+        &[
+            "unlink",
+            "Platform::api",
+            "Client::release",
+            "--kind",
+            "depends-on",
+        ],
+    );
+    assert_eq!(f.run("Platform", &["show"])["version"], 3);
+    assert_eq!(f.run("Client", &["show"])["version"], 3);
+    assert_eq!(f.run("Atlas", &["show"])["version"], 1);
+    let created = f.run(
+        "Atlas",
+        &[
+            "link",
+            "Platform::pr:https://github.com/org/repo/pull/1",
+            "Client::release",
+        ],
+    );
+    assert_eq!(affected_version(&created, "named:Platform"), Some(4));
+    assert_eq!(affected_version(&created, "named:Client"), Some(4));
+    assert_eq!(created["version"], 1);
+}

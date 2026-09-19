@@ -99,7 +99,12 @@ hey-boss mm add 'Release' --id release --request-id release-topic --if-version 0
 hey-boss mm edit release --title 'Release plan' --if-version 1 --json
 ```
 
-Reuse a request ID only for an identical uncertain retry; a changed operation conflicts. `--if-version` checks the selected project's map revision. Adding/removing/updating a cross-link also increments both endpoint projects' map revisions. Live issue changes and Inbox state do not increment the outline revision; reload for their current state.
+Reuse a request ID only for an identical uncertain retry; a changed operation conflicts.
+`--if-version` checks the selected project's map revision. Select an endpoint project
+when using this guard for links. Adding/removing/updating a cross-link increments both
+endpoint projects' map revisions. If both endpoints belong to other projects, the
+invoking project's revision stays unchanged. Live issue changes and Inbox state do
+not increment the outline revision; reload for their current state.
 
 Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not found, 4 conflict, 1 operational failure. `--request-id` and `--if-version` apply only to mutations.
 
