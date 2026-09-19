@@ -9,7 +9,11 @@ Unread contains pending updates, alerts, questions, and document reviews. Activi
 contains completed and cancelled records. Both views show all matching notices,
 newest first, with project/search filters. Appearance follows the system.
 The list loads bounded summaries from the existing native SQLite history;
-document bodies and attachments load only when opened. There is no second history
+document bodies and attachments load only when opened. Bounded saved PNG icon
+snapshots are included in list metadata. Cards use the native notification severity
+colors (blue, green, orange, red), symbols, surface tint, and left accent stripe.
+Named CLI icons and their SF Symbol equivalents override the default icon, with a
+severity badge; unknown symbols fall back to the severity/kind icon. There is no second history
 store and no migration of existing notices.
 
 Ordinary updates/alerts become read when opened successfully. Questions stay

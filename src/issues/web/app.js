@@ -2,6 +2,26 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const paths = {
+  info: '<circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="M12 11v6M12 7v.5" stroke="var(--solid)" stroke-width="2"/>',
+  success:
+    '<circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m7 12 3 3 7-7" stroke="var(--solid)" stroke-width="2"/>',
+  warning:
+    '<path d="M12 2 23 21H1Z" fill="currentColor" stroke="none"/><path d="M12 9v5M12 17v.5" stroke="var(--solid)" stroke-width="2"/>',
+  error:
+    '<path d="M8 2h8l6 6v8l-6 6H8l-6-6V8Z" fill="currentColor" stroke="none"/><path d="m8 8 8 8M16 8l-8 8" stroke="var(--solid)" stroke-width="2"/>',
+  bell: '<path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Z" fill="currentColor"/><path d="M10 21h4M12 2v2"/>',
+  docs: '<path d="M5 2h9l5 5v15H5Z"/><path d="M14 2v6h5M8 12h8M8 16h8M8 19h5"/>',
+  question:
+    '<path d="M21 11a9 9 0 0 1-9 9H4l-3 3v-12a10 10 0 0 1 20 0Z"/><path d="M9 8a3 3 0 1 1 5 2l-2 2v1M12 16v.5"/>',
+  build: '<path d="m14 3 7 7-3 3-3-3-9 11-3-3 11-9-3-3Z"/>',
+  code: '<path d="m7 6-6 6 6 6M17 6l6 6-6 6M14 3l-4 18"/>',
+  test: '<path d="m2 5 2 2 3-4M10 5h12M2 12l2 2 3-4M10 12h12M2 19l2 2 3-4M10 19h12"/>',
+  review:
+    '<path d="M13 3H3v18h7M6 7h7M6 11h4"/><circle cx="16" cy="14" r="5"/><path d="m20 18 3 4"/>',
+  deploy:
+    '<path d="m12 2 10 5v12l-10 4-10-4V7l10-5ZM2 7l10 5 10-5M12 12v11M7 4l10 5"/>',
+
+
   inbox: '<path d="M4 4h16l2 12v4H2v-4L4 4Z"/><path d="M2 16h6l2 3h4l2-3h6"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M10 2h4l.5 3.2L17 6.6l3-1.1L22 9l-2.5 2.1v2.8L22 16l-2 3.5-3-1.1-2.5 1.4L14 22h-4l-.5-2.2L7 18.4l-3 1.1L2 16l2.5-2.1v-2.8L2 9l2-3.5 3 1.1 2.5-1.4L10 2Z"/>',

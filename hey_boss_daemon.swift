@@ -325,8 +325,8 @@ final class Database {
         }
     }
     func inboxRows() throws -> [[String: Any]] {
-        // Project only list metadata; never load image/document bodies into the list.
-        let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'severity',json_extract(body,'$.severity'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
+        // Project list metadata and bounded 128px icon snapshots, never document/attachment bodies.
+        let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'severity',json_extract(body,'$.severity'),'icon',json_extract(body,'$.icon'),'iconData',json_extract(body,'$.iconData'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
         defer { sqlite3_finalize(stmt) }
         var rows: [[String: Any]] = []
         while true {
