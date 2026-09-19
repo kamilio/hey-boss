@@ -6,7 +6,7 @@ import {HubStore,HubError,equal,token} from './store.mjs';
 import {pushContent,preview} from './markdown-text.mjs';
 export function createApp({store=new HubStore(),hubToken,origin,secure=true,push=webpush,vapid,now=Date.now}={}){
  if(!hubToken||hubToken.length<32)throw Error('HUB_TOKEN must contain at least 32 characters');
- const app=express();app.disable('x-powered-by');app.use(express.json({limit:'8mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
+ const app=express();app.disable('x-powered-by');app.use('/api/bridge/artifacts',express.json({limit:'32mb'}));app.use(express.json({limit:'8mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
  if(vapid)push.setVapidDetails(vapid.subject,vapid.publicKey,vapid.privateKey);
  app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"});if(req.method!=='GET'&&req.headers.origin&&req.headers.origin!==origin)return res.status(403).json({error:'Request origin is not allowed'});next();});
  const change=()=>{for(const res of listeners)res.write('data: '+JSON.stringify({revision:store.revision(),connected:Date.now()-bridgeSeen<30000})+'\n\n');};
@@ -28,6 +28,14 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.post('/api/bridge/issue-projects',bridge,(req,res)=>{store.setIssueProjects(req.body.projects);res.json({ok:true});});
  app.get('/api/bridge/issues',bridge,(req,res)=>res.json({creations:store.pendingIssues()}));
  app.post('/api/bridge/issues/:id/result',bridge,(req,res)=>{store.finishIssue(req.params.id,req.body);change();res.json({ok:true});});
+ app.get('/project-resource',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/resource.html',import.meta.url))));
+ app.get('/artifacts',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/artifacts.html',import.meta.url))));
+ app.use('/artifact-web',auth,express.static(fileURLToPath(new URL('../dist/artifact-web/',import.meta.url))));
+ app.get('/api/artifact-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects(),connected:store.issueConnected()}));
+ app.post('/api/artifact-requests',auth,(req,res)=>res.status(202).json({request:store.artifactRequest(req.device.id,req.body)}));
+ app.get('/api/artifact-requests/:id',auth,(req,res)=>res.json({request:store.artifactResult(req.device.id,req.params.id)}));
+ app.get('/api/bridge/artifacts',bridge,(req,res)=>res.json({requests:store.pendingArtifacts()}));
+ app.post('/api/bridge/artifacts/:id/result',bridge,(req,res)=>{store.finishArtifact(req.params.id,req.body);res.json({ok:true});});
  app.get('/api/tasks/:id',auth,(req,res)=>res.json({task:store.get(req.params.id)}));
  app.post('/api/tasks/:id/open',auth,(req,res)=>{const task=store.open(req.params.id);change();res.json({task:outcome(task)});});
  app.post('/api/notifications',auth,(req,res)=>{const preferences=store.setPreferences(req.body);change();res.json({notifications:{...preferences,...store.routing(now())}});});

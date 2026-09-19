@@ -1,0 +1,10 @@
+target
+out
+output
+.git
+.playwright-cli
+**/node_modules
+**/dist
+**/.data
+**/.env*
+**/*.db*

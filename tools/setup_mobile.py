@@ -22,7 +22,7 @@ def main():
     volumes=json.loads(run(['flyctl','volumes','list','--app',args.app,'--json'],capture_output=True,text=True).stdout)
     if not any(v.get('name')=='hey_boss_data' for v in volumes):run(['flyctl','volumes','create','hey_boss_data','--app',args.app,'--region',args.region,'--size','1','--yes'])
     run(['flyctl','secrets','import','--app',args.app,'--stage'],input=f'HUB_TOKEN={token}\nPUBLIC_ORIGIN=https://{args.app}.fly.dev\n',text=True,stdout=subprocess.DEVNULL)
-    run(['flyctl','deploy','--app',args.app,'--ha=false','--primary-region',args.region],cwd=ROOT/'mobile')
+    run(['flyctl','deploy','--config','mobile/fly.toml','--dockerfile','mobile/Dockerfile','--app',args.app,'--ha=false','--primary-region',args.region],cwd=ROOT)
     url=f'https://{args.app}.fly.dev'
     request=urllib.request.Request(url+'/api/bridge/pair-code',data=b'{}',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
     code=json.loads(urllib.request.urlopen(request,timeout=15).read())['code']

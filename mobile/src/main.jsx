@@ -26,7 +26,7 @@ function TaskIcon({task,size=20}){
 function App(){
  const [appearance,setAppearance]=useState(preferredAppearance);
  useEffect(()=>{const media=window.matchMedia('(prefers-color-scheme: dark)');const update=()=>setAppearance(preferredAppearance());media.addEventListener('change',update);return()=>media.removeEventListener('change',update);},[]);
- const [state,setState]=useState(null),[paired,setPaired]=useState(null),[tab,setTab]=useState('inbox'),[code,setCode]=useState('');
+ const [state,setState]=useState(null),[paired,setPaired]=useState(null),[tab,setTab]=useState(location.hash==='#issues'?'issues':'inbox'),[code,setCode]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pushBusy,setPushBusy]=useState(false),[settingsBusy,setSettingsBusy]=useState(false);
  const [drafts,setDrafts]=useState(savedDrafts),[sending,setSending]=useState(null),[selectedID,setSelectedID]=useState(null),[detail,setDetail]=useState(null),[detailLoading,setDetailLoading]=useState(false),[detailError,setDetailError]=useState('');
  useEffect(()=>{try{localStorage.setItem('hey-boss-drafts',JSON.stringify(drafts));}catch{}},[drafts]);
@@ -122,7 +122,7 @@ function App(){
    {(error||connectionError)&&<div className="message error" role="alert"><CircleAlert size={18}/><span>{error||connectionError}</span><button aria-label="Dismiss error" onClick={()=>{setError('');setConnectionError('');}}><X size={18}/></button></div>}
    {notice&&!error&&!connectionError&&<div className="message" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={()=>setNotice('')}><X size={18}/></button></div>}
   </main>
-  {paired&&<nav aria-label="Main navigation">{glassNav(<div className="tabs">{[['inbox','Inbox',Inbox],['history','Activity',History],['issues','Issues',ListTodo]].map(([value,label,Icon])=><button key={value} className={tab===value?'selected':''} aria-current={tab===value?'page':undefined} onClick={()=>{setTab(value);setNotice('');}}><Icon size={21} strokeWidth={1.8}/><span>{label}</span>{value==='inbox'&&pending.length>0&&<b>{pending.length}</b>}</button>)}</div>)}</nav>}
+  {paired&&<nav aria-label="Main navigation">{glassNav(<div className="tabs">{[['inbox','Inbox',Inbox],['history','Activity',History],['issues','Issues',ListTodo]].map(([value,label,Icon])=><button key={value} className={tab===value?'selected':''} aria-current={tab===value?'page':undefined} onClick={()=>{setTab(value);setNotice('');}}><Icon size={21} strokeWidth={1.8}/><span>{label}</span>{value==='inbox'&&pending.length>0&&<b>{pending.length}</b>}</button>)}<a href="/artifacts" className="artifact-tab"><span>Artifacts</span></a></div>)}</nav>}
   <Dialog.Root open={selectedID!==null} onOpenChange={open=>{if(!open)closeReader();}}><Dialog.Content className="reader-dialog" aria-describedby={undefined} onOpenAutoFocus={event=>{event.preventDefault();document.getElementById('reader-heading')?.focus();}}>
    <div className="reader-top"><span className="reader-context">{selected?.project||'Update'}</span><Dialog.Close><button className="icon-button" aria-label="Close reader"><X size={20}/></button></Dialog.Close></div>
    <Dialog.Title id="reader-heading" tabIndex={-1}>{selected?.title||state?.tasks.find(t=>t.taskID===selectedID)?.title||'Loading update…'}</Dialog.Title>

@@ -1,0 +1,37 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {HubStore} from './store.mjs';
+import {createApp} from './index.mjs';
+const project={id:'named:Artifacts',name:'Artifacts'};
+const payload={project:project.id,operation:{action:'artifact',operation:{command:'create',title:'Plan',body:'# Plan'}},request_id:'artifact-1'};
+test('artifact transport deduplicates mutations, isolates devices and keeps authoritative results',()=>{
+ const store=new HubStore();store.setIssueProjects([project]);
+ const first=store.artifactRequest('phone',payload);
+ assert.equal(first.status,'pending');assert.deepEqual(store.artifactRequest('phone',payload),first);
+ assert.throws(()=>store.artifactRequest('other',payload),/another request/);
+ assert.throws(()=>store.artifactResult('other',first.id),/not found/);
+ assert.throws(()=>store.artifactRequest('phone',{...payload,operation:{action:'close',number:1}}),/artifact/);
+ store.finishArtifact(first.id,{ok:true,artifact:{id:'stable',body:'# Plan'}});
+ assert.equal(store.pendingArtifacts().length,0);
+ assert.equal(store.artifactResult('phone',first.id).result.artifact.id,'stable');
+ store.finishArtifact(first.id,{ok:false,error:{message:'late'}});
+ assert.equal(store.artifactResult('phone',first.id).result.ok,true);
+ store.close();
+});
+test('artifact page and data routes require existing pairing and origin authentication',async t=>{
+ const store=new HubStore();store.setIssueProjects([project]);const key='x'.repeat(64);
+ const app=createApp({store,hubToken:key,secure:false,origin:'http://127.0.0.1'});
+ const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
+ t.after(()=>{app.locals.close();server.close();store.close();});const base='http://127.0.0.1:'+server.address().port;
+ const call=(path,body,headers={})=>fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
+ assert.equal((await call('/artifacts')).status,401);assert.equal((await call('/api/artifact-bootstrap')).status,401);
+ assert.equal((await call('/api/bridge/artifacts')).status,401);
+ const paired=await call('/api/pair',{code:store.pairing()});const headers={Cookie:paired.headers.get('set-cookie').split(';')[0]};
+ assert.equal((await call('/api/artifact-bootstrap',null,headers)).status,200);
+ assert.equal((await call('/api/artifact-requests',payload,{...headers,Origin:'https://evil.invalid'})).status,403);
+ const submitted=await call('/api/artifact-requests',payload,headers);assert.equal(submitted.status,202);
+ const id=(await submitted.json()).request.id;
+ const bridge={Authorization:'Bearer '+key};
+ assert.equal((await call('/api/bridge/artifacts/'+id+'/result',{ok:true,artifact:{id:'stable'}},bridge)).status,200);
+ assert.equal((await(await call('/api/artifact-requests/'+id,null,headers)).json()).request.result.artifact.id,'stable');
+});

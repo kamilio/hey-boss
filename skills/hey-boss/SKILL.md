@@ -230,3 +230,18 @@ previews and fetches full bodies on demand; search covers previews and loaded te
 Reads have a 32 MiB response budget. If a complete map exceeds it, use preview/none
 bodies, `view NODE` for text, or `links NODE` for a focused read with bodies omitted.
 Mutations retain all saved content regardless of read size.
+
+## Artifacts
+
+`hey-boss artifact` manages persistent project Markdown documents in the issue store.
+Use `create --title TITLE --file plan.md` (or `--body`, '-' for stdin), `list --query TEXT`,
+`view ID --json`, `edit ID --file updated.md --if-version N`, and `export ID` for Markdown stdout.
+`--issue NUMBER` or `--node ALIAS_OR_ID` on create/link attaches the same document;
+`unlink ID --issue NUMBER` or `--node NODE` preserves it. `links` reads resource attachments.
+`comment ID --body TEXT --quote SELECTED_TEXT` or `--parent COMMENT_ID` adds discussions.
+`resolve ID COMMENT_ID` and `--reopen` retain thread history. `archive/restore ID --if-version N`
+retain stable references. Project/host/agent/request IDs follow issue conventions.
+Use the authoritative supervisor host from companions; artifacts, like mindmaps, are not
+fleet issue replicas. Web/Fly use existing project authentication and the supervisor bridge.
+Test using a separate `HEY_BOSS_ISSUE_DB`. Interrupted mutations must retry the same request ID
+and payload; stale document revisions must be merged explicitly rather than overwritten.
