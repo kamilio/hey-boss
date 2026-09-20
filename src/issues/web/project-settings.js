@@ -1,6 +1,7 @@
 "use strict";
 const workflowPromptKeys = ["worktree", "checkout", "prs", "main"];
 let projectPromptDefaults = {};
+let chiefDefaultPrompt = "";
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
   projectSettingsFocus = null,
@@ -13,6 +14,8 @@ let projectSettingsVersion = 0,
 function projectSettingsDraft() {
   return {
     prompt: $("#project-prompt").value,
+    chief_enabled: $("#project-chief").checked,
+    chief_prompt: $("#project-chief-prompt").value,
     worktree_enabled: $("#project-worktree").checked,
     prompt_overrides: Object.fromEntries(workflowPromptKeys.map(key => [key, $("#project-prompt-" + key).value.trim() ? $("#project-prompt-" + key).value : null])),
     prs_enabled: $("#project-prs").checked,
@@ -25,6 +28,8 @@ function projectSettingsChanged() {
     JSON.stringify(projectSettingsDraft()) !==
     JSON.stringify(projectSettingsOriginal);
   updateWorkflowBranches();
+  $("#project-chief-state").textContent = $("#project-chief").checked ? "Enabled" : "Disabled";
+  $(".chief-settings").classList.toggle("chief-enabled", $("#project-chief").checked);
   $("#project-settings-state").textContent = changed ? "Unsaved changes" : "";
   $("#project-settings-form button[type=submit]").disabled =
     projectSettingsSaving || !projectSettingsOriginal || !changed;
@@ -59,6 +64,10 @@ $("#project-settings-trigger").onclick = async () => {
     if (sequence !== projectSettingsSequence) return;
     projectSettingsVersion = value.version;
     $("#project-prompt").value = value.prompt;
+    $("#project-chief").checked = value.chief_enabled;
+    $("#project-chief-prompt").value = value.chief_prompt;
+    chiefDefaultPrompt = value.chief_default_prompt;
+    $("#project-chief-instructions").open = false;
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
     projectPromptDefaults = value.prompt_defaults;
@@ -182,11 +191,17 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 
 $("#project-drafts").onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
+$("#project-chief").onchange = projectSettingsChanged;
+$("#project-chief-prompt").oninput = projectSettingsChanged;
+$("#project-chief-reset").onclick = () => {
+  $("#project-chief-prompt").value = chiefDefaultPrompt;
+  projectSettingsChanged();
+};
 
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;
-  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt]")) input.disabled = disabled;
+  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt], #project-chief-reset")) input.disabled = disabled;
 }
 function updateWorkflowBranches() {
   const active = [$("#project-worktree").checked ? "worktree" : "checkout", $("#project-prs").checked ? "prs" : "main"];
