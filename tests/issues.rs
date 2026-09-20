@@ -975,6 +975,8 @@ fn schema_three_migration_preserves_legacy_independent_worker_settings() {
     let p = v["project"]["id"].as_str().unwrap();
     let db = f.sql();
     db.execute("INSERT INTO project_workers VALUES(?1,?2,7,123)",rusqlite::params![p,serde_json::to_string(&json!({"cwd":f.cwd,"prompt":"Implement {{issue_command}}. {{commit_instruction}}","concurrency":3,"labels":["ready"],"use_goal":true,"enabled":false})).unwrap()]).unwrap();
+    db.execute_batch("DROP INDEX worker_finished_history;")
+        .unwrap();
     db.execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP INDEX worker_runs_worker; ALTER TABLE worker_runs DROP COLUMN worker_id; ALTER TABLE worker_runs DROP COLUMN reservation_expires; ALTER TABLE worker_runs DROP COLUMN claimed_at; DROP TABLE issue_workers; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=3;").unwrap();
     let s = f.run("session-a", &["worker", "status"]);
     assert_eq!(s["config"]["concurrency"], 3);
@@ -1902,6 +1904,19 @@ fn schema_eight_graph_sync_migration_keeps_links_and_reinstates_safe_upsert() {
     );
     f.sql().execute_batch("INSERT INTO issue_subtasks SELECT * FROM issue_subtasks WHERE child_number=2 ON CONFLICT(project_id,child_number) DO UPDATE SET parent_number=excluded.parent_number;").unwrap();
     assert_eq!(f.run("session-a", &["view", "1"]), before);
+}
+
+#[test]
+fn finished_worker_history_index_is_repaired_on_existing_databases() {
+    let f = Fixture::new();
+    let before = f.create();
+    f.sql()
+        .execute_batch("DROP INDEX IF EXISTS worker_finished_history;")
+        .unwrap();
+    assert_eq!(f.run("reader", &["view", "1"])["issue"], before["issue"]);
+    assert!(f.sql().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='worker_finished_history')",
+        [], |r| r.get::<_, bool>(0)).unwrap());
 }
 
 #[test]
