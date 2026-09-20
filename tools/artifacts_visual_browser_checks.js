@@ -15,7 +15,7 @@ async page => {
     await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
     for(const [size,width,height] of [['desktop',1440,1000],['tablet',820,1180],['phone',390,844],['small-phone',320,740]]) {
       await page.setViewportSize({width,height});
-      await page.goto(origin+'/artifacts#project=Artifact+Studio');
+      await page.goto(origin+'/artifacts#project=named%3AArtifact+Studio');await page.reload();
       await page.locator('.artifact-row').first().waitFor();
       await page.evaluate(()=>{document.activeElement.blur();scrollTo(0,0);});
       await check(theme+'-'+size+'-library');

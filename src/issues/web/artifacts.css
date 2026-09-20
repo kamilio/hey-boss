@@ -12,7 +12,6 @@
   margin-bottom: 28px;
 }
 #artifact-main .page-heading h1 { font-size: 30px; }
-#artifact-main .page-description { margin: 6px 0 0; font-size: 13px; }
 #artifact-main .button { min-height: 40px; gap: 7px; }
 #artifact-main .button svg { width: 15px; height: 15px; }
 #artifact-status { margin: 0; color: var(--muted); font-size: 12px; }
@@ -85,6 +84,11 @@
 .artifact-reading pre { max-width: 100%; overflow: auto; }
 .artifact-reading pre code { font-size: 12px; }
 .artifact-reading table { font-size: 13px; }
+.artifact-reading.artifact-large > :is(p,h1,h2,h3,h4,h5,h6,hr), .artifact-reading.artifact-large li {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 60px;
+}
+.artifact-reading.artifact-large li { contain-intrinsic-size: auto 27px; }
 .artifact-backlinks { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 20px; padding: 20px 4px; }
 .artifact-backlinks h2 { font-size: 12px; color: var(--muted); font-weight: 500; margin: 0; }
 .artifact-links { padding: 0; list-style: none; margin: 0; display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; }
@@ -172,7 +176,6 @@
   #artifact-main, #resource-main { padding: 24px 18px 40px; }
   #artifact-main .page-heading { gap: 12px; margin-bottom: 24px; }
   #artifact-main .page-heading h1 { font-size: 26px; }
-  #artifact-main .page-description { max-width: 180px; font-size: 12px; }
   #artifact-main .page-heading > .button { min-height: 40px; font-size: 12px; padding: 9px 12px; }
   .artifact-toolbar { flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; }
   .artifact-search { flex-basis: 100%; max-width: none; }
@@ -194,7 +197,9 @@
   .artifact-editor-tools .primary { margin-left: auto; }
   .artifact-editor-paper { padding: 24px 22px; }
   #artifact-title { font-size: 24px; margin-bottom: 20px; }
-  #artifact-body { font-size: 13px; min-height: 380px; }
+  #artifact-body { font-size: 16px; min-height: 380px; }
+  .artifact-search input, .artifact-thread textarea, #artifact-comment,
+  .artifact-attachment-picker input, .artifact-attachment-picker select { font-size: 16px; }
   #artifact-edit-preview { min-height: 380px; }
   .app-navigation .navigation-inner { overflow-x: auto; scrollbar-width: none; }
   .app-navigation .navigation-inner::-webkit-scrollbar { display: none; }
