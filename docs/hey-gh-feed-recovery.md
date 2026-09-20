@@ -49,3 +49,39 @@ cache and watches. Recovery replacements appear when individual observations
 or subsequent account cycles validate their sources. There is no hey-gh web
 UI or Fly service; the hey-boss issue viewer is checked separately at desktop
 and phone widths.
+
+## Installed verification — September 20, 2026
+
+The 51 distinct Rust tests passed (40 GitHub integration tests, seven repository
+tests, two SDK unit tests, and two CLI unit tests). Clippy with warnings denied
+and Rust formatting passed. The initial three issue regressions failed on the
+original implementation because no recovery/failure replacements were emitted.
+
+The installed daemon reproduced the issue's exact same-head recovery on
+`poe-internal/poe2` PR 15033. Before the individual read its feed row retained
+`details: request deadline exceeded` and `complete=false`. The cached-only
+individual read returned `complete=true` at unchanged head
+`4bd3fbb4b4a8b4bd20bdf30d9c7ac8ff5068f7dc`. The subsequent incremental read emitted
+one replacement with `complete=true`, empty `sourceErrors`, and an advanced
+cursor. No explicit upstream refresh was requested by this verification.
+
+Installed on this MacBook, `kamils-macbook-pro.local`, and `devbox`. The Mac
+binaries match SHA-256
+`f255148ebcfe68c61e5d67840154c33139d06e45fb8153abf4b66a487e7f02bb`;
+the command-card skills on all machines match
+`64ce866a70d374c06fbeac9783f2fcab6f9168279bf59a045b27fa8ae9bbdfcc`.
+Devbox's patched source hashes match this MacBook's source. The existing local
+daemon was gracefully restarted to load the installed binary, retaining its
+cache and watches. Devices without an existing hey-gh daemon received the CLI
+and skills without starting additional services.
+
+The isolated issue viewer passed visual review at 1440×1000 and 390×844,
+responsive checks at 390, 768, and 1440 pixels, Markdown comment preview, and
+keyboard navigation. There was no document overflow or browser console error.
+Its Chrome session, server, screenshots, reports, and temporary build snapshot
+were removed after review. Existing checkout edits and other browser sessions
+were preserved.
+
+The required hey-boss Fly deployment reused its current immutable mobile image
+because this fix changes a local hey-gh daemon. Rolling deployment checks and
+the public `/healthz` endpoint passed; uncommitted mobile changes were preserved.
