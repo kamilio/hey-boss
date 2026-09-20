@@ -1833,7 +1833,16 @@ dialog::backdrop {
   color: var(--muted);
   font-size: 11px;
 }
-.issue-pr-link .pr-purpose-label { border-left: 1px solid var(--line); padding-left: 6px; }
+.issue-pr-link .pr-purpose-label {
+  flex: none;
+  white-space: nowrap;
+  border-left: 1px solid var(--line);
+  padding-left: 6px;
+}
+.pr-link-title {
+  min-width: 0;
+  max-width: calc(100% - 17px);
+}
 .pr-link a {
   overflow-wrap: anywhere;
   min-width: 0;
@@ -1886,6 +1895,7 @@ dialog::backdrop {
   position: relative;
   z-index: 1;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   max-width: 100%;

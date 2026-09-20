@@ -471,7 +471,7 @@ function listPullRequests(issue) {
         /* Keep old attached links readable if URL parsing fails. */
       }
       const purpose = prPurposeLabel(pr.purpose);
-      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)} · ${purpose}" aria-label="Open pull request ${esc(title)} · ${purpose}">${icon("link")}${esc(title)}<span class="pr-purpose-label">${purpose}</span></a>`;
+      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)} · ${purpose}" aria-label="Open pull request ${esc(title)} · ${purpose}">${icon("link")}<span class="pr-link-title">${esc(title)}</span><span class="pr-purpose-label">${purpose}</span></a>`;
     })
     .join("");
 }
