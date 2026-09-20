@@ -39,6 +39,7 @@ pub fn render_fragment(source: &str) -> String {
             &format!(" class=\"markdown-align-{alignment}\""),
         );
     }
+    body = body.replace("<pre>", "<pre tabindex=\"0\" aria-label=\"Code block\">");
     body
 }
 /// Share the reader's dialect with document selection matching.
@@ -57,7 +58,7 @@ fn render_body(source: &str, source_map: bool) -> String {
         .chain(source.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
     let line_at = |offset: usize| line_starts.partition_point(|start| *start <= offset).max(1);
-    let events = TextMergeWithOffset::new(Parser::new_ext(source, options).into_offset_iter()).map(
+    let mut events: Vec<_> = TextMergeWithOffset::new(Parser::new_ext(source, options).into_offset_iter()).map(
         |(event, range)| {
             let event = match event {
                 // Raw HTML is displayed as text, never executed as document markup.
@@ -86,9 +87,38 @@ fn render_body(source: &str, source_map: bool) -> String {
             };
             (event, range)
         },
-    );
+    ).collect();
+    for index in 0..events.len() {
+        let Event::TaskListMarker(checked) = events[index].0 else {
+            continue;
+        };
+        let mut label = String::new();
+        for (event, _) in &events[index + 1..] {
+            match event {
+                Event::End(TagEnd::Paragraph | TagEnd::Item) | Event::Start(Tag::List(_)) => break,
+                Event::Text(text) | Event::Code(text) => {
+                    label.push_str(&crate::syntax::escape(text))
+                }
+                Event::Html(text) if !source_map => label.push_str(text),
+                Event::SoftBreak | Event::HardBreak => label.push(' '),
+                _ => {}
+            }
+        }
+        let label = if label.trim().is_empty() {
+            "Task"
+        } else {
+            label.trim()
+        };
+        events[index].0 = Event::Html(
+            format!(
+                "<input disabled=\"\" type=\"checkbox\"{} aria-label=\"{label}\" />",
+                if checked { " checked=\"\"" } else { "" }
+            )
+            .into(),
+        );
+    }
     let mut styled = Vec::new();
-    let mut events = events.peekable();
+    let mut events = events.into_iter().peekable();
     let mut image_depth = 0;
     let mut literal_depth = 0;
     let mut finder = LinkFinder::new();
@@ -305,6 +335,39 @@ mod tests {
             );
         }
         assert!(!html.contains("style="));
+    }
+
+    #[test]
+    fn fragment_tasks_have_names_and_code_can_scroll_with_the_keyboard() {
+        let html = render_fragment(
+            "- [x] Keep **context** and `code`\n- [ ] Review <script>literally</script>\n\n```unknown\nwide code\n```\n\n    indented code\n",
+        );
+        assert!(
+            html.contains("aria-label=\"Keep context and code\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-label=\"Review &lt;script&gt;literally&lt;/script&gt;\""),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<pre tabindex=\"0\" aria-label=\"Code block\">")
+                .count(),
+            2,
+            "{html}"
+        );
+        assert!(
+            html.contains("disabled=\"\" type=\"checkbox\" checked=\"\""),
+            "{html}"
+        );
+        let nested = render_fragment("- [ ] Parent \"quoted\"\n  - [x] Child\n");
+        assert!(
+            nested.contains("aria-label=\"Parent &quot;quoted&quot;\""),
+            "{nested}"
+        );
+        assert!(nested.contains("aria-label=\"Child\""), "{nested}");
+        let review = render_review_document("- [x] <b>literal</b> and context\n");
+        assert!(!review.contains("aria-label=\"<span"), "{review}");
     }
 
     #[test]
