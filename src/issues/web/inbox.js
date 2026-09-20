@@ -131,6 +131,7 @@ function updateAppNavigation() {
   $("#nav-issues").href = routeHash({
     ...model.route,
     view: "issues",
+    issue: null,
     notice: "",
   });
 }
