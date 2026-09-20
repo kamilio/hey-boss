@@ -787,7 +787,9 @@ mod tests {
     #[test]
     fn compact_overview_retains_assignment_identity() {
         let runs = runs_for_project(
-            &[json!({"id":"run","project_id":"Atlas","actor_id":"worker:run","session_id":"session","expanded_prompt":"private"})],
+            &[
+                json!({"id":"run","project_id":"Atlas","actor_id":"worker:run","session_id":"session","expanded_prompt":"private"}),
+            ],
             &HashSet::from(["Atlas".into()]),
         );
         assert_eq!(runs[0]["actor_id"], "worker:run");
