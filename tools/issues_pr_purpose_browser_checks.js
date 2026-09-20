@@ -78,6 +78,7 @@ async page => {
   for (const [width,scheme] of [[1440,'light'],[390,'dark']]) {
     await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:scheme});
     check(await page.evaluate(() => document.documentElement.scrollWidth<=innerWidth), `List ${width}px fits`);
+    check(await issueLinks.locator('.pr-link-title').evaluateAll(els => els.every(el => {const range=document.createRange();range.selectNodeContents(el);return range.getClientRects().length===1;})), `List ${width}px keeps PR identifiers intact`);
     await page.screenshot({path:`output/playwright/issue45/list-${width}.png`,fullPage:true});
   }
   const link = issueLinks.first();
