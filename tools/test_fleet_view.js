@@ -36,3 +36,21 @@ assert.equal(projects[0].history.length,1);
 assert.equal(projects[1].active[0].online,false);
 assert.deepEqual(projectView({machines:[]},now),[]);
 console.log('Project grouping checks passed');
+const {deviceView} = require('../src/issues/web/fleet.js');
+const atlasWorker = {id:'atlas',pid:12,config:{projects:['named:Atlas'],directory:'/work/atlas',enabled:true,concurrency:2},runs:[projectRun]};
+const allProjects = {id:'all',pid:13,config:{projects:[],directory:'/work',enabled:true,concurrency:3},runs:[]};
+const devices = deviceView({machines:[
+ {host:'local',state:'connected',heartbeat:99,workers:[atlasWorker,{...atlasWorker,id:'stopped',pid:null},allProjects,{id:'beacon',pid:14,config:{projects:['named:Beacon']},runs:[]}]},
+ {host:'remote',state:'connected',heartbeat:80,workers:[atlasWorker]},
+]},'named:Atlas',now);
+assert.deepEqual(devices[0].live.map(w=>w.id),['atlas','all'],'Selected project includes unrestricted workers but excludes unrelated projects');
+assert.deepEqual(devices[0].saved.map(w=>w.id),['stopped'],'Stopped records are separate from running workers');
+assert.equal(devices[0].active,1,'Only unfinished attempts contribute to active agents');
+assert.equal(devices[0].capacity,5);
+assert.equal(devices[1].online,false,'Stale devices have last-known state, not confirmed running capacity');
+assert.equal(devices[1].active,0);
+assert.equal(devices[1].capacity,0);
+assert.deepEqual(deviceView({machines:[{host:'other',workers:[{config:{projects:['named:Beacon']}}]}]},'named:Atlas',now),[]);
+assert.equal(deviceView({machines:[{host:'empty',workers:[]}]},null,now).length,1,'All-projects view keeps empty devices visible');
+assert.deepEqual(deviceView({},null,now),[]);
+console.log('Device controls scope and runtime checks passed');

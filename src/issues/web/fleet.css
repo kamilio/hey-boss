@@ -31,6 +31,21 @@
 .device-settings { border-top:1px solid var(--line); padding:20px 0; color:var(--muted); font-size:13px }
 .device-settings>summary { cursor:pointer; min-height:34px }
 .device-help { margin:10px 0 18px }
+.device-group { margin:24px 0; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--surface) }
+.device-heading,.worker-heading { display:flex; align-items:center; gap:12px; flex-wrap:wrap }
+.device-heading { justify-content:space-between }
+.device-heading h3 { margin:0; color:var(--text); font-size:16px }
+.device-summary { margin:8px 0 18px }
+.worker-info { flex:1; min-width:0 }
+.worker-name { color:var(--text) }
+.worker-id { font:11px ui-monospace,SFMono-Regular,monospace }
+.worker-state { padding:3px 8px; border-radius:12px; background:var(--input); font-size:12px }
+.worker-projects,.worker-capacity { margin:8px 0; line-height:1.5 }
+.worker-directory { margin:8px 0; display:flex; flex-direction:column; gap:5px }
+.worker-directory>span { font-size:11px }
+.worker-directory code { color:var(--text); font:12px/1.7 ui-monospace,SFMono-Regular,monospace; overflow-wrap:anywhere; user-select:all }
+.saved-workers { margin-top:12px }
+.saved-workers>summary { cursor:pointer; min-height:44px; padding:12px 0; box-sizing:border-box }
 .device-row { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:15px 0; border-top:1px solid var(--line); overflow-wrap:anywhere }
 .device-actions { display:flex; gap:8px; flex-wrap:wrap }
 .device-note { flex-basis:100%; margin:0 }
@@ -86,6 +101,7 @@
 .takeover-dialog button,.resume-command button,#takeover-open { min-height:44px }
 @media(max-width:680px) { .resume-command { flex-direction:column }.resume-command code { box-sizing:border-box; width:100% }.resume-command button { width:100% }.takeover-dialog { padding:22px }.takeover-dialog-actions { flex-direction:column-reverse }.takeover-dialog-actions button { width:100% } }
 @media(max-width:680px) {
+  .device-group { padding:16px }.device-row { align-items:flex-start; flex-direction:column }.worker-info { width:100% }.device-actions { width:100% }.device-actions button { min-height:44px }
   .agent-grid { grid-template-columns:1fr }.agent-card { padding:21px; border-radius:17px }.project-heading h2 { font-size:19px }
   .session-heading { flex-direction:column; align-items:flex-start; gap:12px }.session-heading h1 { font-size:22px }.session-subheading { align-items:flex-start }
   .conversation-wrap { padding-top:24px }.chat-message.user { max-width:94%; padding:16px 18px }.message-body { font-size:14px }.conversation-intro { margin-bottom:30px }
