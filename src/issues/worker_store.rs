@@ -224,6 +224,52 @@ pub(super) fn execute(
 }
 
 impl Store {
+    /// Assign and cancel under one write lock; retries never seize a newer claim.
+    pub(crate) fn worker_takeover(&mut self, id: &str, boss: &Actor) -> Result<Value> {
+        if boss.id != "human:boss" {
+            return Err(Error::invalid("Take over is a Boss action"));
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved: Option<(String, Option<String>, bool, bool)> = tx.query_row(
+            "SELECT r.job,r.session_id,r.finished_at IS NOT NULL,r.stop_requested FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",
+            [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let (text, session, finished, stopping) =
+            saved.ok_or_else(|| Error::conflict("This agent is no longer available"))?;
+        let job: Job = serde_json::from_str(&text)?;
+        let issue = get_issue(&tx, &job.project.id, job.number(), false)?;
+        let repeated = stopping && issue.assignee.as_deref() == Some("human:boss");
+        if !repeated {
+            if finished
+                || issue.state != "open"
+                || (issue.assignee.is_some()
+                    && issue.assignee.as_deref() != Some(&job.actor.id)
+                    && !own_pr_handoff(&tx, &job, &issue)?)
+            {
+                return Err(Error::conflict(
+                    "The agent or issue owner changed. Refresh before taking over.",
+                ));
+            }
+            tx.execute(
+                "UPDATE worker_runs SET stop_requested=1,updated_at=?2 WHERE id=?1",
+                params![id, now()],
+            )?;
+            mutate(
+                &tx,
+                &job.project,
+                boss,
+                &Operation::AssignBoss {
+                    number: job.number(),
+                    force: true,
+                },
+                now(),
+            )?;
+        }
+        tx.commit()?;
+        Ok(json!({"ok":true,"stopped":finished,"session_id":session,"directory":job.config.cwd}))
+    }
+
     pub(crate) fn worker_prompt(&self, id: &str, text: &str) -> Result<()> {
         self.db.execute(
             "UPDATE worker_runs SET expanded_prompt=?2 WHERE id=?1",
@@ -565,6 +611,101 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn takeover_stops_exact_run_assigns_boss_and_is_idempotent() {
+        let mut f = HandoffFixture::new(true);
+        let mut boss = f.job.actor.clone();
+        boss.id = "human:boss".into();
+        boss.kind = "human".into();
+        let result = f.store.worker_takeover(&f.job.id, &boss).unwrap();
+        assert_eq!(result["stopped"], false);
+        assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+        assert!(f.store.worker_cancelled(&f.job).unwrap());
+        let version = f.issue().version;
+        f.store.worker_takeover(&f.job.id, &boss).unwrap();
+        assert_eq!(f.issue().version, version);
+        f.store
+            .worker_finish(&f.job, "stopped", "Taken over")
+            .unwrap();
+        assert_eq!(
+            f.store.worker_takeover(&f.job.id, &boss).unwrap()["stopped"],
+            true
+        );
+        assert_eq!(f.issue().state, "open");
+    }
+
+    #[test]
+    fn takeover_rejects_changed_ownership_hidden_projects_and_finished_runs() {
+        for mode in ["owner", "hidden", "finished", "actor"] {
+            let mut f = HandoffFixture::new(false);
+            let mut boss = f.job.actor.clone();
+            boss.id = "human:boss".into();
+            match mode {
+                "owner" => {
+                    f.store
+                        .db
+                        .execute("INSERT INTO agents VALUES('someone-else','{}',0)", [])
+                        .unwrap();
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET assignee='someone-else'", [])
+                        .unwrap();
+                }
+                "hidden" => {
+                    f.store
+                        .db
+                        .execute("UPDATE projects SET hidden_at=1", [])
+                        .unwrap();
+                }
+                "finished" => {
+                    f.store.worker_finish(&f.job, "failed", "Failed").unwrap();
+                }
+                _ => {
+                    boss.id = "agent".into();
+                }
+            }
+            assert!(f.store.worker_takeover(&f.job.id, &boss).is_err(), "{mode}");
+            assert!(
+                !f.store
+                    .db
+                    .query_row("SELECT stop_requested FROM worker_runs", [], |r| r
+                        .get::<_, bool>(0))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_also_stops_an_agent_that_already_handed_its_issue_to_boss() {
+        let mut f = HandoffFixture::new(true);
+        f.apply(Operation::AssignBoss {
+            number: 1,
+            force: false,
+        });
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        let mut boss = f.job.actor.clone();
+        boss.id = "human:boss".into();
+        f.store.worker_takeover(&f.job.id, &boss).unwrap();
+        assert!(f.store.worker_cancelled(&f.job).unwrap());
+    }
+
+    #[test]
+    fn takeover_rolls_back_stop_when_assignment_fails() {
+        let mut f = HandoffFixture::new(false);
+        let mut boss = f.job.actor.clone();
+        boss.id = "human:boss".into();
+        f.store.db.execute_batch("CREATE TRIGGER reject_takeover BEFORE UPDATE ON issues BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+        assert!(f.store.worker_takeover(&f.job.id, &boss).is_err());
+        assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
+        assert!(
+            !f.store
+                .db
+                .query_row("SELECT stop_requested FROM worker_runs", [], |r| r
+                    .get::<_, bool>(0))
+                .unwrap()
+        );
     }
 
     #[test]

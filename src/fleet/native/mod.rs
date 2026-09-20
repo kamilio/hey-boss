@@ -7,6 +7,7 @@ mod mobile;
 mod replica;
 mod service;
 mod supervisor;
+mod takeover;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use context::Context;

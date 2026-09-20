@@ -16,22 +16,25 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  for(const route of ['/agents','/agents/session'])app.get(route,auth,(req,res)=>res.sendFile(page));
  app.get('/api/agent-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects()}));
  app.get('/api/fleet/status',auth,(req,res)=>{if(!snapshot)return res.status(503).json({error:'Connect your supervisor to see agents.'});const value=filtered();if(now()-seen>15000)for(const m of value.machines)m.state='disconnected';res.json(value);});
- app.get('/api/fleet/conversation',auth,(req,res)=>{
-  const cursor=Number(req.query.cursor??0),before=req.query.before==null?null:Number(req.query.before),latest=req.query.latest==='1',host=req.query.host,run=req.query.run;
+ function requestAgent(req,res,action){
+  const input=action==='takeover'?req.body:req.query;
+  const cursor=Number(input.cursor??0),before=input.before==null?null:Number(input.before),latest=input.latest==='1',host=input.host,run=input.run;
   if((before!==null&&(!Number.isSafeInteger(before)||before<0))||(req.query.latest!=null&&!['0','1'].includes(req.query.latest))||!Number.isSafeInteger(cursor)||cursor<0||typeof host!=='string'||typeof run!=='string')throw new HubError(400,'Invalid conversation request');
   const entry=filtered().machines.find(m=>m.host===host)?.workers.flatMap(w=>w.runs).find(r=>r.id===run);
   if(!entry)throw new HubError(404,'This conversation is no longer available');
   if(now()-seen>15000)throw new HubError(503,'Connect your supervisor to load this conversation.');
   if(pending.size>=32||[...pending.values()].filter(p=>p.device===req.device.id).length>=2)throw new HubError(429,'Wait for your current conversation to load.');
   const id=randomUUID();const timer=setTimeout(()=>{pending.delete(id);if(!res.destroyed)res.status(504).json({error:'The device did not respond. Try again when it reconnects.'});},20000);timer.unref();
-  pending.set(id,{id,host,run,cursor,before,latest,project:entry.project_id,device:req.device.id,res,timer});
+  pending.set(id,{id,action,host,run,cursor,before,latest,project:entry.project_id,device:req.device.id,res,timer});
   res.on('close',()=>{clearTimeout(timer);pending.delete(id);});
- });
+ }
+ app.get('/api/fleet/conversation',auth,(req,res)=>requestAgent(req,res,'conversation'));
+ app.post('/api/fleet/takeover',auth,(req,res)=>requestAgent(req,res,'takeover'));
  app.post('/api/bridge/agents/status',bridge,(req,res)=>{
   if(!Array.isArray(req.body.machines)||req.body.machines.length>100)throw new HubError(400,'Invalid agent snapshot');
   snapshot=req.body;seen=now();res.json({ok:true});
  });
- app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,host,run,cursor,before,latest,project})=>({id,host,run,cursor,before,latest,project}))}));
+ app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,project})=>({id,action,host,run,cursor,before,latest,project}))}));
  app.post('/api/bridge/agents/:id/result',bridge,(req,res)=>{
   const request=pending.get(req.params.id);
   if(request){

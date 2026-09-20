@@ -3,6 +3,7 @@ use super::{
     context::{Context, atomic_json, now, read_frame, read_json, send},
     control, conversation,
     replica::{self, invalid},
+    takeover,
 };
 use serde_json::{Value, json};
 use std::{
@@ -124,14 +125,17 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                     )?;
                 }
             }
-            Some("conversation") => {
+            Some("conversation" | "takeover") => {
                 let cursor = message.get("cursor").cloned().unwrap_or(json!(0));
-                let result =
+                let result = if message["kind"] == "takeover" {
+                    takeover::apply(&ctx, message["run"].as_str().unwrap_or(""))
+                } else {
                     conversation::page(&ctx, message["run"].as_str().unwrap_or(""), &cursor)
-                        .unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
+                }
+                .unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
                 reply(
                     &output,
-                    json!({"kind":"conversation","id":message["id"],"result":result}),
+                    json!({"kind":message["kind"],"id":message["id"],"result":result}),
                 )?;
             }
             Some("ping") => {

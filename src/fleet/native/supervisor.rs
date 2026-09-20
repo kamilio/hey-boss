@@ -3,6 +3,7 @@ use super::{
     context::{Context, atomic_json, hash, id, now, read_frame, read_json, send},
     control, conversation,
     replica::{self, invalid},
+    takeover,
 };
 use serde_json::{Value, json};
 use std::{
@@ -197,6 +198,7 @@ impl Supervisor {
         Ok(status)
     }
     fn conversation(&self, request: &Value) -> Result<Value> {
+        let taking_over = request["kind"] == "takeover";
         let host = request["host"]
             .as_str()
             .ok_or_else(|| invalid("Missing device"))?;
@@ -230,6 +232,9 @@ impl Supervisor {
             return Err(invalid("This project is hidden or no longer available"));
         }
         if host == "local" {
+            if taking_over {
+                return takeover::apply(&self.ctx, run_id);
+            }
             return conversation::page(&self.ctx, run_id, &cursor);
         }
         let identifier = id()?;
@@ -249,7 +254,7 @@ impl Supervisor {
             }
             outgoing
                 .try_send(
-                    json!({"kind":"conversation","id":identifier,"run":run_id,"cursor":cursor}),
+                    json!({"kind":if taking_over {"takeover"} else {"conversation"},"id":identifier,"run":run_id,"cursor":cursor}),
                 )
                 .map_err(|_| invalid("This device is busy. Try again in a moment."))?;
             state.waiters.insert(identifier.clone(), tx);
@@ -258,7 +263,17 @@ impl Supervisor {
             .recv_timeout(Duration::from_secs(10))
             .map_err(|_| invalid("This device did not respond. Try again when it reconnects."));
         self.state.lock().unwrap().waiters.remove(&identifier);
-        result
+        let mut result = result?;
+        if taking_over && result["ok"] != false && result["stopped"] == true {
+            result["resume_command"] = takeover::command(
+                host,
+                result["directory"].as_str().unwrap_or(""),
+                result["session_id"].as_str().unwrap_or(""),
+            )
+            .map(|c| json!(c))
+            .unwrap_or(Value::Null);
+        }
+        Ok(result)
     }
     fn signal(&self, request: &Value) -> Result<Value> {
         let host = request["host"]
@@ -681,7 +696,7 @@ impl Supervisor {
                         )?;
                     }
                 }
-                Some("conversation") => {
+                Some("conversation" | "takeover") => {
                     if let Some(waiter) = self
                         .state
                         .lock()
@@ -981,7 +996,7 @@ impl Supervisor {
         let result = match request["kind"].as_str() {
             Some("status") => self.status(),
             Some("overview") => self.overview(),
-            Some("conversation") => self.conversation(&request),
+            Some("conversation" | "takeover") => self.conversation(&request),
             Some("signal") => self.signal(&request),
             _ => Err(invalid("Unknown supervisor request")),
         };

@@ -317,6 +317,15 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
 }
 
 #[test]
+fn takeover_requires_csrf_and_json_before_contacting_the_fleet() {
+    let web=Web::start();
+    let body=br#"{"host":"local","run":"synthetic"}"#;
+    assert_eq!(web.http("POST","/api/fleet/takeover",&[("Content-Type","application/json")],body).status,403);
+    assert_eq!(web.http("POST","/api/fleet/takeover",&[("X-Hey-Boss-CSRF",&web.token),("Content-Type","text/plain")],body).status,400);
+    assert_eq!(web.http("POST","/api/fleet/takeover",&[("X-Hey-Boss-CSRF",&web.token),("Content-Type","application/json"),("Origin","https://evil.example")],body).status,403);
+}
+
+#[test]
 fn artifact_diagrams_are_bundled_locally_and_preserve_markdown_source() {
     let web = Web::start();
     let bundle = web.http("GET", "/artifact-diagrams.js", &[], b"");
