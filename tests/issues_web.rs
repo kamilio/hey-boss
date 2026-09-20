@@ -281,6 +281,8 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
         ("/tags.js", "text/javascript"),
         ("/app.css", "text/css"),
         ("/workers", "text/html"),
+        ("/agents", "text/html"),
+        ("/agents/session", "text/html"),
         ("/fleet.js", "text/javascript"),
         ("/fleet.css", "text/css"),
         ("/icon.png", "image/png"),
@@ -1077,7 +1079,7 @@ fn main_navigation_includes_mindmaps_on_every_page() {
             .split("</nav>")
             .next()
             .unwrap();
-        for (href, label) in [("/mm", "Mindmaps"), ("/workers", "Workers")] {
+        for (href, label) in [("/mm", "Mindmaps"), ("/agents", "Agents")] {
             assert!(
                 navigation.contains(&format!("href=\"{href}\"")) && navigation.contains(label),
                 "Missing {label} in main navigation on {path}"
@@ -1086,7 +1088,8 @@ fn main_navigation_includes_mindmaps_on_every_page() {
         assert!(navigation.contains("Inbox") && navigation.contains("Issues"));
         assert_eq!(html.matches("href=\"/mm\"").count(), 1);
         if path != "/" {
-            assert!(navigation.contains(&format!("href=\"{path}\" aria-current=\"page\"")));
+            let current = if path == "/workers" { "/agents" } else { path };
+            assert!(navigation.contains(&format!("href=\"{current}\" aria-current=\"page\"")));
         }
     }
 }
@@ -1427,4 +1430,20 @@ fn project_workflow_legacy_templates_reset_and_version_guards() {
             .unwrap()
             .contains("Custom isolated")
     );
+}
+
+#[test]
+fn agent_conversations_reject_malformed_cursors_and_query_encoding() {
+    let web = Web::start();
+    for query in ["cursor=-1", "cursor=hello", "host=%ZZ", "host=%FF"] {
+        let reply = web.http("GET", &format!("/api/fleet/conversation?{query}"), &[], b"");
+        assert_eq!(reply.status, 400, "Query {query}");
+    }
+    for path in ["/agents", "/agents/session"] {
+        let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
+        assert!(html.contains("Agents · Hey Boss"));
+        assert!(html.contains("id=\"conversation\""));
+        assert!(!html.contains("coordinates workers"));
+        assert!(html.contains("href=\"/agents\" aria-current=\"page\""));
+    }
 }

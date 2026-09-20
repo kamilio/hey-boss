@@ -9,6 +9,16 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+pub struct Window {
+    #[serde(default)]
+    pub cursor: u64,
+    #[serde(default)]
+    pub before: Option<u64>,
+    #[serde(default)]
+    pub latest: bool,
+}
+
 const PAGE_BYTES: u64 = 1024 * 1024;
 const ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 static PATHS: OnceLock<Mutex<HashMap<(PathBuf, String), PathBuf>>> = OnceLock::new();
@@ -91,7 +101,7 @@ fn runs_for_project(runs: &[Value], projects: &HashSet<String>) -> Vec<Value> {
         .collect()
 }
 
-pub fn conversation(host: &str, run: &str, cursor: u64) -> Result<Value> {
+pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
     let status = overview()?;
     let machine = status["machines"]
         .as_array()
@@ -107,7 +117,7 @@ pub fn conversation(host: &str, run: &str, cursor: u64) -> Result<Value> {
         return Err(Error::invalid("This agent is no longer available"));
     }
     if host == "local" {
-        return local(run, cursor);
+        return local_window(run, window);
     }
     if machine["state"] != "connected" {
         return Err(Error::new(
@@ -126,21 +136,23 @@ pub fn conversation(host: &str, run: &str, cursor: u64) -> Result<Value> {
         .env("SSH_ASKPASS_REQUIRE", "never");
     transport(
         command,
-        &serde_json::to_vec(&json!({"run":run,"cursor":cursor}))?,
+        &serde_json::to_vec(
+            &json!({"run":run,"cursor":window.cursor,"before":window.before,"latest":window.latest}),
+        )?,
         Duration::from_secs(12),
     )
 }
 
-pub fn local(run: &str, cursor: u64) -> Result<Value> {
+pub fn local_window(run: &str, window: &Window) -> Result<Value> {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
         .ok_or_else(|| Error::invalid("Codex storage is unavailable"))?;
-    page(
+    window_page(
         &database(&crate::issues::database_path()?)?,
         &home,
         run,
-        cursor,
+        window,
     )
 }
 fn valid_session(session: &str) -> bool {
@@ -188,7 +200,20 @@ fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
     paths.insert(key, path.clone());
     Some(path)
 }
+#[cfg(test)]
 fn page(db: &Connection, home: &Path, run: &str, cursor: u64) -> Result<Value> {
+    window_page(
+        db,
+        home,
+        run,
+        &Window {
+            cursor,
+            ..Window::default()
+        },
+    )
+}
+fn window_page(db: &Connection, home: &Path, run: &str, window: &Window) -> Result<Value> {
+    let cursor = window.cursor;
     let saved:Option<Option<String>>=db.query_row("SELECT r.session_id FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",[run],|r|r.get(0)).optional()?;
     let session =
         saved.ok_or_else(|| Error::invalid("This conversation is no longer available"))?;
@@ -214,18 +239,26 @@ fn page(db: &Connection, home: &Path, run: &str, cursor: u64) -> Result<Value> {
         return Err(Error::invalid("Conversation changed. Reload its history."));
     }
     let mut reader = BufReader::new(file);
-    if cursor > 0 {
-        reader.seek(SeekFrom::Start(cursor - 1))?;
+    let historical = window.latest || window.before.is_some();
+    let (start, boundary) = if historical {
+        recent_range(&mut reader, size, window.before)?
+    } else {
+        (cursor, size)
+    };
+    if start > 0 {
+        reader.seek(SeekFrom::Start(start - 1))?;
         let mut byte = [0];
         reader.read_exact(&mut byte)?;
         if byte[0] != b'\n' {
             return Err(Error::invalid("Invalid conversation cursor"));
         }
     }
-    reader.seek(SeekFrom::Start(cursor))?;
+    reader.seek(SeekFrom::Start(start))?;
     let mut messages = Vec::new();
     let mut complete = true;
-    while reader.stream_position()? - cursor < PAGE_BYTES {
+    while reader.stream_position()? < boundary
+        && (historical || reader.stream_position()? - start < PAGE_BYTES)
+    {
         let offset = reader.stream_position()?;
         let mut line = Vec::new();
         reader
@@ -251,10 +284,50 @@ fn page(db: &Connection, home: &Path, run: &str, cursor: u64) -> Result<Value> {
     let end = reader.stream_position()?;
     result["messages"] = json!(messages);
     result["cursor"] = json!(end);
-    result["has_more"] = json!(end < size && complete);
+    result["has_more"] = json!(!historical && end < size && complete);
+    if historical {
+        result["older_cursor"] = json!(start);
+        result["has_earlier"] = json!(start > 0);
+    }
     result["availability"] = json!("available");
     Ok(result)
 }
+fn recent_range(
+    reader: &mut BufReader<std::fs::File>,
+    size: u64,
+    before: Option<u64>,
+) -> Result<(u64, u64)> {
+    let boundary = before.unwrap_or(size);
+    if boundary > size {
+        return Err(Error::invalid("Invalid earlier-history cursor"));
+    }
+    if boundary == 0 {
+        return Ok((0, 0));
+    }
+    let base = boundary.saturating_sub(PAGE_BYTES + ENTRY_BYTES);
+    reader.seek(SeekFrom::Start(base))?;
+    let mut bytes = vec![0; (boundary - base) as usize];
+    reader.read_exact(&mut bytes)?;
+    if before.is_some() && bytes.last() != Some(&b'\n') {
+        return Err(Error::invalid("Invalid earlier-history cursor"));
+    }
+    let end = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let target = end.saturating_sub(PAGE_BYTES as usize);
+    let start = bytes[..target]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if base > 0 && start == 0 {
+        return Err(Error::invalid("A saved conversation entry exceeds 8 MiB"));
+    }
+    Ok((base + start as u64, base + end as u64))
+}
+
 fn item(record: &Value, offset: u64) -> Option<Value> {
     if record["type"] != "response_item" {
         return None;
@@ -418,7 +491,9 @@ fn bridge(path: &Path) -> Result<()> {
     let mut status = compact(crate::fleet::call(&json!({"kind":"status"}))?, &projects)?;
     for m in status["machines"].as_array_mut().into_iter().flatten() {
         for w in m["workers"].as_array_mut().into_iter().flatten() {
-            w.as_object_mut().map(|o| o.remove("config"));
+            if let Some(obj) = w.as_object_mut() {
+                obj.remove("config");
+            }
         }
     }
     status["signals"] = json!([]);
@@ -447,7 +522,7 @@ fn bridge(path: &Path) -> Result<()> {
             conversation(
                 request["host"].as_str().unwrap_or(""),
                 request["run"].as_str().unwrap_or(""),
-                request["cursor"].as_u64().unwrap_or(0),
+                &serde_json::from_value::<Window>(request.clone())?,
             )
         };
         let result = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
@@ -568,6 +643,75 @@ mod tests {
             .write_all(&line.as_bytes()[line.len() - 10..])
             .unwrap();
         assert_eq!(f.page(0).unwrap()["messages"][0]["text"], "Streaming reply");
+    }
+    #[test]
+    fn latest_window_loads_backwards_without_overlap_and_keeps_live_cursor() {
+        let f = Fixture::new();
+        let history = (0..150)
+            .map(|i| Fixture::line("assistant", &format!("{i}:{}", "x".repeat(20000))))
+            .collect::<String>();
+        let pending = Fixture::line("assistant", "Live final reply");
+        std::fs::write(&f.path, history.clone() + &pending[..pending.len() - 5]).unwrap();
+        let mut p = window_page(
+            &f.db,
+            &f.root,
+            "run",
+            &Window {
+                latest: true,
+                ..Window::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            p["messages"].as_array().unwrap().last().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("149:")
+        );
+        let live_cursor = p["cursor"].as_u64().unwrap();
+        assert_eq!(live_cursor, history.len() as u64);
+        let mut ids = std::collections::HashSet::new();
+        loop {
+            for message in p["messages"].as_array().unwrap() {
+                assert!(ids.insert(message["id"].as_str().unwrap().to_owned()));
+            }
+            if p["has_earlier"] == false {
+                break;
+            }
+            p = window_page(
+                &f.db,
+                &f.root,
+                "run",
+                &Window {
+                    before: p["older_cursor"].as_u64(),
+                    ..Window::default()
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(ids.len(), 150);
+        assert!(
+            window_page(
+                &f.db,
+                &f.root,
+                "run",
+                &Window {
+                    before: Some(2),
+                    ..Window::default()
+                }
+            )
+            .is_err()
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&f.path)
+            .unwrap()
+            .write_all(&pending.as_bytes()[pending.len() - 5..])
+            .unwrap();
+        assert_eq!(
+            f.page(live_cursor).unwrap()["messages"][0]["text"],
+            "Live final reply"
+        );
     }
     #[test]
     fn pages_preserve_all_history_and_reject_invalid_offsets() {

@@ -1,4 +1,5 @@
 pub mod agent_control;
+pub mod agent_conversations;
 pub mod agents;
 pub mod artifacts;
 pub mod document;
