@@ -26,10 +26,10 @@ mod workers;
 mod artifacts;
 #[path = "batch.rs"]
 mod batch;
-#[path = "transfer.rs"]
-mod transfer;
 #[path = "status.rs"]
 mod status;
+#[path = "transfer.rs"]
+mod transfer;
 
 const APPLICATION_ID: i64 = 0x48424953;
 const SCHEMA_VERSION: i64 = 13;
@@ -178,7 +178,17 @@ fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
         agent_launch_count: row.get(16)?,
-        status: row.get::<_, Option<String>>(17)?.map(|s| serde_json::from_str(&s)).transpose().map_err(|e| rusqlite::Error::FromSqlConversionFailure(17,rusqlite::types::Type::Text,Box::new(e)))?,
+        status: row
+            .get::<_, Option<String>>(17)?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         sort_order: row.get(13)?,
         draft: row.get(14)?,
         plan: row
@@ -999,8 +1009,16 @@ impl Store {
                 }
                 json!({"ok":true,"project":project,"issue":get_issue(&tx,&project.id,*number,true)?,"changed":changed,"order_version":order_version+i64::from(changed)})
             }
-            Operation::Status { number, level, comment } => status::update(&tx, &project, actor.unwrap(), *number, *level, comment, now)?,
-            Operation::StatusHistory { number, limit, offset } => status::history(&tx, &project, *number, *limit, *offset)?,
+            Operation::Status {
+                number,
+                level,
+                comment,
+            } => status::update(&tx, &project, actor.unwrap(), *number, *level, comment, now)?,
+            Operation::StatusHistory {
+                number,
+                limit,
+                offset,
+            } => status::history(&tx, &project, *number, *limit, *offset)?,
             Operation::StatusView { number } => status::current(&tx, &project, *number)?,
             Operation::View { number } => {
                 let issue = get_issue(&tx, &project.id, *number, true)?;
