@@ -569,6 +569,8 @@ struct Codex {
     start: String,
     session: Option<String>,
     native_goal: bool,
+    approvals: super::worker_approvals::Approvals,
+    approval_items: VecDeque<(String, Value)>,
 }
 impl Codex {
     fn spawn(path: &Path, job: &Job) -> Result<Self> {
@@ -638,6 +640,8 @@ impl Codex {
             start,
             session: None,
             native_goal: false,
+            approvals: Default::default(),
+            approval_items: VecDeque::new(),
         })
     }
     fn suspend_goal(&mut self, state: &str) -> Result<Option<Value>> {
@@ -699,16 +703,20 @@ impl Codex {
         &mut self,
         method: &str,
         params: Value,
-        store: &Store,
+        store: &mut Store,
         job: &Job,
         stop: &AtomicBool,
     ) -> Result<Value> {
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({"id":id,"method":method,"params":params}))?;
-        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut deadline = Instant::now() + Duration::from_secs(45);
         loop {
             Self::check(store, job, stop)?;
+            self.poll_approvals(store, job, stop)?;
+            if self.approvals.is_pending() {
+                deadline = Instant::now() + Duration::from_secs(45);
+            }
             if Instant::now() > deadline {
                 return Err(Error::new(
                     "worker_error",
@@ -718,6 +726,7 @@ impl Codex {
             let Some(value) = self.receive()? else {
                 continue;
             };
+            self.observe_approvals(&value);
             if value.get("id") == Some(&json!(id)) && value.get("method").is_none() {
                 if let Some(error) = value.get("error") {
                     return Err(Error::new(
@@ -730,7 +739,8 @@ impl Codex {
                 });
             }
             if value.get("id").is_some() && value.get("method").is_some() {
-                return self.needs_input(value);
+                self.request_input(value, store, job, stop)?;
+                continue;
             }
             if self.pending.len() > 4096 {
                 return Err(Error::new(
@@ -741,10 +751,100 @@ impl Codex {
             self.pending.push_back(value);
         }
     }
+    fn observe_approvals(&mut self, value: &Value) {
+        // An owned server may still report other threads; never mix their requests.
+        if value["params"]["threadId"]
+            .as_str()
+            .is_some_and(|id| self.session.as_deref() != Some(id))
+        {
+            return;
+        }
+        self.approvals.observe(value);
+        if value["method"] == "item/started" && value["params"]["item"]["type"] == "fileChange" {
+            let item = &value["params"]["item"];
+            if let Some(id) = item["id"].as_str() {
+                self.approval_items.retain(|(saved, _)| saved != id);
+                let preview = if serde_json::to_vec(item).is_ok_and(|bytes| bytes.len() <= 65536) {
+                    item.clone()
+                } else {
+                    json!({"previewTooLarge":true})
+                };
+                self.approval_items.push_back((id.into(), preview));
+                if self.approval_items.len() > 64 {
+                    self.approval_items.pop_front();
+                }
+            }
+        }
+    }
+    fn request_input(
+        &mut self,
+        value: Value,
+        store: &mut Store,
+        job: &Job,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        Self::check(store, job, stop)?;
+        if value["params"]["threadId"].as_str() != self.session.as_deref() || self.session.is_none()
+        {
+            return Err(Error::new(
+                "blocked",
+                "Codex requested approval for an unowned session; no decision was sent",
+            ));
+        }
+        let preview = self
+            .approval_items
+            .iter()
+            .rev()
+            .find(|(id, _)| Some(id.as_str()) == value["params"]["itemId"].as_str())
+            .map(|(_, item)| item);
+        match self.approvals.start(&value, job, preview) {
+            Ok(true) => {
+                store.worker_event(
+                    &job.id,
+                    "Waiting for Codex approval in Hey Boss Inbox",
+                    None,
+                )?;
+                Ok(())
+            }
+            Ok(false) => self.needs_input(value),
+            Err(error) => {
+                // Fail closed while keeping the original request in the saved session.
+                let _: Result<()> = self.needs_input(value);
+                Err(Error::new(
+                    "blocked",
+                    format!(
+                        "Codex approval needs attention: {error}. Resume the saved session or retry after connecting Hey Boss."
+                    ),
+                ))
+            }
+        }
+    }
+    fn poll_approvals(&mut self, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<()> {
+        for (response, cancelled) in self.approvals.poll().map_err(|e| {
+            Error::new(
+                "blocked",
+                format!("Codex approval bridge unavailable: {e}. Review the saved session."),
+            )
+        })? {
+            Self::check(store, job, stop)?;
+            self.send(response)?;
+            if cancelled {
+                return Err(Error::new(
+                    "blocked",
+                    "Codex approval cancelled or answered without a supported decision. Explicit retry is required.",
+                ));
+            }
+            store.worker_event(
+                &job.id,
+                "Codex approval answered in Hey Boss; continuing session",
+                None,
+            )?;
+        }
+        Ok(())
+    }
     fn needs_input<T>(&mut self, value: Value) -> Result<T> {
         let method = value["method"].as_str().unwrap_or("input");
-        // Honor the user's Codex approval rules. Save a recoverable session;
-        // never automatically approve an unrelated tool or permission request.
+        // Unsupported input and unavailable Inbox fail closed with a saved session.
         let response = match method {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                 json!({"decision":"cancel"})
@@ -772,6 +872,8 @@ impl Drop for Codex {
         let _ = stop_group(self.child.id(), &self.start);
         // Reap the parent even if it exited before its process identity was read.
         let _ = self.child.wait();
+        // The server is stopped before its remaining Inbox questions are cancelled.
+        self.approvals = Default::default();
     }
 }
 
@@ -1030,6 +1132,7 @@ fn run_thread(
     let mut last_log = Instant::now() - Duration::from_secs(2);
     loop {
         Codex::check(store, job, stop)?;
+        c.poll_approvals(store, job, stop)?;
         let Some(value) = (if let Some(pending) = c.pending.pop_front() {
             Some(pending)
         } else {
@@ -1037,8 +1140,10 @@ fn run_thread(
         }) else {
             continue;
         };
+        c.observe_approvals(&value);
         if value.get("id").is_some() && value.get("method").is_some() {
-            return c.needs_input(value);
+            c.request_input(value, store, job, stop)?;
+            continue;
         }
         let method = value["method"].as_str().unwrap_or("");
         let params = &value["params"];

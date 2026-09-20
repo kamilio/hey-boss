@@ -9,6 +9,7 @@ pub mod remote;
 mod store;
 pub mod web;
 pub mod worker;
+mod worker_approvals;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

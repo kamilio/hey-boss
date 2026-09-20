@@ -122,7 +122,7 @@ impl Action {
         Ok(value)
     }
 }
-fn socket_path() -> Result<PathBuf> {
+pub(crate) fn socket_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HEY_BOSS_INBOX_SOCKET") {
         return Ok(path.into());
     }
