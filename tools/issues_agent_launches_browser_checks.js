@@ -3,8 +3,8 @@ async page => {
   const check = (ok, label) => {if (!ok) throw Error(label);checks.push(label);};
   page.on('pageerror', e => errors.push(e.message));
   const url = 'http://127.0.0.1:4794/#project=named%3ALaunch%20QA';
-  await page.goto(url);
-  await page.reload();
+  await page.goto(url, {waitUntil:'domcontentloaded'});
+  await page.reload({waitUntil:'domcontentloaded'});
   const fits = async selector => page.locator(selector).evaluateAll(elements => elements.every(el => {
     const r = el.getBoundingClientRect();return r.left >= 0 && r.right <= innerWidth && el.scrollWidth <= el.clientWidth;
   }));
@@ -15,9 +15,9 @@ async page => {
       await page.goto(url);
       await page.locator('.issue-row').nth(3).waitFor();
       check(await page.locator('.issue-row').nth(0).locator('.agent-launch-count').count() === 0,'Zero hidden in list');
-      check(await page.locator('.agent-launch-count').allTextContents().then(values => values.length === 3 && values[0].startsWith('1 agent launch') && values[1].startsWith('12 agent launches') && values[2].startsWith('1234 agent launches')),`${theme}/${width}: counts correct`);
+      check(await page.locator('#issue-list .agent-launch-count').allTextContents().then(values => values.length === 3 && values[0].startsWith('1 agent launch') && values[1].startsWith('12 agent launches') && values[2].startsWith('1234 agent launches')),`${theme}/${width}: counts correct`);
       check(await fits('.issue-row'),`${theme}/${width}: list fits`);
-      const badge = page.locator('.agent-launch-count').nth(0);
+      const badge = page.locator('#issue-list .agent-launch-count').nth(0);
       await badge.hover();
       check(await badge.locator('.agent-launch-help').isVisible(),`${theme}/${width}: hover help`);
       check(await fits('.agent-launch-count:hover .agent-launch-help'),`${theme}/${width}: hover help fits`);

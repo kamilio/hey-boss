@@ -175,6 +175,8 @@
 }
 .agent-launch-count:not(.launch-help-dismissed):hover .agent-launch-help,
 .agent-launch-count:not(.launch-help-dismissed):focus .agent-launch-help { display: block; }
+.sidebar .agent-launch-count { display: flex; }
+.sidebar .agent-launch-help { width: 100%; max-width: 260px; }
 .issue-time-link {
   position: relative;
   z-index: 1;
