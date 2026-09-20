@@ -123,13 +123,18 @@ export class HubStore{
  close(){this.db.close();}
  artifactRequest(device,value){return this.transaction(()=>{
   const commands=['list','view','preview','create','edit','archive','comment','resolve','link','unlink','links'];
+  const attachment=value?.operation?.action==='attachment'&&['list','upload','download','remove'].includes(value.operation.operation?.command);
   const resourceRead=value?.operation?.action==='view'||value?.operation?.action==='mindmap'&&['view','show'].includes(value.operation.operation?.command);
-  if(!value||!resourceRead&&(value.operation?.action!=='artifact'||!commands.includes(value.operation.operation?.command))||value.host)throw new HubError(400,'Only project artifact operations are accepted');
-  const reading=resourceRead||['list','view','links','preview'].includes(value.operation.operation.command);
+  if(!value||!attachment&&!resourceRead&&(value.operation?.action!=='artifact'||!commands.includes(value.operation.operation?.command))||value.host)throw new HubError(400,'Only project artifact operations are accepted');
+  const reading=resourceRead||['list','view','links','preview','download'].includes(value.operation.operation.command);
   if(!reading&&(typeof value.request_id!=='string'||!/^[-a-zA-Z0-9_]{1,128}$/.test(value.request_id)))throw new HubError(400,'An artifact mutation request ID is required');
   const id=reading?token():value.request_id;
   const payload=JSON.stringify({project:value.project,operation:value.operation});
-  if(Buffer.byteLength(payload)>2*1048576)throw new HubError(400,'Artifact request is too large');
+  if(attachment&&value.operation.operation.command==='upload'){
+   const data=value.operation.operation.data;
+   if(typeof data!=='string'||data.length>Math.ceil(10*1048576/3)*4||Buffer.from(data,'base64').length>10*1048576)throw new HubError(400,'Attachments must be at most 10 MiB');
+  }
+  if(Buffer.byteLength(payload)>(attachment?16:2)*1048576)throw new HubError(400,'Artifact request is too large');
   const existing=this.db.prepare('SELECT * FROM artifact_requests WHERE id=?').get(id);
   if(existing){if(existing.device!==device||existing.payload!==payload)throw new HubError(409,'ID belongs to another request');return this.artifactResult(device,id);}
   if(!this.issueProjects().some(p=>p.id===value.project))throw new HubError(400,'Choose a registered project; reconnect the supervisor to refresh projects');
@@ -140,6 +145,14 @@ export class HubStore{
   return this.artifactResult(device,id);
  });}
  artifactResult(device,id){const row=this.db.prepare('SELECT * FROM artifact_requests WHERE device=? AND id=?').get(device,id);if(!row)throw new HubError(404,'Artifact request not found');return {id:row.id,status:row.status,result:row.result?JSON.parse(row.result):null};}
- pendingArtifacts(){return this.db.prepare("SELECT id,payload FROM artifact_requests WHERE status='pending' ORDER BY created,id LIMIT 10").all().map(r=>({id:r.id,...JSON.parse(r.payload)}));}
+ pendingArtifacts(){
+  const result=[];let bytes=32;
+  for(const row of this.db.prepare("SELECT id,length(cast(payload AS BLOB)) AS size FROM artifact_requests WHERE status='pending' ORDER BY created,id LIMIT 10").all()){
+   if(bytes+row.size+256>16*1048576)break;
+   const payload=this.db.prepare('SELECT payload FROM artifact_requests WHERE id=?').get(row.id).payload;
+   result.push({id:row.id,...JSON.parse(payload)});bytes+=row.size+256;
+  }
+  return result;
+ }
  finishArtifact(id,result){if(typeof result?.ok!=='boolean'||Buffer.byteLength(JSON.stringify(result))>32*1048576)throw new HubError(400,'Invalid artifact transport result');if(!this.db.prepare('SELECT id FROM artifact_requests WHERE id=?').get(id))throw new HubError(404,'Artifact request not found');this.db.prepare("UPDATE artifact_requests SET status='done',result=? WHERE id=? AND status='pending'").run(JSON.stringify(result),id);}
 }

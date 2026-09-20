@@ -1499,3 +1499,25 @@ fn agent_conversations_reject_malformed_cursors_and_query_encoding() {
         assert!(html.contains("href=\"/agents\" aria-current=\"page\""));
     }
 }
+
+#[test]
+fn file_attachments_share_authenticated_actions_and_all_page_assets() {
+    let web=Web::start();
+    for path in ["/attachments.js","/attachments.css"] {
+        let response=web.http("GET",path,&[],b"");assert_eq!(response.status,200);
+        assert!(!response.body.is_empty());
+    }
+    for path in ["/","/mm","/artifacts"] {
+        let response=web.http("GET",path,&[],b"");
+        let html=String::from_utf8(response.body).unwrap();
+        assert!(html.contains("/attachments.js")&&html.contains("/attachments.css"));
+    }
+    web.ok(json!({"action":"create","title":"Files","body":"","labels":[]}));
+    let upload=json!({"action":"attachment","operation":{"command":"upload","target":{"kind":"issue","id":"1"},"name":"notes.txt","data":"aGVsbG8="}});
+    let payload=serde_json::to_vec(&json!({"project":web.project,"operation":upload})).unwrap();
+    assert_eq!(web.http("POST","/api/action",&[("Content-Type","application/json")],&payload).status,403);
+    let result=web.ok(upload);let id=result["attachment"]["id"].as_str().unwrap();
+    assert_eq!(web.ok(json!({"action":"attachment","operation":{"command":"download","id":id}}))["data"],"aGVsbG8=");
+    web.ok(json!({"action":"attachment","operation":{"command":"remove","id":id}}));
+    assert_eq!(web.action(&web.project,json!({"action":"attachment","operation":{"command":"download","id":id}}),None).status,404);
+}

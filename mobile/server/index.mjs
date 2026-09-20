@@ -7,7 +7,7 @@ import {HubStore,HubError,equal,token} from './store.mjs';
 import {pushContent,preview} from './markdown-text.mjs';
 export function createApp({store=new HubStore(),hubToken,origin,secure=true,push=webpush,vapid,now=Date.now}={}){
  if(!hubToken||hubToken.length<32)throw Error('HUB_TOKEN must contain at least 32 characters');
- const app=express();app.disable('x-powered-by');app.use('/api/bridge/artifacts',express.json({limit:'32mb'}));app.use(express.json({limit:'8mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
+ const app=express();app.disable('x-powered-by');app.use('/api/bridge/artifacts',express.json({limit:'32mb'}));app.use('/api/artifact-requests',express.json({limit:'16mb'}));app.use(express.json({limit:'8mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
  if(vapid)push.setVapidDetails(vapid.subject,vapid.publicKey,vapid.privateKey);
  app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"});if(req.method!=='GET'&&req.headers.origin&&req.headers.origin!==origin)return res.status(403).json({error:'Request origin is not allowed'});next();});
  const change=()=>{for(const res of listeners)res.write('data: '+JSON.stringify({revision:store.revision(),connected:Date.now()-bridgeSeen<30000})+'\n\n');};

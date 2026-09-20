@@ -184,13 +184,16 @@ impl Mobile {
                         operation["operation"]["command"].as_str(),
                         Some("view" | "show")
                     );
-            let outcome = if operation["action"] != "artifact" && !read {
+            let outcome = if operation["action"] != "artifact"
+                && operation["action"] != "attachment"
+                && !read
+            {
                 json!({"ok":false,"error":{"code":"invalid_input","message":"Only artifact operations are accepted"}})
             } else if let Some(project) = project {
                 let writing = !read
                     && !matches!(
                         operation["operation"]["command"].as_str(),
-                        Some("list" | "view" | "links" | "preview")
+                        Some("list" | "view" | "links" | "preview" | "download")
                     );
                 let key = writing.then(|| format!("artifact-mobile:{request_id}"));
                 let project_id = project["id"].as_str().unwrap();
