@@ -2,6 +2,7 @@
 use super::*;
 use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
 use std::collections::HashMap;
+pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 pub(super) const SCHEMA: &str = "
 CREATE TABLE issue_workers(id TEXT PRIMARY KEY,kind TEXT NOT NULL,config TEXT NOT NULL,version INTEGER NOT NULL,owner_pid INTEGER,owner_start TEXT,machine TEXT,stop_requested INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
 ALTER TABLE worker_runs ADD COLUMN worker_id TEXT REFERENCES issue_workers(id);
@@ -84,6 +85,13 @@ pub(super) const PROJECT_DIRECTORIES: &str = "SELECT json_extract(metadata,'$.cw
  WHERE id IN(SELECT created_by FROM issues WHERE project_id=?1
  UNION SELECT assignee FROM issues WHERE project_id=?1 AND assignee IS NOT NULL)
  ORDER BY last_seen DESC LIMIT ?2";
+// Resolve the bounded set of IDs first. An outer worker_id/OR filter scans all
+// attempts even when the history subquery is indexed.
+const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at
+ FROM worker_runs r JOIN projects p ON p.id=r.project_id
+ WHERE r.id IN(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL
+ UNION ALL SELECT id FROM(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20))
+ ORDER BY r.finished_at IS NOT NULL,r.started_at DESC,r.id DESC";
 fn directory(db: &Connection, p: &Project) -> Result<String> {
     let mut stmt = db.prepare(PROJECT_DIRECTORIES)?;
     let paths = stmt
@@ -229,7 +237,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
     let upgrading = workers
         .iter()
         .any(|w| w["id"].as_str() == selected.as_deref() && w["upgrading"] == true);
-    let mut stmt=db.prepare("SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.worker_id=?1 AND (r.finished_at IS NULL OR r.id IN(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20)) ORDER BY r.finished_at IS NOT NULL,r.started_at DESC,r.id DESC")?;
+    let mut stmt = db.prepare(STATUS_RUNS)?;
     let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for run in &mut runs {
         if let Some(s) = run["goal"].as_str() {
@@ -892,6 +900,8 @@ mod tests {
                 db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES(?1,?2,'Task','','open','agent',0,0,1,'[]')",params![p.id,n]).unwrap();
                 db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) VALUES(?1,?2,?3,'{\"issue\":{\"title\":\"Task\"}}','agent','running',1,'start','machine',?3,0,'worker',?4)",params![format!("run-{n}"),p.id,n,if n<=24 {None}else{Some(n)}]).unwrap();
             }
+            db.execute("UPDATE worker_runs SET started_at=48 WHERE id='run-49'", [])
+                .unwrap();
             let s = status(db, Some("worker"), &p).unwrap();
             assert_eq!(s["active"], 24);
             assert_eq!(s["free"], 6);
@@ -905,6 +915,32 @@ mod tests {
                     .count(),
                 24
             );
+            let expected: Vec<String> = (1..=24)
+                .rev()
+                .chain((30..=49).rev())
+                .map(|n| format!("run-{n}"))
+                .collect();
+            let ids: Vec<&str> = s["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected);
+            // Large old history must not change the result or make status
+            // scan every finished attempt. Use nonmonotonic finish times.
+            db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at)
+                SELECT 'archived-'||x,?1,49,'{}','agent','completed',1,'start','machine',-x,0,'worker',(x*7919)%10000 FROM n", [&p.id]).unwrap();
+            let mut stmt = db.prepare(STATUS_RUNS).unwrap();
+            let ids = stmt
+                .query_map(["worker"], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(ids, expected);
+            let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+            assert!(steps < 5_000, "status history used {steps} VM steps");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
