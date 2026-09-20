@@ -1,5 +1,6 @@
 [
  {"url":"http://localhost/#project=named:Release#1&issue=1","entity":"issue","id":"1","project":"named:Release#1","host":""},
+ {"url":"http://localhost/#project=named%3ADesign+%CE%A9&issue=1","entity":"issue","id":"1","project":"named:Design Ω","host":""},
  {"url":"http://127.0.0.1:4781/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&inbox_state=unread&issue=114&state=open&owner=all","entity":"issue","id":"114","project":"github.com/poe-platform/poe-code","host":""},
  {"url":"https://hey-boss-mobile-kamil.fly.dev/artifacts#project=named%3ADesign+%26+QA&artifact=a-123&issue=19&node=n-19","entity":"artifact","id":"a-123","project":"named:Design & QA","host":""},
  {"url":"http://localhost/mm?focus=1#project=named%3AMap&node=n-123&issue=3","entity":"node","id":"n-123","project":"named:Map","host":""},

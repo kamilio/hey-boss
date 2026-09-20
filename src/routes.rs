@@ -30,7 +30,8 @@ pub struct Route {
     pub params: HashMap<String, String>,
 }
 fn parameters(value: &str) -> Result<HashMap<String, String>> {
-    // Validate first; form_urlencoded's forgiving decoder would hide broken pasted links.
+    // Decode form parameters directly: reparsing a URL would interpret a literal
+    // '#' inside the fragment's parameters as another fragment boundary.
     let bytes = value.as_bytes();
     for (i, byte) in bytes.iter().enumerate() {
         if *byte == b'%'
@@ -41,16 +42,30 @@ fn parameters(value: &str) -> Result<HashMap<String, String>> {
             return Err(Error::invalid("Invalid URL parameter encoding"));
         }
     }
+    fn decode(value: &str) -> Result<String> {
+        let bytes = value.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            decoded.push(match bytes[index] {
+                b'+' => b' ',
+                b'%' => {
+                    let high = (bytes[index + 1] as char).to_digit(16).unwrap();
+                    let low = (bytes[index + 2] as char).to_digit(16).unwrap();
+                    index += 2;
+                    (high * 16 + low) as u8
+                }
+                byte => byte,
+            });
+            index += 1;
+        }
+        String::from_utf8(decoded).map_err(|_| Error::invalid("URL parameters must be UTF-8"))
+    }
     let mut params = HashMap::new();
-    let mut address = reqwest::Url::parse("http://localhost/").expect("valid parameter base URL");
-    // set_query preserves literal '#' inside a fragment parameter; reparsing a
-    // concatenated URL would incorrectly treat it as the start of a fragment.
-    address.set_query(Some(value));
-    for (key, value) in address.query_pairs() {
+    for part in value.split('&').filter(|part| !part.is_empty()) {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
         // URLSearchParams.get uses the first duplicate, not the last.
-        params
-            .entry(key.into_owned())
-            .or_insert_with(|| value.into_owned());
+        params.entry(decode(key)?).or_insert(decode(value)?);
     }
     Ok(params)
 }

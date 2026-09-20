@@ -100,6 +100,7 @@ fn lookup_rejects_invalid_and_missing_targets_instead_of_returning_unrelated_ite
         "http://localhost/#issue=9007199254740992",
         "http://localhost/agents/session#run=missing",
         "http://localhost/#project=%ZZ&issue=1",
+        "http://localhost/#project=%FF&issue=1",
         "http://localhost/#project=github.com%2Fpoe-platform%2Fpoe-code&issue=99",
     ] {
         let output = f.lookup(url, true);
