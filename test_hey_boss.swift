@@ -117,7 +117,7 @@ func audit() {
     auditWebInbox(root:root)
     auditConnectionSettings()
     auditResilience(root: root)
-    auditDesktopActions(root: root)
+    auditDesktopActions()
     auditScannerOutput(root: root)
     auditSocketDeadlines()
     auditOverviewExpansionPersistence()
@@ -1420,50 +1420,97 @@ func auditMultilineSourceComment(root: URL) {
     print("Passed: failed save retains draft and editor, retry succeeds, absent final newline preserved, multiline source selection, original source line numbers without fence offset, exact whitespace/newlines in agent metadata, visible Send button saves/clears/closes")
 }
 
-func auditDesktopActions(root: URL) {
-    let fixture = root.appendingPathComponent("action-http.py")
-    let portFile = root.appendingPathComponent("action-http.port")
-    let python = """
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import TCPServer
-import sys
-class FixtureServer(HTTPServer):
- def server_bind(self):
-  # This loopback fixture does not need HTTPServer's blocking reverse DNS.
-  TCPServer.server_bind(self)
-  self.server_name='localhost'
-  self.server_port=self.socket.getsockname()[1]
-class Handler(BaseHTTPRequestHandler):
- def log_message(self,*args):pass
- def do_GET(self):
-  if self.path=='/large':
-   self.send_response(200);self.send_header('Content-Length','131073');self.end_headers();self.wfile.write(b'x'*131073)
-  elif self.path=='/redirect':
-   self.send_response(302);self.send_header('Location','https://example.invalid/blocked');self.end_headers()
-  else:
-   self.send_response(200);self.end_headers();self.wfile.write(b'website ready')
- def do_POST(self):
-  body=self.rfile.read(int(self.headers.get('Content-Length','0')))
-  self.send_response(201);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(body)
-server=FixtureServer(('127.0.0.1',0),Handler)
-open(sys.argv[1],'w').write(str(server.server_port))
-server.serve_forever()
-"""
-    try! python.write(to: fixture, atomically: true, encoding: .utf8)
-    let server = Process(); server.executableURL = URL(fileURLWithPath: "/usr/bin/env"); server.arguments = ["python3",fixture.path,portFile.path]
-    let errors = Pipe()
-    server.standardOutput = FileHandle.nullDevice; server.standardError = errors
-    try! server.run()
-    defer { if server.isRunning { server.terminate() }; server.waitUntilExit() }
-    let deadline = Date().addingTimeInterval(20)
-    while !FileManager.default.fileExists(atPath: portFile.path) && server.isRunning && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-    guard FileManager.default.fileExists(atPath: portFile.path) else {
-        if server.isRunning { server.terminate() }
-        server.waitUntilExit()
-        let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        preconditionFailure("HTTP action fixture did not start (exit \(server.terminationStatus)): \(detail)")
+// Bind synchronously so the audit does not depend on external interpreter startup.
+final class ActionHTTPFixture {
+    let port: Int
+    private let listener: Int32
+    private let stopped = DispatchSemaphore(value: 0)
+
+    init() {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        listener = fd
+        precondition(fd >= 0)
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        precondition(bound == 0 && listen(fd, 8) == 0)
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        precondition(withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        } == 0)
+        port = Int(UInt16(bigEndian: address.sin_port))
+        let completion = stopped
+        DispatchQueue(label: "audit.action-http").async {
+            defer { completion.signal() }
+            while true {
+                let client = accept(fd, nil, nil)
+                guard client >= 0 else { return }
+                Self.respond(client)
+                Darwin.close(client)
+            }
+        }
     }
-    let port = Int(try! String(contentsOf: portFile, encoding: .utf8))!
+
+    func stop() {
+        shutdown(listener, SHUT_RDWR)
+        Darwin.close(listener)
+        precondition(stopped.wait(timeout: .now() + 5) == .success)
+    }
+
+    private static func respond(_ client: Int32) {
+        var noSignal: Int32 = 1
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var request = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+        let separator = Data("\r\n\r\n".utf8)
+        while request.count < 262144 {
+            let count = recv(client, &buffer, buffer.count, 0)
+            guard count > 0 else { return }
+            request.append(contentsOf: buffer.prefix(count))
+            guard let headerEnd = request.range(of: separator) else { continue }
+            let header = String(decoding: request[..<headerEnd.lowerBound], as: UTF8.self)
+            let bodyLength = header.components(separatedBy: "\r\n").first {
+                $0.lowercased().hasPrefix("content-length:")
+            }.flatMap { Int($0.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+            guard request.count >= headerEnd.upperBound + bodyLength else { continue }
+            let first = header.components(separatedBy: "\r\n")[0].split(separator: " ")
+            guard first.count >= 2 else { return }
+            var status = "200 OK", extra = ""
+            var body = Data("website ready".utf8)
+            if first[0] == "POST" {
+                status = "201 Created"; extra = "Content-Type: application/json\r\n"
+                body = request.subdata(in: headerEnd.upperBound..<(headerEnd.upperBound + bodyLength))
+            } else if first[1] == "/large" {
+                body = Data(repeating: 120, count: 131073)
+            } else if first[1] == "/redirect" {
+                status = "302 Found"; extra = "Location: https://example.invalid/blocked\r\n"; body = Data()
+            }
+            var response = Data("HTTP/1.1 \(status)\r\n\(extra)Content-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+            response.append(body)
+            response.withUnsafeBytes { bytes in
+                var sent = 0
+                while sent < bytes.count {
+                    let count = send(client, bytes.baseAddress!.advanced(by: sent), bytes.count - sent, 0)
+                    guard count > 0 else { return }
+                    sent += count
+                }
+            }
+            return
+        }
+    }
+}
+
+func auditDesktopActions() {
+    let server = ActionHTTPFixture()
+    defer { server.stop() }
+    let port = server.port
     let actions = DesktopActions(cli: nil)
     var opened: [URL] = []; var cancelled = 0
     actions.openWebsite = { url, completion in opened.append(url); completion(true) }
