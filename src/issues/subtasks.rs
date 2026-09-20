@@ -214,7 +214,7 @@ impl Graph {
         let count = if !issue["deleted_at"].is_null() {
             0
         } else {
-            let own = i64::from(issue["state"] == "open");
+            let own = i64::from(issue["state"] == "open" || issue["state"] == "blocked");
             own + self
                 .children
                 .get(&number)
