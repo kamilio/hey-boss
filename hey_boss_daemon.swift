@@ -3058,6 +3058,7 @@ struct HealthSnapshot: Decodable {
         var automatic: Bool
         var harvestProcesses: Bool
         var cleanWorktrees: Bool
+        var cleanCaches: Bool?
         var intervalSeconds: UInt64
         var processMinAgeSeconds: UInt64
         var browserMinAgeSeconds: UInt64? = nil
@@ -3087,6 +3088,9 @@ struct HealthSnapshot: Decodable {
     var worktrees: [Item]
     var harvestedProcesses: Int
     var removedWorktrees: Int
+    var caches: [Item]?
+    var removedCaches: Int?
+    var diskAvailableChangeBytes: Int64?
     var errors: [String]
     var activity: [Activity]?
     var running: Bool?
@@ -3134,13 +3138,14 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     let automatic = NSButton(checkboxWithTitle: "Automatic cleanup", target: nil, action: nil)
     let processesEnabled = NSButton(checkboxWithTitle: "Harvest orphan processes", target: nil, action: nil)
     let worktreesEnabled = NSButton(checkboxWithTitle: "Clean unused worktrees", target: nil, action: nil)
+    let cachesEnabled = NSButton(checkboxWithTitle: "Clean disposable caches", target: nil, action: nil)
     let policy = NSTextField(wrappingLabelWithString: "")
     let roots = NSTextField(wrappingLabelWithString: "")
     let footer = NSTextField(wrappingLabelWithString: "")
     let scan = NSButton(title: "Scan now", target: nil, action: nil)
     let clean = NSButton(title: "Clean eligible items", target: nil, action: nil)
     let addFolder = NSButton(title: "Add workspace…", target: nil, action: nil)
-    let kind = NSSegmentedControl(labels: ["Processes", "Worktrees", "Activity"], trackingMode: .selectOne, target: nil, action: nil)
+    let kind = NSSegmentedControl(labels: ["Processes", "Worktrees", "Caches", "Activity"], trackingMode: .selectOne, target: nil, action: nil)
     let logSearch = NSSearchField()
     let selectedEvent = NSTextField(wrappingLabelWithString: "Select an entry to read its full message.")
     let currentPhase = NSTextField(labelWithString: "")
@@ -3155,12 +3160,13 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     var items: [HealthSnapshot.Item] = []
     func rebuildItems() {
         let all: [HealthSnapshot.Item]
-        if kind.selectedSegment == 2 {
+        if kind.selectedSegment == 3 {
             all = (snapshot?.activity ?? []).reversed().map { event in
                 let stamp = Date(timeIntervalSince1970: event.at).formatted(date: .abbreviated, time: .standard)
                 return .init(name: "\(stamp) · \(event.category)", detail: event.message, eligible: false)
             }
         } else if kind.selectedSegment == 1 { all = snapshot?.worktrees ?? [] }
+        else if kind.selectedSegment == 2 { all = snapshot?.caches ?? [] }
         else if let inventory = snapshot?.processInventory {
             all = inventory.map { process in
                 .init(name: "\((process.executable as NSString).lastPathComponent) · PID \(process.pid)",
@@ -3170,9 +3176,9 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let query = logSearch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let selectedKey = items.indices.contains(table.selectedRow) ? items[table.selectedRow].selectionKey : nil
         items = query.isEmpty ? all : all.filter { ($0.name + " " + $0.detail + " " + ($0.worktree?.repository ?? "")).localizedCaseInsensitiveContains(query) }
-        table.tableColumn(withIdentifier: .init("name"))?.title = kind.selectedSegment == 2 ? "Time · Category" : kind.selectedSegment == 0 ? "Process · PID" : "Checkout"
-        table.tableColumn(withIdentifier: .init("state"))?.title = kind.selectedSegment == 2 ? "Activity" : kind.selectedSegment == 0 ? "Process details" : "Status"
-        table.tableColumn(withIdentifier: .init("age"))?.isHidden = kind.selectedSegment == 2
+        table.tableColumn(withIdentifier: .init("name"))?.title = kind.selectedSegment == 3 ? "Time · Category" : kind.selectedSegment == 0 ? "Process · PID" : kind.selectedSegment == 2 ? "Cache" : "Checkout"
+        table.tableColumn(withIdentifier: .init("state"))?.title = kind.selectedSegment == 3 ? "Activity" : kind.selectedSegment == 0 ? "Process details" : "Status"
+        table.tableColumn(withIdentifier: .init("age"))?.isHidden = kind.selectedSegment >= 2
         table.tableColumn(withIdentifier: .init("repository"))?.isHidden = kind.selectedSegment != 1
         for id in ["memory", "cpu"] { table.tableColumn(withIdentifier: .init(id))?.isHidden = kind.selectedSegment != 0 }
         clean.title = kind.selectedSegment == 1 ? "Remove selected worktree" : "Clean eligible items"
@@ -3207,10 +3213,11 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         automatic.target = self; automatic.action = #selector(toggleAutomatic)
         processesEnabled.target = self; processesEnabled.action = #selector(toggleProcesses)
         worktreesEnabled.target = self; worktreesEnabled.action = #selector(toggleWorktrees)
+        cachesEnabled.target = self; cachesEnabled.action = #selector(toggleCaches)
         scan.target = self; scan.action = #selector(scanNow); clean.target = self; clean.action = #selector(cleanNow)
         addFolder.target = self; addFolder.action = #selector(addWorkspace)
         kind.selectedSegment = 0; kind.target = self; kind.action = #selector(switchKind)
-        logSearch.placeholderString = "Filter activity, processes, or worktrees…"; logSearch.delegate = self
+        logSearch.placeholderString = "Filter activity, processes, worktrees, or caches…"; logSearch.delegate = self
         selectedEvent.font = .systemFont(ofSize: 12); selectedEvent.textColor = .secondaryLabelColor
         selectedEvent.isSelectable = true
         selectedEvent.maximumNumberOfLines = 3; selectedEvent.lineBreakMode = .byTruncatingTail
@@ -3228,7 +3235,7 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         table.addTableColumn(name); table.addTableColumn(age); table.addTableColumn(processMemory); table.addTableColumn(cpu); table.addTableColumn(repository); table.addTableColumn(state); table.dataSource = self; table.delegate = self
         table.style = .inset; table.rowHeight = 36; table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        let views: [NSView] = [title, subtitle, machine, openRepository, diskTitle, disk, diskBar, memoryTitle, memory, memoryDetail, cleanupTitle, automatic, processesEnabled, worktreesEnabled, policy, roots, addFolder, kind, scan, clean, logSearch, currentPhase, scroll, selectedEvent, footer]
+        let views: [NSView] = [title, subtitle, machine, openRepository, diskTitle, disk, diskBar, memoryTitle, memory, memoryDetail, cleanupTitle, automatic, processesEnabled, worktreesEnabled, cachesEnabled, policy, roots, addFolder, kind, scan, clean, logSearch, currentPhase, scroll, selectedEvent, footer]
         for view in views { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
         NSLayoutConstraint.activate([
             machine.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), machine.centerYAnchor.constraint(equalTo: title.centerYAnchor), machine.widthAnchor.constraint(equalToConstant: 245),
@@ -3245,6 +3252,7 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             automatic.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), automatic.centerYAnchor.constraint(equalTo: cleanupTitle.centerYAnchor),
             processesEnabled.leadingAnchor.constraint(equalTo: title.leadingAnchor), processesEnabled.topAnchor.constraint(equalTo: cleanupTitle.bottomAnchor, constant: 12),
             worktreesEnabled.leadingAnchor.constraint(equalTo: processesEnabled.trailingAnchor, constant: 24), worktreesEnabled.centerYAnchor.constraint(equalTo: processesEnabled.centerYAnchor),
+            cachesEnabled.leadingAnchor.constraint(equalTo: worktreesEnabled.trailingAnchor, constant: 24), cachesEnabled.centerYAnchor.constraint(equalTo: worktreesEnabled.centerYAnchor),
             policy.leadingAnchor.constraint(equalTo: title.leadingAnchor), policy.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), policy.topAnchor.constraint(equalTo: processesEnabled.bottomAnchor, constant: 10),
             roots.leadingAnchor.constraint(equalTo: title.leadingAnchor), roots.trailingAnchor.constraint(equalTo: addFolder.leadingAnchor, constant: -16), roots.topAnchor.constraint(equalTo: policy.bottomAnchor, constant: 12),
             addFolder.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), addFolder.topAnchor.constraint(equalTo: roots.topAnchor),
@@ -3275,15 +3283,19 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         automatic.state = value.config.automatic ? .on : .off
         processesEnabled.state = value.config.harvestProcesses ? .on : .off
         worktreesEnabled.state = value.config.cleanWorktrees ? .on : .off
-        policy.stringValue = "Checks every \(value.config.intervalSeconds / 60) minutes. Test browsers: \((value.config.browserMinAgeSeconds ?? value.config.processMinAgeSeconds) / 60)+ minutes old; other test processes: \(value.config.processMinAgeSeconds / 60)+ minutes. Cleanup requires repeated quiet checks and no clients. Worktrees: unused, clean, merged, \(value.config.worktreeMinAgeDays)+ days. Codex stays running."
+        cachesEnabled.state = value.config.cleanCaches == true ? .on : .off
+        policy.stringValue = "Checks every \(value.config.intervalSeconds / 60) minutes. Test browsers: \((value.config.browserMinAgeSeconds ?? value.config.processMinAgeSeconds) / 60)+ minutes; other tests: \(value.config.processMinAgeSeconds / 60)+ minutes. Worktrees: clean, unused, merged or \(value.config.worktreeMinAgeDays)+ days with a retained branch. Caches: Chrome signing copies 1+ hour; browser/build caches 1+ day. Repeated quiet checks required."
         roots.stringValue = "Workspaces: " + (value.config.workspaceRoots.isEmpty ? "None configured" : value.config.workspaceRoots.joined(separator: " · "))
         roots.toolTip = value.config.workspaceRoots.joined(separator: "\n")
         kind.setLabel("Processes (\(value.processInventory?.count ?? value.processes.count))", forSegment: 0); kind.setLabel("Worktrees (\(value.worktrees.count))", forSegment: 1)
-        kind.setLabel("Activity (\(value.activity?.count ?? 0))", forSegment: 2)
+        kind.setLabel("Caches (\(value.caches?.count ?? 0))", forSegment: 2)
+        kind.setLabel("Activity (\(value.activity?.count ?? 0))", forSegment: 3)
         currentPhase.stringValue = value.phase?.isEmpty == false ? value.phase! : "Waiting for the next check"
         currentPhase.textColor = value.running == true ? .systemBlue : .secondaryLabelColor
         let date = value.observedAt > 0 ? Date(timeIntervalSince1970: value.observedAt).formatted(date: .abbreviated, time: .shortened) : "Not scanned yet"
-        footer.stringValue = value.errors.isEmpty ? "\(date) · Last scan: \(value.processes.count) cleanup groups; stopped \(value.harvestedProcesses) processes; removed \(value.removedWorktrees) worktrees." : value.errors.joined(separator: "\n")
+        let diskChange = value.diskAvailableChangeBytes.map { String(format: " · Net free space %+.1f MiB", Double($0) / 1_048_576) } ?? ""
+        footer.stringValue = value.errors.isEmpty ? "\(date) · Stopped \(value.harvestedProcesses) processes; removed \(value.removedWorktrees) worktrees and \(value.removedCaches ?? 0) caches.\(diskChange)" : value.errors.joined(separator: "\n")
+        footer.toolTip = "Net free-space change includes concurrent writes and APFS shared blocks; it is measured on the home volume."
         footer.textColor = value.errors.isEmpty ? .secondaryLabelColor : .systemOrange
         if !selectingCell { rebuildItems() }; setBusy(busy)
     }
@@ -3376,6 +3388,7 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     @objc func toggleAutomatic() { request([automatic.state == .on ? "enable" : "disable"], snapshotResult: false) }
     @objc func toggleProcesses() { request(["configure", "--processes", processesEnabled.state == .on ? "true" : "false"], snapshotResult: false) }
     @objc func toggleWorktrees() { request(["configure", "--worktrees", worktreesEnabled.state == .on ? "true" : "false"], snapshotResult: false) }
+    @objc func toggleCaches() { request(["configure", "--caches", cachesEnabled.state == .on ? "true" : "false"], snapshotResult: false) }
     @objc func addWorkspace() {
         if selectedHost != nil {
             let alert = NSAlert(); alert.messageText = "Add workspace on " + selectedHost!; alert.informativeText = "Enter an absolute directory path on this machine."
@@ -3397,7 +3410,8 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
     func setBusy(_ value: Bool) {
         busy = value
-        for button in [scan, clean, automatic, processesEnabled, worktreesEnabled, addFolder] { button.isEnabled = !value && snapshot != nil && snapshot?.running != true }
+        for button in [scan, clean, automatic, processesEnabled, worktreesEnabled, cachesEnabled, addFolder] { button.isEnabled = !value && snapshot != nil && snapshot?.running != true }
+        cachesEnabled.isEnabled = cachesEnabled.isEnabled && snapshot?.config.cleanCaches != nil
         machine.isEnabled = !value
         let worktree = items.indices.contains(table.selectedRow) ? items[table.selectedRow].worktree : nil
         if kind.selectedSegment == 1 { clean.isEnabled = clean.isEnabled && worktree != nil }
