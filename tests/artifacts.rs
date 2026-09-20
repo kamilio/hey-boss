@@ -189,8 +189,14 @@ fn selection_context_matches_rendered_table_cells_and_footnotes() {
         std::process::id()
     ));
     let mut store = Store::open(&path).unwrap();
-    let created = run(&mut store, json!({"command":"create","title":"Context","body":"| Left | Right |\n| --- | --- |\n| Row | Keep **context** |\n\nA final **selected passage** with a footnote.[^note]\n\n[^note]: Keep explanation."}));
+    let created = run(
+        &mut store,
+        json!({"command":"create","title":"Context","body":"| Left | Right |\n| --- | --- |\n| Row | Keep **context** |\n\nA final **selected passage** with a footnote.[^note]\n\n[^note]: Keep explanation."}),
+    );
     let id = created["artifact"]["id"].as_str().unwrap();
-    let commented = run(&mut store, json!({"command":"comment","id":id,"body":"Review","quote":"selected passage","prefix":"RowKeep context\n\nA final ","suffix":" with a footnote.1\n1\nKeep explanation."}));
+    let commented = run(
+        &mut store,
+        json!({"command":"comment","id":id,"body":"Review","quote":"selected passage","prefix":"RowKeep context\n\nA final ","suffix":" with a footnote.1\n1\nKeep explanation."}),
+    );
     assert_eq!(commented["comments"][0]["outdated"], false);
 }
