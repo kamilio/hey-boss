@@ -71,3 +71,22 @@ cargo test --locked --test agent_runtime real_agents_complete_and_resume_the_exa
 It verifies successful completion, exact session reuse and preserved conversation
 content. It passed locally with Codex 0.155.1, Claude Code 2.1.278 and Pi 0.84.4;
 use the installed CLI versions reported by the test environment when reproducing.
+
+## Provider-neutral goals
+
+`ManagedGoal` supplies continuation without requiring a native goal service.
+Create it with the full objective, call `start`, then feed each ordered session
+event to `observe`. A completed turn containing a valid JSON `status`/`summary`
+report completes or blocks the goal. Ordinary turn completion sends a continuation
+in the same session; failed/interrupted turns block it. Approvals/input still go
+to the embedding application's explicit decision handler. This controller does
+not also activate Codex's automatic native goals, avoiding duplicate continuation.
+
+`pause` records paused intent before interrupting, so late events cannot reactivate
+it. `start` explicitly re-enables a paused/blocked goal; complete goals reject
+restart. Serialize the controller with serde and persist it alongside the entire
+session reference. On process recovery, launch the exact reference and call
+`resume`; the old turn guard is discarded while the objective and completed-turn
+accounting are retained. A goal attached to one owned process cannot control a
+second process. `last_usage` retains the provider's last usage payload; it does
+not invent a cumulative token count across differing provider accounting formats.

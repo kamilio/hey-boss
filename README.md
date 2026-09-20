@@ -2,6 +2,11 @@
 
 Licensed under [MIT](LICENSE).
 
+The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Code,
+and Pi sessions through one API, including resume, activity, steering, interruption,
+explicit approvals/input, and provider-neutral goal continuation. Issue workers
+continue using Codex; worker/task agent selection is deferred.
+
 The [worker terminal dashboard](worker-tui/README.md) shows the current worker, live sessions,
 activity, queue state, and worker controls. Run `hey-boss worker` to start a worker
 with the dashboard, or `hey-boss worker status` to watch existing workers.
