@@ -710,7 +710,12 @@ Drafts are ordinary persisted issues, visible in lists and details, excluded fro
 worker reservation and manual claims. Drafting requires an open, unassigned,
 unreserved issue. Disabling drafts rejects new drafts and interactive planning;
 it preserves existing drafts and allows explicit undrafting. The web creation
-form and issue properties offer compact Draft checkboxes with these same rules.
+form offers a Save as draft choice that explains agent pickup and updates the
+save action. Lists distinguish drafts with a badge and a pencil icon. Open draft
+details explain their status and offer Mark ready; issue properties offer Move
+to draft with the eligibility restriction when unavailable. Existing drafts can
+still be marked ready after drafts are disabled. Linked plans display their file
+and host, with a reminder that marking ready first syncs the latest plan.
 
 Interactive planning is a human-terminal workflow. Agents must not start it
 unless explicitly asked:

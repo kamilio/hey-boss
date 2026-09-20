@@ -91,7 +91,7 @@ async page => {
   await page.reload({waitUntil:'domcontentloaded'});
   await page.getByRole('button',{name:'Move to draft',exact:true}).click();
   await page.locator('.draft-notice').waitFor();
-  const prefix = `output/playwright/draft-${page.context().browser().browserType().name()}`;
+  const prefix = `output/playwright/issue40/draft-${page.context().browser().browserType().name()}`;
   for (const scheme of ['light','dark']) {
     await page.emulateMedia({colorScheme:scheme});
     for (const width of [1440,768,390,320]) {
@@ -151,7 +151,7 @@ async page => {
   await page.locator('[data-draft-action="draft"]').waitFor();
   check(await page.locator('#comment-body').inputValue() === 'Typing while the readiness save is in flight.', 'Readiness retains typing during the request');
   await page.unroute('**/api/action', delay);
-  await action({action:'assign_boss',number});
+  await action({action:'assign_boss',number,force:false});
   await page.reload({waitUntil:'domcontentloaded'});
   await page.locator('[data-draft-action="draft"]').waitFor();
   check(await page.locator('[data-draft-action="draft"]').isDisabled(), 'Assigned issue cannot be drafted');
@@ -160,8 +160,8 @@ async page => {
   await page.waitForFunction(() => document.querySelector('#editor-draft-help').textContent.includes('Unassign'));
   check(await page.locator('#editor-draft').isDisabled(), 'Assigned editor keeps draft choice disabled');
   await page.keyboard.press('Escape');
-  await action({action:'unassign',number});
-  await action({action:'close',number});
+  await action({action:'unassign',number,force:false});
+  await action({action:'close',number,force:false});
   await page.reload({waitUntil:'domcontentloaded'});
   await page.locator('[data-draft-action="draft"]').waitFor();
   check(await page.locator('[data-draft-action="draft"]').isDisabled(), 'Closed issue cannot be drafted');
