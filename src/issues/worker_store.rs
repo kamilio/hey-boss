@@ -4,6 +4,25 @@ use crate::issues::worker::{Job, ProjectConfig, now};
 pub(super) const HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_issue_history ON worker_runs(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 type ActiveProcess = (Job, Option<u32>, Option<String>);
 
+// Only the owning agent's deliberate handoff may finish after changing owners.
+// A human takeover must still stop the session and invalidate its completion.
+fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
+    if !job.config.prs_enabled
+        || issue.state != "open"
+        || issue.deleted_at.is_some()
+        || issue.assignee.as_deref() != Some("human:boss")
+        || issue.title != job.issue["title"]
+        || issue.body != job.issue["body"]
+    {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.assignee')='human:boss' AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",
+        params![job.project.id, job.number(), job.actor.id],
+        |r| r.get(0),
+    )?)
+}
+
 pub(super) const SCHEMA: &str = "
 CREATE TABLE worker_pool(id INTEGER PRIMARY KEY CHECK(id=1),concurrency INTEGER NOT NULL CHECK(concurrency BETWEEN 1 AND 16));
 INSERT INTO worker_pool VALUES(1,2);
@@ -294,6 +313,7 @@ impl Store {
                 issue.assignee.as_deref() != Some(&job.actor.id)
                     && !(issue.state == "closed"
                         && issue.closed_by.as_deref() == Some(&job.actor.id))
+                    && !own_pr_handoff(&self.db, job, &issue)?
             })
     }
     pub(crate) fn worker_event(
@@ -344,20 +364,23 @@ impl Store {
         let own_closed = issue.state == "closed"
             && issue.closed_by.as_deref() == Some(&job.actor.id)
             && issue.deleted_at.is_none();
+        let handed_off = own_pr_handoff(&tx, job, &issue)?;
         let mut state = if own_closed { "completed" } else { state };
         let mut summary: String = summary.chars().take(16_000).collect();
         if state == "completed"
             && !own_closed
-            && (!own || issue.title != job.issue["title"] || issue.body != job.issue["body"])
+            && ((!own && !handed_off)
+                || issue.title != job.issue["title"]
+                || issue.body != job.issue["body"])
         {
             state = "blocked";
             summary = format!(
                 "Issue ownership or requirements changed while Codex worked. Review the session before closing.\n\n{summary}"
             );
         }
-        if own && issue.deleted_at.is_none() && issue.state == "open" {
+        if (own || handed_off) && issue.deleted_at.is_none() && issue.state == "open" {
             let report = format!("### Worker {}\n\n{}", state, summary);
-            if state == "completed" {
+            if state == "completed" && !job.config.prs_enabled {
                 mutate(
                     &tx,
                     &job.project,
@@ -380,16 +403,29 @@ impl Store {
                     },
                     now(),
                 )?;
-                mutate(
-                    &tx,
-                    &job.project,
-                    &job.actor,
-                    &Operation::Unassign {
-                        number: job.number(),
-                        force: false,
-                    },
-                    now(),
-                )?;
+                if state == "completed" && job.config.prs_enabled {
+                    mutate(
+                        &tx,
+                        &job.project,
+                        &job.actor,
+                        &Operation::AssignBoss {
+                            number: job.number(),
+                            force: false,
+                        },
+                        now(),
+                    )?;
+                } else if own {
+                    mutate(
+                        &tx,
+                        &job.project,
+                        &job.actor,
+                        &Operation::Unassign {
+                            number: job.number(),
+                            force: false,
+                        },
+                        now(),
+                    )?;
+                }
             }
         }
         tx.execute(
@@ -419,6 +455,268 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct HandoffFixture {
+        store: Store,
+        job: Job,
+        root: std::path::PathBuf,
+    }
+    impl HandoffFixture {
+        fn new(prs: bool) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "hb-pr-handoff-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            let actor = Actor {
+                id: "codex:handoff".into(),
+                kind: "codex".into(),
+                session_id: Some("handoff".into()),
+                machine: "unit".into(),
+                host: "unit".into(),
+                pid: None,
+                process_start: None,
+                cwd: root.clone(),
+                source: "test".into(),
+            };
+            let project = Project {
+                id: "named:Handoff".into(),
+                name: "Handoff".into(),
+            };
+            store
+                .db
+                .execute(
+                    "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,2)",
+                    params![project.id, project.name],
+                )
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO agents VALUES(?1,?2,0)",
+                    params![actor.id, serde_json::to_string(&actor).unwrap()],
+                )
+                .unwrap();
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,created_at,updated_at,version,labels) VALUES(?1,1,'Task','Requirements','open',?2,?2,0,0,1,'[]')", params![project.id,actor.id]).unwrap();
+            let issue =
+                serde_json::to_value(get_issue(&store.db, &project.id, 1, false).unwrap()).unwrap();
+            let job = Job {
+                id: "handoff-run".into(),
+                worker_id: String::new(),
+                resume_session: None,
+                project,
+                issue,
+                comments: vec![],
+                config: ProjectConfig {
+                    prs_enabled: prs,
+                    ..Default::default()
+                },
+                actor,
+                owner_pid: 1,
+                owner_start: "start".into(),
+                machine: "unit".into(),
+            };
+            store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,claimed_at) VALUES(?1,?2,1,?3,?4,'running',1,'start','unit',0,0,0)", params![job.id,job.project.id,serde_json::to_string(&job).unwrap(),job.actor.id]).unwrap();
+            let mut fixture = Self { store, job, root };
+            fixture.apply(Operation::Comment {
+                number: 1,
+                body: "Existing history".into(),
+            });
+            for (number, purpose) in [
+                (1, crate::issues::PrPurpose::Fix),
+                (2, crate::issues::PrPurpose::SupportingEvidence),
+            ] {
+                fixture.apply(Operation::AddPullRequest {
+                    number: 1,
+                    url: format!("https://github.com/example/repo/pull/{number}"),
+                    purpose,
+                });
+            }
+            fixture
+        }
+        fn apply(&mut self, operation: Operation) {
+            self.store
+                .execute(&Request {
+                    version: 1,
+                    project: self.job.project.clone(),
+                    project_override: None,
+                    actor: Some(self.job.actor.clone()),
+                    request_id: None,
+                    operation,
+                })
+                .unwrap();
+        }
+        fn issue(&self) -> Issue {
+            get_issue(&self.store.db, &self.job.project.id, 1, false).unwrap()
+        }
+        fn state(&self) -> String {
+            self.store
+                .db
+                .query_row(
+                    "SELECT state FROM worker_runs WHERE id=?1",
+                    [&self.job.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+    }
+    impl Drop for HandoffFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn pr_completion_hands_open_issue_to_boss_and_preserves_history() {
+        let mut f = HandoffFixture::new(true);
+        f.store
+            .worker_finish(
+                &f.job,
+                "completed",
+                "Fix PR is ready for review; not merged.",
+            )
+            .unwrap();
+        assert_eq!(f.issue().state, "open");
+        assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+        assert_eq!(f.state(), "completed");
+        assert!(f.issue().closed_at.is_none());
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT count(*) FROM issue_pull_requests", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM events WHERE action='closed'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        f.store
+            .worker_finish(&f.job, "completed", "Duplicate report")
+            .unwrap();
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn agent_pr_handoff_is_not_cancelled_or_reported_as_an_ownership_conflict() {
+        let mut f = HandoffFixture::new(true);
+        f.apply(Operation::AssignBoss {
+            number: 1,
+            force: false,
+        });
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        f.store
+            .worker_finish(&f.job, "completed", "Ready for Boss.")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.issue().state, "open");
+        assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn external_boss_takeover_and_changed_requirements_are_not_ready_handoffs() {
+        for changed in [false, true] {
+            let mut f = HandoffFixture::new(true);
+            if changed {
+                f.apply(Operation::AssignBoss {
+                    number: 1,
+                    force: false,
+                });
+                f.store
+                    .db
+                    .execute("UPDATE issues SET body='Changed requirements'", [])
+                    .unwrap();
+            } else {
+                let mut boss = f.job.actor.clone();
+                boss.id = "human:boss".into();
+                f.store
+                    .db
+                    .execute(
+                        "INSERT INTO agents VALUES(?1,?2,0)",
+                        params![boss.id, serde_json::to_string(&boss).unwrap()],
+                    )
+                    .unwrap();
+                mutate(
+                    &f.store.db,
+                    &f.job.project,
+                    &boss,
+                    &Operation::AssignBoss {
+                        number: 1,
+                        force: true,
+                    },
+                    now(),
+                )
+                .unwrap();
+                assert!(f.store.worker_cancelled(&f.job).unwrap());
+            }
+            f.store
+                .worker_finish(&f.job, "completed", "Stale completion")
+                .unwrap();
+            assert_eq!(f.state(), "blocked");
+            assert_eq!(f.issue().state, "open");
+            assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+        }
+    }
+
+    #[test]
+    fn explicit_pr_closure_and_non_pr_completion_still_close() {
+        for prs in [false, true] {
+            let mut f = HandoffFixture::new(prs);
+            if prs {
+                f.apply(Operation::Close {
+                    number: 1,
+                    comment: Some("Source/group explicitly completed".into()),
+                    force: false,
+                });
+            }
+            f.store
+                .worker_finish(&f.job, "completed", "Finished.")
+                .unwrap();
+            assert_eq!(f.issue().state, "closed");
+            assert_eq!(f.state(), "completed");
+            assert!(f.issue().assignee.is_none());
+        }
+    }
+
+    #[test]
+    fn unfinished_pr_reviews_release_for_retry_without_boss_handoff() {
+        let mut f = HandoffFixture::new(true);
+        f.store
+            .worker_finish(&f.job, "blocked", "Review findings still need fixes.")
+            .unwrap();
+        assert_eq!(f.issue().state, "open");
+        assert!(f.issue().assignee.is_none());
+        assert_eq!(f.state(), "blocked");
+    }
 
     #[test]
     fn launches_are_atomic_idempotent_and_backfill_survives_reopening() {
@@ -473,7 +771,10 @@ mod tests {
             {
                 let mut query = store.db.prepare("SELECT count(*) FROM issue_agent_launches WHERE project_id='named:Launches' AND issue_number=1").unwrap();
                 assert_eq!(query.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 1);
-                assert!(query.get_status(rusqlite::StatementStatus::VmStep) < 100, "Counting one issue must not scan unrelated launches");
+                assert!(
+                    query.get_status(rusqlite::StatementStatus::VmStep) < 100,
+                    "Counting one issue must not scan unrelated launches"
+                );
             }
             // Simulate the old schema with one launched and one merely reserved run.
             store.db.execute_batch("DROP TABLE issue_agent_launches;

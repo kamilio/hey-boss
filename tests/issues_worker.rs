@@ -169,6 +169,45 @@ impl Drop for Worker {
     }
 }
 #[test]
+fn completed_pr_worker_keeps_fix_open_and_hands_it_to_boss() {
+    let f = Fixture::new("pr-handoff");
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&["--prs"]);
+    f.cli(&[
+        "pr",
+        "add",
+        "1",
+        "https://github.com/example/repo/pull/50",
+        "--purpose",
+        "fix",
+    ]);
+    f.cli(&["comment", "1", "--body", "Preserve existing history"]);
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "completed");
+    assert_eq!(status["eligible"], 0);
+    let view = f.cli(&["view", "1"]);
+    assert_eq!(view["issue"]["state"], "open");
+    assert_eq!(view["issue"]["assignee"], "human:boss");
+    assert!(view["issue"]["closed_at"].is_null());
+    assert_eq!(view["comments"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        f.cli(&["pr", "list", "1"])["pull_requests"][0]["purpose"],
+        "fix"
+    );
+    let transcript = f.transcript();
+    let turn = transcript
+        .iter()
+        .find(|v| v["method"] == "turn/start")
+        .unwrap();
+    let text = turn["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Keep the issue open until the actual fix PR is merged"));
+    assert!(text.contains("hey-boss issue assign-to-boss 1"));
+    worker.stop();
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "open");
+}
+
+#[test]
 fn codex_protocol_goal_completion_and_prompt_variables() {
     let f = Fixture::new("completed");
     f.setup(&["--prompt", "/goal"]);

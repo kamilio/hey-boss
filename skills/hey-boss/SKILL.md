@@ -129,6 +129,16 @@ without reattaching it. Older links are `unspecified`; adding an existing URL
 preserves its purpose. `view` and `pr list` JSON expose `purpose`. Review every PR,
 using purpose to distinguish merge requirements from supporting material;
 classification alone never closes an issue or assigns it to Boss.
+In PR workflow mode, keep the issue open until its actual fix PR is merged.
+Passing CI or a ready-for-review handoff is not a merge. Continue the existing
+session through required reviews, feedback, findings and conflicts. Only when
+fully merge-ready, comment with verification and the remaining merge step, then
+`issue assign-to-boss NUMBER` and report completed; Boss ownership prevents worker
+pickup. If blocked, report blocked; do not hand incomplete work to Boss. Worker
+completion in PR mode preserves an open issue and assigns it to Boss rather than
+closing it. Custom PR prompts inherit these lifecycle rules. Explicit source/group
+closure and non-PR completion can still close normally. Supporting evidence PRs
+do not all need to merge. No automatic merging is performed.
 Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
 A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The shared prompt defaults to `Claim and implement` followed by the backtick-wrapped
 `{{issue_command}}`. Project settings assembles shared instructions + selected

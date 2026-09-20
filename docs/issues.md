@@ -310,6 +310,19 @@ and **Use default** clears it. Changing an inactive branch does not change the
 assembled prompt until that branch is selected. Settings apply to future jobs;
 reserved jobs retain their captured configuration.
 
+PR delivery always adds handoff rules to generated instructions, including custom
+PR prompts. Keep the issue open until the actual fix PR is merged; passing CI and
+a ready-for-review handoff are not a merge. Agents continue the existing session
+through required CI, reviews, feedback, findings and conflicts. Once fully
+merge-ready, record verification and the remaining merge step in an issue comment,
+then use `hey-boss issue assign-to-boss NUMBER` and report completed. Boss-owned
+open issues are excluded from worker pickup. A completed PR-mode worker run also
+keeps an owned issue open and assigns it to Boss, preserving links and history.
+Incomplete work must continue or report blocked, without a Boss handoff.
+Explicit source/group closures and non-PR completion still close normally.
+Attachment purposes distinguish the actual fix and prerequisites from supporting
+evidence; supporting PRs do not all need to merge. Workers do not merge PRs.
+
 Worktree and PR settings are off by default.
 `worker --worktree` / `--no-worktree` and `--prs` / `--no-prs` override project
 choices for that worker, including restored worker IDs. Worktree mode instructs
