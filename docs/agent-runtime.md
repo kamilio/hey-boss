@@ -18,10 +18,12 @@ executable discovery now use the shared implementation.
 | Native goal | get/set saved native goal | none | none |
 | Native output schema | per-turn or launch default | --json-schema at launch | none; use prompt format |
 
-Capabilities describe actual provider behavior. A queued Claude user message is
-not acknowledged direct steering. The caller receives the delivery mode. Claude
-queued messages have distinct local turn guards; Pi internal tool-loop turns are
-not client turns. Native goals are explicitly Codex-only; callers can implement
+Capabilities describe actual provider behavior. Claude steering is buffered in
+the owned client and sent only after the current result. Sending stdin messages
+during a Claude tool loop can fold them into that loop without a second result;
+the client queue guarantees the reported next-turn delivery and distinct local
+turn guards. Pi internal tool-loop turns are not client turns. The caller receives
+the delivery mode. Native goals are explicitly Codex-only; callers can implement
 continuation independently of native provider support.
 
 Persist the entire `SessionRef`: provider, ID, and Pi's exact session file. Pi
