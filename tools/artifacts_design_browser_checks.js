@@ -4,7 +4,7 @@ async page => {
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   const origin=await page.evaluate(()=>location.origin);
   await page.setViewportSize({width:1440,height:1000});
-  await page.goto(origin+'/artifacts#project=Artifact+Studio');
+  await page.goto(origin+'/artifacts#project=named%3AArtifact+Studio');await page.reload();
   await page.locator('.artifact-row').first().waitFor();
   await page.locator('.artifact-row').filter({hasText:'Workspace design notes'}).click();
   await page.locator('#artifact-reading').waitFor();
@@ -25,6 +25,8 @@ async page => {
   await page.getByRole('button',{name:'Write',exact:true}).click();
   check(await page.getByRole('textbox',{name:'Markdown',exact:true}).inputValue()==='# Preview check\n\n**Readable** draft.','Switching back to Write preserves content');
   await page.setViewportSize({width:390,height:844});
+  check(await page.locator('#nav-artifacts').evaluate(el=>el.getBoundingClientRect().left>=0&&el.getBoundingClientRect().right<=innerWidth),'Current navigation tab stays visible on a phone');
+  check(await page.locator('#artifact-body').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),'Phone writing text avoids Safari focus zoom');
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Editor fits a phone viewport');
   await page.getByRole('button',{name:'Back',exact:true}).click();
   await page.locator('#artifact-reading').waitFor();

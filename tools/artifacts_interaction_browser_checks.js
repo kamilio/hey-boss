@@ -4,7 +4,7 @@ async page => {
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.setViewportSize({width:390,height:844});
-  await page.goto(origin+'/artifacts#project=Artifact+Studio');
+  await page.goto(origin+'/artifacts#project=named%3AArtifact+Studio');
   await page.reload();
   await page.locator('.artifact-row').filter({hasText:'Workspace design notes'}).click();
   await page.locator('#artifact-reading').waitFor();
