@@ -14,7 +14,7 @@ async page => {
   }
   check((await task()).status==='pending','Viewing and resizing never answer the request');
   check(await page.locator('.related-issue-link').count()===1,'Approval links to its issue');
-  const text=await page.locator('#inbox-detail').textContent().catch(()=>page.locator('main').textContent());
+  const text=await page.locator('main').textContent();
   check(text.includes('/synthetic/repo/example.rs')&&text.includes('-old')&&text.includes('+new'),'File diff and path are readable');
   await page.setViewportSize({width:1440,height:1050});
   await page.getByRole('button',{name:'Approve once',exact:true}).focus();

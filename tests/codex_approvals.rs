@@ -107,6 +107,7 @@ impl Fixture {
         c.current_dir(&self.root)
             .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
             .env("HEY_BOSS_ISSUE_PROJECT", "named:Approval QA")
+            .env("HEY_BOSS_AGENT_ID", "human:approvals-test")
             .env("HEY_BOSS_FLEET_STATE", self.root.join("fleet-state"))
             .env("HEY_BOSS_FLEET_DESIRED", self.root.join("fleet.json"))
             .env("HEY_BOSS_INBOX_SOCKET", self.root.join("inbox.sock"))
@@ -123,7 +124,8 @@ impl Fixture {
         let output = self.command(args).output().unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).unwrap()
