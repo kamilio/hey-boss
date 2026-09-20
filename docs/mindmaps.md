@@ -210,6 +210,9 @@ body edits remain unavailable for live issue references.
 and moves as one transaction. `--file -` reads stdin. Preview it with `--dry-run`;
 the preview executes the same validation and returns the proposed result without
 saving anything. Guard the preview and commit with the same map `--if-version`.
+`mm batch --help` documents the complete input format and copy-ready examples.
+Every object requires `command` (exactly `edit`, `alias` or `move`, not `action`)
+and `node` (an existing selector in the selected map).
 
 ```json
 [
@@ -222,14 +225,18 @@ saving anything. Guard the preview and commit with the same map `--if-version`.
 
 ```sh
 hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
+hey-boss mm batch --file - --dry-run --if-version 42 --json < edits.json
 hey-boss mm batch --file edits.json --if-version 42 --request-id organize-replies --json
 ```
 
 All selectors resolve against the original map before any edits, so later entries
 can still use `followup` after its alias changes. Nodes, parents and sibling anchors
+cannot use a new alias introduced earlier in the same array and
 must already exist in the selected map. Entries execute in input order; move fields
 `under`, `before` and `after` follow `mm move` semantics. Omit them to move a node to
-the root/end. Use `alias: null` to clear an alias. Edits accept titles and issue
+the root/end. Null placement fields behave like omission. Use `alias: null` (or
+omit `alias`) to clear an alias. An edit requires `title` or `clear_label:true`,
+which cannot be combined; `clear_label` defaults to false. Edits accept titles and issue
 `clear_label`, preserving live issue content; bodies and resource mutations are
 not supported. Unknown fields and commands are rejected.
 

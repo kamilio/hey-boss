@@ -232,9 +232,32 @@ one project; cycles are rejected. Automatic issue→PR relationships come from
 Inbox is reported explicitly. Map reads never complete notices or change issues.
 `mm batch --file edits.json` (or `--file -` for stdin) atomically applies a JSON
 array of `edit` (`node`, `title` or `clear_label`), `alias` (`node`, `alias`), and
-`move` (`node`, optional `under`/`before`/`after`) entries. Preview with `--dry-run`
+`move` (`node`, optional `under`/`before`/`after`) entries. Each object requires the
+exact `command` discriminator, not `action`; `mm batch --help` shows the complete
+format and copy-ready examples. For existing selectors, save this as `edits.json`:
+
+```json
+[
+  {"command":"edit","node":"issue:12","title":"Keep replies safe"},
+  {"command":"alias","node":"followup","alias":"reply-followup"},
+  {"command":"move","node":"followup","under":"existing-topic"}
+]
+```
+
+```sh
+hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
+hey-boss mm batch --file - --dry-run --if-version 42 --json < edits.json
+hey-boss mm batch --file edits.json --if-version 42 --request-id organize-replies --json
+```
+
+Replace 42 with the map version from `mm show --json`. Preview with `--dry-run`
 and guard the whole batch with `--if-version`. All selectors bind before edits;
-invalid nodes, duplicate requested labels/aliases, cycles and stale versions roll
+use the original alias or stable node ID in later entries, never a new alias
+introduced by an earlier entry. Omitted/null `alias` clears it; omitted/null
+`under` moves to the root; omitted sibling anchors append. Use only one of
+`before`/`after`. `clear_label:true` restores an issue's title and excludes `title`.
+Unknown fields/commands and body edits are rejected. Limits: 1 MiB/10,000 entries.
+Invalid nodes, duplicate requested labels/aliases, cycles and stale versions roll
 back everything. JSON returns compact `changed_nodes` before/after metadata and
 one resulting version; empty/net no-op batches do not advance it. Identical
 `--request-id` retries are safe after alias changes; dry runs cannot use request IDs.
