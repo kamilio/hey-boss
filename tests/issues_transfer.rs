@@ -220,7 +220,6 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     let moved_child = call("Source", transfer_child, None).unwrap();
     assert_eq!(moved_child["drafts_enabled"], false);
     drop(db);
-    drop(call);
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
