@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "agent_launches.rs"]
+mod agent_launches;
 #[path = "chief.rs"]
 pub(super) mod chief;
 #[path = "claim_recovery.rs"]
@@ -93,7 +95,7 @@ fn migration_error(error: Error, path: &Path) -> Error {
     )
 }
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
@@ -113,10 +115,13 @@ struct Issue {
     sort_order: i64,
     draft: bool,
     plan: Option<super::planning::Plan>,
+    #[serde(default)]
+    agent_launch_count: i64,
 }
 fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
+        agent_launch_count: row.get(16)?,
         sort_order: row.get(13)?,
         draft: row.get(14)?,
         plan: row
@@ -587,6 +592,7 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs' AND type='table')", [], |r|r.get::<_,bool>(0))? {
             db.execute_batch(super::chief::SCHEMA)?;
         }
+        agent_launches::migrate(&db)?;
         Ok(Self { db })
     }
 
@@ -792,7 +798,7 @@ impl Store {
                         if *all { -1_i64 } else { i64::from(*limit) + 1 },
                         if *all { 0 } else { *offset }
                     ],
-                    |row| Ok((row_issue(row)?, row.get::<_, i64>(16)?)),
+                    |row| Ok((row_issue(row)?, row.get::<_, i64>(17)?)),
                 )?;
                 let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let more = !*all && found.len() > *limit as usize;

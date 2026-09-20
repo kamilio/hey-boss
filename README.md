@@ -716,6 +716,8 @@ The supervisor and companion remain alive. The companion stops the old worker an
 
 Worker and browser reads use WAL snapshots; migration writes run only when needed. A temporary SQLite lock during worker status refresh retries without shutting down Codex sessions. Browser discovery uses its own connection. Git identity checks avoid enumerating all worktrees for ordinary checkouts. The manual claim window starts at the first model activity, with a separate fifteen-minute wait for model startup, so a queued model does not consume the claim deadline.
 
+Issue lists and details show each issue's worker agent launch count. Hover or focus the muted web count for its explanation; CLI `issue list` and `issue view` include it, and JSON exposes `agent_launch_count`. Each actual process launch counts once, including retries and resumed sessions; reservations and failed process starts do not count. Launch history persists through reopening, deletion/restoration, project moves, and fleet sync. This count imposes no retry limit. Existing recorded launches are backfilled during upgrade.
+
 Quick add issues with **⌘⇧K** (Mac) or **Ctrl+Shift+K** from any web page,
 including over an open editor. On Mac, **Control+Option+Space** opens quick add
 from any application; the menu bar also has **Quick add issue…**. Enter a title
