@@ -1425,7 +1425,14 @@ func auditDesktopActions(root: URL) {
     let portFile = root.appendingPathComponent("action-http.port")
     let python = """
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import TCPServer
 import sys
+class FixtureServer(HTTPServer):
+ def server_bind(self):
+  # This loopback fixture does not need HTTPServer's blocking reverse DNS.
+  TCPServer.server_bind(self)
+  self.server_name='localhost'
+  self.server_port=self.socket.getsockname()[1]
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def do_GET(self):
@@ -1438,7 +1445,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_POST(self):
   body=self.rfile.read(int(self.headers.get('Content-Length','0')))
   self.send_response(201);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(body)
-server=HTTPServer(('127.0.0.1',0),Handler)
+server=FixtureServer(('127.0.0.1',0),Handler)
 open(sys.argv[1],'w').write(str(server.server_port))
 server.serve_forever()
 """
