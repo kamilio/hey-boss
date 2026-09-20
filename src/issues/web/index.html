@@ -333,10 +333,10 @@
   <textarea class="text-input workflow-prompt" id="project-prompt-main" rows="3" maxlength="32000" aria-describedby="project-source-main"></textarea>
   <div class="branch-footer"><span id="project-source-main">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="main">Use default</button></div></div></div></section>
             <details class="settings-section planning-settings"><summary>Drafts &amp; planning</summary>
-              <label class="workflow-toggle"><input type="checkbox" id="project-drafts" /><span>Enable drafts</span></label>
+              <label class="draft-choice"><input type="checkbox" id="project-drafts" aria-describedby="project-drafts-help" /><span><strong>Allow draft issues</strong><span id="project-drafts-help">Keep work in the project before it is ready for agents. Existing drafts stay saved when this is turned off and can still be marked ready.</span></span></label>
               <label class="field-label" for="project-plan-template">Plan file template</label>
-              <input class="text-input" id="project-plan-template" />
-              <p class="field-help">Repository-relative path. Use {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
+              <input class="text-input" id="project-plan-template" aria-describedby="plan-template-help" />
+              <p class="field-help" id="plan-template-help">Used for terminal planning with --interactive. File changes sync to the linked issue. Choose a repository-relative path with {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
             </details>
           </div>
           <aside class="settings-preview" aria-labelledby="settings-preview-title">
@@ -436,7 +436,7 @@
               hidden
             ></div>
           </div>
-          <label class="field-help" id="editor-draft-control"><input type="checkbox" id="editor-draft" /> Draft</label>
+          <label class="draft-choice" id="editor-draft-control"><input type="checkbox" id="editor-draft" aria-describedby="editor-draft-help" /><span><strong>Save as draft</strong><span id="editor-draft-help">Saved to the project. Agents skip it until you mark it ready.</span></span><span class="draft-badge" aria-hidden="true">Draft</span></label>
           <label class="field-label labels-label" for="editor-labels"
             >Labels <span>optional</span></label
           >
