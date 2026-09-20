@@ -151,6 +151,7 @@ enum Action {
         body: Body,
     },
     /// Atomically organize labels, aliases and moves from a JSON array.
+    #[command(after_help = BATCH_HELP)]
     Batch {
         /// JSON file; '-' reads stdin, up to 1 MiB.
         #[arg(long)]
@@ -210,6 +211,52 @@ enum Action {
         no_discovery: bool,
     },
 }
+
+const BATCH_HELP: &str = r#"JSON input format:
+  An array of objects. Every object requires "command" and "node".
+  "command" is exactly "edit", "alias" or "move" (not "action").
+  "node" is an existing selector: alias, n-ID, PROJECT::alias,
+  issue:NUMBER, pr:URL or notice:TASK_ID, in the selected map.
+
+  edit:  "title" (string) or "clear_label":true is required.
+         "title" changes topic/PR text or an issue's map-only label.
+         "clear_label" restores an issue's live title; default false.
+         Do not combine "title" with "clear_label":true.
+  alias: "alias" (string) sets an alias; null or omission clears it.
+  move:  Optional "under", "before", "after" are selector strings.
+         Null or omitted "under" moves to the root.
+         Use at most one of "before" or "after", in the target parent.
+         Null or omitted sibling anchors append to the parent's end.
+
+  Unknown fields and commands are rejected; body edits are unsupported.
+  Limits: 1 MiB of UTF-8 JSON and 10,000 entries.
+
+Example edits.json (all selectors must already exist):
+[
+  {"command":"edit","node":"issue:1","title":"Keep replies safe"},
+  {"command":"edit","node":"issue:2","clear_label":true},
+  {"command":"alias","node":"followup","alias":"reply-followup"},
+  {"command":"alias","node":"archived","alias":null},
+  {"command":"move","node":"followup","under":"existing-topic",
+   "before":"existing-sibling"},
+  {"command":"move","node":"archived","after":"existing-topic"},
+  {"command":"move","node":"loose"}
+]
+
+Preview and apply (replace 42 with the version from hey-boss mm show --json):
+  hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
+  hey-boss mm batch --file - --dry-run --if-version 42 --json < edits.json
+  hey-boss mm batch --file edits.json --if-version 42 \
+    --request-id organize-replies --json
+
+Selectors bind before any edits. Later entries must use the original alias
+or stable node ID, not a new alias introduced earlier in the array.
+Entries then execute in order. Invalid selectors, alias/label collisions,
+cycles or a stale version roll back the whole transaction.
+Dry runs save nothing and cannot use --request-id. A changed batch advances
+the map version once; empty/net no-op batches preserve it. Retry an identical
+commit with the same --request-id to receive its original result."#;
+
 impl Options {
     fn operation(&self) -> Result<Operation> {
         let add = |title: String,

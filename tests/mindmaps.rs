@@ -1981,6 +1981,101 @@ fn batch_file(f: &Fixture, edits: Value) -> String {
 }
 
 #[test]
+fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
+    let f = Fixture::new();
+    let help = f.terminal("Atlas", &["batch", "--help"]);
+    let long_help = f.terminal("Atlas", &["batch", "-h"]);
+    assert_eq!(help, long_help);
+    for documented in [
+        "\"command\":\"edit\"",
+        "\"command\":\"alias\"",
+        "\"command\":\"move\"",
+        "clear_label",
+        "before",
+        "after",
+        "null",
+        "--file -",
+        "--dry-run",
+        "--if-version",
+        "--request-id",
+        "before any edits",
+        "new alias",
+        "Unknown fields",
+    ] {
+        assert!(
+            help.contains(documented),
+            "Missing {documented:?} in:\n{help}"
+        );
+    }
+    // Exercise the copy-ready JSON shown by help, rather than a duplicated fixture.
+    let start = help.find("[\n").expect("JSON array example");
+    let end = start + help[start..].find("\n]").unwrap() + 2;
+    let example = &help[start..end];
+    let edits: Value = serde_json::from_str(example).unwrap();
+    f.issue("Atlas", &["create", "--title", "Original reply"]);
+    f.issue("Atlas", &["create", "--title", "Original followup"]);
+    f.run("Atlas", &["issue", "1"]);
+    f.run("Atlas", &["issue", "2", "--title", "Old label"]);
+    for name in ["followup", "archived", "loose", "existing-topic"] {
+        f.run("Atlas", &["add", name, "--id", name]);
+    }
+    f.run(
+        "Atlas",
+        &[
+            "add",
+            "Sibling",
+            "--id",
+            "existing-sibling",
+            "--under",
+            "existing-topic",
+        ],
+    );
+    let before = f.run("Atlas", &["show"]);
+    let version = before["version"].to_string();
+    let file = batch_file(&f, edits);
+    let preview = f.run(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &file,
+            "--dry-run",
+            "--if-version",
+            &version,
+        ],
+    );
+    assert_eq!(preview["changed"], true);
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(f.run("Atlas", &["show"]), before);
+    let mut child = f
+        .cmd(
+            "Atlas",
+            "mm",
+            &[
+                "batch",
+                "--file",
+                "-",
+                "--dry-run",
+                "--if-version",
+                &version,
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(example.as_bytes())
+        .unwrap();
+    assert_eq!(success(child.wait_with_output().unwrap()), preview);
+    assert_eq!(f.run("Atlas", &["show"]), before);
+}
+
+#[test]
 fn batch_preview_atomic_commit_retry_and_resource_preservation() {
     let f = Fixture::new();
     f.issue(
