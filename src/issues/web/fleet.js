@@ -40,7 +40,17 @@ function agentState(entry) {
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
   return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState};
+function deviceView(data, project, now = Date.now()) {
+  return (data.machines || []).map(machine => {
+    const workers = (machine.workers || []).filter(w => !project || !w.config?.projects?.length || w.config.projects.includes(project));
+    const online = machine.state === 'connected' && now / 1000 - (machine.heartbeat || 0) <= 15;
+    const live = workers.filter(w => w.pid > 0), saved = workers.filter(w => !(w.pid > 0));
+    return {machine, online, live, saved,
+      active: online ? live.reduce((n,w) => n + (w.runs || []).filter(r => r.finished_at == null).length, 0) : 0,
+      capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
+  }).filter(d => !project || d.live.length || d.saved.length);
+}
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -104,23 +114,53 @@ if (typeof document !== 'undefined') (() => {
   }
   function renderDevices(data) {
     const open=$('device-settings').open;
+    const savedOpen=new Set([...$('device-list').querySelectorAll('details[open]')].map(d=>d.dataset.host));
+    const project=route().get('project');
+    const devices=deviceView(data,project);
+    const projectName=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'');
+    $('device-help').textContent=(project?'Workers that can pick up tasks for '+projectName(project)+'.':'Workers across all projects.')+' Each worker manages its own agent slots. Controls below affect that worker, including all its projects.';
     const controls=[];
-    for(const machine of data.machines||[])for(const worker of machine.workers||[]){
-      const row=element('div','device-row');row.append(element('span','',machine.hostname||machine.host));
+    function workerRow(worker,device) {
+      const {machine,online}=device, running=worker.pid>0;
+      const active=(worker.runs||[]).filter(r=>r.finished_at==null).length;
+      const name=worker.config?.name;
+      const label=name&&!/^Worker \d+$/.test(name)?name:'Worker '+worker.id.slice(0,8);
+      const row=element('div','device-row');row.dataset.worker=worker.id;
+      const info=element('div','worker-info');
+      const heading=element('div','worker-heading');heading.append(element('strong','worker-name',label));
+      if(name&&!/^Worker \d+$/.test(name))heading.append(element('span','worker-id',worker.id.slice(0,8)));
+      const state=!online?(running?'Last seen running':'Last seen stopped'):!running?'Stopped':!worker.config?.enabled?(active?'Draining':'Paused'):(active?'Working':'Idle');
+      heading.append(element('span','worker-state',state));info.append(heading);
+      const ids=worker.config?.projects||[];
+      info.append(element('p','worker-projects',ids.length?ids.map(projectName).join(', '):'All projects'));
+      const cwd=element('p','worker-directory');cwd.append(element('span','','Working directory'),element('code','',worker.config?.directory||'Not recorded'));info.append(cwd);
+      info.append(element('p','worker-capacity',running?(online?'':'Last known: ')+active+' active '+(active===1?'agent':'agents')+' · '+(worker.config?.concurrency||1)+' '+((worker.config?.concurrency||1)===1?'slot':'slots'):'No running agents'));
+      row.append(info);
       const buttons=element('div','device-actions');
-      for(const [action,label] of [[worker.config?.enabled?'pause':'resume',worker.config?.enabled?'Pause new tasks':'Resume tasks'],['restart','Restart'],['stop','Stop']]){
-        const b=element('button','button small',label);b.type='button';Object.assign(b.dataset,{signal:action,host:machine.host,worker:worker.id,focus:machine.host+':'+worker.id+':'+action});b.setAttribute('aria-label',label+' on '+(machine.hostname||machine.host));buttons.append(b);
+      const actions=running?[[worker.config?.enabled?'pause':'resume',worker.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']];
+      const hints={pause:'Finish current agents, then pause new task pickup.',resume:'Enable task pickup and start this worker if needed.',restart:'Stop this worker’s current agents and restart the worker.',stop:'Stop this worker and its current agents. It stays stopped until started again.'};
+      for(const [action,text] of actions){
+        const b=element('button','button small',text);b.type='button';b.title=hints[action];Object.assign(b.dataset,{signal:action,host:machine.host,worker:worker.id,focus:machine.host+':'+worker.id+':'+action});b.setAttribute('aria-label',text+' · '+label+' on '+(machine.hostname||machine.host));buttons.append(b);
       }
       row.append(buttons);
+      if(!online)row.append(element('p','device-note','Device disconnected. Actions will wait for it to reconnect.'));
       for(const signal of (data.signals||[]).filter(s=>s.host===machine.host&&s.worker===worker.id&&s.state!=='acknowledged'))row.append(element('p','device-note',`${signal.signal}: ${signal.state}${machine.state==='connected'?'':' · waiting for connection'}`));
-      controls.push(row);
+      return row;
+    }
+    for(const device of devices){
+      const {machine,online,live,saved,active,capacity}=device;
+      const section=element('section','device-group');section.dataset.host=machine.host;
+      const heading=element('div','device-heading');heading.append(element('h3','',machine.hostname||machine.host),element('span','device-connection',online?'Connected':'Disconnected'));section.append(heading);
+      section.append(element('p','device-summary',online?live.length+' running '+(live.length===1?'worker':'workers')+' · '+active+' active '+(active===1?'agent':'agents')+' / '+capacity+' slots':'Showing last known worker state'));
+      for(const worker of live)section.append(workerRow(worker,device));
+      if(saved.length){const past=element('details','saved-workers');past.dataset.host=machine.host;past.open=savedOpen.has(machine.host);past.append(element('summary','',saved.length+' '+(online?'stopped':'last seen stopped')+' '+(saved.length===1?'worker':'workers')));for(const worker of saved)past.append(workerRow(worker,device));section.append(past);}
+      if(!live.length&&!saved.length)section.append(element('p','device-note','No workers configured.'));
+      controls.push(section);
     }
     const focus=document.activeElement?.dataset.focus;
     $('device-list').replaceChildren(...controls);$('device-settings').open=open;
     if(focus)[...$('device-list').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
     $('device-settings').hidden=mobile||!controls.length;
-    const conflicts=data.conflicts||[];$('conflicts').hidden=!conflicts.length;
-    $('conflict-list').replaceChildren(...conflicts.map(c=>element('li','',c.reason)));
   }
   function renderDetail(data) {
     const resource=HeyBossRoutes.resolve();
