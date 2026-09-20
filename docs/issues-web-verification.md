@@ -554,8 +554,19 @@ shared Mac. A fresh headless Chrome completed all checks. The first linked-plan
 fixture omitted its parent directory and therefore produced a lock error; the
 corrected missing-file fixture and successful sync both passed. These attempts
 are not counted as passing checks. The unrelated Worker TUI macOS CI smoke test
-still timed out waiting for Build dashboard on the initial push.
+timed out waiting for Build dashboard on the initial push; the subsequent runtime
+push passed the Worker TUI workflow on macOS and Linux. The main Check workflow
+passed Linux and mobile; macOS was still running at completion.
+
+Release build `935c44e2e7ed4651` was installed and verified current on this
+MacBook, `kamils-macbook-pro.local`, and `devbox`. Four read-only checks against
+the installed Mac web app verified the served JavaScript hash, readiness UI,
+and claim/editor restrictions. Fly app `hey-boss-mobile-kamil` was deployed,
+returned a healthy `/healthz`, and served the verified stylesheet hash. A
+read-only fleet check against the committed release export confirmed all three
+installations; unrelated in-progress changes in the shared checkout were
+excluded from that release comparison.
 
 Repeatable suites: tools/issues_draft_browser_checks.js and
- tools/issues_draft_accessibility.js. Synthetic screenshots, reports, browsers,
+tools/issues_draft_accessibility.js. Synthetic screenshots, reports, browsers,
 servers, and temporary files are removed after review as requested.
