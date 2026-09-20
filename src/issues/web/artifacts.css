@@ -231,7 +231,7 @@
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%);
 }
 
-.artifact-reading [tabindex="-1"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.artifact-reading [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 #artifact-document:has(.comments-hidden) > .artifact-document-heading { max-width: 820px; margin-inline: auto; }
 #artifact-document:has(.comments-hidden) > .back-link { margin-left: max(0px, calc((100% - 820px) / 2)); }
 /* Short lists can defer offscreen work without the huge height changes of a
