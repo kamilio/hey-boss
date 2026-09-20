@@ -6,6 +6,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+mod native;
+
 // Persisted roles and protocol-v1 frames keep their original names so existing
 // installations can upgrade without losing state or starting a second service.
 pub const SUPERVISOR_ROLE: &str = "controller";
@@ -185,58 +187,14 @@ pub fn record_local_worker(
 }
 
 pub fn run(action: &Action) -> std::io::Result<()> {
+    // Match the previous fleet service: private replicas, journals and backups.
+    unsafe {
+        libc::umask(0o077);
+    }
     if let Action::Database { path } = action {
         return database(path);
     }
-    let mut command = std::process::Command::new("python3");
-    command.args(["-c", include_str!("../tools/fleet_hey_boss.py")]);
-    command.env(
-        "HEY_BOSS_FLEET_BINARY",
-        std::env::current_exe()?.canonicalize()?,
-    );
-    match action {
-        Action::Database { .. } => unreachable!(),
-        Action::Setup { source } => {
-            command.arg("setup");
-            if let Some(source) = source {
-                command.arg("--source").arg(source);
-            }
-        }
-        Action::Supervisor => {
-            command.arg("supervisor");
-        }
-        Action::Companion { stdio, install } => {
-            command.arg("companion");
-            if *stdio {
-                command.arg("--stdio");
-            }
-            if *install {
-                command.arg("--install");
-            }
-        }
-        Action::Status => {
-            command.arg("status");
-        }
-        Action::Signal {
-            host,
-            worker,
-            signal,
-        } => {
-            command.args(["signal", host, worker, signal]);
-        }
-    }
-    if matches!(
-        action,
-        Action::Supervisor | Action::Companion { install: false, .. }
-    ) {
-        use std::os::unix::process::CommandExt;
-        return Err(command.exec());
-    }
-    let status = command.status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("Fleet command failed"));
-    }
-    Ok(())
+    native::run(action)
 }
 
 fn database(path: &std::path::Path) -> std::io::Result<()> {
@@ -269,6 +227,13 @@ fn database(path: &std::path::Path) -> std::io::Result<()> {
                 connection.backup("main", destination, None)?;
                 return Ok(
                     serde_json::json!({"ok":true,"columns":[],"rows":[],"transaction":!connection.is_autocommit()}),
+                );
+            }
+            if request.get("replica").is_some() {
+                let value = native::replica_request(&connection, &request)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                return Ok(
+                    serde_json::json!({"ok":true,"columns":["result"],"rows":[[value.to_string()]],"transaction":!connection.is_autocommit()}),
                 );
             }
             let sql = request["sql"].as_str().ok_or("SQL is missing")?;

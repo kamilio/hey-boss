@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Owner-authenticated fleet control, durable SQLite replicas, and offline workers."""
+"""Legacy protocol regression fixture; production fleet execution is native Rust.
+
+Replica calls below forward to the native database transport. Legacy lifecycle
+helpers remain solely to assert rolling-upgrade compatibility with old peers.
+"""
 import argparse
 import contextlib
 import fcntl
@@ -1704,3 +1708,28 @@ if __name__ == '__main__':
     except Exception as error:
         print('hey-boss fleet: ' + str(error), file=sys.stderr)
         sys.exit(1)
+
+
+# Tests of replication run against the native implementation, including durable
+# transactions and receipts. The legacy service code is never embedded or run
+# by the production CLI.
+def _native_replica(db, command, **payload):
+    return json.loads(db.request({'replica': command, **payload}).fetchone()[0])
+
+def install_capture(db, role, node):
+    _native_replica(db, 'capture', role=role, node=node)
+
+def export_snapshot(db, node):
+    return _native_replica(db, 'snapshot', node=node)
+
+def export_incremental(db, node, cursor):
+    return _native_replica(db, 'incremental', node=node, cursor=cursor)
+
+def allocate(db, node, workers):
+    _native_replica(db, 'allocate', node=node, workers=workers)
+
+def accept_changes(db, node, changes):
+    return _native_replica(db, 'accept', node=node, changes=changes)
+
+def apply_pull(db, node, payload, receipts):
+    _native_replica(db, 'pull', node=node, payload=payload, receipts=receipts)

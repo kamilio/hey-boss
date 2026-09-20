@@ -1,0 +1,309 @@
+//! Fleet migration and shutdown tests run only against private fixture databases.
+use serde_json::Value;
+use std::{
+    fs,
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixListener,
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+struct Fixture {
+    root: PathBuf,
+}
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "hb-native-runtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("inventory.json"), "{\"ssh_hosts\":[]}").unwrap();
+        fs::write(root.join("desired.json"), "{\"machines\":{}}").unwrap();
+        Self { root }
+    }
+    fn command(&self, args: &[&str]) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        c.args(args)
+            .current_dir(&self.root)
+            .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
+            .env("HEY_BOSS_FLEET_STATE", &self.root)
+            .env("HEY_BOSS_FLEET_CONFIG", self.root.join("inventory.json"))
+            .env("HEY_BOSS_FLEET_DESIRED", self.root.join("desired.json"))
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_FLEET_SUPERVISED")
+            .env(
+                "HEY_BOSS_CODEX",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py"),
+            )
+            .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"));
+        c
+    }
+    fn cli(&self, args: &[&str]) -> Value {
+        let output = self.command(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    fn issue(&self) {
+        self.cli(&[
+            "issue",
+            "--project",
+            "Worker fixture",
+            "--agent",
+            "human:fixture",
+            "--json",
+            "create",
+            "--title",
+            "Keep running",
+            "--body",
+            "Fixture requirements",
+        ]);
+    }
+    fn worker_status(&self) -> Value {
+        self.cli(&["worker", "--project", "Worker fixture", "--json", "status"])
+    }
+    fn wait_for(&self, condition: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = self.worker_status();
+            if condition(&state) {
+                return state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not reach expected state: {state}"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    fn service(&self, kind: &str) -> Service {
+        Service(
+            self.command(&["fleet", kind])
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        )
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+struct Service(Child);
+impl Service {
+    fn terminate(&mut self) {
+        unsafe { libc::kill(self.0.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.0.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "fixture service failed to stop");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn status_runs_without_python() {
+    let f = Fixture::new();
+    f.issue();
+    let socket = f.root.join("fleet.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let v: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(v["kind"], "status");
+                    stream.write_all(b"{\"ok\":true,\"machines\":[]}").unwrap();
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+    let output = f
+        .command(&["fleet", "status"])
+        .env("PATH", f.root.join("no-python"))
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "fleet still requires Python: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["ok"],
+        true
+    );
+}
+
+#[test]
+fn supervisor_shutdown_preserves_running_worker_and_agent() {
+    let f = Fixture::new();
+    f.issue();
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    let mut worker = Service(
+        f.command(&[
+            "worker",
+            "--project",
+            "Worker fixture",
+            "--directory",
+            f.root.to_str().unwrap(),
+            "--json",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap(),
+    );
+    let running = f.wait_for(|s| {
+        s["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["state"] == "running")
+    });
+    let run = running["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["state"] == "running")
+        .unwrap()
+        .clone();
+    let mut supervisor = f.service("supervisor");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.root.join("fleet.sock").exists() {
+        assert!(Instant::now() < deadline, "supervisor did not start");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let status = f.cli(&["fleet", "status"]);
+    assert_eq!(status["machines"][0]["workers"][0]["pid"], worker.0.id());
+    supervisor.terminate();
+    assert!(
+        worker.0.try_wait().unwrap().is_none(),
+        "supervisor stopped worker"
+    );
+    let after = f.worker_status();
+    assert_eq!(after["runs"][0]["id"], run["id"]);
+    assert_eq!(after["runs"][0]["state"], "running");
+    assert_eq!(after["runs"][0]["stop_requested"], false);
+    // Explicitly stop only our synthetic worker after checking the migration invariant.
+    f.cli(&[
+        "worker",
+        "--json",
+        "stop",
+        running["worker_id"].as_str().unwrap(),
+    ]);
+    worker.0.wait().unwrap();
+}
+
+#[test]
+fn companion_protocol_runs_without_python_and_eof_leaves_execution_independent() {
+    let f = Fixture::new();
+    f.issue();
+    let mut companion = f
+        .command(&["fleet", "companion", "--stdio"])
+        .env("PATH", f.root.join("no-python"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(companion.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let hello: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(hello["version"], 1);
+    assert_eq!(hello["kind"], "hello");
+    assert!(hello["workers"].as_array().unwrap().is_empty());
+    let mut input = companion.stdin.take().unwrap();
+    input
+        .write_all(b"{\"version\":1,\"kind\":\"ping\"}\n")
+        .unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let heartbeat: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(heartbeat["kind"], "heartbeat");
+    assert_eq!(heartbeat["version"], 1);
+    drop(input);
+    assert!(companion.wait().unwrap().success());
+}
+
+#[test]
+fn companion_shutdown_preserves_existing_worker_and_claimed_agent() {
+    let f = Fixture::new();
+    f.issue();
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    let mut worker = Service(
+        f.command(&[
+            "worker",
+            "--project",
+            "Worker fixture",
+            "--directory",
+            f.root.to_str().unwrap(),
+            "--json",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap(),
+    );
+    let running = f.wait_for(|s| {
+        s["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["state"] == "running")
+    });
+    fs::write(f.root.join("fleet-agent.json"),serde_json::to_vec(&serde_json::json!({"role":"agent","controller":"fixture","revision":"fixture","workers":[{"id":running["worker_id"],"config":running["config"],"intent":"running"}]})).unwrap()).unwrap();
+    let mut companion = f.service("companion");
+    thread::sleep(Duration::from_millis(500));
+    assert!(companion.0.try_wait().unwrap().is_none());
+    companion.terminate();
+    assert!(worker.0.try_wait().unwrap().is_none());
+    let after = f.worker_status();
+    assert_eq!(after["runs"][0]["id"], running["runs"][0]["id"]);
+    assert_eq!(after["runs"][0]["state"], "running");
+    assert_eq!(after["runs"][0]["stop_requested"], false);
+    f.cli(&[
+        "worker",
+        "--json",
+        "stop",
+        running["worker_id"].as_str().unwrap(),
+    ]);
+    worker.0.wait().unwrap();
+}

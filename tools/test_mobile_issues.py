@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('fleet', ROOT / 'tools/fleet_hey_boss.py')
+spec = importlib.util.spec_from_file_location('fleet', ROOT / 'tools/test_fleet_reference.py')
 fleet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet)
 fleet.BINARY = pathlib.Path(os.environ.get('HEY_BOSS_TEST_BINARY', ROOT / 'target/debug/hey-boss')).resolve()

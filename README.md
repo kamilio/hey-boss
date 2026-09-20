@@ -88,6 +88,11 @@ transaction journals sync on reconnect. Allocations do not expire when a machine
 disconnects, preventing another machine from starting the same task. Concurrent
 same-field edits are retained as conflicts rather than overwriting work.
 `hey-boss fleet status` shows the fleet without opening a browser.
+The supervisor and companion run natively in Rust, including replication,
+allocation, worker controls, and the mobile bridge. Restarting either fleet
+service leaves independently running workers and agents alive. Python remains
+required for the source upgrade and GitHub import utilities; the old fleet
+implementation is retained only as a regression-test reference.
 Standalone workers still use their local queue. `worker --host HOST --directory
 /remote/checkout` runs a worker and its Codex agents on that host.
 **Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,
