@@ -650,6 +650,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/preview",
             "/api/inbox",
             "/api/fleet",
+            "/api/fleet/takeover",
             "/api/mm",
         ]
         .contains(&path.as_str())
@@ -681,6 +682,12 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 return Err(Error::invalid("Expected a worker signal"));
             }
             return json_response(crate::fleet::call(&value)?);
+        }
+        if path == "/api/fleet/takeover" {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            return json_response(crate::fleet::call(
+                &json!({"kind":"takeover","host":value["host"],"run":value["run"]}),
+            )?);
         }
         if path == "/api/preview" {
             #[derive(Deserialize)]

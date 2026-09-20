@@ -518,6 +518,10 @@ fn bridge(path: &Path) -> Result<()> {
             .ok_or_else(|| Error::invalid("Invalid conversation transport ID"))?;
         let result = if !projects.contains(request["project"].as_str().unwrap_or("")) {
             Err(Error::invalid("This project is no longer available"))
+        } else if request["action"] == "takeover" {
+            crate::fleet::call(
+                &json!({"kind":"takeover","host":request["host"],"run":request["run"]}),
+            )
         } else {
             conversation(
                 request["host"].as_str().unwrap_or(""),

@@ -2,25 +2,29 @@
 use serde_json::Value;
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    os::unix::net::UnixListener,
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
+static SERIAL: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     root: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "hb-native-runtime-{}-{}",
+        // Darwin's default temp directory leaves too little room for Unix sockets.
+        let root = PathBuf::from("/tmp").join(format!(
+            "hb-native-runtime-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("inventory.json"), "{\"ssh_hosts\":[]}").unwrap();
@@ -171,6 +175,106 @@ fn status_runs_without_python() {
 }
 
 #[test]
+fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
+    let f = Fixture::new();
+    f.issue();
+    f.issue();
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    let mut worker = Service(
+        f.command(&[
+            "worker",
+            "--project",
+            "Worker fixture",
+            "--directory",
+            f.root.to_str().unwrap(),
+            "--concurrency",
+            "2",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap(),
+    );
+    let running = f.wait_for(|s| {
+        s["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().filter(|r| r["state"] == "running").count() == 2)
+    });
+    let run = running["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["number"] == 1)
+        .unwrap();
+    let mut supervisor = f.service("supervisor");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.root.join("fleet.sock").exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(50));
+    }
+    let request = serde_json::json!({"kind":"takeover","host":"local","run":run["id"]});
+    let call = || {
+        let mut stream = UnixStream::connect(f.root.join("fleet.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        serde_json::from_slice::<Value>(&bytes).unwrap()
+    };
+    let first = call();
+    assert_eq!(first["ok"], true);
+    assert_eq!(first["stopped"], false);
+    assert!(first["resume_command"].is_null());
+    let stopped = f.wait_for(|s| {
+        s["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["number"] == 1 && r["finished_at"].is_number())
+    });
+    assert_eq!(stopped["active"], 1);
+    assert_eq!(stopped["eligible"], 0);
+    assert!(
+        stopped["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["number"] == 2
+                && r["state"] == "running"
+                && !r["stop_requested"].as_bool().unwrap())
+    );
+    let issue = f.cli(&[
+        "issue",
+        "--project",
+        "Worker fixture",
+        "--json",
+        "view",
+        "1",
+    ]);
+    assert_eq!(issue["issue"]["assignee"], "human:boss");
+    assert_eq!(issue["issue"]["state"], "open");
+    let resumed = call();
+    assert_eq!(resumed["stopped"], true);
+    let command = resumed["resume_command"].as_str().unwrap();
+    assert!(command.contains(f.root.to_str().unwrap()));
+    assert!(command.contains(run["session_id"].as_str().unwrap()));
+    assert!(command.contains("codex resume"));
+    assert_eq!(
+        unsafe { libc::kill(run["pid"].as_u64().unwrap() as i32, 0) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    worker.terminate();
+    supervisor.terminate();
+}
+
+#[test]
 fn supervisor_shutdown_preserves_running_worker_and_agent() {
     let f = Fixture::new();
     f.issue();
@@ -228,6 +332,76 @@ fn supervisor_shutdown_preserves_running_worker_and_agent() {
         running["worker_id"].as_str().unwrap(),
     ]);
     worker.0.wait().unwrap();
+}
+
+#[test]
+fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
+    let f = Fixture::new();
+    f.issue();
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    let mut worker = Service(
+        f.command(&[
+            "worker",
+            "--project",
+            "Worker fixture",
+            "--directory",
+            f.root.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap(),
+    );
+    let status = f.wait_for(|s| {
+        s["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().any(|r| r["state"] == "running"))
+    });
+    let run = &status["runs"][0];
+    let mut companion = Service(
+        f.command(&["fleet", "companion", "--stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let mut output = BufReader::new(companion.0.stdout.take().unwrap());
+    let mut input = companion.0.stdin.take().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["kind"],
+        "hello"
+    );
+    let request =
+        serde_json::json!({"version":1,"kind":"takeover","id":"takeover-fixture","run":run["id"]});
+    for stopped in [false, true] {
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["kind"], "takeover");
+        assert_eq!(response["id"], "takeover-fixture");
+        assert_eq!(response["result"]["ok"], true);
+        assert_eq!(response["result"]["stopped"], stopped);
+        if !stopped {
+            f.wait_for(|s| s["runs"][0]["finished_at"].is_number());
+        } else {
+            assert!(
+                response["result"]["resume_command"]
+                    .as_str()
+                    .unwrap()
+                    .contains(run["session_id"].as_str().unwrap())
+            );
+        }
+    }
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_outbox WHERE table_name='issues' AND json_extract(after_json,'$.assignee')='human:boss')",[],|r|r.get::<_,bool>(0)).unwrap());
+    drop(input);
+    companion.0.wait().unwrap();
+    worker.terminate();
 }
 
 #[test]

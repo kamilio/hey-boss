@@ -22,5 +22,13 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal((await call('/api/fleet/conversation?host=local&run=run&before=-1',null,headers)).status,400);
  await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,messages:[{id:'0',role:'assistant',text:'**Done** <script>alert(1)</script>'}],cursor:100,has_more:false,availability:'available'},bridge);
  const result=await(await reading).json();assert.match(result.messages[0].html,/<strong>Done<\/strong>/);assert.ok(!result.messages[0].html.includes('<script>'));
+ assert.equal((await call('/api/fleet/takeover',{host:'local',run:'run'})).status,401);
+ assert.equal((await call('/api/fleet/takeover',{host:'local',run:'private'},headers)).status,404);
+ assert.equal((await call('/api/fleet/takeover',{host:'local',run:'run'},{...headers,Origin:'https://evil.example'})).status,403);
+ const takeover=call('/api/fleet/takeover',{host:'local',run:'run'},headers);
+ for(let i=0;i<20;i++){pending=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(pending.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(pending.length,1);assert.equal(pending[0].action,'takeover');assert.equal(pending[0].project,'named:Atlas');
+ await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,stopped:true,resume_command:'cd /repo && codex resume session'},bridge);
+ assert.equal((await(await takeover).json()).resume_command,'cd /repo && codex resume session');
  store.setIssueProjects([]);assert.equal((await call('/api/fleet/conversation?host=local&run=run',null,headers)).status,404);
 });
