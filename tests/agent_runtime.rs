@@ -139,6 +139,79 @@ fn claude_queued_input_keeps_a_distinct_guarded_turn() {
 }
 
 #[test]
+fn pi_preflight_input_exposes_pending_ack_and_validates_the_late_response() {
+    for reject in [false, true] {
+        let mut session = launch(Provider::Pi, None);
+        let turn = session
+            .prompt(
+                if reject {
+                    "preflight reject"
+                } else {
+                    "preflight input"
+                },
+                None,
+            )
+            .unwrap();
+        assert!(session.state().awaiting_prompt_ack);
+        until(&mut session, |e| matches!(e, Event::Input { .. }));
+        assert!(session.steer(&turn, "must not bypass preflight").is_err());
+        assert!(
+            session
+                .respond_input("preflight-input", Some("invalid"))
+                .is_err()
+        );
+        session
+            .respond_input("preflight-input", Some("two"))
+            .unwrap();
+        let Event::TurnCompleted { status, output, .. } =
+            until(&mut session, |e| matches!(e, Event::TurnCompleted { .. }))
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            status,
+            if reject {
+                TurnStatus::Failed
+            } else {
+                TurnStatus::Completed
+            }
+        );
+        assert!(output.contains(if reject {
+            "preflight rejected"
+        } else {
+            "preflight accepted"
+        }));
+        assert!(!session.state().awaiting_prompt_ack);
+        assert!(!session.state().outcome_uncertain);
+    }
+}
+
+#[test]
+fn pi_interrupt_stops_owned_preflight_without_answering_input() {
+    let mut session = launch(Provider::Pi, None);
+    session.prompt("preflight input", None).unwrap();
+    until(&mut session, |e| matches!(e, Event::Input { .. }));
+    session.interrupt().unwrap();
+    until(&mut session, |e| {
+        matches!(
+            e,
+            Event::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                ..
+            }
+        )
+    });
+    assert!(session.state().stopped);
+    assert!(!session.state().awaiting_prompt_ack);
+    assert!(session.state().pending_requests.is_empty());
+    assert!(
+        session
+            .respond_input("preflight-input", Some("two"))
+            .is_err()
+    );
+}
+
+#[test]
 fn malformed_protocol_never_counts_as_completion() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let mut session = launch(provider, None);
