@@ -68,14 +68,7 @@ Active work is the default; h switches to a separate completed-attempt history.
 appear separately only when `--history` is supplied. Concurrency limits active
 sessions only. Open, unassigned
 issues retry after unsuccessful attempts with a delay of 30 seconds to five
-minutes. Codex command, network, file-change and permission approvals appear as
-issue-linked questions in Hey Boss Inbox. The worker keeps its session and claim
-while you decide; approving or declining continues that same session. Command
-and file approvals apply once, and permission grants last only for the current
-turn. Cancel or dismiss stops the attempt on a manual retry hold. Pending
-questions are cancelled when the request is resolved or the worker stops.
-Unsupported input requests or an unavailable Inbox still save the session on
-a manual retry hold; no action is automatically approved.
+minutes; approval requests remain on hold until explicitly retried.
 The dashboard identifies selected projects and connectivity to the supervisor.
 **Supervisor → Worker → Agent:** the supervisor coordinates the fleet; each
 worker picks issues, manages its Codex agents, and handles retries. An agent is
