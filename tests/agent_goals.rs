@@ -81,3 +81,44 @@ fn goals_continue_without_a_report_and_preserve_pause_and_resume() {
         restored.pause(&mut recovered).unwrap();
     }
 }
+
+#[test]
+fn queued_claude_instructions_must_finish_before_the_goal_completes() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentSession::launch(Launch {
+        provider: Provider::Claude,
+        binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+        cwd: root,
+        resume: None,
+        env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), "claude".into())]),
+        output_schema: None,
+    })
+    .unwrap();
+    let mut goal = ManagedGoal::new("queued goal").unwrap();
+    let turn = goal.start(&mut agent).unwrap();
+    loop {
+        let event = agent.receive(Duration::from_millis(50)).unwrap();
+        if let Some(event) = event {
+            goal.observe(&mut agent, &event).unwrap();
+            if matches!(event, hey_boss::agent_runtime::Event::TextDelta { .. }) {
+                break;
+            }
+        }
+    }
+    agent
+        .steer(
+            &turn,
+            r#"{"status":"completed","summary":"Queued instruction verified"}"#,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while goal.status() == GoalStatus::Active {
+        if let Some(event) = agent.receive(Duration::from_millis(50)).unwrap() {
+            goal.observe(&mut agent, &event).unwrap();
+        }
+        assert!(Instant::now() < deadline);
+    }
+    assert_eq!(goal.status(), GoalStatus::Complete);
+    assert_eq!(goal.turns_completed(), 2);
+    assert_eq!(goal.summary(), Some("Queued instruction verified"));
+}

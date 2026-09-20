@@ -173,6 +173,12 @@ impl ManagedGoal {
                     self.summary = Some(output.clone());
                     return Ok(());
                 }
+                // Claude steering creates another client turn. An earlier
+                // report cannot finish the goal while queued instructions run.
+                if let Some(turn) = &agent.turn {
+                    self.turn = Some(turn.clone());
+                    return Ok(());
+                }
                 let report = structured_output
                     .clone()
                     .or_else(|| serde_json::from_str::<Value>(output.trim()).ok())
