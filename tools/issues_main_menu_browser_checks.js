@@ -3,13 +3,16 @@ async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
   page.on('pageerror', error => errors.push(error.message));
-  await page.waitForFunction(() => model.csrf && model.project);
+  await page.route('**/api/inbox', route => route.fulfill({
+    json: {ok:true, tasks:[], unread:0},
+  }));
+  await page.waitForFunction(() => typeof model !== 'undefined' && model.csrf && model.project);
   const origin = await page.evaluate(() => location.origin);
   const project = await page.evaluate(async () => {
     const value = await api({action:'create', title:'Return to the issue list',
       body:'The Issues menu should return to the list while keeping your filters.', labels:['ready']},
       'Main menu QA ' + crypto.randomUUID());
-    await api({action:'close', number:1, if_version:null}, value.project.id);
+    await api({action:'close', number:1, force:false}, value.project.id);
     return value.project.id;
   });
   const open = async filtered => {
