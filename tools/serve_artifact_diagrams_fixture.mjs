@@ -1,5 +1,5 @@
 // Isolated production native/mobile servers for Mermaid browser checks.
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,copyFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {spawn,execFileSync} from 'node:child_process';
@@ -8,7 +8,9 @@ import {createApp} from '../mobile/server/index.mjs';
 import {HubStore} from '../mobile/server/store.mjs';
 
 const root=mkdtempSync(join(tmpdir(),'hey-boss-diagrams-'));
-const binary=resolve(process.argv[2]||'target/debug/hey-boss');
+// A build in the shared checkout must not auto-reload this server mid-test.
+const binary=join(root,'hey-boss');
+copyFileSync(resolve(process.argv[2]||'target/debug/hey-boss'),binary);
 const env={...process.env,HEY_BOSS_ISSUE_DB:join(root,'issues.db'),HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock')};
 delete env.HEY_BOSS_ISSUE_HOST;
 const source='# Recovery flow\n\nFollow the saved request through each service. Expand the diagram to see the full route.\n\n```mermaid\nflowchart LR\n user[You send a message] --> chat[Chat saves your message]\n chat --> observer[Reply tracker saves a delivery task]\n observer --> session[Session saves agent history]\n session --> runner[Runner coordinates work]\n runner --> model[Model service calls provider]\n runner --> tools[Tool service performs actions]\n model --> saved[Saved model and tool results]\n tools --> saved\n saved --> session\n session --> observer\n observer --> outbox[Delivery queue keeps reply until confirmed]\n outbox --> chat\n chat --> user\n```\n\n## Recovery decision\n\n```mermaid\nflowchart TD\n A[Request interrupted] --> B{Result saved?}\n B -->|Yes| C[Replay the same result]\n B -->|No| D[Report incomplete work]\n C --> E[Confirm delivery]\n D --> E\n```\n\n## Broken source stays available\n\n```mermaid\nflowchart LR\n A[Broken\n```\n\n## Ordinary code\n\n```js\nconst saved = true;\n```\n\n## Untrusted labels\n\n```mermaid\nflowchart LR\n A["<script>window.diagramPwned=1</script>"] --> B[Safe]\n click B "javascript:window.diagramPwned=2"\n```';
