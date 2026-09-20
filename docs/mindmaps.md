@@ -66,6 +66,7 @@ support local maps normally.
 
 ```sh
 hey-boss mm issue 3 --issue-project Platform --id api --under release
+hey-boss mm issue 12 --under release --title 'Ship API' --if-version 5 --request-id ship-api
 hey-boss mm pr https://github.com/org/repo/pull/42 --title 'Implementation' --id implementation-pr
 hey-boss mm notice TASK_ID --under release
 hey-boss mm link design implementation --description 'Implements the design'
@@ -76,6 +77,18 @@ hey-boss mm unlink implementation Platform::api --kind depends-on
 ```
 
 Typed selectors `issue:12`, `pr:HTTP_URL` and `notice:TASK_ID` add missing reference nodes as roots when used in `mm link`. If either endpoint cannot resolve, the entire operation rolls back. Other commands require existing nodes. An issue reference is checked against the authoritative issue store. PR references use HTTP(S) URLs, with trailing slashes normalized. Notification IDs resolve through the local Mac Inbox bridge when viewing.
+
+`mm issue NUMBER --title LABEL` creates the reference, its nesting and a map-only
+label atomically with one `--if-version` guard and one map version increment.
+Labels support up to 512 bytes and work with `--issue-project` references. The
+live issue and its attached PRs remain unchanged. If the reference already exists,
+an explicit title replaces only its map label; omitted `--id` and `--under` preserve
+its alias and parent. Supplied placement must match the existing node, otherwise
+the entire command fails; use `mm alias` or `mm move` to reorganize it. Repeating
+the same label and matching placement is a no-op without a version increment.
+Identical `--request-id` retries return the original result even after the map
+version changes. Without `--title`, adding an existing reference remains an error.
+Use `mm edit NODE --clear-label` to restore the live title.
 
 A link is directed: **A depends-on B** means A waits for B. `related` is the default kind; custom kinds are allowed. Descriptions are optional, and `--why` is an alias for `--description`. Repeating `link` updates the description for the same source, target and kind; an omitted or empty description clears it. `unlink` removes only that direction and kind. Cross-links can cycle; outline parenthood cannot.
 

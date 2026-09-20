@@ -503,6 +503,7 @@ fn execute_single(
         }
         Operation::Add {
             title,
+            display_label,
             body,
             kind,
             reference,
@@ -523,21 +524,64 @@ fn execute_single(
                     "Mindmap nesting supports at most 32 levels",
                 ));
             }
-            selected = Some(insert(
-                db,
-                p,
-                NewNode {
-                    title,
-                    body,
+            // Only an explicitly supplied issue label permits reusing an
+            // existing reference. Omitted placement leaves its location intact.
+            let existing = if display_label.is_some() {
+                let (reference, ref_project) = canonical_ref(
+                    db,
+                    p,
                     kind,
-                    reference: reference.as_deref(),
-                    ref_project: reference_project.as_deref(),
-                    alias: alias.as_deref(),
-                    parent: parent.as_ref().map(id),
-                },
-                now,
-            )?);
-            changed = true;
+                    reference.as_deref().unwrap(),
+                    reference_project.as_deref(),
+                    true,
+                )?;
+                db.query_row(
+                    &format!("SELECT {COLUMNS} FROM mindmap_nodes WHERE project_id=?1 AND kind=?2 AND reference_project=?3 AND reference=?4"),
+                    params![p.id, kind, ref_project, reference], row,
+                ).optional()?
+            } else {
+                None
+            };
+            let node = if let Some(node) = existing {
+                if alias
+                    .as_ref()
+                    .is_some_and(|alias| node["alias"] != json!(alias))
+                    || (under.is_some() && node["parent_id"] != json!(parent.as_ref().map(id)))
+                {
+                    return Err(Error::conflict(
+                        "This reference has a different alias or parent; use mm alias or mm move",
+                    ));
+                }
+                node
+            } else {
+                changed = true;
+                insert(
+                    db,
+                    p,
+                    NewNode {
+                        title,
+                        body,
+                        kind,
+                        reference: reference.as_deref(),
+                        ref_project: reference_project.as_deref(),
+                        alias: alias.as_deref(),
+                        parent: parent.as_ref().map(id),
+                    },
+                    now,
+                )?
+            };
+            if let Some(label) = display_label
+                && node["display_label"] != json!(label)
+            {
+                db.execute(
+                    "UPDATE mindmap_nodes SET display_label=?2,updated_at=?3 WHERE id=?1",
+                    params![id(&node), label, now],
+                )?;
+                changed = true;
+                selected = Some(get(db, id(&node))?);
+            } else {
+                selected = Some(node);
+            }
         }
         Operation::Edit {
             node,

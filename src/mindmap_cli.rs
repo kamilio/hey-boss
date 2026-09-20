@@ -117,6 +117,9 @@ enum Action {
         number: i64,
         #[arg(long)]
         issue_project: Option<String>,
+        /// Map-only label; updates the label if this reference already exists.
+        #[arg(long)]
+        title: Option<String>,
         #[command(flatten)]
         placement: Placement,
     },
@@ -216,6 +219,7 @@ impl Options {
                    reference_project: Option<String>,
                    p: &Placement| Operation::Add {
             title,
+            display_label: None,
             body,
             kind: kind.into(),
             reference,
@@ -279,15 +283,19 @@ impl Options {
             Some(Action::Issue {
                 number,
                 issue_project,
+                title,
                 placement,
-            }) => add(
-                format!("Issue #{number}"),
-                String::new(),
-                "issue",
-                Some(number.to_string()),
-                issue_project.clone(),
-                placement,
-            ),
+            }) => Operation::Add {
+                title: format!("Issue #{number}"),
+                display_label: title.clone(),
+                body: String::new(),
+                kind: "issue".into(),
+                reference: Some(number.to_string()),
+                reference_project: issue_project.clone(),
+                alias: placement.alias.clone(),
+                under: placement.under.clone(),
+                if_version: self.if_version,
+            },
             Some(Action::Pr {
                 url,
                 title,

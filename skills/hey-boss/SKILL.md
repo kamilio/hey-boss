@@ -192,6 +192,7 @@ Mindmaps are not replicated to fleet companions; use `--host SUPERVISOR` (or
 ```sh
 hey-boss mm add 'Release' --id release
 hey-boss mm issue 12 --under release
+hey-boss mm issue 12 --under release --title 'Ship API' --if-version 5 --request-id ship-api
 hey-boss mm link issue:12 Platform::api --kind depends-on --why 'API must land first'
 hey-boss mm link pr:https://github.com/org/repo/pull/2 pr:https://github.com/org/repo/pull/1 --kind depends-on
 hey-boss mm show
@@ -223,6 +224,12 @@ changes it while preserving URL/attachments/dependencies. Issue and notice text 
 live; issue and PR nodes accept title edits only. `mm edit issue:12 --title LABEL`
 sets a map-only issue label; `mm edit issue:12 --clear-label` restores its live
 title. Details retain the original title and search matches both titles.
+`mm issue NUMBER --title LABEL` sets an initial map-only label atomically with
+creation and nesting, using one version guard/increment. On an existing reference,
+it updates only the label; supplied alias/parent must match (use alias/move to
+change them). Omitted placement is preserved. Matching labels are no-ops;
+identical request-ID retries return the original result. Cross-project references
+support the same labels. Without --title, duplicate references remain errors.
 `view` prints the PR URL and export links its label.
 `view NODE --bodies preview|none|full` controls focused text reads (default full).
 Live issue assignments appear in the viewer and `view`; viewer search matches
