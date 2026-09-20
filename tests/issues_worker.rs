@@ -636,6 +636,7 @@ fn approval_hold_is_not_retried_automatically_even_after_delay() {
     f.setup(&[]);
     let mut worker = f.worker();
     let first = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(first["runs"][0]["state"], "blocked", "{first}");
     let id = first["runs"][0]["id"].as_str().unwrap().to_owned();
     let db = rusqlite::Connection::open(&f.db).unwrap();
     db.execute("UPDATE worker_runs SET finished_at=0", [])

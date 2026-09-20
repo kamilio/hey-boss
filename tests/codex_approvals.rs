@@ -14,6 +14,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+// A concurrent fork can inherit a writable copy descriptor until exec, making
+// Linux reject the new executable with ETXTBSY. Keep copies and launches apart.
+static EXECUTABLE_SETUP: Mutex<()> = Mutex::new(());
+
 struct Fixture {
     root: PathBuf,
     tasks: Arc<Mutex<BTreeMap<String, Value>>>,
@@ -26,7 +30,10 @@ impl Fixture {
         let root = PathBuf::from(format!("/tmp/hb61-{}-{mode}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         // Keep live-worker upgrade detection independent of concurrent local builds.
-        fs::copy(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).unwrap();
+        {
+            let _guard = EXECUTABLE_SETUP.lock().unwrap();
+            fs::copy(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).unwrap();
+        }
         fs::write(root.join("mode.txt"), mode).unwrap();
         let listener = UnixListener::bind(root.join("inbox.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -90,6 +97,7 @@ impl Fixture {
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-approvals.mjs");
         let fixture = f.root.join("codex");
+        let _guard = EXECUTABLE_SETUP.lock().unwrap();
         fs::copy(source, &fixture).unwrap();
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         f.worker = Some(
@@ -121,6 +129,7 @@ impl Fixture {
         c
     }
     fn cli(&self, args: &[&str]) -> Value {
+        let _guard = EXECUTABLE_SETUP.lock().unwrap();
         let output = self.command(args).output().unwrap();
         assert!(
             output.status.success(),
@@ -263,6 +272,12 @@ fn dismissal_free_text_and_cancel_never_grant_approval() {
         f.wait(|| f.finished());
         assert_eq!(f.replies()[0]["result"], json!({"decision":"cancel"}));
         assert_eq!(f.cli(&["worker", "status"])["runs"][0]["state"], "blocked");
+        // Age beyond ordinary failure backoff: approval holds still require a human retry.
+        rusqlite::Connection::open(f.root.join("issues.db"))
+            .unwrap()
+            .execute("UPDATE worker_runs SET finished_at=0", [])
+            .unwrap();
+        assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
     }
 }
 
