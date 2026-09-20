@@ -2613,3 +2613,23 @@ button.avatar.self:hover {
  .settings-section-heading { flex-direction:column; gap:0; margin-bottom:10px; }
  #project-settings-dialog .dialog-heading, #project-settings-dialog .dialog-footer { padding-left:16px; padding-right:16px; }
 }
+
+.chief-cadence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 12px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chief-cadence > :first-child {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-weight: 600;
+}
+.chief-enabled .chief-cadence > :first-child { color: var(--accent); background: var(--accent-soft); }
+#project-chief-instructions summary { cursor: pointer; font-weight: 600; }
+#project-chief-instructions .field-label { margin-top: 16px; }
+#project-chief-instructions .branch-footer { flex-wrap: wrap; }

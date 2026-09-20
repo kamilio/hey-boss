@@ -332,6 +332,18 @@
   <div class="branch-footer"><span id="project-source-prs">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="prs">Use default</button></div></div><div class="workflow-branch" data-branch="main"><div class="branch-heading"><label for="project-prompt-main"><small>Otherwise</small><strong>Push to main</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-main" rows="3" maxlength="32000" aria-describedby="project-source-main"></textarea>
   <div class="branch-footer"><span id="project-source-main">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="main">Use default</button></div></div></div></section>
+            <section class="settings-section chief-settings" aria-labelledby="settings-chief-title">
+              <div class="settings-section-heading"><div><h3 id="settings-chief-title">Chief</h3><p class="field-help">An organizing agent for this project.</p></div>
+                <label class="workflow-toggle"><input type="checkbox" id="project-chief" aria-describedby="project-chief-help" /><span>Enable Chief</span></label>
+              </div>
+              <p class="field-help" id="project-chief-help">Runs one pass every hour while a worker monitors this project. Resumes the same conversation and uses no issue slots. Workers handle code changes.</p>
+              <div class="chief-cadence"><span id="project-chief-state">Disabled</span><span>Hourly · Same conversation</span></div>
+              <details id="project-chief-instructions"><summary>Chief instructions</summary>
+                <label class="field-label" for="project-chief-prompt">Organizing prompt</label>
+                <textarea class="text-input" id="project-chief-prompt" rows="7" maxlength="32000" required aria-describedby="project-chief-prompt-help"></textarea>
+                <div class="branch-footer"><span id="project-chief-prompt-help">Separate from worker instructions. Each pass ends automatically.</span><button class="button link-button" id="project-chief-reset" type="button">Use default</button></div>
+              </details>
+            </section>
             <details class="settings-section planning-settings"><summary>Drafts &amp; planning</summary>
               <label class="draft-choice"><input type="checkbox" id="project-drafts" aria-describedby="project-drafts-help" /><span><strong>Allow draft issues</strong><span id="project-drafts-help">Keep work in the project before it is ready for agents. Existing drafts stay saved when this is turned off and can still be marked ready.</span></span></label>
               <label class="field-label" for="project-plan-template">Plan file template</label>
