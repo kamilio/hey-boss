@@ -15,6 +15,9 @@ pub const COMPANION_ROLE: &str = "agent";
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Read a known local agent conversation; requests arrive on stdin.
+    #[command(hide = true)]
+    Conversation,
     /// Owner-private database driver using the CLI's bundled SQLite.
     #[command(hide = true)]
     Database {
@@ -190,6 +193,17 @@ pub fn run(action: &Action) -> std::io::Result<()> {
     // Match the previous fleet service: private replicas, journals and backups.
     unsafe {
         libc::umask(0o077);
+    }
+    if matches!(action, Action::Conversation) {
+        let request: Value = serde_json::from_reader(std::io::stdin().take(65536))?;
+        let run = request["run"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("Missing agent"))?;
+        let window: crate::agent_conversations::Window = serde_json::from_value(request.clone())?;
+        let result = crate::agent_conversations::local_window(run, &window)
+            .map_err(std::io::Error::other)?;
+        println!("{result}");
+        return Ok(());
     }
     if let Action::Database { path } = action {
         return database(path);

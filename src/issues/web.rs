@@ -8,6 +8,39 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
+fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
+    fn decode(input: &str) -> Result<String> {
+        let mut bytes = Vec::new();
+        let mut chars = input.bytes();
+        while let Some(byte) = chars.next() {
+            bytes.push(match byte {
+                b'+' => b' ',
+                b'%' => {
+                    let a = chars.next().and_then(|c| (c as char).to_digit(16));
+                    let b = chars.next().and_then(|c| (c as char).to_digit(16));
+                    match (a, b) {
+                        (Some(a), Some(b)) => (a * 16 + b) as u8,
+                        _ => return Err(Error::invalid("Invalid query encoding")),
+                    }
+                }
+                other => other,
+            });
+        }
+        String::from_utf8(bytes).map_err(|_| Error::invalid("Invalid query encoding"))
+    }
+    url.split_once('?')
+        .map(|(_, query)| {
+            query
+                .split('&')
+                .map(|part| {
+                    let (key, value) = part.split_once('=').unwrap_or((part, ""));
+                    Ok((decode(key)?, decode(value)?))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| Ok(std::collections::HashMap::new()))
+}
+
 pub struct Config {
     pub port: u16,
     pub mobile_origin: Option<String>,
@@ -115,6 +148,9 @@ pub fn serve(config: Config) -> Result<()> {
     let server = Server::http(("127.0.0.1", config.port))
         .map_err(|e| Error::new("io_error", e.to_string()))?;
     let authority = server.server_addr().to_ip().unwrap().to_string();
+    if let Backend::Local(path) = &backend {
+        crate::agent_conversations::start_bridge(path.clone());
+    }
     let mut secret = [0_u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut secret)?;
     let mut app = App {
@@ -409,6 +445,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "application/javascript; charset=utf-8",
                 include_bytes!("web/artifact-editor.js"),
             )),
+            "/artifact-diagrams.js" => Some((
+                "application/javascript; charset=utf-8",
+                include_bytes!("web/artifact-diagrams.js"),
+            )),
             "/artifacts.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/artifacts.js"),
@@ -430,7 +470,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/mindmap-map.js"),
             )),
-            "/workers" => Some(("text/html; charset=utf-8", include_bytes!("web/fleet.html"))),
+            "/agents" | "/agents/session" | "/workers" => {
+                Some(("text/html; charset=utf-8", include_bytes!("web/fleet.html")))
+            }
             "/fleet.css" => Some(("text/css; charset=utf-8", include_bytes!("web/fleet.css"))),
             "/fleet.js" => Some((
                 "text/javascript; charset=utf-8",
@@ -444,10 +486,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/components.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/components.js"),
-            )),
-            "/artifact-diagrams.js" => Some((
-                "application/javascript; charset=utf-8",
-                include_bytes!("web/artifact-diagrams.js"),
             )),
             "/quick-issue.js" => Some((
                 "text/javascript; charset=utf-8",
@@ -492,7 +530,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             _ => None,
         };
         if let Some((kind, data)) = asset {
-            if matches!(path.as_str(), "/" | "/mm" | "/workers" | "/artifacts") {
+            if matches!(
+                path.as_str(),
+                "/" | "/mm" | "/workers" | "/agents" | "/agents/session" | "/artifacts"
+            ) {
                 let issues = path == "/";
                 let shell = include_str!("web/app-shell.html")
                     .replace(
@@ -529,7 +570,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     )
                     .replace(
                         "<!--workers-current-->",
-                        if path == "/workers" {
+                        if matches!(path.as_str(), "/workers" | "/agents" | "/agents/session") {
                             " aria-current=\"page\""
                         } else {
                             ""
@@ -552,8 +593,31 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             }
             return Ok((200, kind, data.to_vec()));
         }
+        if path == "/api/fleet/conversation" {
+            let query = parse_query(request.url())?;
+            let cursor = query
+                .get("cursor")
+                .map(|s| s.parse::<u64>())
+                .transpose()
+                .map_err(|_| Error::invalid("Invalid conversation cursor"))?
+                .unwrap_or(0);
+            let result = crate::agent_conversations::conversation(
+                query.get("host").map(String::as_str).unwrap_or(""),
+                query.get("run").map(String::as_str).unwrap_or(""),
+                &crate::agent_conversations::Window {
+                    cursor,
+                    before: query
+                        .get("before")
+                        .map(|s| s.parse::<u64>())
+                        .transpose()
+                        .map_err(|_| Error::invalid("Invalid earlier-history cursor"))?,
+                    latest: query.get("latest").is_some_and(|v| v == "1"),
+                },
+            )?;
+            return json_response(result);
+        }
         if path == "/api/fleet/status" {
-            return json_response(crate::fleet::call(&json!({"kind":"status"}))?);
+            return json_response(crate::agent_conversations::overview()?);
         }
         if path == "/api/bootstrap" {
             let mut result = app.execute(
