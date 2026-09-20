@@ -195,6 +195,11 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
     },
+    Transfer {
+        number: i64,
+        destination: String,
+        if_version: i64,
+    },
     Move {
         number: i64,
         before: Option<i64>,
@@ -361,6 +366,7 @@ impl Operation {
             | Self::AddPullRequest { number, .. }
             | Self::RemovePullRequest { number, .. }
             | Self::Move { number, .. }
+            | Self::Transfer { number, .. }
             | Self::View { number }
             | Self::Subtasks { number, .. }
             | Self::CreateSubtask { number, .. }

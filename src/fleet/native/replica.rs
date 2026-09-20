@@ -1402,6 +1402,85 @@ mod tests {
     }
 
     #[test]
+    fn issue_transfer_replicates_append_only_comments_and_resolutions() {
+        let main = Fixture::new();
+        main.capture();
+        let actor = Actor {
+            id: "human:boss".into(),
+            kind: "human".into(),
+            session_id: None,
+            machine: "main".into(),
+            host: "test".into(),
+            pid: None,
+            process_start: None,
+            cwd: std::env::temp_dir(),
+            source: "test".into(),
+        };
+        let mut store = Store::open(&main.path).unwrap();
+        let mut call = |project: &str, operation: Value| {
+            store
+                .execute(&Request {
+                    version: 1,
+                    project: Project {
+                        id: "named:Native fleet".into(),
+                        name: "Native fleet".into(),
+                    },
+                    project_override: Some(project.into()),
+                    actor: Some(actor.clone()),
+                    operation: serde_json::from_value(operation).unwrap(),
+                    request_id: None,
+                })
+                .unwrap()
+        };
+        call(
+            "Destination",
+            json!({"action":"create","title":"Existing","body":"","labels":[]}),
+        );
+        let comment = call(
+            "named:Native fleet",
+            json!({"action":"comment","number":1,"body":"Keep this comment"}),
+        );
+        call(
+            "named:Native fleet",
+            json!({"action":"resolve_comment","number":1,"comment_id":comment["comment_id"],"resolved":true}),
+        );
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        let before = snapshot(&main.db, "agent").unwrap();
+        apply_pull(&agent.db, "agent", &before, &[]).unwrap();
+        let issue = call("named:Native fleet", json!({"action":"view","number":1}));
+        call(
+            "named:Native fleet",
+            json!({"action":"transfer","number":1,"destination":"Destination","if_version":issue["issue"]["version"]}),
+        );
+        let delta = incremental(&main.db, "agent", before["cursor"].as_i64().unwrap()).unwrap();
+        apply_pull(&agent.db, "agent", &delta, &[]).unwrap();
+        let mut replica = Store::open(&agent.path).unwrap();
+        let result = replica
+            .execute(&Request {
+                version: 1,
+                project: Project {
+                    id: "named:Destination".into(),
+                    name: "Destination".into(),
+                },
+                project_override: None,
+                actor: Some(actor),
+                operation: Operation::View { number: 2 },
+                request_id: None,
+            })
+            .unwrap();
+        assert_eq!(result["comments"][0]["body"], "Keep this comment");
+        assert_eq!(result["comments"][0]["resolved"], true);
+        let foreign_keys: i64 = agent
+            .db
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_keys, 0);
+    }
+
+    #[test]
     fn snapshot_preserves_protocol_and_journals_only_real_changes() {
         let f = Fixture::new();
         f.capture();
