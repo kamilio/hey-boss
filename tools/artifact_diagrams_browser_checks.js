@@ -9,14 +9,13 @@ async page => {
   });
   const origin=await page.evaluate(()=>location.origin);
   const mobile=origin.endsWith(':59550');
-  await page.reload();
   if(mobile){
     const pair=await(await page.request.get(origin+'/fixture-pairing')).json();
     const response=await page.request.post(origin+'/api/pair',{data:{code:pair.code,device:'Diagram QA'}});
     assert(response.ok(),'Mobile device pairs with isolated store');
   }
-  await page.goto(origin+'/artifacts#project=named%3AFlowchart+QA');
-  await page.reload();
+  await page.goto(origin+'/artifacts#project=named%3AFlowchart+QA',{waitUntil:'domcontentloaded'});
+  await page.reload({waitUntil:'domcontentloaded'});
   await page.locator('.artifact-row').first().click();
   const figures=page.locator('.artifact-diagram');
   await figures.first().locator('svg').waitFor();
