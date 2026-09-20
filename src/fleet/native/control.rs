@@ -126,6 +126,10 @@ pub(super) fn configure_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<
             )?;
             let mut config = desired["config"].clone();
             config["enabled"] = json!(desired["intent"].as_str().unwrap_or("running") == "running");
+            // Old desired definitions omit newly added default fields. Normalize
+            // through the same settings schema as Store before comparing.
+            let settings: crate::issues::worker::Settings = serde_json::from_value(config)?;
+            let config = serde_json::to_value(settings)?;
             if let Some(row) = row.first() {
                 let previous: Value = serde_json::from_str(row["config"].as_str().unwrap())?;
                 if previous != config {
