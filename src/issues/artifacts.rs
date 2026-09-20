@@ -97,7 +97,7 @@ fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     let rendered = crate::markdown::render_fragment(source);
     let mut stmt=db.prepare("SELECT id,parent,author,body,quote,prefix,suffix,resolved,created_at FROM artifact_comments WHERE project_id=?1 AND artifact_id=?2 ORDER BY id LIMIT 1001")?;
     let mut comments=stmt.query_map(params![p.id,id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"parent":r.get::<_,Option<i64>>(1)?,"author":r.get::<_,String>(2)?,"body":r.get::<_,String>(3)?,"quote":r.get::<_,Option<String>>(4)?,"prefix":r.get::<_,Option<String>>(5)?,"suffix":r.get::<_,Option<String>>(6)?,"resolved":r.get::<_,bool>(7)?,"created_at":r.get::<_,i64>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let plain = rendered_text(source);
+    let plain = rendered_text(&rendered);
     for c in &mut comments {
         c["outdated"] = json!(c["quote"].as_str().is_some_and(|q| !anchor_matches(
             &plain,
@@ -123,26 +123,33 @@ fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     Ok(result)
 }
 // The browser anchors against the rendered reading surface, not Markdown syntax.
-fn rendered_text(source: &str) -> String {
-    use pulldown_cmark::{Event, Parser};
+fn rendered_text(html: &str) -> String {
     let mut text = String::new();
-    for event in Parser::new_ext(source, crate::markdown::parser_options()) {
-        match event {
-            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
-                text.push_str(&t)
+    let mut tag = false;
+    let mut quote = None;
+    // This is our escaped renderer output. Match DOM text without inventing
+    // separators between adjacent cells or dropping generated footnote numbers.
+    for c in html.chars() {
+        if tag {
+            if quote == Some(c) {
+                quote = None;
+            } else if quote.is_none() {
+                match c {
+                    '\'' | '"' => quote = Some(c),
+                    '>' => tag = false,
+                    _ => {}
+                }
             }
-            Event::SoftBreak | Event::HardBreak => text.push(' '),
-            Event::End(
-                pulldown_cmark::TagEnd::Paragraph
-                | pulldown_cmark::TagEnd::Heading(_)
-                | pulldown_cmark::TagEnd::Item
-                | pulldown_cmark::TagEnd::CodeBlock
-                | pulldown_cmark::TagEnd::TableCell,
-            ) => text.push(' '),
-            _ => {}
+        } else if c == '<' {
+            tag = true;
+        } else {
+            text.push(c);
         }
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    html_escape::decode_html_entities(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 fn anchor_matches(text: &str, quote: &str, prefix: &str, suffix: &str) -> bool {
     let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");

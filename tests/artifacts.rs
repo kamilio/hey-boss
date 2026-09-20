@@ -181,3 +181,16 @@ fn selection_anchors_use_the_readers_markdown_dialect() {
     );
     assert_eq!(commented["comments"][1]["outdated"], false);
 }
+
+#[test]
+fn selection_context_matches_rendered_table_cells_and_footnotes() {
+    let path = std::env::temp_dir().join(format!(
+        "hey-boss-artifact-rendered-context-{}.db",
+        std::process::id()
+    ));
+    let mut store = Store::open(&path).unwrap();
+    let created = run(&mut store, json!({"command":"create","title":"Context","body":"| Left | Right |\n| --- | --- |\n| Row | Keep **context** |\n\nA final **selected passage** with a footnote.[^note]\n\n[^note]: Keep explanation."}));
+    let id = created["artifact"]["id"].as_str().unwrap();
+    let commented = run(&mut store, json!({"command":"comment","id":id,"body":"Review","quote":"selected passage","prefix":"RowKeep context\n\nA final ","suffix":" with a footnote.1\n1\nKeep explanation."}));
+    assert_eq!(commented["comments"][0]["outdated"], false);
+}
