@@ -187,6 +187,15 @@ fn embedding_can_supply_the_owned_agents_explicit_identity() {
 }
 
 #[test]
+fn killed_claude_task_without_notification_does_not_hold_parent_completion() {
+    let mut session = launch(Provider::Claude, None);
+    session.prompt("background killed", None).unwrap();
+    until(&mut session, |event| {
+        matches!(event, Event::TurnCompleted { .. })
+    });
+}
+
+#[test]
 #[ignore = "requires installed, authenticated Codex, Claude and Pi CLIs; makes small model requests"]
 fn real_agents_complete_and_resume_the_exact_conversation() {
     let root = std::env::temp_dir().join(format!("hey-boss-real-agents-{}", std::process::id()));

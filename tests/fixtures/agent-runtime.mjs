@@ -44,6 +44,12 @@ function prompt(text) {
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
   if (provider === 'pi') send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
+  if (text === 'background killed' && provider === 'claude') {
+    send({type:'system',subtype:'task_started',task_id:'task-1',task_type:'local_agent'});
+    send({type:'result',session_id:session,subtype:'success',is_error:false,result:'provisional'});
+    send({type:'system',subtype:'task_updated',task_id:'task-1',patch:{status:'killed'}});
+    complete(); return;
+  }
   if (text.startsWith('hold')) return;
   if (text.startsWith('queued goal')) { output = JSON.stringify({status:'completed',summary:'Initial turn verified'}); setTimeout(() => complete(), 300); return; }
   if (text === 'queued turns') { setTimeout(() => complete(), 300); return; }
