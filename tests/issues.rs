@@ -96,6 +96,63 @@ fn success(o: Output) -> Value {
     serde_json::from_slice(&o.stdout).unwrap()
 }
 
+#[test]
+fn home_directory_does_not_create_a_project_but_explicit_projects_work() {
+    let f = Fixture::new();
+    let mut list = f.cmd("session-a", &["projects"]);
+    list.env("HOME", &f.cwd);
+    let value = success(list.output().unwrap());
+    assert!(value["projects"].as_array().unwrap().is_empty());
+    let mut create = f.cmd("session-a", &["create", "--title", "Home is not a project"]);
+    create.env("HOME", &f.cwd);
+    assert!(!create.output().unwrap().status.success());
+    let mut explicit = f.cmd(
+        "session-a",
+        &["create", "--project", "Atlas", "--title", "Actual work"],
+    );
+    explicit.env("HOME", &f.cwd);
+    let created = success(explicit.output().unwrap());
+    assert_eq!(created["project"]["id"], "named:Atlas");
+    let mut list = f.cmd("session-a", &["projects"]);
+    list.env("HOME", &f.cwd);
+    assert_eq!(
+        success(list.output().unwrap())["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn discovery_and_notification_registration_skip_home_projects() {
+    let f = Fixture::new();
+    let home = std::env::var_os("HOME").unwrap();
+    let project = hey_boss::issues::Project {
+        id: format!(
+            "local:machine:{}",
+            Path::new(&home).canonicalize().unwrap().display()
+        ),
+        name: "Home".into(),
+    };
+    let mut store = hey_boss::issues::Store::open(&f.db).unwrap();
+    store.discover_projects(&[(project.clone(), 1)]).unwrap();
+    assert!(store.notification_project(&project, None).is_err());
+    assert_eq!(
+        f.sql()
+            .query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .notification_project(&project, Some("Atlas"))
+            .unwrap()
+            .id,
+        "named:Atlas"
+    );
+}
+
 fn rejected_batch(o: Output) -> Value {
     assert_eq!(
         o.status.code(),
