@@ -1443,12 +1443,19 @@ open(sys.argv[1],'w').write(str(server.server_port))
 server.serve_forever()
 """
     try! python.write(to: fixture, atomically: true, encoding: .utf8)
-    let server = Process(); server.executableURL = URL(fileURLWithPath: "/usr/bin/python3"); server.arguments = [fixture.path,portFile.path]
-    server.standardOutput = FileHandle.nullDevice; server.standardError = FileHandle.nullDevice
+    let server = Process(); server.executableURL = URL(fileURLWithPath: "/usr/bin/env"); server.arguments = ["python3",fixture.path,portFile.path]
+    let errors = Pipe()
+    server.standardOutput = FileHandle.nullDevice; server.standardError = errors
     try! server.run()
-    defer { server.terminate(); server.waitUntilExit() }
-    let deadline = Date().addingTimeInterval(5)
-    while !FileManager.default.fileExists(atPath: portFile.path) && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    defer { if server.isRunning { server.terminate() }; server.waitUntilExit() }
+    let deadline = Date().addingTimeInterval(20)
+    while !FileManager.default.fileExists(atPath: portFile.path) && server.isRunning && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    guard FileManager.default.fileExists(atPath: portFile.path) else {
+        if server.isRunning { server.terminate() }
+        server.waitUntilExit()
+        let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        preconditionFailure("HTTP action fixture did not start (exit \(server.terminationStatus)): \(detail)")
+    }
     let port = Int(try! String(contentsOf: portFile, encoding: .utf8))!
     let actions = DesktopActions(cli: nil)
     var opened: [URL] = []; var cancelled = 0
