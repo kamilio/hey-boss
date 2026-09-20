@@ -90,13 +90,18 @@ fi
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Organized the project."}}' '{"type":"turn.completed"}'
 "#).unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
-    f.cli(&["settings", "set", "--chief"]);
-    let start = || {
+    f.cli(&["settings", "set", "--no-chief"]);
+    let start = |enable: bool| {
+        let mut command = f.command();
+        if enable {
+            command.arg("worker").arg("--chief");
+        } else {
+            command.arg("worker");
+        }
         Worker(
-            f.command()
+            command
                 .env("HEY_BOSS_CODEX", &fake)
                 .args([
-                    "worker",
                     "--project",
                     "Chief QA",
                     "--directory",
@@ -114,8 +119,13 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     let finished = || {
         db.query_row("SELECT count(*) FROM project_chiefs WHERE state='idle' AND session_id='chief-saved-thread' AND owner_pid IS NULL",[],|r|r.get::<_,i64>(0)).unwrap() == 1
     };
-    let worker = start();
+    let worker = start(true);
     wait_for(finished);
+    assert_eq!(
+        f.cli(&["settings", "show"])["chief_enabled"],
+        true,
+        "worker --chief enables its selected project"
+    );
     assert_eq!(
         db.query_row("SELECT count(*) FROM worker_runs", [], |r| r
             .get::<_, i64>(0))
@@ -136,7 +146,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     drop(worker);
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
-    let worker = start();
+    let worker = start(false);
     wait_for(|| {
         finished()
             && fs::read_to_string(f.0.join("launches.txt"))
@@ -149,7 +159,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
         [],
     )
     .unwrap();
-    let worker = start();
+    let worker = start(false);
     wait_for(finished);
     assert!(
         fs::read_to_string(f.0.join("launches.txt"))
@@ -160,7 +170,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     fs::write(f.0.join("fail"), "").unwrap();
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
-    let worker = start();
+    let worker = start(false);
     wait_for(|| {
         db.query_row("SELECT state FROM project_chiefs", [], |r| {
             r.get::<_, String>(0)
@@ -179,7 +189,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     fs::write(f.0.join("hold"), "").unwrap();
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
-    let worker = start();
+    let worker = start(false);
     wait_for(|| f.0.join("chief.pid").exists());
     let pid: u32 = fs::read_to_string(f.0.join("chief.pid"))
         .unwrap()
