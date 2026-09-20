@@ -1,6 +1,7 @@
 pub mod agent_control;
 pub mod agent_conversations;
 pub(crate) mod agent_process;
+pub mod agent_runtime;
 pub mod agents;
 pub mod artifacts;
 pub mod attachments;
