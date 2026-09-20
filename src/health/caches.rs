@@ -452,7 +452,7 @@ mod tests {
         let mut observations = BTreeMap::new();
         assert_eq!(
             run(
-                &[candidate.clone()],
+                std::slice::from_ref(&candidate),
                 &mut observations,
                 &[],
                 at,
@@ -467,7 +467,7 @@ mod tests {
         assert!(root.join("Cache").exists());
         assert_eq!(
             run(
-                &[candidate.clone()],
+                std::slice::from_ref(&candidate),
                 &mut observations,
                 &[],
                 at + 60,
@@ -508,7 +508,7 @@ mod tests {
         let at = super::super::now();
         assert!(
             !run(
-                &[candidate.clone()],
+                std::slice::from_ref(&candidate),
                 &mut observations,
                 &[],
                 at,
@@ -525,7 +525,7 @@ mod tests {
             ..candidate
         };
         run(
-            &[candidate.clone()],
+            std::slice::from_ref(&candidate),
             &mut observations,
             &[],
             at + 100,
@@ -537,7 +537,7 @@ mod tests {
         let open = vec![root.join("Cache/data")];
         assert_eq!(
             run(
-                &[candidate.clone()],
+                std::slice::from_ref(&candidate),
                 &mut observations,
                 &[],
                 at + 160,
@@ -550,7 +550,7 @@ mod tests {
             0
         );
         run(
-            &[candidate.clone()],
+            std::slice::from_ref(&candidate),
             &mut observations,
             &[],
             at + 200,
@@ -562,7 +562,7 @@ mod tests {
         fs::write(root.join("Cache/new"), "changed").unwrap();
         assert_eq!(
             run(
-                &[candidate.clone()],
+                std::slice::from_ref(&candidate),
                 &mut observations,
                 &[],
                 at + 260,
