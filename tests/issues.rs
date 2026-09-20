@@ -900,6 +900,115 @@ fn large_markdown_is_complete_and_history_pages_make_progress() {
 }
 
 #[test]
+fn pr_purposes_can_be_classified_without_reattaching_or_changing_lifecycle() {
+    let f = Fixture::new();
+    f.create();
+    let fix = "https://github.com/example/repo/pull/15064";
+    let evidence = "https://github.com/example/repo/pull/15006";
+    let attached = f.run("session-a", &["pr", "add", "1", evidence]);
+    assert_eq!(attached["pull_requests"][0]["purpose"], "unspecified");
+    let original = attached["pull_requests"][0].clone();
+    f.run("session-a", &["pr", "add", "1", fix, "--purpose", "fix"]);
+    let classified = f.run(
+        "session-b",
+        &[
+            "pr",
+            "classify",
+            "1",
+            evidence,
+            "--purpose",
+            "supporting-evidence",
+        ],
+    );
+    assert_eq!(classified["changed"], true);
+    let pr = classified["pull_requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pr| pr["url"] == evidence)
+        .unwrap();
+    assert_eq!(pr["purpose"], "supporting-evidence");
+    assert_eq!(pr["added_by"], original["added_by"]);
+    assert_eq!(pr["created_at"], original["created_at"]);
+    let viewed = f.run("session-a", &["view", "1"])["issue"].clone();
+    assert_eq!(viewed["state"], "open");
+    assert!(viewed["assignee"].is_null());
+    assert_eq!(viewed["pull_requests"], classified["pull_requests"]);
+    assert_eq!(
+        f.run("session-a", &["pr", "list", "1"])["pull_requests"],
+        classified["pull_requests"]
+    );
+    assert_eq!(
+        f.run(
+            "session-b",
+            &[
+                "pr",
+                "classify",
+                "1",
+                evidence,
+                "--purpose",
+                "supporting-evidence"
+            ]
+        )["changed"],
+        false
+    );
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["version"],
+        viewed["version"]
+    );
+    // Adding an existing URL must never silently change its classification.
+    f.run("session-a", &["pr", "add", "1", fix]);
+    let prs = f.run("session-a", &["pr", "list", "1"])["pull_requests"].clone();
+    assert_eq!(
+        prs.as_array()
+            .unwrap()
+            .iter()
+            .find(|pr| pr["url"] == fix)
+            .unwrap()["purpose"],
+        "fix"
+    );
+    f.run(
+        "session-a",
+        &["pr", "classify", "1", fix, "--purpose", "prerequisite"],
+    );
+    f.run(
+        "session-a",
+        &["pr", "classify", "1", fix, "--purpose", "unspecified"],
+    );
+    f.fail(
+        "session-a",
+        &[
+            "pr",
+            "classify",
+            "1",
+            "https://github.com/example/repo/pull/999",
+            "--purpose",
+            "fix",
+        ],
+        3,
+    );
+}
+
+#[test]
+fn legacy_pr_links_migrate_to_unspecified_without_losing_attachment_metadata() {
+    let f = Fixture::new();
+    f.create();
+    f.run(
+        "session-a",
+        &["pr", "add", "1", "https://github.com/example/repo/pull/123"],
+    );
+    let original = f.run("session-a", &["pr", "list", "1"])["pull_requests"][0].clone();
+    f.sql()
+        .execute_batch("ALTER TABLE issue_pull_requests DROP COLUMN purpose;")
+        .unwrap();
+    let migrated = f.run("session-a", &["view", "1"])["issue"]["pull_requests"][0].clone();
+    assert_eq!(migrated["purpose"], "unspecified");
+    assert_eq!(migrated["url"], original["url"]);
+    assert_eq!(migrated["added_by"], original["added_by"]);
+    assert_eq!(migrated["created_at"], original["created_at"]);
+}
+
+#[test]
 fn project_instructions_and_pr_links_are_durable_and_visible_in_claim_and_cli() {
     let f = Fixture::new();
     f.create();

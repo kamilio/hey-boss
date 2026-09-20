@@ -136,7 +136,7 @@ pub(super) fn execute(
         }
         event(db, &target.id, next, &author, &action, created, &data)?;
     }
-    db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at) SELECT ?3,?4,url,added_by,created_at FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
+    db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) SELECT ?3,?4,url,added_by,created_at,purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     db.execute("UPDATE mindmaps SET version=version+1 WHERE project_id IN (SELECT project_id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=CAST(?2 AS TEXT))",params![source.id,number])?;
     db.execute("UPDATE mindmap_nodes SET reference_project=?3,reference=CAST(?4 AS TEXT),updated_at=?5 WHERE kind='issue' AND reference_project=?1 AND reference=CAST(?2 AS TEXT)",params![source.id,number,target.id,next,now])?;
     db.execute("UPDATE issues SET deleted_at=?3,assignee=NULL,updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![source.id,number,now])?;

@@ -366,9 +366,27 @@ enum SubtaskAction {
 
 #[derive(Subcommand)]
 enum PrAction {
-    Add { number: i64, url: String },
-    Remove { number: i64, url: String },
-    List { number: i64 },
+    /// Attach a PR; existing links keep their recorded purpose.
+    Add {
+        number: i64,
+        url: String,
+        #[arg(long, value_enum, default_value = "unspecified")]
+        purpose: issues::PrPurpose,
+    },
+    /// Change an attached PR's purpose without removing its history.
+    Classify {
+        number: i64,
+        url: String,
+        #[arg(long, value_enum)]
+        purpose: issues::PrPurpose,
+    },
+    Remove {
+        number: i64,
+        url: String,
+    },
+    List {
+        number: i64,
+    },
 }
 #[derive(Subcommand)]
 enum SettingsAction {
@@ -468,9 +486,23 @@ impl Options {
                 },
             },
             Action::Pr { command } => match command {
-                PrAction::Add { number, url } => Operation::AddPullRequest {
+                PrAction::Add {
+                    number,
+                    url,
+                    purpose,
+                } => Operation::AddPullRequest {
                     number: *number,
                     url: url.clone(),
+                    purpose: *purpose,
+                },
+                PrAction::Classify {
+                    number,
+                    url,
+                    purpose,
+                } => Operation::ClassifyPullRequest {
+                    number: *number,
+                    url: url.clone(),
+                    purpose: *purpose,
                 },
                 PrAction::Remove { number, url } => Operation::RemovePullRequest {
                     number: *number,
@@ -938,7 +970,11 @@ fn print_text(value: &Value) {
     }
     if let Some(prs) = value["pull_requests"].as_array() {
         for pr in prs {
-            println!("PR: {}", line(&pr["url"]));
+            println!(
+                "PR [{}]: {}",
+                pr["purpose"].as_str().unwrap_or("unspecified"),
+                line(&pr["url"])
+            );
         }
     }
     if value["scope"] == "global" {
@@ -1160,7 +1196,11 @@ fn print_issue_line(issue: &Value) {
     }
     if let Some(prs) = issue["pull_requests"].as_array() {
         for pr in prs {
-            println!("  PR: {}", line(&pr["url"]));
+            println!(
+                "  PR [{}]: {}",
+                pr["purpose"].as_str().unwrap_or("unspecified"),
+                line(&pr["url"])
+            );
         }
     }
 }

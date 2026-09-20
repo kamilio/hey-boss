@@ -44,7 +44,7 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     )
     .unwrap();
     call("Source", json!({"action":"resolve_comment","number":1,"comment_id":comment["comment_id"],"resolved":true}),None).unwrap();
-    call("Source", json!({"action":"add_pull_request","number":1,"url":"https://github.com/example/repo/pull/1"}), None).unwrap();
+    call("Source", json!({"action":"add_pull_request","number":1,"url":"https://github.com/example/repo/pull/1","purpose":"supporting-evidence"}), None).unwrap();
     call("Source",json!({"action":"mindmap","operation":{"command":"add","title":"Keep everything","body":"","kind":"issue","reference":"1","reference_project":"named:Source","alias":"moving"}}),None).unwrap();
     let source = call("Source", json!({"action":"view","number":1}), None).unwrap();
     let transfer = json!({"action":"transfer","number":1,"destination":"named:Destination","if_version":source["issue"]["version"]});
@@ -55,6 +55,10 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     assert_eq!(moved["issue"]["labels"], json!(["ready"]));
     assert_eq!(moved["issue"]["draft"], true);
     assert_eq!(moved["issue"]["pull_requests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        moved["issue"]["pull_requests"][0]["purpose"],
+        "supporting-evidence"
+    );
     assert_eq!(call("Source", transfer, Some("move-once")).unwrap(), moved);
     let destination = call("Destination", json!({"action":"view","number":2}), None).unwrap();
     assert_eq!(destination["comments"][0]["body"], "Preserved comment");

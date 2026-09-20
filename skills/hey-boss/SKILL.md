@@ -123,6 +123,12 @@ Claim output includes project instructions and PR attachment commands.
 PRs are disabled by default; project settings or `worker --prs` enable them.
 Attach one or more with `hey-boss issue pr add NUMBER URL`; list/remove through
 `issue pr list/remove`. They remain visible in CLI and UI.
+Record a link's role with `issue pr add NUMBER URL --purpose fix|prerequisite|supporting-evidence|unspecified`.
+Use `issue pr classify NUMBER URL --purpose PURPOSE` to change an existing link
+without reattaching it. Older links are `unspecified`; adding an existing URL
+preserves its purpose. `view` and `pr list` JSON expose `purpose`. Review every PR,
+using purpose to distinguish merge requirements from supporting material;
+classification alone never closes an issue or assigns it to Boss.
 Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
 A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The shared prompt defaults to `Claim and implement` followed by the backtick-wrapped
 `{{issue_command}}`. Project settings assembles shared instructions + selected

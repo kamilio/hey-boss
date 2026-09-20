@@ -33,6 +33,11 @@ const SCHEMA_VERSION: i64 = 12;
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     (
+        "issue_pull_requests",
+        "purpose",
+        "TEXT NOT NULL DEFAULT 'unspecified' CHECK(purpose IN ('unspecified','fix','prerequisite','supporting-evidence'))",
+    ),
+    (
         "project_settings",
         "chief_enabled",
         "INTEGER NOT NULL DEFAULT 0",
@@ -67,7 +72,12 @@ fn missing_additive_columns(
     db: &Connection,
 ) -> Result<Vec<(&'static str, &'static str, &'static str)>> {
     let mut missing = Vec::new();
-    for table in ["issues", "project_settings", "mindmap_nodes"] {
+    for table in [
+        "issues",
+        "project_settings",
+        "mindmap_nodes",
+        "issue_pull_requests",
+    ] {
         let mut statement = db.prepare("SELECT name FROM pragma_table_info(?1)")?;
         let columns = statement
             .query_map([table], |r| r.get::<_, String>(0))?
@@ -701,6 +711,7 @@ impl Store {
             | Operation::ConfigureProject { .. }
             | Operation::PullRequests { .. }
             | Operation::AddPullRequest { .. }
+            | Operation::ClassifyPullRequest { .. }
             | Operation::RemovePullRequest { .. } => {
                 registry::execute(&tx, &project, &r.operation, actor)?
             }

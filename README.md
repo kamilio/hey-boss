@@ -691,6 +691,17 @@ Show reveals the full wrapping editor locally. ⌘Return submits. See the
 [skill's secret workflow](skills/hey-boss/SKILL.md#secrets-keep-values-out-of-agent-context)
 for guarded file redirection, cancellation behavior, and environment use.
 
+## Pull request purposes
+
+Attached PRs have a purpose: `unspecified` (the default for older links), `fix`,
+`prerequisite`, or `supporting-evidence`. Attach with
+`hey-boss issue pr add NUMBER URL --purpose fix`, or change an existing link with
+`hey-boss issue pr classify NUMBER URL --purpose supporting-evidence`.
+Classification preserves the attachment author and date. Issue details, lists,
+and `issue pr list` JSON expose `purpose`. Review every PR; use this metadata to
+distinguish merge requirements from supporting material. It never automatically
+closes an issue or assigns it to Boss.
+
 ## Issue subtasks
 
 Create a child from the parent's Subtasks card or add an existing issue. Each
