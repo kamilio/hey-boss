@@ -1,0 +1,83 @@
+use hey_boss::agent_runtime::{AgentSession, GoalStatus, Launch, ManagedGoal, Provider};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+#[test]
+fn goals_continue_without_a_report_and_preserve_pause_and_resume() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut session = AgentSession::launch(Launch {
+            provider,
+            binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+            cwd: root,
+            resume: None,
+            env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), provider.name().into())]),
+            output_schema: None,
+        })
+        .unwrap();
+        let mut goal = ManagedGoal::new("goal fixture").unwrap();
+        goal.start(&mut session).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while goal.status() == GoalStatus::Active {
+            if let Some(event) = session.receive(Duration::from_millis(50)).unwrap() {
+                goal.observe(&mut session, &event).unwrap();
+            }
+            assert!(Instant::now() < deadline);
+        }
+        assert_eq!(goal.status(), GoalStatus::Complete);
+        assert_eq!(goal.turns_completed(), 2);
+        assert_eq!(goal.summary(), Some("Goal fixture verified"));
+        let restored: ManagedGoal =
+            serde_json::from_slice(&serde_json::to_vec(&goal).unwrap()).unwrap();
+        assert_eq!(restored.objective(), "goal fixture");
+        assert!(goal.start(&mut session).is_err());
+
+        let mut goal = ManagedGoal::new("hold").unwrap();
+        goal.start(&mut session).unwrap();
+        goal.pause(&mut session).unwrap();
+        assert_eq!(goal.status(), GoalStatus::Paused);
+        // An interrupted turn delivered after pause cannot resume the goal.
+        for _ in 0..8 {
+            if let Some(event) = session.receive(Duration::from_millis(20)).unwrap() {
+                goal.observe(&mut session, &event).unwrap();
+            }
+        }
+        assert_eq!(goal.status(), GoalStatus::Paused);
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut other = AgentSession::launch(Launch {
+            provider,
+            binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+            cwd: root,
+            resume: None,
+            env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), provider.name().into())]),
+            output_schema: None,
+        })
+        .unwrap();
+        assert!(goal.pause(&mut other).is_err());
+        goal.start(&mut session).unwrap();
+        assert_eq!(goal.status(), GoalStatus::Active);
+        goal.pause(&mut session).unwrap();
+        let saved = session.inspect().unwrap().session.unwrap();
+        let encoded = serde_json::to_vec(&goal).unwrap();
+        session.stop().unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut recovered = AgentSession::launch(Launch {
+            provider,
+            binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+            cwd: root,
+            resume: Some(saved.clone()),
+            env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), provider.name().into())]),
+            output_schema: None,
+        })
+        .unwrap();
+        let mut restored: ManagedGoal = serde_json::from_slice(&encoded).unwrap();
+        restored.resume(&mut recovered).unwrap();
+        assert_eq!(restored.objective(), "hold");
+        assert_eq!(restored.session().unwrap().id, saved.id);
+        assert_eq!(restored.status(), GoalStatus::Active);
+        restored.pause(&mut recovered).unwrap();
+    }
+}
