@@ -234,7 +234,13 @@ impl Store {
                 "Codex exited before its process could be recorded",
             )
         })?;
-        self.db.execute("UPDATE worker_runs SET pid=?2,process_start=?3,updated_at=?4 WHERE id=?1 AND finished_at IS NULL",params![id,pid,start,now()])?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let at = now();
+        tx.execute("UPDATE worker_runs SET pid=?2,process_start=?3,updated_at=?4 WHERE id=?1 AND finished_at IS NULL",params![id,pid,start,at])?;
+        tx.execute("INSERT OR IGNORE INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) SELECT id,project_id,issue_number,?2 FROM worker_runs WHERE id=?1 AND finished_at IS NULL", params![id,at])?;
+        tx.commit()?;
         Ok(())
     }
     pub(crate) fn worker_attach(&mut self, job: &mut Job, session: &str) -> Result<()> {
@@ -413,6 +419,80 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launches_are_atomic_idempotent_and_backfill_survives_reopening() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-launches-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute("INSERT INTO projects(id,name,next_number) VALUES('named:Launches','Launches',2)", []).unwrap();
+            store
+                .db
+                .execute("INSERT INTO agents VALUES('agent','{}',0)", [])
+                .unwrap();
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Launches',1,'Task','','open','agent',0,0,1,'[]')", []).unwrap();
+            store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('run','named:Launches',1,'{}','agent','reserved',1,'start','unit',0,0)", []).unwrap();
+            assert_eq!(
+                get_issue(&store.db, "named:Launches", 1, false)
+                    .unwrap()
+                    .agent_launch_count,
+                0
+            );
+            let pid = std::process::id();
+            store.db.execute_batch("CREATE TRIGGER reject_launch BEFORE INSERT ON issue_agent_launches BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+            assert!(store.worker_process("run", pid).is_err());
+            assert!(
+                store
+                    .db
+                    .query_row("SELECT pid IS NULL FROM worker_runs", [], |r| r
+                        .get::<_, bool>(0))
+                    .unwrap()
+            );
+            store
+                .db
+                .execute_batch("DROP TRIGGER reject_launch;")
+                .unwrap();
+            store.worker_process("run", pid).unwrap();
+            store.worker_process("run", pid).unwrap();
+            assert_eq!(
+                get_issue(&store.db, "named:Launches", 1, false)
+                    .unwrap()
+                    .agent_launch_count,
+                1
+            );
+            let unchanged = get_issue(&store.db, "named:Launches", 1, false).unwrap();
+            assert_eq!((unchanged.version, unchanged.updated_at), (1, 0));
+            store.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Launches',2,'Other','','open','agent',0,0,1,'[]');
+              WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+              INSERT INTO issue_agent_launches SELECT 'unrelated-'||x,'named:Launches',2,x FROM n;").unwrap();
+            {
+                let mut query = store.db.prepare("SELECT count(*) FROM issue_agent_launches WHERE project_id='named:Launches' AND issue_number=1").unwrap();
+                assert_eq!(query.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                assert!(query.get_status(rusqlite::StatementStatus::VmStep) < 100, "Counting one issue must not scan unrelated launches");
+            }
+            // Simulate the old schema with one launched and one merely reserved run.
+            store.db.execute_batch("DROP TABLE issue_agent_launches;
+              INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES('reserved','named:Launches',1,'{}','agent','blocked',1,'start','unit',0,0,1);
+              UPDATE fleet_meta SET role='agent',node='unit';").unwrap();
+            drop(store);
+            for _ in 0..2 {
+                let store = Store::open(&path).unwrap();
+                assert_eq!(
+                    get_issue(&store.db, "named:Launches", 1, false)
+                        .unwrap()
+                        .agent_launch_count,
+                    1
+                );
+                assert_eq!(store.db.query_row("SELECT count(*) FROM fleet_outbox WHERE table_name='issue_agent_launches'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn progress_writes_are_atomic_and_contention_is_nonfatal() {

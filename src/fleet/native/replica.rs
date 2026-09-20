@@ -11,6 +11,10 @@ pub(super) const TABLES: &[(&str, &[&str])] = &[
     ("projects", &["id"]),
     ("agents", &["id"]),
     ("issues", &["project_id", "number"]),
+    (
+        "issue_agent_launches",
+        &["project_id", "issue_number", "run_id"],
+    ),
     ("issue_subtasks", &["project_id", "child_number"]),
     ("comments", &["id"]),
     ("events", &["id"]),
@@ -1405,6 +1409,12 @@ mod tests {
     fn issue_transfer_replicates_append_only_comments_and_resolutions() {
         let main = Fixture::new();
         main.capture();
+        main.db
+            .execute(
+                "INSERT INTO issue_agent_launches VALUES('launch-1','named:Native fleet',1,1)",
+                [],
+            )
+            .unwrap();
         let actor = Actor {
             id: "human:boss".into(),
             kind: "human".into(),
@@ -1469,6 +1479,7 @@ mod tests {
                 request_id: None,
             })
             .unwrap();
+        assert_eq!(result["issue"]["agent_launch_count"], 1);
         assert_eq!(result["comments"][0]["body"], "Keep this comment");
         assert_eq!(result["comments"][0]["resolved"], true);
         let foreign_keys: i64 = agent
@@ -1478,6 +1489,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(foreign_keys, 0);
+    }
+
+    #[test]
+    fn offline_launch_replay_is_deduplicated_across_receipts_and_snapshots() {
+        let main = Fixture::new();
+        main.capture();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        agent.db.execute("INSERT INTO issue_agent_launches VALUES('offline-launch','named:Native fleet',1,123)", []).unwrap();
+        let changes = journal(&agent.db, 0).unwrap();
+        let first = accept_changes(&main.db, "agent", &changes).unwrap();
+        assert!(first.iter().all(|r| r["state"] != "conflict"), "{first:?}");
+        let repeated = accept_changes(&main.db, "agent", &changes).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &repeated,
+        )
+        .unwrap();
+        for db in [&main.db, &agent.db] {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM issue_agent_launches", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
     }
 
     #[test]

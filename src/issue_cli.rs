@@ -1128,11 +1128,17 @@ fn print_issue_line(issue: &Value) {
         .or_else(|| issue["assignee"].as_str())
         .unwrap_or("unassigned");
     println!(
-        "#{} [{}] {} · {}",
+        "#{} [{}] {} · {} · {} agent launch{}",
         issue["number"],
         state,
         line(&issue["title"]),
-        owner
+        owner,
+        issue["agent_launch_count"].as_u64().unwrap_or(0),
+        if issue["agent_launch_count"] == 1 {
+            ""
+        } else {
+            "es"
+        }
     );
     if let Some(number) = issue["parent"]["number"].as_i64() {
         println!(

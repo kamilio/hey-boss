@@ -172,10 +172,16 @@ impl Drop for Worker {
 fn codex_protocol_goal_completion_and_prompt_variables() {
     let f = Fixture::new("completed");
     f.setup(&["--prompt", "/goal"]);
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 0);
     let mut w = f.worker();
     let s = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(s["runs"][0]["state"], "completed");
     assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 1);
+    assert_eq!(
+        f.cli(&["list", "--state", "all"])["issues"][0]["agent_launch_count"],
+        1
+    );
     let transcript = f.transcript();
     let goals: Vec<_> = transcript
         .iter()
@@ -336,6 +342,7 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
     let timed_out = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(timed_out["runs"][0]["state"], "claim_timeout");
     let session = timed_out["runs"][0]["session_id"].clone();
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 1);
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
     worker.stop();
     let db = rusqlite::Connection::open(&f.db).unwrap();
@@ -345,6 +352,7 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
     let mut replacement = f.worker();
     let resumed = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
     assert_eq!(resumed["runs"][0]["session_id"], session);
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 2);
     assert_eq!(
         f.cli(&["view", "1"])["issue"]["assignee"],
         format!("codex:{}", session.as_str().unwrap())
