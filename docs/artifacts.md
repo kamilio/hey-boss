@@ -29,7 +29,8 @@ The editor switches between **Preview** and **Write** without losing draft text.
 Its controls remain reachable while scrolling. Ordinary drafts grow with their
 text; large files use a bounded writing area with a plain editor that renders
 only visible lines. Undo/redo, selections and browser drafts retain the complete
-document. Its local bundle loads only when a large draft is opened. Opening Comments on a small screen
+document. Its local bundle loads only when a large draft is opened.
+Opening Comments on a small screen
 brings the conversation into view, and closing it returns to document controls.
 Large documents become readable while the rest loads. Posting comments and
 resolving discussions keep the unchanged reading surface in place.

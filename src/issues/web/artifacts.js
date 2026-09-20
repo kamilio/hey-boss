@@ -318,10 +318,21 @@ const HeyBossArtifacts = (() => {
         getSelection().removeAllRanges();
       };
       selectText=select;$("#artifact-reading").onpointerup=select;$("#artifact-reading").onkeyup=select;
+      $("#artifact-reading").onclick=e=>{
+        const reader=e.currentTarget,link=e.target.closest('a[href^="#"]');
+        if(!link||e.defaultPrevented)return;
+        let id=link.getAttribute("href").slice(1),decoded=id;
+        try{decoded=decodeURIComponent(id);}catch{}
+        const target=reader.querySelector("#"+CSS.escape(id))||reader.querySelector("#"+CSS.escape(decoded));
+        if(!target)return;
+        e.preventDefault();target.scrollIntoView({block:"start"});
+        if(!target.hasAttribute("tabindex")){target.tabIndex=-1;target.addEventListener("blur",()=>target.removeAttribute("tabindex"),{once:true});}
+        target.focus({preventScroll:true});
+      };
       $("#artifact-comment-form").onsubmit=async e=>{e.preventDefault();const b=$("button[type=submit]",e.currentTarget);b.disabled=true;pendingComment ||= {operation:{command:"comment",id:doc.id,body:$("#artifact-comment").value,...(anchor||{})},requestID:crypto.randomUUID()};$("#artifact-comment").readOnly=true;$("#artifact-comment").dispatchEvent(new Event("input"));try{const r=await api(context,pendingComment.operation,pendingComment.requestID);drafts.remove(commentKey);if(!b.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Comment saved");}catch(e){if(!b.isConnected)return;b.disabled=false;if(!e.uncertain){pendingComment=null;$("#artifact-comment").readOnly=false;$("#artifact-comment").dispatchEvent(new Event("input"));}error(e);}};
     }
     async function library(append=false) {
-      const seq=++generation;status("Loading…");$("#artifact-error").hidden=true;
+      const seq=++generation;status("Loading…");$("#artifact-error").hidden=true;$("#artifact-more").hidden=true;
       const list=$("#artifact-list");list.setAttribute("aria-busy","true");
       if(!list.children.length)list.innerHTML='<div class="artifact-loading" aria-hidden="true"><span></span><span></span><span></span></div>';
       try {const value=await api(context,{command:"list",query:$("#artifact-search").value,archived:$("#artifact-archived").checked,offset:append?offset:0});if(seq!==generation)return;rows=append?[...rows,...value.artifacts]:value.artifacts;offset=rows.length;
@@ -330,23 +341,23 @@ const HeyBossArtifacts = (() => {
         $("#artifact-list").innerHTML=rows.map(a=>`<a class="artifact-row" href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}"><span class="artifact-document-icon">${icon("docs")}</span><span class="artifact-row-content"><strong>${esc(a.title)}</strong><span class="artifact-row-meta">${a.archived?'<span class="artifact-badge">Archived</span>':""}Updated ${esc(date(a.updated_at))}</span></span><span class="artifact-row-arrow">${icon("arrow-right")}</span></a>`).join("")||`<div class="artifact-empty"><span class="artifact-empty-icon">${icon(query?"search":"docs")}</span><h2>${query?"No matching artifacts":"Your documents start here"}</h2><p>${query?"Try a different title or a phrase from the document.":"Keep plans, notes, and decisions together in your project."}</p><button class="button${query?"":" primary"}" type="button" id="artifact-empty-action">${query?"Clear search":"New artifact"}</button></div>`;
         if($("#artifact-empty-action"))$("#artifact-empty-action").onclick=()=>{if(query){$("#artifact-search").value="";$("#artifact-search").focus();library();}else $("#artifact-new").click();};
         $("#artifact-more").hidden=!value.more;status(`${rows.length} ${rows.length===1?"document":"documents"}${value.more?" · more available":""}${query?" found":" · recently updated"}`);
-      }catch(e){if(seq===generation)error(e,()=>library(append));}
+      }catch(e){if(seq===generation){if($(".artifact-loading",list))list.replaceChildren();error(e,()=>library(append));}}
       finally{if(seq===generation)list.removeAttribute("aria-busy");}
     }
     async function navigate() {
       clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
       const params=route(),id=HeyBossUI.projectId(boot.projects[0]?.id);project=boot.projects.find(p=>p.id===id)||boot.projects[0];
       if(!project){error(Error("No registered projects. Reconnect the supervisor to load project data."),()=>location.reload());return;}
-      context={project:project.id,csrf:boot.csrf,host:params.get("host")};picker.update(boot.projects,project);doc=null;commentsOpen=null;
+      context={project:project.id,csrf:boot.csrf,host:params.get("host")};for(const input of [$("#artifact-new"),$("#artifact-search"),$("#artifact-archived")])input.disabled=false;picker.update(boot.projects,project);doc=null;commentsOpen=null;
       $("#nav-artifacts").setAttribute("aria-current","page");
       if(mobile){$("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;$("#nav-mindmaps").hidden=true;}
       const idDoc=params.get("artifact");
-      if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;reading();status("");}catch(e){if(seq===generation)error(e,navigate);}}
+      if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;reading();status("");}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
       else if(params.get("new")==="1")editor();
       else {mode("library");document.title="Artifacts · Hey Boss";await library();}
     }
     $("#artifact-new").onclick=()=>{location.hash=new URLSearchParams({project:context.project,new:"1",...(context.host?{host:context.host}:{})});};
-    let timer;$("#artifact-search").oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>library(),250);};
+    let timer;$("#artifact-search").oninput=()=>{generation++;$("#artifact-more").hidden=true;clearTimeout(timer);timer=setTimeout(()=>library(),250);};
     $("#artifact-archived").onchange=()=>library();$("#artifact-more").onclick=()=>library(true);
     document.addEventListener("pointerdown",e=>{const menu=$(".artifact-menu[open]");if(menu&&!menu.contains(e.target))menu.open=false;});
     window.addEventListener("resize",()=>{cancelAnimationFrame(resizeFrame);if(editing)resizeFrame=requestAnimationFrame(()=>{if(editing)resizeEditor();});});
