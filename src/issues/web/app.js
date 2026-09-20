@@ -1325,7 +1325,11 @@ $("#new-issue").onclick = () => openEditor();
 $("#copy-create-command").onclick = async () => {
   const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
   const host = model.route.host || model.defaultHost;
-  const command = `hey-boss issue create --project ${quote(model.project.id)}${host ? ` --host ${quote(host)}` : ""} --title '<title>' --body '<markdown>'`;
+  // The CLI resolves names, but exact IDs take precedence over name matches.
+  const {id, name} = model.project;
+  const ambiguous = model.projects.some(p => p.id !== id && (p.name === name || p.id === name));
+  const project = ambiguous ? id : name;
+  const command = `hey-boss issue create --project ${quote(project)}${host ? ` --host ${quote(host)}` : ""} --title '<title>' --body '<markdown>'`;
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(command);
