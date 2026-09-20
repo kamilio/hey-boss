@@ -243,38 +243,15 @@ pub fn validate_config(c: &ProjectConfig, p: &Project) -> Result<()> {
 }
 
 pub fn codex_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("HEY_BOSS_CODEX") {
-        let path = PathBuf::from(path);
-        if !path.is_absolute() || !executable(&path) {
-            return Err(Error::invalid(
-                "HEY_BOSS_CODEX must point to an executable absolute Codex path",
-            ));
-        }
-        return Ok(path);
-    }
-    let mut candidates: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|p| p.join("codex"))
-            .collect();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        candidates.extend([
-            home.join(".local/bin/codex"),
-            home.join(".cargo/bin/codex"),
-            PathBuf::from("/opt/homebrew/bin/codex"),
-        ]);
-        if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-            let mut versions: Vec<_> = versions.flatten().map(|p| p.path()).collect();
-            versions.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-            candidates.extend(versions.into_iter().rev().map(|p| p.join("bin/codex")));
-        }
-    }
-    candidates.push("/Applications/Codex.app/Contents/Resources/codex".into());
-    candidates.into_iter().find(|p|executable(p)).ok_or_else(||Error::new("worker_error","Codex CLI was not found. Install Codex or set HEY_BOSS_CODEX to its absolute path."))
-}
-fn executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    crate::agent_runtime::Provider::Codex
+        .binary()
+        .map_err(|error| {
+            if std::env::var_os("HEY_BOSS_CODEX").is_some() {
+                Error::invalid(error.to_string())
+            } else {
+                Error::new("worker_error", error.to_string())
+            }
+        })
 }
 
 pub struct Worker {
