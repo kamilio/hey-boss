@@ -53,6 +53,32 @@ class FleetTests(unittest.TestCase):
         self.agent.close()
         self.temporary.cleanup()
 
+    def test_snapshot_reads_while_another_connection_holds_the_write_lock(self):
+        with fleet.connect_db(self.main_path) as reader:
+            reader.execute('PRAGMA busy_timeout=50')
+            self.main.execute('BEGIN IMMEDIATE')
+            try:
+                with reader:
+                    snapshot = fleet.export_snapshot(reader, 'agent')
+                self.assertEqual(snapshot['tables']['issues'][0]['title'], 'Original')
+            finally:
+                self.main.rollback()
+
+    def test_snapshot_batches_history_identity_lookups(self):
+        with self.main:
+            for number in range(30):
+                self.main.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES(?,1,'human:fixture',?,0)",
+                                  (PROJECT, str(number)))
+                local_id = self.main.execute('SELECT last_insert_rowid()').fetchone()[0]
+                self.main.execute("INSERT INTO fleet_row_ids VALUES('remote','comments',?,?)", (100 + number, local_id))
+        with mock.patch.object(self.main, 'execute', wraps=self.main.execute) as execute:
+            with self.main:
+                snapshot = fleet.export_snapshot(self.main, 'agent')
+        comments = snapshot['tables']['comments']
+        self.assertEqual([(r['origin'], r['row']['id']) for r in comments],
+                         [('remote', 100 + number) for number in range(30)])
+        self.assertLess(len(execute.call_args_list), 25, 'Snapshot performs a database call per history row')
+
     def test_drafts_are_not_allocated_and_project_settings_replicate(self):
         with self.main:
             self.main.execute("DELETE FROM fleet_allocations")

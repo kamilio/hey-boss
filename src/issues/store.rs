@@ -561,6 +561,7 @@ impl Store {
             tx.commit()?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_row_local' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::fleet::INDEXES)?; }
         Ok(Self { db })
     }
 

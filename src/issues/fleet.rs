@@ -2,6 +2,9 @@
 use super::{Error, Result};
 use rusqlite::{Connection, params};
 
+pub(crate) const INDEXES: &str =
+    "CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);";
+
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS fleet_meta(id INTEGER PRIMARY KEY CHECK(id=1),role TEXT NOT NULL,node TEXT NOT NULL,syncing INTEGER NOT NULL DEFAULT 0);
 INSERT OR IGNORE INTO fleet_meta VALUES(1,'standalone','',0);
@@ -10,6 +13,7 @@ CREATE TABLE IF NOT EXISTS fleet_number_ranges(project_id TEXT PRIMARY KEY,first
 CREATE TABLE IF NOT EXISTS fleet_outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT,table_name TEXT NOT NULL,before_json TEXT,after_json TEXT,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fleet_receipts(node TEXT NOT NULL,seq INTEGER NOT NULL,result TEXT NOT NULL,PRIMARY KEY(node,seq));
 CREATE TABLE IF NOT EXISTS fleet_row_ids(origin TEXT NOT NULL,table_name TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER NOT NULL,PRIMARY KEY(origin,table_name,origin_id));
+CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);
 CREATE TABLE IF NOT EXISTS fleet_conflicts(id TEXT PRIMARY KEY,node TEXT NOT NULL,seq INTEGER NOT NULL,table_name TEXT NOT NULL,data TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,resolved INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS fleet_subtask_receipts(node TEXT NOT NULL,seq INTEGER NOT NULL,project_id TEXT NOT NULL,child_number INTEGER NOT NULL,parent_number INTEGER NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(node,seq));
 CREATE INDEX IF NOT EXISTS fleet_subtask_receipt_key ON fleet_subtask_receipts(node,project_id,child_number,seq DESC);
