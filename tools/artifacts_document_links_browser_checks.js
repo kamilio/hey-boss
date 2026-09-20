@@ -7,10 +7,13 @@ async page => {
   const id=(await response.json()).artifact.id;
   await page.setViewportSize({width:390,height:844});await page.goto(origin+'/artifacts#project='+encodeURIComponent(project)+'&artifact='+id);await page.reload();
   await page.locator('#artifact-reading').waitFor();const route=page.url();
+  await page.getByRole('link',{name:'Skip to artifacts',exact:true}).focus();
+  await page.keyboard.press('Enter');
+  if(page.url()!==route||!await page.locator('#artifact-main').evaluate(el=>el===document.activeElement))throw Error('Skip link replaced route or failed to focus document');
   await page.locator('#artifact-reading .footnote-reference a').click();
   if(page.url()!==route)throw Error('Footnote replaced the artifact route');
   await page.locator('#artifact-reading .footnote-definition').waitFor();
   if(!await page.locator('#artifact-reading .footnote-definition').evaluate(el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.top<innerHeight;}))throw Error('Footnote did not scroll into view');
   await page.screenshot({path:'output/playwright/artifact-redesign/'+page.context().browser().browserType().name()+'-footnote-navigation.png'});
-  return {routeRetained:true,footnoteReachable:true};
+  return {routeRetained:true,skipLinkPreservesDocument:true,footnoteReachable:true};
 }
