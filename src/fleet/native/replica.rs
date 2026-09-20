@@ -140,6 +140,12 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         m.entry("plan_template")
             .or_insert(json!("plans/{timestamp}-{number}.md"));
     }
+    if table == "issue_pull_requests" {
+        row.as_object_mut()
+            .ok_or_else(|| invalid("Invalid PR row"))?
+            .entry("purpose")
+            .or_insert(json!("unspecified"));
+    }
     let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
         .iter()
         .map(|r| r["name"].as_str().unwrap().to_string())
@@ -1524,6 +1530,65 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn pr_purpose_survives_snapshot_and_offline_classification_replay() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'fix')", []).unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT purpose FROM issue_pull_requests", &[]).unwrap()[0]["purpose"],
+            "fix"
+        );
+        agent
+            .db
+            .execute(
+                "UPDATE issue_pull_requests SET purpose='supporting-evidence'",
+                [],
+            )
+            .unwrap();
+        let changes = journal(&agent.db, 0).unwrap();
+        let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &receipts,
+        )
+        .unwrap();
+        for db in [&main.db, &agent.db] {
+            let pr = &rows(db, "SELECT * FROM issue_pull_requests", &[]).unwrap()[0];
+            assert_eq!(pr["purpose"], "supporting-evidence");
+            assert_eq!(pr["added_by"], "human:fixture");
+            assert_eq!(pr["created_at"], 123);
+        }
+    }
+
+    #[test]
+    fn legacy_replicated_pr_defaults_to_unspecified() {
+        let f = Fixture::new();
+        let pr = json!({"project_id":"named:Native fleet","issue_number":1,"url":"https://github.com/example/repo/pull/1","added_by":"human:fixture","created_at":123});
+        put_row(&f.db, "issue_pull_requests", &pr).unwrap();
+        assert_eq!(
+            rows(&f.db, "SELECT purpose FROM issue_pull_requests", &[]).unwrap()[0]["purpose"],
+            "unspecified"
+        );
     }
 
     #[test]

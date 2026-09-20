@@ -498,10 +498,12 @@ pub(super) fn execute(
         }
         Operation::PullRequests { number }
         | Operation::AddPullRequest { number, .. }
+        | Operation::ClassifyPullRequest { number, .. }
         | Operation::RemovePullRequest { number, .. } => {
             get_issue(db, &p.id, *number, true)?;
             let mut changed = 0;
             if let Operation::AddPullRequest { url, .. }
+            | Operation::ClassifyPullRequest { url, .. }
             | Operation::RemovePullRequest { url, .. } = op
             {
                 let after = url
@@ -516,26 +518,27 @@ pub(super) fn execute(
                     return Err(Error::invalid("Invalid PR URL"));
                 }
                 let actor = actor.unwrap();
-                changed = if matches!(op, Operation::AddPullRequest { .. }) {
-                    db.execute("INSERT INTO issue_pull_requests VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",params![p.id,number,url,actor.id,now()])?
-                } else {
-                    db.execute("DELETE FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND url=?3",params![p.id,number,url])?
+                let (action, data) = match op {
+                    Operation::AddPullRequest { purpose, .. } => {
+                        changed = db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",params![p.id,number,url,actor.id,now(),purpose.as_str()])?;
+                        ("pr_attached", json!({"url":url,"purpose":purpose}))
+                    }
+                    Operation::ClassifyPullRequest { purpose, .. } => {
+                        let previous: String = db.query_row("SELECT purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND url=?3",params![p.id,number,url],|r|r.get(0)).optional()?.ok_or_else(|| Error::new("not_found", "PR is not attached to this issue"))?;
+                        changed = db.execute("UPDATE issue_pull_requests SET purpose=?4 WHERE project_id=?1 AND issue_number=?2 AND url=?3 AND purpose<>?4",params![p.id,number,url,purpose.as_str()])?;
+                        (
+                            "pr_classified",
+                            json!({"url":url,"purpose":purpose,"previous_purpose":previous}),
+                        )
+                    }
+                    _ => {
+                        changed = db.execute("DELETE FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND url=?3",params![p.id,number,url])?;
+                        ("pr_removed", json!({"url":url}))
+                    }
                 };
                 if changed > 0 {
                     db.execute("UPDATE issues SET version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2",params![p.id,number,now()])?;
-                    event(
-                        db,
-                        &p.id,
-                        *number,
-                        &actor.id,
-                        if matches!(op, Operation::AddPullRequest { .. }) {
-                            "pr_attached"
-                        } else {
-                            "pr_removed"
-                        },
-                        now(),
-                        &json!({"url":url}),
-                    )?;
+                    event(db, &p.id, *number, &actor.id, action, now(), &data)?;
                 }
             }
             Ok(
@@ -546,8 +549,8 @@ pub(super) fn execute(
     }
 }
 pub(super) fn pull_requests(db: &Connection, p: &str, n: i64) -> Result<Vec<Value>> {
-    let mut stmt=db.prepare("SELECT url,added_by,created_at FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
-    Ok(stmt.query_map(params![p,n],|r|Ok(json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
+    Ok(stmt.query_map(params![p,n],|r|Ok(json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"purpose":r.get::<_,String>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 pub(super) fn claim_lock(
     db: &Connection,

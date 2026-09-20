@@ -18,6 +18,26 @@ pub const BODY_LIMIT: usize = 1024 * 1024;
 pub const WIRE_LIMIT: usize = 16 * 1024 * 1024;
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrPurpose {
+    #[default]
+    Unspecified,
+    Fix,
+    Prerequisite,
+    SupportingEvidence,
+}
+impl PrPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Fix => "fix",
+            Self::Prerequisite => "prerequisite",
+            Self::SupportingEvidence => "supporting-evidence",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
     pub code: String,
@@ -162,6 +182,13 @@ pub enum Operation {
     AddPullRequest {
         number: i64,
         url: String,
+        #[serde(default)]
+        purpose: PrPurpose,
+    },
+    ClassifyPullRequest {
+        number: i64,
+        url: String,
+        purpose: PrPurpose,
     },
     RemovePullRequest {
         number: i64,
@@ -369,6 +396,7 @@ impl Operation {
             | Self::Create { .. } => None,
             Self::PullRequests { number }
             | Self::AddPullRequest { number, .. }
+            | Self::ClassifyPullRequest { number, .. }
             | Self::RemovePullRequest { number, .. }
             | Self::Move { number, .. }
             | Self::Transfer { number, .. }
