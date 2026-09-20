@@ -17,7 +17,6 @@
 #artifact-status { margin: 0; color: var(--muted); font-size: 12px; }
 #artifact-status:empty { display: none; }
 #artifact-main[data-mode="library"] #artifact-status { margin-bottom: 14px; }
-#artifact-main[data-mode="reading"] #artifact-status:not(:empty),
 #artifact-main[data-mode="editor"] #artifact-status:not(:empty) { margin-bottom: 16px; }
 #artifact-error { color: var(--danger); padding: 12px 16px; border: 1px solid var(--danger); border-radius: 10px; }
 .artifact-muted { color: var(--muted); font-size: 12px; }
@@ -224,3 +223,9 @@
 
 .artifact-code-editor { min-width: 0; }
 .artifact-code-editor:focus-within { outline: 2px solid var(--accent); outline-offset: 8px; border-radius: 2px; }
+
+#artifact-main[data-mode="reading"] #artifact-status {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%);
+}
+
+.artifact-reading [tabindex="-1"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
