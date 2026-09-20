@@ -1990,6 +1990,9 @@ fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
         "\"command\":\"edit\"",
         "\"command\":\"alias\"",
         "\"command\":\"move\"",
+        "\"command\":\"link\"",
+        "changed_links",
+        "description",
         "clear_label",
         "before",
         "after",
@@ -2323,4 +2326,285 @@ fn batch_many_labels_have_one_revision_and_compact_receipts() {
         ],
         4,
     );
+}
+
+#[test]
+fn batch_links_preview_commit_retry_and_preserve_resources() {
+    let f = Fixture::new();
+    f.issue(
+        "Atlas",
+        &[
+            "create",
+            "--title",
+            "Live issue",
+            "--body",
+            "Untouched body",
+        ],
+    );
+    f.run("Atlas", &["issue", "1", "--id", "issue"]);
+    f.run(
+        "Atlas",
+        &["pr", "https://github.com/org/repo/pull/1", "--id", "pr"],
+    );
+    f.run("Atlas", &["add", "Release", "--id", "release"]);
+    for target in ["issue", "pr"] {
+        f.run(
+            "Atlas",
+            &[
+                "link",
+                "release",
+                target,
+                "--kind",
+                "depends-on",
+                "--why",
+                "Old note",
+            ],
+        );
+    }
+    f.run("Atlas", &["link", "issue", "pr", "--why", "Unrelated"]);
+    let resource = f.issue("Atlas", &["view", "1"]);
+    let before = f.run("Atlas", &["show"]);
+    let version = before["version"].to_string();
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"alias","node":"release","alias":"launch"},
+            {"command":"link","from":"release","to":"issue:1","kind":"depends-on","description":"Issue first"},
+            {"command":"link","from":"release","to":"pr","kind":"depends-on","description":"PR first"}
+        ]),
+    );
+    let preview = f.run(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &file,
+            "--dry-run",
+            "--if-version",
+            &version,
+        ],
+    );
+    assert_eq!(preview["changed_links"].as_array().unwrap().len(), 2);
+    assert_eq!(preview["changed_nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(preview["version"], before["version"].as_i64().unwrap() + 1);
+    for link in preview["changed_links"].as_array().unwrap() {
+        assert_eq!(link["before"]["description"], "Old note");
+        assert!(link["from"].as_str().unwrap().starts_with("n-"));
+    }
+    assert_eq!(f.run("Atlas", &["show"]), before);
+    let args = [
+        "batch",
+        "--file",
+        &file,
+        "--if-version",
+        &version,
+        "--request-id",
+        "notes",
+    ];
+    let saved = f.run("Atlas", &args);
+    assert_eq!(saved["version"], preview["version"]);
+    assert_eq!(f.run("Atlas", &args), saved);
+    let after = f.run("Atlas", &["show"]);
+    assert_eq!(after["nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(after["links"].as_array().unwrap().len(), 3);
+    assert!(
+        after["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["description"] == "Unrelated")
+    );
+    assert_eq!(f.issue("Atlas", &["view", "1"]), resource);
+    assert!(saved.to_string().len() < 4096);
+    let terminal = f.terminal("Atlas", &["batch", "--file", &batch_file(&f, json!([
+        {"command":"link","from":"launch","to":"issue","kind":"depends-on","description":"Changed"}
+    ])), "--dry-run"]);
+    assert!(terminal.contains("Changed"));
+}
+
+#[test]
+fn batch_links_failures_and_net_noops_leave_graph_unchanged() {
+    let f = Fixture::new();
+    for name in ["root", "child", "other"] {
+        f.run("Atlas", &["add", name, "--id", name]);
+    }
+    for target in ["child", "other"] {
+        f.run(
+            "Atlas",
+            &[
+                "link",
+                "root",
+                target,
+                "--kind",
+                "depends-on",
+                "--why",
+                "Original",
+            ],
+        );
+    }
+    let before = f.run("Atlas", &["show"]);
+    let first = json!({"command":"link","from":"root","to":"child","kind":"depends-on","description":"Changed"});
+    for (second, code) in [
+        (
+            json!({"command":"link","from":"root","to":"missing","kind":"related"}),
+            3,
+        ),
+        (
+            json!({"command":"link","from":"root","to":"root","kind":"related"}),
+            2,
+        ),
+        (
+            json!({"command":"link","from":"root","to":"other","kind":"pull-request"}),
+            2,
+        ),
+        (
+            json!({"command":"link","from":"root","to":"other","kind":"related","description":"x".repeat(16385)}),
+            2,
+        ),
+        (
+            json!({"command":"link","from":"root","to":"other","kind":"related","why":"typo"}),
+            2,
+        ),
+    ] {
+        let file = batch_file(&f, json!([first, second]));
+        f.fail("Atlas", &["batch", "--file", &file], code);
+        assert_eq!(f.run("Atlas", &["show"]), before);
+    }
+    let file = batch_file(&f, json!([first]));
+    f.fail("Atlas", &["batch", "--file", &file, "--if-version", "0"], 4);
+    assert_eq!(f.run("Atlas", &["show"]), before);
+    let file = batch_file(
+        &f,
+        json!([
+            first,
+            {"command":"link","from":"root","to":"child","kind":"depends-on","description":"Original"}
+        ]),
+    );
+    let noop = f.run("Atlas", &["batch", "--file", &file]);
+    assert_eq!(noop["changed"], false);
+    assert_eq!(noop["changed_links"], json!([]));
+    assert_eq!(noop["version"], before["version"]);
+    assert_eq!(f.run("Atlas", &["show"]), before);
+}
+
+#[test]
+fn batch_links_create_typed_endpoints_and_bump_each_affected_map_once() {
+    let f = Fixture::new();
+    f.run("Atlas", &["add", "Release", "--id", "release"]);
+    f.issue("Other", &["create", "--title", "External issue"]);
+    f.run("Other", &["add", "External topic", "--id", "external"]);
+    let atlas = f.run("Atlas", &["show"]);
+    let other = f.run("Other", &["show"]);
+    let resource = f.issue("Other", &["view", "1"]);
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"link","from":"release","to":"Other::issue:1","kind":"depends-on","description":"先に修正 🧭"},
+            {"command":"link","from":"release","to":"Other::external","kind":"related"},
+            {"command":"link","from":"release","to":"pr:https://github.com/org/repo/pull/2","kind":"depends-on","description":"Review first"}
+        ]),
+    );
+    let preview = f.run(
+        "Atlas",
+        &["batch", "--file", &file, "--dry-run", "--if-version", "1"],
+    );
+    assert_eq!(preview["changed_links"].as_array().unwrap().len(), 3);
+    assert_eq!(preview["changed_nodes"].as_array().unwrap().len(), 2);
+    assert!(
+        preview["changed_links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["before"].is_null())
+    );
+    assert_eq!(f.run("Atlas", &["show"]), atlas);
+    assert_eq!(f.run("Other", &["show"]), other);
+    let args = [
+        "batch",
+        "--file",
+        &file,
+        "--if-version",
+        "1",
+        "--request-id",
+        "new-links",
+    ];
+    let saved = f.run("Atlas", &args);
+    assert_eq!(
+        saved["affected_projects"],
+        json!([
+            {"project":"named:Atlas","version":2}, {"project":"named:Other","version":2}
+        ])
+    );
+    assert_eq!(f.run("Atlas", &args), saved);
+    let after = f.run("Atlas", &["show"]);
+    let external_after = f.run("Other", &["show"]);
+    assert_eq!(after["links"].as_array().unwrap().len(), 3);
+    assert_eq!(f.issue("Other", &["view", "1"]), resource);
+    let noop = f.run("Atlas", &["batch", "--file", &file, "--if-version", "2"]);
+    assert_eq!(noop["changed"], false);
+    assert_eq!(noop["changed_links"], json!([]));
+    assert_eq!(noop["affected_projects"], json!([]));
+    assert_eq!(f.run("Atlas", &["show"]), after);
+    assert_eq!(f.run("Other", &["show"]), external_after);
+    // Even typed nodes created while binding are rolled back on a later failure.
+    let bad = batch_file(
+        &f,
+        json!([
+            {"command":"link","from":"release","to":"Other::pr:https://github.com/org/repo/pull/3","kind":"related"},
+            {"command":"link","from":"release","to":"release","kind":"related"}
+        ]),
+    );
+    f.fail("Atlas", &["batch", "--file", &bad], 2);
+    assert_eq!(f.run("Atlas", &["show"]), after);
+    assert_eq!(f.run("Other", &["show"]), external_after);
+}
+
+#[test]
+fn batch_links_description_clearing_matches_individual_link() {
+    let f = Fixture::new();
+    for name in ["root", "child"] {
+        f.run("Atlas", &["add", name, "--id", name]);
+    }
+    for clear in [json!(null), json!(""), json!(" \n\t ")] {
+        f.run("Atlas", &["link", "root", "child", "--why", "Old note"]);
+        let file = batch_file(
+            &f,
+            json!([
+                {"command":"link","from":"root","to":"child","kind":"related","description":clear}
+            ]),
+        );
+        let saved = f.run("Atlas", &["batch", "--file", &file]);
+        assert_eq!(
+            saved["changed_links"][0]["after"]["description"],
+            Value::Null
+        );
+        assert_eq!(f.run("Atlas", &["link", "root", "child"])["changed"], false);
+    }
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"link","from":"root","to":"child","kind":"related"}
+        ]),
+    );
+    assert_eq!(
+        f.run("Atlas", &["batch", "--file", &file])["changed"],
+        false
+    );
+    let boundary = "🧭".repeat(4096);
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"link","from":"child","to":"root","kind":"related","description":boundary}
+        ]),
+    );
+    assert_eq!(f.run("Atlas", &["batch", "--file", &file])["changed"], true);
+    let before = f.run("Atlas", &["show"]);
+    let bad = batch_file(
+        &f,
+        json!([
+            {"command":"link","from":"child","to":"root","kind":"related","description":format!("{boundary}x")}
+        ]),
+    );
+    f.fail("Atlas", &["batch", "--file", &bad], 2);
+    assert_eq!(f.run("Atlas", &["show"]), before);
 }

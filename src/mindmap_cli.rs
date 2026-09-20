@@ -150,7 +150,7 @@ enum Action {
         #[command(flatten)]
         body: Body,
     },
-    /// Atomically organize labels, aliases and moves from a JSON array.
+    /// Atomically update labels, aliases, moves and directed links from a JSON array.
     #[command(after_help = BATCH_HELP)]
     Batch {
         /// JSON file; '-' reads stdin, up to 1 MiB.
@@ -213,8 +213,9 @@ enum Action {
 }
 
 const BATCH_HELP: &str = r#"JSON input format:
-  An array of objects. Every object requires "command" and "node".
-  "command" is exactly "edit", "alias" or "move" (not "action").
+  An array of objects. Every object requires "command".
+  "command" is exactly "edit", "alias", "move" or "link" (not "action").
+  edit, alias and move require "node".
   "node" is an existing selector: alias, n-ID, PROJECT::alias,
   issue:NUMBER, pr:URL or notice:TASK_ID, in the selected map.
 
@@ -227,6 +228,15 @@ const BATCH_HELP: &str = r#"JSON input format:
          Null or omitted "under" moves to the root.
          Use at most one of "before" or "after", in the target parent.
          Null or omitted sibling anchors append to the parent's end.
+  link:  Required "from", "to" (selectors) and "kind" (string).
+         Adds/updates the directed connection from source to target.
+         "description" is optional text, up to 16 KiB (not "why").
+         Null, omission or blank text clears an existing description.
+         "kind" is nonblank, at most 64 bytes, without control characters;
+         "pull-request" is reserved for automatic issue PR connections.
+         Self-links are rejected. Cross-project endpoints are supported.
+         Missing typed issue/PR/notice references are added as by mm link;
+         missing aliases or node IDs are rejected.
 
   Unknown fields and commands are rejected; body edits are unsupported.
   Limits: 1 MiB of UTF-8 JSON and 10,000 entries.
@@ -240,7 +250,11 @@ Example edits.json (all selectors must already exist):
   {"command":"move","node":"followup","under":"existing-topic",
    "before":"existing-sibling"},
   {"command":"move","node":"archived","after":"existing-topic"},
-  {"command":"move","node":"loose"}
+  {"command":"move","node":"loose"},
+  {"command":"link","from":"followup","to":"issue:1",
+   "kind":"depends-on","description":"Replies need this fix"},
+  {"command":"link","from":"existing-topic","to":"issue:2",
+   "kind":"related","description":null}
 ]
 
 Preview and apply (replace 42 with the version from hey-boss mm show --json):
@@ -251,11 +265,15 @@ Preview and apply (replace 42 with the version from hey-boss mm show --json):
 
 Selectors bind before any edits. Later entries must use the original alias
 or stable node ID, not a new alias introduced earlier in the array.
-Entries then execute in order. Invalid selectors, alias/label collisions,
-cycles or a stale version roll back the whole transaction.
+Entries then execute in order. Invalid selectors, descriptions, kinds,
+alias/label collisions, cycles or a stale version roll back the whole transaction.
 Dry runs save nothing and cannot use --request-id. A changed batch advances
 the map version once; empty/net no-op batches preserve it. Retry an identical
-commit with the same --request-id to receive its original result."#;
+commit with the same --request-id to receive its original result.
+JSON includes changed_nodes, changed_links (stable from/to/kind and before/after
+description metadata; null before means a new link), base_version, version and
+affected_projects. Each affected map advances once; a dry run reports proposed
+versions. Underlying resources and unrelated links are preserved."#;
 
 impl Options {
     fn operation(&self) -> Result<Operation> {
@@ -587,6 +605,16 @@ pub fn run(options: &Options) -> Result<()> {
                 node["id"].as_str().unwrap(),
                 node["before"],
                 node["after"]
+            );
+        }
+        for link in graph["changed_links"].as_array().unwrap() {
+            println!(
+                "{} → {} ({}): {} → {}",
+                link["from"].as_str().unwrap(),
+                link["to"].as_str().unwrap(),
+                link["kind"].as_str().unwrap(),
+                link["before"],
+                link["after"]
             );
         }
         return Ok(());

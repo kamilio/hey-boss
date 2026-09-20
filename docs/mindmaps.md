@@ -207,19 +207,22 @@ body edits remain unavailable for live issue references.
 ### Atomic organization batches
 
 `mm batch --file edits.json` applies a JSON array of label edits, alias changes,
-and moves as one transaction. `--file -` reads stdin. Preview it with `--dry-run`;
+moves and directed connection updates as one transaction. `--file -` reads stdin. Preview it with `--dry-run`;
 the preview executes the same validation and returns the proposed result without
 saving anything. Guard the preview and commit with the same map `--if-version`.
 `mm batch --help` documents the complete input format and copy-ready examples.
-Every object requires `command` (exactly `edit`, `alias` or `move`, not `action`)
-and `node` (an existing selector in the selected map).
+Every object requires `command` (exactly `edit`, `alias`, `move` or `link`, not
+`action`). Edit, alias and move require `node` (an existing selector in the selected map).
+Link requires `from`, `to` and `kind`.
 
 ```json
 [
   {"command":"edit","node":"issue:12","title":"Keep replies safe"},
   {"command":"edit","node":"issue:13","clear_label":true},
   {"command":"alias","node":"followup","alias":"reply-followup"},
-  {"command":"move","node":"followup","under":"issue:12"}
+  {"command":"move","node":"followup","under":"issue:12"},
+  {"command":"link","from":"followup","to":"issue:12","kind":"depends-on","description":"Replies need this fix"},
+  {"command":"link","from":"followup","to":"issue:13","kind":"related","description":"Keep the followup aligned"}
 ]
 ```
 
@@ -240,8 +243,20 @@ which cannot be combined; `clear_label` defaults to false. Edits accept titles a
 `clear_label`, preserving live issue content; bodies and resource mutations are
 not supported. Unknown fields and commands are rejected.
 
+Link entries follow `mm link` semantics: `from` and `to` accept aliases, stable node
+IDs, typed resource selectors and `PROJECT::selector` cross-project endpoints.
+Missing typed issue/PR/notice references are added to the map; missing aliases or
+node IDs fail. These new nodes cannot be used by organization entries in the same
+batch. `kind` is required, nonblank, at most 64 bytes and without control characters;
+`pull-request` is reserved for automatic issue→PR links. Self-links fail. The
+optional `description` is text up to 16 KiB; null, omission or whitespace-only text
+clears a saved explanation. Use `description`, not the CLI flag alias `why`.
+Repeated entries for the same directed source/target/kind execute in order and
+produce one net change in the receipt. Other connection kinds and reverse links
+remain independent.
+
 Invalid selectors, alias collisions, duplicate requested labels, invalid nesting,
-cycles, or a stale version reject the whole transaction. Requested titles must be
+cycles, invalid connection descriptions/kinds, or a stale version reject the whole transaction. Requested titles must be
 unique among saved map labels/titles; existing duplicate ordinary titles do not
 block unrelated moves or alias changes. Alias changes must be valid at each step;
 use a temporary alias to swap names. The batch supports 10,000 entries and 1 MiB
@@ -250,7 +265,12 @@ state remain unchanged.
 
 JSON results include `changed_nodes` with each changed node's stable `id` and compact
 `before`/`after` organization metadata, including siblings affected by reordering.
+`changed_links` contains each changed connection's stable `from`, `to`, `kind` and
+`before`/`after` objects containing `description`; `before:null` means a new connection.
+New typed reference nodes appear in `changed_nodes` with `before:null`.
 `base_version` is the guarded revision; `version` is the resulting revision (the
-proposed revision for a dry run). A batch advances the map version once, and empty
+proposed revision for a dry run). A batch advances each affected map version once;
+`affected_projects` reports those revisions for cross-project connections. The
+single guard applies to the selected map, just as with `mm link`. Empty
 or net no-op batches leave it unchanged. Identical request-ID retries return the
 original receipt even after aliases change. Dry runs cannot use `--request-id`.
