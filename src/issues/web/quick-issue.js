@@ -116,7 +116,8 @@ const HeyBossQuickIssue = (() => {
         const id = document.createElement("span"); id.textContent = project.id;
         text.append(name,id); option.append(icon,text);
         if (project.id === current?.id) { const badge = document.createElement("span"); badge.className = "quick-issue-project-current"; badge.textContent = "Current"; option.append(badge); }
-        option.addEventListener("pointerdown",event => event.preventDefault());
+        // Keep input focus on mouse selection without suppressing touch clicks.
+        option.addEventListener("mousedown",event => event.preventDefault());
         option.addEventListener("click",() => { active = i; choose(); });
         list.append(option);
       });
