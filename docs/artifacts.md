@@ -7,12 +7,19 @@ project. One document can be attached to multiple issues and map nodes; its
 stable URL and references survive renames, edits and archiving. Unlinking removes
 only the reference. Removed map topics remain identified in document backlinks.
 
+The library keeps search and recent documents together. Open a document for a
+focused reading view; **Edit** opens its draft, and the **More actions** menu
+contains Export Markdown and Archive/Restore. **Comments** shows or hides the
+conversation beside the document, or below it on smaller screens. Reply composers
+open only when needed. Unused reference and discussion sections stay out of view.
+
 Select text in the reading surface before commenting to quote that selection, or
 comment on the whole document. Threads support replies, resolving and reopening.
 Resolved threads collapse subtly. Edits preserve every discussion; unmatched
 selection quotes appear as outdated. Quotes retain nearby text to distinguish
 repeated passages.
 
+The editor switches between **Preview** and **Write** without losing draft text.
 The Markdown editor saves drafts in this browser and reports draft, saving,
 saved and error states. Save publishes the draft. Revision checks reject stale
 edits. Load the latest revision for comparison, merge it into your draft, then

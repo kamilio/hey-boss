@@ -4,7 +4,10 @@ async page => {
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   page.on('pageerror',e=>errors.push(e.message));
   await page.reload();
-  if(!await page.locator('#artifact-editor').count())await page.getByRole('button',{name:'New artifact',exact:true}).click();
+  if(!await page.locator('#artifact-editor').count()) {
+    if(!await page.locator('#artifact-library').isVisible())await page.getByRole('link',{name:'All artifacts',exact:true}).click();
+    await page.getByRole('button',{name:'New artifact',exact:true}).click();
+  }
   await page.getByRole('textbox',{name:'Title',exact:true}).fill('Browser plan');
   await page.getByRole('textbox',{name:'Markdown',exact:true}).fill('# Plan\n\n🐈'+'A'.repeat(79)+'**selected** phrase.\n\n- [x] Verified');
   await page.reload();
@@ -25,15 +28,18 @@ async page => {
   await page.getByText('Anchored discussion',{exact:true}).waitFor();
   check(await page.locator('.artifact-thread blockquote').innerText()==='selected','Saved quote survives reading refresh');
   check(await page.getByText('Outdated selection · discussion preserved',{exact:true}).count()===0,'Formatted selection matches saved source');
+  await page.locator('.artifact-reply summary').click();
   await page.getByRole('textbox',{name:'Reply to comment'}).fill('Follow up');
   await page.getByRole('button',{name:'Reply',exact:true}).click();
   await page.getByText('Follow up',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Resolve',exact:true}).click();
   await page.locator('details.artifact-thread.resolved').waitFor();
   check(!await page.locator('details.artifact-thread.resolved').getAttribute('open'),'Resolved discussion collapses');
-  await page.reload();await page.locator('details.artifact-thread.resolved').waitFor();
+  await page.reload();await page.locator('#artifact-reading').waitFor();
+  if(!await page.locator('#artifact-comments').isVisible())await page.locator('#artifact-comments-toggle').click();
+  await page.locator('details.artifact-thread.resolved').waitFor();
   check(await page.locator('details.artifact-thread.resolved .reply').count()===1,'Resolved thread and reply persist after reload');
-  await page.getByRole('button',{name:'Edit / rename',exact:true}).click();
+  await page.getByRole('button',{name:'Edit',exact:true}).click();
   await page.getByRole('textbox',{name:'Markdown',exact:true}).fill('My merged draft');
   const boot=await(await page.request.get(origin+'/api/bootstrap')).json();
   const action=async operation=>{const r=await page.request.post(origin+'/api/action',{headers:{'X-Hey-Boss-CSRF':boot.csrf},data:{project,operation,request_id:await page.evaluate(()=>crypto.randomUUID())}});if(!r.ok())throw Error(await r.text());return r.json();};
@@ -48,7 +54,7 @@ async page => {
   await page.getByRole('button',{name:'Save',exact:true}).click();
   await page.locator('#artifact-reading').waitFor();
   check(page.url()===documentURL,'Rename preserves URL');
-  await page.locator('details.artifact-thread summary').click();
+  await page.locator('details.artifact-thread > summary').click();
   check(await page.getByText('Outdated selection · discussion preserved',{exact:true}).isVisible(),'Removed selection becomes outdated without losing discussion');
   const issue=await action({action:'create',title:'Referring issue',body:'Issue description',labels:[]});
   const number=issue.issue.number;
@@ -59,9 +65,12 @@ async page => {
   await page.locator('#issue-artifacts a').filter({hasText:'Renamed browser plan'}).click();
   await page.getByRole('link',{name:`Referring issue · #${number}`,exact:true}).waitFor();
   check(true,'Document backlink opens referring issue');
+  await page.locator('.artifact-menu summary').click();
   await page.getByRole('button',{name:'Archive',exact:true}).click();
+  await page.locator('.artifact-menu summary').click();
   await page.getByRole('button',{name:'Restore',exact:true}).waitFor();
   await page.getByRole('button',{name:'Restore',exact:true}).click();
+  await page.locator('.artifact-menu summary').click();
   await page.getByRole('button',{name:'Archive',exact:true}).waitFor();
   check(true,'Archive and restore preserve document');
   await page.setViewportSize({width:390,height:844});
