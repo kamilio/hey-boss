@@ -196,6 +196,9 @@
         if (card) this.select(card.dataset.mapNode);
       });
       element.addEventListener("focusin", (e) => {
+        // Pointer users have already reached the card, even if it is clipped.
+        // Only keyboard focus needs to reveal an off-screen control.
+        if (!e.target.matches(":focus-visible")) return;
         const id = e.target.dataset.mapNode || e.target.dataset.mapToggle || e.target.dataset.mapResource,
           item = this.data?.positions.get(id);
         if (!item) return;
