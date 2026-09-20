@@ -522,3 +522,40 @@ browser sessions were preserved. The verified source and both installs remained
 Rust companion test was ignored, with explicit Linux worker/goal smoke coverage
 recorded separately.
 
+## Draft readiness · issue 40 · 2026-09-20
+
+Drafts now have a distinct list badge and status, a visible explanation of agent
+pickup, and an explicit Mark ready action. Creation and editing explain the
+saved draft state and name the save action accordingly. Properties explain
+unavailable transitions and show linked plan files and their owning host.
+Project settings explain how disabling drafts preserves existing drafts.
+
+Verification used a synthetic Draft QA database and an empty Inbox socket:
+
+- Chrome and WebKit each passed 53 interaction and layout checks. These cover
+  creation, restoration, readiness, save failure/retry, typing during a save,
+  keyboard focus, disabled settings, assignments, closed issues, and long save
+  labels at 320 pixels.
+- Both browsers passed 16 axe audits each with zero violations, covering lists,
+  draft details, editors, and planning settings in light/dark appearance at
+  1440 and 320 pixels.
+- Screenshots were reviewed at widths of 1440, 768, 390, and 320 pixels. Visual
+  testing found and fixed an overflowing editor footer. Editor actions now
+  remain visible while the form scrolls; narrow issue properties stack.
+- Ten additional checks verified a long linked-plan path in both appearances,
+  an actual missing-file sync error preserving the draft, and final file title
+  and body synchronization before readiness, including keyboard focus when
+  drafting is disabled.
+- All 71 issue/web integration tests passed, along with Rustfmt, strict CLI
+  Clippy, JavaScript syntax checks, and whitespace checks for the changed files.
+
+A headed Chrome startup initially timed out loading a static script on the busy
+shared Mac. A fresh headless Chrome completed all checks. The first linked-plan
+fixture omitted its parent directory and therefore produced a lock error; the
+corrected missing-file fixture and successful sync both passed. These attempts
+are not counted as passing checks. The unrelated Worker TUI macOS CI smoke test
+still timed out waiting for Build dashboard on the initial push.
+
+Repeatable suites: tools/issues_draft_browser_checks.js and
+ tools/issues_draft_accessibility.js. Synthetic screenshots, reports, browsers,
+servers, and temporary files are removed after review as requested.
