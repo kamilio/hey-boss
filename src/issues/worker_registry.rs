@@ -78,10 +78,16 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         json!({"ok":true,"project":p,"prompt":prompt,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
+// Discover the project's agents first instead of rescanning its issues for
+// every agent in the store. Both legacy and independent workers use this.
+pub(super) const PROJECT_DIRECTORIES: &str = "SELECT json_extract(metadata,'$.cwd') FROM agents
+ WHERE id IN(SELECT created_by FROM issues WHERE project_id=?1
+ UNION SELECT assignee FROM issues WHERE project_id=?1 AND assignee IS NOT NULL)
+ ORDER BY last_seen DESC LIMIT ?2";
 fn directory(db: &Connection, p: &Project) -> Result<String> {
-    let mut stmt=db.prepare("SELECT json_extract(metadata,'$.cwd') FROM agents WHERE EXISTS(SELECT 1 FROM issues i WHERE i.project_id=?1 AND (i.created_by=agents.id OR i.assignee=agents.id)) ORDER BY last_seen DESC LIMIT 50")?;
+    let mut stmt = db.prepare(PROJECT_DIRECTORIES)?;
     let paths = stmt
-        .query_map([&p.id], |r| r.get::<_, Option<String>>(0))?
+        .query_map(params![p.id, 50], |r| r.get::<_, Option<String>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for path in paths.into_iter().flatten() {
         if Path::new(&path).is_dir()
@@ -713,6 +719,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn directory_discovery_scales_with_project_associations() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE agents(id TEXT PRIMARY KEY,metadata TEXT,last_seen INTEGER);
+            CREATE TABLE issues(project_id TEXT,created_by TEXT,assignee TEXT);
+            CREATE INDEX project_issues ON issues(project_id);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+            INSERT INTO agents SELECT 'unrelated-'||x,'{}',x FROM n;
+            INSERT INTO agents VALUES('creator','{\"cwd\":\"/creator\"}',1),('assignee','{\"cwd\":\"/assignee\"}',2),('missing-cwd','{}',3);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100)
+            INSERT INTO issues SELECT 'project','creator',CASE WHEN x=1 THEN 'assignee' WHEN x=2 THEN 'missing-cwd' ELSE NULL END FROM n;
+            INSERT INTO issues VALUES('other','unrelated-1000',NULL);").unwrap();
+        let mut stmt = db.prepare(PROJECT_DIRECTORIES).unwrap();
+        let paths = stmt
+            .query_map(params!["project", 50], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            paths,
+            vec![None, Some("/assignee".into()), Some("/creator".into())]
+        );
+        // Count VM work rather than wall time: unrelated agents must not each
+        // rescan the project's issues, regardless of machine speed.
+        let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+        assert!(steps < 10_000, "directory discovery used {steps} VM steps");
+    }
+
     #[test]
     fn idle_and_invalid_checkout_polls_do_not_wait_for_a_writer() {
         let root = std::env::temp_dir().join(format!("hb-idle-worker-{}", random_id().unwrap()));
