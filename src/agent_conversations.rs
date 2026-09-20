@@ -80,6 +80,8 @@ fn runs_for_project(runs: &[Value], projects: &HashSet<String>) -> Vec<Value> {
                 "project_name",
                 "number",
                 "title",
+                "session_id",
+                "actor_id",
                 "state",
                 "started_at",
                 "finished_at",
@@ -781,5 +783,15 @@ mod tests {
             "large private event"
         );
         assert!(result["conflicts"][0].get("saved_change").is_none());
+    }
+    #[test]
+    fn compact_overview_retains_assignment_identity() {
+        let runs = runs_for_project(
+            &[json!({"id":"run","project_id":"Atlas","actor_id":"worker:run","session_id":"session","expanded_prompt":"private"})],
+            &HashSet::from(["Atlas".into()]),
+        );
+        assert_eq!(runs[0]["actor_id"], "worker:run");
+        assert_eq!(runs[0]["session_id"], "session");
+        assert!(runs[0].get("expanded_prompt").is_none());
     }
 }

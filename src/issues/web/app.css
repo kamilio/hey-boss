@@ -1981,7 +1981,8 @@ dialog::backdrop {
 }
 
 .list-label-filter,
-.list-assignee-filter {
+.list-assignee-filter,
+.list-agent-trace {
   position: relative;
   z-index: 1;
   color: inherit;
@@ -1999,6 +2000,23 @@ dialog::backdrop {
 .list-assignee-filter:hover {
   text-decoration: underline;
 }
+.list-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.list-agent-trace {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  color: var(--muted);
+}
+.list-agent-trace svg { width: 14px; height: 14px; }
+.list-agent-trace:hover { color: var(--text); background: var(--hover); }
+.list-agent-trace:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .list-assignee-filter > span:last-child {
   max-width: 120px;
   overflow: hidden;
@@ -2006,6 +2024,7 @@ dialog::backdrop {
   white-space: nowrap;
 }
 @media (max-width: 600px) {
+  .list-agent-trace { width: 44px; height: 44px; }
   .list-assignee-filter > span:last-child {
     display: none;
   }

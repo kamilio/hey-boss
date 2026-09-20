@@ -94,7 +94,7 @@ pub(super) const PROJECT_DIRECTORIES: &str = "SELECT json_extract(metadata,'$.cw
  ORDER BY last_seen DESC LIMIT ?2";
 // Resolve the bounded set of IDs first. An outer worker_id/OR filter scans all
 // attempts even when the history subquery is indexed.
-const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at
+const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at,r.actor_id
  FROM worker_runs r JOIN projects p ON p.id=r.project_id
  WHERE r.id IN(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL
  UNION ALL SELECT id FROM(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20))
@@ -292,7 +292,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
         .iter()
         .any(|w| w["id"].as_str() == selected.as_deref() && w["upgrading"] == true);
     let mut stmt = db.prepare(STATUS_RUNS)?;
-    let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for run in &mut runs {
         if let Some(s) = run["goal"].as_str() {
             run["goal"] = serde_json::from_str(s)?;
@@ -934,6 +934,7 @@ mod tests {
             assert_eq!(status["config"]["enabled"], true);
             assert_eq!(status["upgrading"], true);
             assert_eq!(status["runs"][0]["session_id"], "saved-session");
+            assert_eq!(status["runs"][0]["actor_id"], "agent");
             assert!(reserve(&mut store, "unit", Some(&id)).unwrap().is_none());
             // Exercise the reservation path with a newly written legacy marker,
             // before any status/open path has had a chance to migrate it.
