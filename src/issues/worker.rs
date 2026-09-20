@@ -788,7 +788,7 @@ impl Codex {
         {
             return Err(Error::new(
                 "blocked",
-                "Codex requested approval for an unowned session; no decision was sent",
+                "Codex needs input or approval: request came from an unowned session; no decision was sent",
             ));
         }
         let preview = self
@@ -813,7 +813,7 @@ impl Codex {
                 Err(Error::new(
                     "blocked",
                     format!(
-                        "Codex approval needs attention: {error}. Resume the saved session or retry after connecting Hey Boss."
+                        "Codex needs input or approval: {error}. Resume the saved session or retry after connecting Hey Boss."
                     ),
                 ))
             }
@@ -823,7 +823,7 @@ impl Codex {
         for (response, cancelled) in self.approvals.poll().map_err(|e| {
             Error::new(
                 "blocked",
-                format!("Codex approval bridge unavailable: {e}. Review the saved session."),
+                format!("Codex needs input or approval: Inbox bridge unavailable: {e}. Review the saved session."),
             )
         })? {
             Self::check(store, job, stop)?;
@@ -831,7 +831,7 @@ impl Codex {
             if cancelled {
                 return Err(Error::new(
                     "blocked",
-                    "Codex approval cancelled or answered without a supported decision. Explicit retry is required.",
+                    "Codex needs input or approval: request cancelled or answered without a supported decision. Explicit retry is required.",
                 ));
             }
             store.worker_event(
