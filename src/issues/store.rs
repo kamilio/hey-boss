@@ -24,6 +24,8 @@ mod workers;
 
 #[path = "artifacts.rs"]
 mod artifacts;
+#[path = "batch.rs"]
+mod batch;
 #[path = "transfer.rs"]
 mod transfer;
 
@@ -244,6 +246,14 @@ fn validate(r: &Request) -> Result<()> {
         return Err(Error::invalid("Issue number must be positive"));
     }
     match &r.operation {
+        Operation::Batch { edits, dry_run } => {
+            batch::validate(edits)?;
+            if !*dry_run && r.request_id.is_none() {
+                return Err(Error::invalid(
+                    "issue batch requires --request-id unless --dry-run",
+                ));
+            }
+        }
         Operation::ResolveComment { comment_id, .. } if *comment_id <= 0 => {
             return Err(Error::invalid("Comment ID must be positive"));
         }
@@ -695,6 +705,9 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::Batch { edits, dry_run } => {
+                batch::execute(&tx, &project, actor, edits, *dry_run, now)?
+            }
             Operation::Artifact { operation } => artifacts::execute(
                 &tx,
                 &project,
@@ -1026,7 +1039,10 @@ impl Store {
                 }
             }
         }
-        if !matches!(r.operation, Operation::Artifact { .. }) {
+        if !matches!(
+            r.operation,
+            Operation::Artifact { .. } | Operation::Batch { .. }
+        ) {
             subtasks::enrich(&tx, &response_project.id, &mut result)?;
         }
         if matches!(r.operation, Operation::Claim { .. }) {
@@ -1037,7 +1053,11 @@ impl Store {
                 actor.unwrap()
             )?);
         }
-        if (r.operation.number().is_some() || matches!(r.operation, Operation::Create { .. }))
+        if (r.operation.number().is_some()
+            || matches!(
+                r.operation,
+                Operation::Create { .. } | Operation::Batch { .. }
+            ))
             && result["changed"] == true
         {
             tx.execute(
@@ -1053,7 +1073,7 @@ impl Store {
             &r.operation,
             Operation::Mindmap {
                 operation: crate::mindmap::Operation::Batch { dry_run: true, .. }
-            }
+            } | Operation::Batch { dry_run: true, .. }
         ) {
             tx.rollback()?;
         } else {

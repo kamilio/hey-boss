@@ -108,6 +108,18 @@ impl Body {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Atomically update guarded labels and ownership; the entire array is one group.
+    #[command(
+        after_help = "JSON array (up to 100 issues / 1 MiB):\n  [{\"number\":1,\"if_version\":3,\"expected_assignee\":\"codex:session\",\"add_labels\":[\"rework needed\"],\"remove_labels\":[\"PR ready\"],\"assignment\":\"unassign\"}]\nexpected_assignee is required; use null for unassigned. assignment: keep (default), unassign, boss.\nUse --dry-run without a request ID to preview. Applying requires --request-id.\nGuard rejection returns applied:false and per-issue rejected/blocked results; no issue changes.\nThe caller assesses readiness; this command never closes issues or controls workers."
+    )]
+    Batch {
+        /// JSON array file; '-' reads stdin.
+        #[arg(long)]
+        file: PathBuf,
+        /// Preview only; no changes, history or retry record are saved.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Upgrade preflight; use the destination installation's state directory.
     #[command(hide = true)]
     Migrate {
@@ -448,6 +460,18 @@ impl Options {
     }
     fn operation(&self) -> Result<Operation> {
         Ok(match &self.action {
+            Action::Batch { file, dry_run } => {
+                let raw = Body {
+                    body: None,
+                    file: Some(file.clone()),
+                }
+                .read()?
+                .unwrap();
+                Operation::Batch {
+                    edits: serde_json::from_str(&raw)?,
+                    dry_run: *dry_run,
+                }
+            }
             Action::Subtask { command } => match command {
                 SubtaskAction::List { number, all } => Operation::Subtasks {
                     number: *number,
@@ -936,6 +960,11 @@ pub fn run(options: &Options) -> Result<()> {
     } else {
         print_text(&value);
     }
+    if !rpc && value["accepted"] == false && value.get("results").is_some() {
+        // Preserve the compact group result instead of replacing it with the
+        // ordinary single-error envelope. RPC carries this result successfully.
+        std::process::exit(4);
+    }
     Ok(())
 }
 
@@ -968,6 +997,39 @@ fn print_text(value: &Value) {
     let project = &value["project"];
     if value["scope"] != "global" {
         println!("{} ({})", line(&project["name"]), line(&project["id"]));
+    }
+    if let Some(results) = value["results"].as_array() {
+        println!(
+            "Batch: {}",
+            if value["accepted"] != true {
+                "rejected; no issue changes"
+            } else if value["dry_run"] == true {
+                "preview; nothing saved"
+            } else {
+                "applied"
+            }
+        );
+        for result in results {
+            println!(
+                "#{} {}{}",
+                result["number"],
+                line(&result["status"]),
+                result["error"]["message"]
+                    .as_str()
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default()
+            );
+            if let Some(after) = result.get("after") {
+                println!(
+                    "  v{} → v{}; assignee: {}; labels: {}",
+                    result["before"]["version"],
+                    after["version"],
+                    after["assignee"].as_str().unwrap_or("unassigned"),
+                    after["labels"]
+                );
+            }
+        }
+        return;
     }
     if value.get("workers").is_some() {
         issues::worker::print_status(value, false);

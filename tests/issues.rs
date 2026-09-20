@@ -33,6 +33,7 @@ impl Fixture {
             .env("HEY_BOSS_ISSUE_DB", &self.db)
             .env("GIT_CEILING_DIRECTORIES", &self.root)
             .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .env_remove("HEY_BOSS_AGENT_ID")
             .env_remove("CODEX_THREAD_ID")
             .args(["issue", "--json", "--agent", agent])
@@ -93,6 +94,308 @@ fn success(o: Output) -> Value {
         String::from_utf8_lossy(&o.stderr)
     );
     serde_json::from_slice(&o.stdout).unwrap()
+}
+
+fn rejected_batch(o: Output) -> Value {
+    assert_eq!(
+        o.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    serde_json::from_slice(&o.stdout).unwrap()
+}
+
+#[test]
+fn batch_triage_is_atomic_previewed_and_retryable() {
+    let f = Fixture::new();
+    f.create();
+    f.create();
+    for n in ["1", "2"] {
+        f.run(
+            "session-a",
+            &["edit", n, "--label", "PR ready", "--label", "keep"],
+        );
+        f.run("session-a", &["claim", n]);
+    }
+    let edits = br#"[
+      {"number":1,"if_version":3,"expected_assignee":"session-a","add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"unassign"},
+      {"number":2,"if_version":3,"expected_assignee":"session-a","add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"unassign"}
+    ]"#;
+    let preview = success(f.stdin(&["batch", "--file", "-", "--dry-run"], edits));
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["results"][0]["after"]["version"], 4);
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["version"], 3);
+    let applied = success(f.stdin(&["batch", "--file", "-", "--request-id", "triage"], edits));
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["results"][0]["status"], "changed");
+    assert_eq!(applied["results"][0]["after"]["assignee"], Value::Null);
+    let issue = f.run("session-a", &["view", "1"])["issue"].clone();
+    assert_eq!(issue["labels"], json!(["keep", "rework needed"]));
+    assert_eq!(issue["body"], "## Problem\nDrops after sleep.");
+    f.run("session-b", &["claim", "1"]);
+    assert_eq!(
+        success(f.stdin(&["batch", "--file", "-", "--request-id", "triage"], edits)),
+        applied
+    );
+    let rejected =
+        rejected_batch(f.stdin(&["batch", "--file", "-", "--request-id", "stale"], edits));
+    assert_eq!(rejected["applied"], false);
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["assignee"],
+        "session-b"
+    );
+    let ready = br#"[
+      {"number":1,"if_version":5,"expected_assignee":"session-b","add_labels":["PR ready"],"remove_labels":["rework needed"],"assignment":"boss"},
+      {"number":2,"if_version":4,"expected_assignee":null,"add_labels":["PR ready"],"remove_labels":["rework needed"],"assignment":"boss"}
+    ]"#;
+    let handoff = success(f.stdin(&["batch", "--file", "-", "--request-id", "ready"], ready));
+    assert_eq!(handoff["applied"], true);
+    assert_eq!(handoff["results"][0]["after"]["assignee"], "human:boss");
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["state"], "open");
+}
+
+#[test]
+fn batch_rejects_changed_owner_and_blocks_other_entries() {
+    let f = Fixture::new();
+    f.create();
+    f.create();
+    let edits = br#"[
+      {"number":1,"if_version":1,"expected_assignee":null,"add_labels":["PR ready"]},
+      {"number":2,"if_version":1,"expected_assignee":"someone-else","assignment":"unassign"}
+    ]"#;
+    let rejected =
+        rejected_batch(f.stdin(&["batch", "--file", "-", "--request-id", "guard"], edits));
+    assert_eq!(rejected["results"][0]["status"], "blocked");
+    assert_eq!(rejected["results"][1]["status"], "rejected");
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["version"], 1);
+    f.run("session-a", &["claim", "2"]);
+    assert_eq!(
+        rejected_batch(f.stdin(&["batch", "--file", "-", "--request-id", "guard"], edits)),
+        rejected
+    );
+    for invalid in [
+        r#"[{"number":1,"if_version":1,"add_labels":["x"]}]"#,
+        r#"[{"number":1,"if_version":1,"expected_assignee":null,"assignment":"close"}]"#,
+        r#"[{"number":1,"if_version":1,"expected_assignee":null,"add_labels":["x"],"remove_labels":["x"]}]"#,
+    ] {
+        assert_eq!(
+            f.stdin(
+                &["batch", "--file", "-", "--request-id", "invalid"],
+                invalid.as_bytes()
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+    }
+    assert_eq!(
+        f.stdin(&["batch", "--file", "-"], edits).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        f.stdin(
+            &[
+                "batch",
+                "--file",
+                "-",
+                "--dry-run",
+                "--request-id",
+                "preview"
+            ],
+            edits
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn batch_preserves_relationships_noops_and_serializes_competing_groups() {
+    let f = Fixture::new();
+    f.create();
+    f.create();
+    f.run(
+        "session-a",
+        &["pr", "add", "1", "https://github.com/example/repo/pull/56"],
+    );
+    f.run("session-a", &["subtask", "add", "1", "2"]);
+    let before = f.run("session-a", &["view", "1"]);
+    let version = before["issue"]["version"].as_i64().unwrap();
+    let edits = json!([
+        {"number":1,"if_version":version,"expected_assignee":null,"add_labels":["PR ready"],"assignment":"boss"},
+        {"number":2,"if_version":before["subtasks"][0]["version"],"expected_assignee":null,"assignment":"unassign"}
+    ]).to_string();
+    let path = f.root.join("triage.json");
+    fs::write(&path, &edits).unwrap();
+    let path = path.to_str().unwrap();
+    let outcomes = std::thread::scope(|s| {
+        let a = s.spawn(|| {
+            f.cmd(
+                "session-a",
+                &["batch", "--file", path, "--request-id", "race-a"],
+            )
+            .output()
+            .unwrap()
+        });
+        let b = s.spawn(|| {
+            f.cmd(
+                "session-a",
+                &["batch", "--file", path, "--request-id", "race-b"],
+            )
+            .output()
+            .unwrap()
+        });
+        [a.join().unwrap(), b.join().unwrap()]
+    });
+    assert_eq!(outcomes.iter().filter(|o| o.status.success()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| o.status.code() == Some(4))
+            .count(),
+        1
+    );
+    let after = f.run("session-a", &["view", "1"]);
+    assert_eq!(after["issue"]["version"], version + 1);
+    assert_eq!(
+        after["issue"]["pull_requests"],
+        before["issue"]["pull_requests"]
+    );
+    assert_eq!(after["issue"]["subtasks"], before["issue"]["subtasks"]);
+    let mut child_after = after["subtasks"][0].clone();
+    let mut child_before = before["subtasks"][0].clone();
+    assert_eq!(
+        child_after["parent"]["number"],
+        child_before["parent"]["number"]
+    );
+    child_after.as_object_mut().unwrap().remove("parent");
+    child_before.as_object_mut().unwrap().remove("parent");
+    assert_eq!(child_after, child_before);
+    assert_eq!(after["issue"]["body"], before["issue"]["body"]);
+    let events: i64 = f
+        .sql()
+        .query_row(
+            "SELECT count(*) FROM events WHERE action='triaged'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 1);
+    let noop = json!([{"number":1,"if_version":version+1,"expected_assignee":"human:boss","add_labels":["PR ready"],"assignment":"boss"}]).to_string();
+    let result = success(f.stdin(
+        &["batch", "--file", "-", "--request-id", "noop"],
+        noop.as_bytes(),
+    ));
+    assert_eq!(result["results"][0]["status"], "unchanged");
+    assert_eq!(result["changed"], false);
+    assert_eq!(
+        f.stdin(
+            &["batch", "--file", "-", "--request-id", "noop"],
+            edits.as_bytes()
+        )
+        .status
+        .code(),
+        Some(4)
+    );
+}
+
+#[test]
+fn batch_rpc_and_replica_and_reservation_boundaries() {
+    let f = Fixture::new();
+    f.create();
+    let project = f.run("session-a", &["view", "1"])["project"].clone();
+    let actor = f.run("session-a", &["whoami"])["agent"].clone();
+    let request = json!({"version":1,"project":project,"project_override":null,"actor":actor,
+        "operation":{"action":"batch","edits":[{"number":1,"if_version":1,"expected_assignee":null,"assignment":"boss"}]},"request_id":"rpc-batch"});
+    let response = success(f.stdin(&["rpc"], request.to_string().as_bytes()));
+    assert_eq!(response["applied"], true);
+    assert_eq!(
+        success(f.stdin(&["rpc"], request.to_string().as_bytes())),
+        response
+    );
+    let mut stale = request.clone();
+    stale["request_id"] = json!("rpc-stale");
+    assert_eq!(
+        success(f.stdin(&["rpc"], stale.to_string().as_bytes()))["accepted"],
+        false
+    );
+    f.sql()
+        .execute("UPDATE fleet_meta SET role='agent' WHERE id=1", [])
+        .unwrap();
+    stale["request_id"] = json!("replica");
+    assert_eq!(
+        f.stdin(&["rpc"], stale.to_string().as_bytes())
+            .status
+            .code(),
+        Some(2)
+    );
+    f.sql()
+        .execute("UPDATE fleet_meta SET role='standalone' WHERE id=1", [])
+        .unwrap();
+    let input = json!([{"number":1,"if_version":2,"expected_assignee":"human:boss","assignment":"unassign"}]).to_string();
+    // A reservation must not be turned into a handoff by a guarded batch.
+    let project_id = project["id"].as_str().unwrap();
+    f.sql().execute("INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,reservation_expires,job,owner_pid,owner_start,machine) VALUES('reserved',?1,1,'worker-actor','reserved',0,0,9223372036854775807,'{}',123,'test','test-machine')", [project_id]).unwrap();
+    let result = rejected_batch(f.stdin(
+        &["batch", "--file", "-", "--request-id", "reserved"],
+        input.as_bytes(),
+    ));
+    assert!(
+        result["results"][0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reservation")
+    );
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["assignee"],
+        "human:boss"
+    );
+}
+
+#[test]
+fn batch_preview_registers_nothing_and_validates_limits() {
+    let f = Fixture::new();
+    let entry =
+        json!({"number":1,"if_version":1,"expected_assignee":null,"add_labels":["PR ready"]});
+    let result = rejected_batch(f.stdin(
+        &["batch", "--file", "-", "--dry-run"],
+        json!([entry.clone()]).to_string().as_bytes(),
+    ));
+    assert_eq!(result["dry_run"], true);
+    for table in ["projects", "agents", "events", "requests", "fleet_outbox"] {
+        let count: i64 = f
+            .sql()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "Preview wrote {table}");
+    }
+    for invalid in [
+        json!([]),
+        json!([entry.clone(), entry.clone()]),
+        json!(vec![entry; 101]),
+    ] {
+        assert_eq!(
+            f.stdin(
+                &["batch", "--file", "-", "--dry-run"],
+                invalid.to_string().as_bytes()
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+    }
+    assert_eq!(
+        f.stdin(
+            &["batch", "--file", "-", "--dry-run"],
+            &vec![b' '; 1024 * 1024 + 1]
+        )
+        .status
+        .code(),
+        Some(2)
+    );
 }
 
 #[test]
