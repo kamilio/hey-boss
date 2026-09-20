@@ -6,6 +6,7 @@ let projectSettingsVersion = 0,
   projectSettingsFocus = null,
   projectSettingsOriginal = null,
   projectSettingsSaving = false,
+  projectPreviewFailed = false,
   projectPreviewTimer,
   projectPreviewSequence = 0,
   projectSettingsSequence = 0;
@@ -43,6 +44,7 @@ $("#project-settings-trigger").onclick = async () => {
   projectSettingsOriginal = null;
   $("#project-settings-name").textContent = model.project.name;
   $("#project-settings-error").hidden = true;
+  projectPreviewFailed = false;
   $("#project-settings-state").textContent = "Loading…";
   setProjectSettingsDisabled(true);
   $("#project-instructions-preview").textContent = "Loading…";
@@ -111,6 +113,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     updateHeader();
     toast("Settings saved");
   } catch (error) {
+    projectPreviewFailed = false;
     $("#project-settings-error").textContent = error.message;
     $("#project-settings-error").hidden = false;
   } finally {
@@ -149,15 +152,21 @@ function previewProjectInstructions() {
         return;
       $("#project-instructions-preview").textContent = value.prompt;
       $("#project-goal-indicator").hidden = !value.use_goal;
-      $("#project-settings-error").hidden = true;
+      if (projectPreviewFailed) {
+        $("#project-settings-error").hidden = true;
+        projectPreviewFailed = false;
+      }
     } catch (error) {
       if (
         sequence !== projectPreviewSequence ||
         !$("#project-settings-dialog").open
       )
         return;
-      $("#project-settings-error").textContent = error.message;
-      $("#project-settings-error").hidden = false;
+      if ($("#project-settings-error").hidden || projectPreviewFailed) {
+        $("#project-settings-error").textContent = error.message;
+        $("#project-settings-error").hidden = false;
+        projectPreviewFailed = true;
+      }
     } finally {
       if (sequence === projectPreviewSequence)
         $("#project-instructions-preview").setAttribute("aria-busy", "false");
@@ -175,6 +184,8 @@ $("#project-drafts").onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
 
 function setProjectSettingsDisabled(disabled) {
+  $("#project-settings-close").disabled = projectSettingsSaving;
+  $("#project-settings-cancel").disabled = projectSettingsSaving;
   for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt]")) input.disabled = disabled;
 }
 function updateWorkflowBranches() {
