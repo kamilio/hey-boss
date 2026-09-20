@@ -150,8 +150,12 @@ checkouts); remote status/stop/pause also work. Every worker owns its slots and
 filters, without shared project/global caps. `worker status` shows slots, pipeline, runtimes and
 activity. Active agents and recent history are separate; `--history 0` hides
 finished attempts. Open, unassigned unsuccessful issues retry automatically after
-a delay of 30 seconds to five minutes. Approval/input requests require explicit
-retry. Stopping/restarting workers stops owned agents and releases unfinished claims for immediate pickup; killed workers are recovered the same way. Pickup resumes the latest unfinished Codex session on the same machine and checkout, even with a new worker ID, and sends the original prompt template again so the agent claims before continuing. Timeout retries also resume; completed attempts start fresh if reopened, and existing claims block pickup. Resume failures retain the saved session ID for retry. Workers drain active sessions and reload after a CLI replacement.
+a delay of 30 seconds to five minutes. Codex command/network/file/permission
+approvals route to issue-linked Inbox questions, retaining the live session and
+claim. Explicit approval or decline continues that session; command/file approval
+applies once and permissions are limited to the current turn. Cancel/dismiss,
+unsupported input and unavailable Inbox require explicit retry. Stopping a worker
+cancels its pending approval questions. Stopping/restarting workers stops owned agents and releases unfinished claims for immediate pickup; killed workers are recovered the same way. Pickup resumes the latest unfinished Codex session on the same machine and checkout, even with a new worker ID, and sends the original prompt template again so the agent claims before continuing. Timeout retries also resume; completed attempts start fresh if reopened, and existing claims block pickup. Resume failures retain the saved session ID for retry. Workers drain active sessions and reload after a CLI replacement.
 `worker pause ID` drains, `worker stop ID` stops its sessions, and
 `worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app. Use `worker restart ID` locally or `worker --host HOST restart ID` from the supervisor machine; `fleet signal HOST ID restart` also works. These queue durable signals, retain the worker ID/settings, and keep the supervisor and companion running. Acknowledgment requires the replacement to register. Failed restarts retry with backoff; a new stop supersedes unfinished restart intent.
 Pickup reserves an unassigned issue; the default ten-minute manual claim window (`--claim-timeout`) starts with the first model activity. Saved workers retain their configured timeout; start with `--id ID --claim-timeout 600` to update an older two-minute setting. Model startup has a separate fifteen-minute bound;
@@ -198,7 +202,8 @@ disconnected. Ordinary updates are durably queued by the companion and do not de
 completion, pickup, or shutdown. Replay is FIFO with acknowledgments and exponential
 backoff; duplicates after acknowledgment loss are acceptable. Explicit human review
 or approval waits still require a reply.
-Test against an isolated DB. Approval requests block for manual resumption.
+Test against an isolated DB and Inbox socket. Approval decisions must be explicit;
+cancellation is never approval. Unsupported input requests block for manual resumption.
 
 ## Issue priority order
 
