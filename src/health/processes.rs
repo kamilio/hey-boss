@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "linux"))]
 use super::output;
-use super::{Config, Item, Observation, now, text};
+use super::{Config, Item, Observation, now, text_within};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -22,6 +22,13 @@ pub struct Process {
 }
 pub type Table = BTreeMap<u32, Process>;
 
+/// Listing every process is the gate for all cleanup. A busy Mac with thousands of
+/// leaked browser processes made the 15-second default fail on every run, so nothing
+/// was ever harvested and the leak kept growing.
+const INVENTORY_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(not(target_os = "linux"))]
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Read-only UI inventory. These rows never authorize signals or cleanup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayProcess {
@@ -35,10 +42,11 @@ pub struct DisplayProcess {
 
 pub fn display_inventory() -> io::Result<Vec<DisplayProcess>> {
     // comm, not args: do not expose command-line credentials in the UI or JSON.
-    let data = text(
+    let data = text_within(
         Command::new("ps")
             .env("LC_ALL", "C")
             .args(["-axo", "pid=,ppid=,uid=,etime=,pcpu=,rss=,comm="]),
+        INVENTORY_TIMEOUT,
     )?;
     let rows = parse_display_inventory(&data, unsafe { libc::geteuid() });
     if rows.is_empty() {
@@ -96,8 +104,14 @@ fn duration(value: &str) -> Option<f64> {
         .map(|s| s + days * 86400.0)
 }
 pub fn inventory() -> io::Result<Table> {
-    let data = text(Command::new("ps").args(["-axo", "pid=,ppid=,uid=,etime=,time=,comm="]))?;
-    let args = text(Command::new("ps").args(["-axo", "pid=,args="]))?;
+    let data = text_within(
+        Command::new("ps").args(["-axo", "pid=,ppid=,uid=,etime=,time=,comm="]),
+        INVENTORY_TIMEOUT,
+    )?;
+    let args = text_within(
+        Command::new("ps").args(["-axo", "pid=,args="]),
+        INVENTORY_TIMEOUT,
+    )?;
     let arguments: BTreeMap<u32, String> = args
         .lines()
         .filter_map(|s| {
@@ -244,6 +258,23 @@ fn browser(p: &Process) -> bool {
     )
 }
 
+/// Test fixtures must be nearly frozen; browsers and workers may tick idle timers.
+fn strict_cpu(p: &Process) -> bool {
+    matches!(
+        category(p),
+        Some("Poe test proxy" | "Temporary catbot test server")
+    )
+}
+
+/// The final check allows the same 2% CPU budget as the quiet observations. An idle
+/// headless browser burns a few hundred milliseconds a minute on timers; with a flat
+/// 0.1-second limit every browser failed the final check and was preserved forever.
+fn quiet_since(old: &Process, fresh: &Process, strict: bool) -> bool {
+    let elapsed = fresh.age_seconds.saturating_sub(old.age_seconds) as f64;
+    let budget = if strict { 0.1 } else { elapsed * 0.02 + 0.1 };
+    fresh.cpu_seconds - old.cpu_seconds <= budget
+}
+
 fn minimum_age(p: &Process, config: &Config) -> u64 {
     if browser(p) {
         config.browser_min_age_seconds
@@ -338,7 +369,7 @@ fn activity_fingerprint(ids: &BTreeSet<u32>) -> io::Result<Option<String>> {
 fn lsof(args: &[&str]) -> io::Result<String> {
     let o = output(
         Command::new("lsof").args(["-nP"]).args(args),
-        Duration::from_secs(15),
+        CONNECTION_TIMEOUT,
     )?;
     // lsof exits 1 for an empty selection. Any diagnostic is uncertainty, not idle.
     if !o.stderr.is_empty() || !(o.status.success() || o.status.code() == Some(1)) {
@@ -497,9 +528,9 @@ fn terminate(
     {
         return Ok(0);
     }
+    let strict = strict_cpu(root);
     for pid in ids {
-        if fresh[pid].identity != old[pid].identity
-            || fresh[pid].cpu_seconds - old[pid].cpu_seconds > 0.1
+        if fresh[pid].identity != old[pid].identity || !quiet_since(&old[pid], &fresh[pid], strict)
         {
             return Ok(0);
         }
@@ -576,10 +607,7 @@ pub fn harvest(
                 QuietWindow {
                     grace: config.observation_seconds,
                     max_gap: config.interval_seconds.saturating_mul(3),
-                    strict_cpu: matches!(
-                        category(root),
-                        Some("Poe test proxy" | "Temporary catbot test server")
-                    ),
+                    strict_cpu: strict_cpu(root),
                 },
             );
         if idle {
@@ -741,6 +769,28 @@ mod tests {
                 strict_cpu: false
             }
         ));
+    }
+    #[test]
+    fn final_check_allows_idle_timer_cpu_but_not_work() {
+        let old = worker();
+        let mut fresh = old.clone();
+        fresh.age_seconds += 120;
+        fresh.cpu_seconds += 1.5;
+        assert!(quiet_since(&old, &fresh, false));
+        assert!(!quiet_since(&old, &fresh, true));
+        fresh.cpu_seconds = old.cpu_seconds + 4.0;
+        assert!(!quiet_since(&old, &fresh, false));
+        fresh.age_seconds = old.age_seconds;
+        fresh.cpu_seconds = old.cpu_seconds + 0.05;
+        assert!(quiet_since(&old, &fresh, true));
+        let mut browser = worker();
+        browser.executable =
+            "/cache/.wrangler/chrome/mac_arm-1/chrome-mac-arm64/Google Chrome for Testing".into();
+        browser.arguments =
+            "chrome --headless --user-data-dir=/tmp/miniflare-1/browser-rendering/profile-1".into();
+        assert_eq!(category(&browser), Some("Cloudflare test browser"));
+        assert!(!strict_cpu(&browser));
+        assert!(!strict_cpu(&worker()));
     }
     #[test]
     fn reused_identity_cannot_signal_a_live_child() {

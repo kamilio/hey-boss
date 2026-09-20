@@ -339,21 +339,27 @@ fn schedule(store: &Store, enable: bool, interval: u64) -> io::Result<()> {
 <key>ProgramArguments</key><array><string>{}</string><string>health</string><string>run</string></array>
 <key>EnvironmentVariables</key><dict><key>HEY_BOSS_HEALTH_DIR</key><string>{}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
 <key>RunAtLoad</key><true/><key>StartInterval</key><integer>{interval}</integer>
-<key>ProcessType</key><string>Background</string><key>LowPriorityIO</key><true/>
+<key>ProcessType</key><string>Standard</string><key>Nice</key><integer>10</integer>
 <key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string>
 </dict></plist>
 "#,
         escape(&exe.to_string_lossy()),
         escape(&store.directory.to_string_lossy())
     );
-    // Do not kill an in-progress maintenance cycle to reconfigure an existing schedule.
-    if Command::new("/bin/launchctl")
+    // Callers hold the maintenance lock, so no cycle is running. Keep a matching
+    // registration; replace a stale one (old priority or binary path) in place.
+    let registered = Command::new("/bin/launchctl")
         .args(["print", &service])
         .output()?
         .status
-        .success()
-    {
-        return Ok(());
+        .success();
+    if registered {
+        if fs::read_to_string(&path).is_ok_and(|current| current == plist) {
+            return Ok(());
+        }
+        let _ = Command::new("/bin/launchctl")
+            .args(["bootout", &service])
+            .output()?;
     }
     fs::write(&path, plist)?;
     let out = Command::new("/bin/launchctl")

@@ -637,7 +637,11 @@ Ignored files such as `.env` or build directories also prevent automatic removal
 Empty, uninitialized submodule directories do not block cleanup; submodule
 contents and symlinked submodule paths remain protected.
 
-Scheduling is opt-in. Settings and the latest bounded runtime state live in
+Scheduling is opt-in. The macOS job runs at standard priority with `nice 10`, not
+launchd's background tier: that tier is throttled whenever builds or tests run, which
+made process and worktree inspection exceed their timeouts on a busy Mac, so the
+leaked browsers were never harvested. Re-running `health enable` refreshes a stale
+registration. Settings and the latest bounded runtime state live in
 `~/.local/share/hey-boss/health` (`HEY_BOSS_HEALTH_DIR` overrides it). There are no
 report files, notification posts, unbounded logs, or telemetry. The state contains
 quiet-observation timestamps needed for safe cleanup, the current scan phase,

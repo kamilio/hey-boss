@@ -545,7 +545,10 @@ fn output_with_limit(
     result
 }
 pub(crate) fn text(command: &mut Command) -> io::Result<String> {
-    let o = output(command, Duration::from_secs(15))?;
+    text_within(command, Duration::from_secs(15))
+}
+pub(crate) fn text_within(command: &mut Command, timeout: Duration) -> io::Result<String> {
+    let o = output(command, timeout)?;
     if !o.status.success() {
         return Err(io::Error::other(
             String::from_utf8_lossy(&o.stderr).trim().to_owned(),
