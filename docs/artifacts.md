@@ -12,12 +12,16 @@ focused reading view; **Edit** opens its draft, and the **More actions** menu
 contains Export Markdown and Archive/Restore. **Comments** shows or hides the
 conversation beside the document, or below it on smaller screens. Reply composers
 open only when needed. Unused reference and discussion sections stay out of view.
+Attachment pickers search available documents and disable Attach when nothing
+matches. Cancel or Escape closes the picker without changing any references.
 
 Select text in the reading surface before commenting to quote that selection, or
 comment on the whole document. Threads support replies, resolving and reopening.
 Resolved threads collapse subtly. Edits preserve every discussion; unmatched
 selection quotes appear as outdated. Quotes retain nearby text to distinguish
 repeated passages.
+Reply drafts survive reloads and resolving a discussion. Interrupted replies keep
+their original content and request identity until delivery can be confirmed.
 
 The editor switches between **Preview** and **Write** without losing draft text.
 Its controls remain reachable while scrolling. Ordinary drafts grow with their
