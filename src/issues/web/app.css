@@ -1804,11 +1804,36 @@ dialog::backdrop {
   overflow-wrap: anywhere;
 }
 .pr-link {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.pr-link-heading {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
+.pr-link-heading a { flex: 1; }
+.pr-purpose-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.pr-purpose-field select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.pr-purpose-help { margin-bottom: 4px; }
+.pr-purpose-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+.issue-pr-link .pr-purpose-label { border-left: 1px solid var(--line); padding-left: 6px; }
 .pr-link a {
   overflow-wrap: anywhere;
   min-width: 0;
