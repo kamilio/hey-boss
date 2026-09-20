@@ -321,8 +321,10 @@ const HeyBossArtifacts = (() => {
         if(!candidate)return;
         anchor=candidate;candidate=null;selectionButton.hidden=true;showAnchor();
         $("#artifact-comment").dispatchEvent(new Event("input"));
-        if(matchMedia("(max-width: 900px)").matches)$("#artifact-comments").scrollIntoView({block:"start"});
-        $("#artifact-comment").focus({preventScroll:true});
+        // The sidebar can be above a passage selected in a long document.
+        // Bring the quoted composer into view before moving keyboard focus.
+        $("#artifact-comment-form").scrollIntoView({block:"center"});
+        $("#artifact-comment").focus();
         getSelection().removeAllRanges();
       };
       selectText=select;$("#artifact-reading").onpointerup=select;$("#artifact-reading").onkeyup=select;
