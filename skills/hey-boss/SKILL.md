@@ -217,6 +217,13 @@ and claims. Concurrent browser moves reject stale queue revisions and refresh.
 
 ## Reference
 
+Worker checkout selection accepts repeatable `-C PATH` / `--cwd PATH` (`--directory`
+is an alias). Multiple paths select their repository projects and save a distinct
+checkout for each; repeated `--project` restricts pickup. With `--host`, paths are
+resolved on that host. Saved `--id` settings retain the mapping through restart.
+Do not combine checkout paths with `--all-projects` or select two checkouts of the
+same project for one worker.
+
 `hey-boss upgrade` updates this installation and every registered SSH companion.
 Use `--source /path/to/hey-boss` to install and remember a development checkout;
 without a configured checkout it fetches upstream main. `--check` only reports

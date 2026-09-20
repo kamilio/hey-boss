@@ -261,11 +261,23 @@ hey-boss worker pause WORKER_ID                  # Existing sessions continue
 hey-boss worker stop WORKER_ID                   # Stop and reap its sessions
 hey-boss worker --id WORKER_ID                   # Restore saved settings
 hey-boss worker --host devbox --directory /home/me/poe-code --concurrency 1
+hey-boss worker -C ~/Workspace/atlas -C ~/Workspace/beacon --concurrency 2
+hey-boss worker --host devbox -C /work/atlas -C /work/beacon
 ```
 
 Concurrency and tags belong to each worker instance. There is no global or
 project cap. Repeated `--tag` requires every tag. Repeated `--project` scans
 several projects; `--all-projects` scans visible projects with known checkouts.
+Use `-C PATH` or `--cwd PATH` to select a checkout without changing your shell's
+directory. Repeat it to pick issues from several repositories, each in its own
+checkout. `--directory` remains an alias. Paths are resolved independently against
+the shell's working directory; remote paths are resolved on `--host`.
+Explicit `--project` filters restrict pickup to those projects; supplied checkouts
+must match them. A single checkout and single project also support custom named
+projects. Other selected projects use discovered checkouts. One worker can select
+only one checkout per project. Saved worker IDs retain these mappings through
+restart; new scope flags replace the saved scope. `--all-projects` cannot be
+combined with explicit checkout paths.
 Each worker displays free/busy slots, pickup pipeline, session IDs, elapsed time,
 and latest Codex activity. `--json` emits status snapshots. Ctrl+C stops that
 worker and reaps its Codex processes before releasing claims.

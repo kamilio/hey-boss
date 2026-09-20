@@ -775,6 +775,12 @@ Nested relationships, queue sorting and offline sync are covered in
 
 ### Remote worker restart
 
+Select worker checkouts with `hey-boss worker -C ~/Workspace/atlas -C ~/Workspace/beacon`.
+Each repository contributes its project and runs agents in its own saved checkout.
+`--cwd` and the existing `--directory` are aliases for `-C`; repeat `--project`
+to restrict the selected projects. With `--host`, paths belong to that machine.
+See [worker scope and restart behavior](docs/issues.md#automatic-codex-workers).
+
 Run `hey-boss worker --host HOST restart WORKER_ID` on the fleet supervisor machine, or use Restart worker under **Manage workers** on `/agents`. Workers are grouped by device and show their projects, working directory, agent slots, and running state. A selected project limits this list to workers that can pick up its tasks; controls still affect the entire worker. Stopped workers are collapsed separately. Pause pickup lets current agents finish; restarting or stopping a worker stops its current agents. Enabled workers remain running in the background after their terminal closes. For a local worker use `hey-boss worker restart WORKER_ID`. These controls require `hey-boss fleet setup`. Check `hey-boss fleet status` for the durable signal acknowledgment; queued does not mean restarted.
 
 The supervisor and companion remain alive. The companion stops the old worker and its owned Codex sessions, then starts a replacement with the same ID and saved settings. It acknowledges only after the replacement registers. A cross-process lock prevents reconciliation from launching a duplicate; interrupted requests replay safely and failures retry with a delay capped at five minutes. A new Stop request supersedes an unfinished restart. Restart explicitly cancels active sessions; Pause drains them. If the old worker or its sessions cannot stop, the companion reports the error and does not launch a duplicate.

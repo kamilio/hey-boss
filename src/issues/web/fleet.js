@@ -142,7 +142,14 @@ if (typeof document !== 'undefined') (() => {
       heading.append(element('span','worker-state',state));info.append(heading);
       const ids=worker.config?.projects||[];
       info.append(element('p','worker-projects',ids.length?ids.map(projectName).join(', '):'All projects'));
-      const cwd=element('p','worker-directory');cwd.append(element('span','','Working directory'),element('code','',worker.config?.directory||'Not recorded'));info.append(cwd);
+      const directories=Object.entries(worker.config?.directories||{});
+      if(directories.length){
+        for(const [project,path] of directories){
+          const cwd=element('p','worker-directory');cwd.append(element('span','','Working directory · '+projectName(project)),element('code','',path));info.append(cwd);
+        }
+      }else{
+        const cwd=element('p','worker-directory');cwd.append(element('span','','Working directory'),element('code','',worker.config?.directory||'Discovered per project'));info.append(cwd);
+      }
       info.append(element('p','worker-capacity',running?(online?'':'Last known: ')+active+' active '+(active===1?'agent':'agents')+' · '+(worker.config?.concurrency||1)+' '+((worker.config?.concurrency||1)===1?'slot':'slots'):'No running agents'));
       row.append(info);
       const buttons=element('div','device-actions');

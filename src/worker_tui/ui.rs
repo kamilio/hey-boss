@@ -80,6 +80,21 @@ fn scope(worker: &Value, snapshot: &Value) -> String {
 }
 
 fn checkout(worker: &Value) -> String {
+    if let Some(directories) = worker["config"]["directories"].as_object()
+        && !directories.is_empty()
+    {
+        return directories
+            .iter()
+            .map(|(project, path)| {
+                format!(
+                    "{}: {}",
+                    project.strip_prefix("named:").unwrap_or(project),
+                    text(path)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+    }
     let directory = text(&worker["config"]["directory"]);
     if directory.is_empty() {
         "Per-project checkouts".into()
