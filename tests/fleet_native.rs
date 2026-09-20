@@ -262,6 +262,7 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
     assert!(command.contains(f.root.to_str().unwrap()));
     assert!(command.contains(run["session_id"].as_str().unwrap()));
     assert!(command.contains("codex resume"));
+    assert!(command.contains("--approve-for-me"));
     assert_eq!(
         unsafe { libc::kill(run["pid"].as_u64().unwrap() as i32, 0) },
         -1

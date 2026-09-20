@@ -484,6 +484,14 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
         .find(|v| v["method"] == "thread/resume")
         .unwrap();
     assert_eq!(resume["params"]["threadId"], session);
+    for thread in protocol
+        .iter()
+        .filter(|v| matches!(v["method"].as_str(), Some("thread/start" | "thread/resume")))
+    {
+        assert_eq!(thread["params"]["approvalPolicy"], "on-request");
+        assert_eq!(thread["params"]["approvalsReviewer"], "auto_review");
+        assert_eq!(thread["params"]["sandbox"], "workspace-write");
+    }
     let prompts: Vec<_> = protocol
         .iter()
         .filter(|v| v["method"] == "turn/start")

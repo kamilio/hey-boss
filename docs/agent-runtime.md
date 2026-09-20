@@ -70,6 +70,18 @@ the owned process group, including tools surviving their parent.
 
 ## Verification
 
+All Hey Boss Codex launches use the hardcoded Auto permission policy in
+`src/codex_permissions.rs`: `approval_policy = "on-request"`,
+`approvals_reviewer = "auto_review"`, and `sandbox_mode = "workspace-write"`.
+Workers, the shared runtime, interactive planning, and Chief use process overrides;
+new and resumed app-server threads also explicitly override their saved policy.
+Takeover commands include `--approve-for-me`. This does not edit global Codex
+configuration or add a project setting. Managed Codex restrictions still apply;
+launch failures do not fall back to unrestricted permissions. Other providers and
+the explicit Inbox handling of remaining approval/input requests are unchanged.
+
+See the [official Auto-review documentation](https://learn.chatgpt.com/docs/sandboxing/auto-review).
+
 `cargo test --locked --test agent_runtime --test issues_worker` checks the three
 protocols, resume identity, guarded/queued steering, explicit approval decline,
 Pi settled retries and extension cancellation, malformed streams, and existing

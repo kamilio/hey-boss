@@ -5,6 +5,7 @@ pub mod agent_runtime;
 pub mod agents;
 pub mod artifacts;
 pub mod attachments;
+pub(crate) mod codex_permissions;
 pub mod document;
 pub mod fleet;
 pub mod health;
