@@ -119,9 +119,43 @@ pub struct Actor {
     pub source: String,
 }
 
+/// A guarded triage entry. The owner guard must be present, including null.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchEdit {
+    pub number: i64,
+    pub if_version: i64,
+    #[serde(deserialize_with = "required_assignee")]
+    pub expected_assignee: Option<String>,
+    #[serde(default)]
+    pub add_labels: Vec<String>,
+    #[serde(default)]
+    pub remove_labels: Vec<String>,
+    #[serde(default)]
+    pub assignment: BatchAssignment,
+}
+fn required_assignee<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(d)
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchAssignment {
+    #[default]
+    Keep,
+    Unassign,
+    Boss,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Batch {
+        edits: Vec<BatchEdit>,
+        #[serde(default)]
+        dry_run: bool,
+    },
     Artifact {
         operation: crate::artifacts::Operation,
     },
@@ -366,6 +400,7 @@ impl Operation {
                 | Self::View { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
+                | Self::Batch { dry_run: true, .. }
         )
     }
     pub fn needs_actor(&self) -> bool {
@@ -374,6 +409,7 @@ impl Operation {
     pub fn number(&self) -> Option<i64> {
         match self {
             Self::Artifact { .. }
+            | Self::Batch { .. }
             | Self::Mindmap { .. }
             | Self::Projects { .. }
             | Self::HideProject

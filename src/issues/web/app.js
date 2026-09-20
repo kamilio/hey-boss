@@ -1157,6 +1157,7 @@ async function historyPage(reset = false) {
     const verbs = {
       created: "created this issue",
       edited: "edited the description or labels",
+      triaged: "updated labels or ownership",
       claimed: "claimed this issue",
       unassigned: "released the claim",
       commented: "added a comment",
@@ -1179,7 +1180,7 @@ async function historyPage(reset = false) {
       result.events
         .map(
           (event) =>
-            `<div class="timeline-item"><strong>${esc(actorName(event.actor))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : event.action === "edited" ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
+            `<div class="timeline-item"><strong>${esc(actorName(event.actor))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : ["edited", "triaged"].includes(event.action) ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
         )
         .join(""),
     );
