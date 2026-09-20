@@ -1886,5 +1886,25 @@ func auditWebInbox(root:URL) {
     _=request("inbox_finish_review","review")
     precondition((try! store.database.get("review")).status=="ok")
     precondition(request("inbox_link",id,["issue":["project":"","number":0]])["status"] as? String=="error")
+    for (taskID,kind,isReview) in [("clear-update","update",false),("clear-alert","alert",false),("clear-question","approval",false),("clear-prompt","prompt",false),("clear-review","update",true),("new-arrival","alert",false)] {
+        var item=Record(taskID:taskID,kind:kind,question:"Body",project:"Fixture",title:taskID,description:"Summary",options:["Approve","Reject"],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:1,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+        item.commentsEnabled=isReview
+        try! store.database.save(item)
+    }
+    precondition(request("inbox_clear",nil,["task_ids":["clear-update","missing"]])["status"] as? String=="error")
+    precondition((try! store.database.get("clear-update")).status=="pending")
+    for ids in [[],[""],["clear-update","clear-update"]] as [[String]] { precondition(request("inbox_clear",nil,["task_ids":ids])["status"] as? String=="error") }
+    let winnerEncoder=JSONEncoder();winnerEncoder.outputFormatting = [.sortedKeys]
+    let winners=try! winnerEncoder.encode(store.database.get("question"))
+    let clearedIDs=["clear-update","clear-alert","clear-question","clear-prompt","clear-review","question",id]
+    precondition(request("inbox_clear",nil,["task_ids":clearedIDs])["cleared"] as? Int==5)
+    for taskID in clearedIDs.prefix(5) {
+        let item=try! store.database.get(taskID)
+        precondition(item.status == (taskID=="clear-update" || taskID=="clear-alert" ? "ok" : "cancelled") && item.result==nil && item.completedAt != nil)
+    }
+    precondition((try! store.database.get("new-arrival")).status=="pending")
+    precondition(try! winnerEncoder.encode(store.database.get("question"))==winners)
+    precondition(request("inbox_clear",nil,["task_ids":clearedIDs])["cleared"] as? Int==0)
+    precondition((try! store.database.pendingCount())==1)
     print("Passed: web Inbox summaries, Markdown, creation links, relationship-only link/unlink, archived linking, read receipts, question read safety, invalid answers, winning answer preservation, cancellation, review comments and finish")
 }

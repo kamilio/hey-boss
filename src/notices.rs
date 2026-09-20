@@ -34,6 +34,9 @@ impl IssueReference {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     List,
+    Clear {
+        task_ids: Vec<String>,
+    },
     View {
         task_id: String,
     },
@@ -67,6 +70,7 @@ impl Action {
     pub fn payload(&self) -> Result<Value> {
         let (command, id) = match self {
             Self::List => ("inbox_list", None),
+            Self::Clear { .. } => ("inbox_clear", None),
             Self::View { task_id } => ("inbox_view", Some(task_id)),
             Self::Read { task_id } => ("inbox_read", Some(task_id)),
             Self::Respond { task_id, .. } => ("inbox_respond", Some(task_id)),
@@ -81,6 +85,19 @@ impl Action {
         }
         let mut value = json!({"command":command,"sync":false,"task_id":id});
         match self {
+            Self::Clear { task_ids } => {
+                if task_ids.is_empty() || task_ids.len() > 10000 {
+                    return Err(Error::invalid("Select 1–10000 notices to clear"));
+                }
+                let mut seen = std::collections::HashSet::new();
+                for id in task_ids {
+                    crate::issues::identifier(id, "task ID", 256)?;
+                    if !seen.insert(id) {
+                        return Err(Error::invalid("Notice IDs must be unique"));
+                    }
+                }
+                value["task_ids"] = json!(task_ids);
+            }
             Self::Respond { answer, .. } => {
                 if answer.trim().is_empty() || answer.len() > 65536 {
                     return Err(Error::invalid("Answer must contain 1–65536 bytes"));
@@ -183,6 +200,28 @@ pub fn execute(action: &Action) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clear_accepts_only_a_bounded_explicit_snapshot() {
+        let action: Action =
+            serde_json::from_value(json!({"action":"clear","task_ids":["one","two"]})).unwrap();
+        let payload = action.payload().unwrap();
+        assert_eq!(payload["command"], "inbox_clear");
+        assert_eq!(payload["task_ids"], json!(["one", "two"]));
+        for ids in [
+            json!([]),
+            json!([""]),
+            json!(["one", "one"]),
+            json!(vec!["one"; 10001]),
+        ] {
+            assert!(
+                serde_json::from_value::<Action>(json!({"action":"clear","task_ids":ids}))
+                    .unwrap()
+                    .payload()
+                    .is_err()
+            );
+        }
+        assert!(serde_json::from_value::<Action>(json!({"action":"clear"})).is_err());
+    }
     #[test]
     fn references_and_payloads_reject_invalid_or_unrelated_capabilities() {
         let reference = IssueReference {

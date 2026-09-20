@@ -24,8 +24,17 @@ export class HubStore{
  transaction(fn){this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;}}
  get(id){const r=this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);if(!r)throw new HubError(404,'This request is no longer available');return {...JSON.parse(r.body),status:r.status,result:r.answer,handledBy:r.actor,version:r.version};}
  list(){return this.db.prepare('SELECT id FROM tasks ORDER BY version DESC LIMIT 300').all().map(r=>this.get(r.id));}
- summaries(){return this.db.prepare("SELECT json_set(body,'$.description',substr(json_extract(body,'$.description'),1,4096),'$.question',substr(json_extract(body,'$.question'),1,4096)) AS body,status,answer,actor,version FROM tasks ORDER BY version DESC LIMIT 300").all().map(r=>({...JSON.parse(r.body),status:r.status,result:r.answer,handledBy:r.actor,version:r.version}));}
+ summaries(){return this.db.prepare("SELECT json_set(body,'$.description',substr(json_extract(body,'$.description'),1,4096),'$.question',substr(json_extract(body,'$.question'),1,4096)) AS body,status,answer,actor,version FROM tasks WHERE status='pending' OR id IN (SELECT id FROM tasks WHERE status!='pending' ORDER BY version DESC LIMIT 300) ORDER BY version DESC").all().map(r=>({...JSON.parse(r.body),status:r.status,result:r.answer,handledBy:r.actor,version:r.version}));}
  outcomes(){return this.db.prepare("SELECT id AS taskID,status,answer AS result,actor AS handledBy,version FROM tasks WHERE status!='pending' AND delivered=0 LIMIT 20").all();}
+ clear(ids,actor='phone'){return this.transaction(()=>{
+  if(!Array.isArray(ids)||!ids.length||ids.length>10000||new Set(ids).size!==ids.length||ids.some(id=>typeof id!=='string'||!id.trim()||Buffer.byteLength(id)>256||/[\p{Cc}]/u.test(id)))throw new HubError(400,'Select 1–10000 unique notice IDs');
+  const find=this.db.prepare('SELECT status FROM tasks WHERE id=?');
+  for(const id of ids)if(!find.get(id))throw new HubError(404,'This request is no longer available');
+  const update=this.db.prepare("UPDATE tasks SET status=CASE WHEN json_extract(body,'$.kind') IN ('approval','prompt') OR json_extract(body,'$.commentsEnabled')=1 THEN 'cancelled' ELSE 'ok' END,answer=NULL,actor=?,version=?,delivered=0,body=json_set(body,'$.completedAt',?) WHERE id=? AND status='pending'");
+  let cleared=0;const completedAt=Date.now()/1000;
+  for(const id of ids)if(find.get(id).status==='pending'){update.run(actor,this.next(),completedAt,id);cleared++;}
+  return cleared;
+ });}
  open(id){return this.transaction(()=>{
   const task=this.get(id);
   if(task.status!=='pending'||['approval','prompt'].includes(task.kind))return task;

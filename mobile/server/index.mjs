@@ -40,6 +40,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.get('/api/bridge/artifacts',bridge,(req,res)=>res.json({requests:store.pendingArtifacts()}));
  app.post('/api/bridge/artifacts/:id/result',bridge,(req,res)=>{store.finishArtifact(req.params.id,req.body);res.json({ok:true});});
  app.get('/api/tasks/:id',auth,(req,res)=>res.json({task:store.get(req.params.id)}));
+ app.post('/api/tasks/clear',auth,(req,res)=>{const cleared=store.clear(req.body.taskIDs);change();res.json({cleared});});
  app.post('/api/tasks/:id/open',auth,(req,res)=>{const task=store.open(req.params.id);change();res.json({task:outcome(task)});});
  app.post('/api/notifications',auth,(req,res)=>{const preferences=store.setPreferences(req.body);change();res.json({notifications:{...preferences,...store.routing(now())}});});
  app.post('/api/bridge/presence',bridge,(req,res)=>{store.presence(req.body,now());res.json({notifications:store.routing(now())});});
@@ -58,6 +59,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
   const {task,created}=store.upsert(r);if(created){store.enqueue({id:task.taskID,...pushContent(task),kind:task.kind},now());change();}res.json({task:outcome(task)});
  });
  app.get('/api/bridge/tasks',bridge,(req,res)=>res.json({tasks:store.outcomes()}));
+ app.post('/api/bridge/tasks/clear',bridge,(req,res)=>{const cleared=store.clear(req.body.taskIDs,'mac');change();res.json({cleared,tasks:req.body.taskIDs.map(id=>outcome(store.get(id)))});});
  app.post('/api/bridge/tasks/:id/ack',bridge,(req,res)=>{store.ack(req.params.id,req.body.version);res.json({ok:true});});
  app.post('/api/bridge/tasks/:id/resolve',bridge,(req,res)=>{try{const task=store.resolve(req.params.id,req.body.result,'mac',req.body.cancel===true);change();res.json({task:outcome(task)});}catch(e){if(e.status===409)return res.status(409).json({error:e.message,task:outcome(store.get(req.params.id))});throw e;}});
  app.use(express.static(fileURLToPath(new URL('../dist/',import.meta.url)),{index:'index.html',setHeaders(res,path){if(path.includes('/assets/'))res.setHeader('Cache-Control','public, max-age=31536000, immutable');}}));
