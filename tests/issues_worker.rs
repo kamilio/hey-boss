@@ -1496,13 +1496,16 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
         f.cli(&["comment", "1", "--body", "Preserved history"]);
         let db = rusqlite::Connection::open(&f.db).unwrap();
         db.busy_timeout(Duration::from_secs(10)).unwrap();
-        db.execute_batch(
-            "ALTER TABLE issues DROP COLUMN draft;
-            ALTER TABLE issues DROP COLUMN plan;
-            ALTER TABLE project_settings DROP COLUMN drafts_enabled;
-            ALTER TABLE project_settings DROP COLUMN plan_template;",
-        )
-        .unwrap();
+        db.execute_batch("ALTER TABLE issues DROP COLUMN draft;")
+            .unwrap();
+        if version == 10 {
+            db.execute_batch(
+                "ALTER TABLE issues DROP COLUMN plan;
+                ALTER TABLE project_settings DROP COLUMN drafts_enabled;
+                ALTER TABLE project_settings DROP COLUMN plan_template;",
+            )
+            .unwrap();
+        }
         db.pragma_update(None, "user_version", version).unwrap();
 
         let mut worker = f.worker();
