@@ -1,69 +1,84 @@
-/* Fleet content; shared theme and controls live in components.css. */
-:root { --amber:#9a650b; --amber-bg:#9a650b12; --red:var(--danger); --red-bg:#b6455912 }
-@media(prefers-color-scheme:dark) { :root { --amber:#eac17a } }
-.overview { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:24px }
-.metric { padding:18px 22px }
-.metric strong { display:block; font-size:28px; font-weight:650; letter-spacing:-.03em }
-.metric span { font-size:12px; color:var(--muted) }
-.machines { display:grid; gap:16px }
-.supervisor { overflow:hidden }
-.machine-header { padding:20px 22px; display:flex; gap:16px }
-.machine-title { font-size:17px; font-weight:650; margin:0; overflow-wrap:anywhere }
-.machine-subtitle { font-size:12px; color:var(--muted); margin:3px 0 0; overflow-wrap:anywhere }
-.worker-tree { margin:0 22px 22px; padding-left:22px; border-left:2px solid var(--line) }
-.worker { position:relative; border-top:1px solid var(--line); padding:18px 0 }
-.worker-tree>.worker::before { content:""; position:absolute; left:-24px; top:28px; width:16px; border-top:2px solid var(--line) }
-.worker-heading { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center }
-.worker-heading h3 { font-size:14px; font-weight:650; margin:0; overflow-wrap:anywhere }
-.capacity { font-size:12px; color:var(--muted) }
-.worker-project { font-size:12px; color:var(--muted); overflow-wrap:anywhere; margin:4px 0 12px }
-.agents { margin-left:10px; padding-left:16px; border-left:2px solid var(--line) }
-.run { padding:10px 0; font-size:12px; min-width:0 }
-.run+.run { border-top:1px solid var(--line) }
-.run-heading { display:flex; justify-content:space-between; align-items:baseline; gap:12px }
-.run strong { font-weight:600; overflow-wrap:anywhere }
-.duration { font-variant-numeric:tabular-nums; font-weight:600; white-space:nowrap; flex-shrink:0 }
-.run-meta { display:flex; gap:6px 12px; flex-wrap:wrap; align-items:center; margin-top:4px; color:var(--muted) }
-.run-event { display:block; color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere; max-height:72px; overflow:auto; margin-top:4px }
-.copy-session { font-size:11px }
-.controls { display:flex; gap:7px; margin-top:12px; flex-wrap:wrap }
-.controls button { font-size:11px; padding:6px 10px }
-.controls button.danger { color:var(--red) }
-.empty { color:var(--muted); font-size:12px; margin:8px 0 }
-.signal-state { font-size:12px; color:var(--amber); margin:9px 0 0 }
-.history { margin-top:12px; color:var(--muted); font-size:12px }
-summary { cursor:pointer }
-.secondary { padding:16px 22px; min-width:0 }
-.secondary>summary { font-size:13px; font-weight:600 }
-.secondary>.worker { margin-top:12px }
-.offline-machine,.diagnostic-machine { margin-top:18px }
-.offline-machine>.worker { margin-left:12px }
-.machine-meta { display:flex; flex-wrap:wrap; gap:7px 15px; margin-top:8px; color:var(--muted); font-size:12px }
-.machine-meta b { font-weight:500; color:var(--text) }
-.machine-notice { font-size:12px; margin:12px 0; padding:10px 12px; border-radius:8px; background:var(--amber-bg); color:var(--amber); overflow-wrap:anywhere }
-.activity { margin-top:24px; padding:20px 22px }
-.activity>summary { font-size:13px; font-weight:600 }
-.activity ol,.activity ul { margin:12px 0 0; padding:0; list-style:none }
-.activity li { display:flex; gap:16px; padding:10px 0; border-top:1px solid var(--line); font-size:12px }
-.activity time { color:var(--muted); flex:0 0 70px }
-.activity .event-host { font-weight:600; min-width:130px; overflow-wrap:anywhere }
-.activity .event-detail { color:var(--muted); overflow-wrap:anywhere; min-width:0 }
-.error { background:var(--red-bg); color:var(--red); padding:12px 16px; border-radius:9px; margin-bottom:18px }
-.offline-run { color:var(--amber) }
-#conflict-list details { min-width:0; width:100% }
-#conflict-list summary { overflow-wrap:anywhere }
-#conflict-list pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; max-height:240px; overflow:auto }
-.clipboard-input { position:fixed; left:-9999px; top:0 }
-.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
-@media(max-width:760px) {
-  .overview { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px }
-  .metric { padding:14px 18px }
-  .machine-header { padding:18px 16px }
-  .worker-tree { margin:0 16px 16px; padding-left:14px }
-  .worker-tree>.worker::before { left:-16px; width:10px }
-  .agents { margin-left:0; padding-left:10px }
-  .secondary,.activity { padding:16px }
-  .activity li { gap:8px; flex-wrap:wrap }
-  .activity .event-host { min-width:100px }
-  .activity .event-detail { flex-basis:100% }
+/* Project overview and a quiet, readable conversation surface. */
+#main { max-width:1120px }
+.page-heading h1 { letter-spacing:-.045em }
+.project-section { margin:36px 0 42px }
+.project-heading { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:18px }
+.project-heading h2 { font-size:21px; letter-spacing:-.025em; margin:0; font-weight:650 }
+.project-heading p { color:var(--muted); margin:4px 0 0; font-size:13px }
+.project-issues { color:var(--muted); font-size:13px; text-decoration:none; flex-shrink:0 }
+.project-issues:hover { color:var(--accent) }
+.agent-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px }
+.agent-card { display:flex; flex-direction:column; gap:17px; min-width:0; padding:24px; border-radius:20px; border:1px solid var(--line); background:var(--surface); color:var(--text); text-decoration:none; box-shadow:var(--shadow); transition:transform .18s,box-shadow .18s,border-color .18s }
+.agent-card:hover { transform:translateY(-2px); border-color:var(--accent); box-shadow:0 16px 35px #263c6318 }
+.agent-card-top { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12px }
+.agent-state { display:inline-flex; align-items:center; gap:7px; color:var(--muted); white-space:nowrap; font-size:12px }
+.agent-state::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor }
+.agent-state.is-live { color:var(--green) }
+.agent-state.is-live::before { box-shadow:0 0 0 4px color-mix(in srgb,var(--green) 9%,transparent) }
+.agent-state.is-done { color:var(--green) }
+.location-label { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.agent-card h3 { font-size:18px; line-height:1.45; letter-spacing:-.02em; font-weight:600; margin:0; overflow-wrap:anywhere }
+.agent-preview { color:var(--muted); font-size:13px; line-height:1.7; margin:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere }
+.agent-card-bottom { margin-top:auto; display:flex; justify-content:space-between; gap:12px; padding-top:14px; border-top:1px solid var(--line); font-size:12px; color:var(--muted) }
+.open-conversation { color:var(--accent) }
+.project-history { margin-top:20px }
+.project-history>summary { color:var(--muted); font-size:13px; cursor:pointer; min-height:44px; padding:10px 0 }
+.history-card { box-shadow:none; background:var(--input) }
+.agents-empty { text-align:center; padding:100px 20px 120px; color:var(--muted) }
+.agents-empty h2 { color:var(--text); font-size:24px; font-weight:550; letter-spacing:-.04em; margin:20px 0 10px }
+.agents-empty p { max-width:330px; margin:auto; line-height:1.8 }
+.empty-orbit { font-size:42px; color:var(--green); background:var(--accent-soft); width:86px; height:86px; border-radius:28px; display:grid; place-items:center; margin:auto }
+.device-settings { border-top:1px solid var(--line); padding:20px 0; color:var(--muted); font-size:13px }
+.device-settings>summary { cursor:pointer; min-height:34px }
+.device-help { margin:10px 0 18px }
+.device-row { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:15px 0; border-top:1px solid var(--line); overflow-wrap:anywhere }
+.device-actions { display:flex; gap:8px; flex-wrap:wrap }
+.device-note { flex-basis:100%; margin:0 }
+.page-footer { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12px; margin:44px 0 20px }
+.page-footer>span[data-icon] { width:16px; height:16px }
+.page-footer button { margin-left:auto }
+.error { background:var(--accent-soft); color:var(--danger); border:1px solid var(--line); padding:14px 18px; border-radius:12px; margin-bottom:22px; overflow-wrap:anywhere }
+.loading-note { color:var(--muted); padding:60px 0 }
+.conversation-page #main { max-width:1050px }
+.session-header { border-bottom:1px solid var(--line); padding:4px 0 25px }
+.back-link { color:var(--muted); text-decoration:none; display:inline-flex; align-items:center; gap:8px; min-height:44px; font-size:13px; margin-bottom:14px }
+.back-link svg { width:17px; height:17px }
+.session-heading { display:flex; align-items:center; justify-content:space-between; gap:20px }
+.session-heading h1 { font-size:26px; line-height:1.4; font-weight:600; letter-spacing:-.04em; margin:4px 0 0; overflow-wrap:anywhere }
+.session-context { margin:0; color:var(--muted); font-size:12px }
+.session-subheading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:14px }
+.session-subheading p { margin:0; color:var(--muted); font-size:12px }
+.conversation-wrap { max-width:760px; margin:auto; padding:32px 0 20px }
+.conversation-intro { color:var(--muted); font-size:11px; display:flex; align-items:center; justify-content:center; gap:8px; margin:8px 0 42px }
+.conversation-intro svg { width:15px; height:15px }
+.chat-message { margin:28px 0; min-width:0; overflow-wrap:anywhere }
+.message-author { font-size:12px; font-weight:600; margin-bottom:9px; color:var(--muted) }
+.message-body { font-size:15px; line-height:1.85; white-space:pre-wrap }
+.assistant .message-body:has(p) { white-space:normal }
+.message-body>:first-child { margin-top:0 }.message-body>:last-child { margin-bottom:0 }
+.chat-message.user { margin:32px 0 38px auto; max-width:85%; padding:19px 23px; background:var(--surface); border:1px solid var(--line); border-radius:22px 22px 5px 22px; box-shadow:0 2px 5px #263c6305 }
+.chat-message.user .message-body { font-size:14px; max-height:none }
+.chat-message.tool,.chat-message.activity { margin:10px 0; color:var(--muted); font-size:12px; border-left:2px solid var(--line); padding-left:15px }
+.chat-message summary { cursor:pointer; min-height:40px; padding:10px 0; overflow-wrap:anywhere }
+.chat-message pre { border-radius:12px; padding:18px; background:var(--input); border:1px solid var(--line); font:12px/1.75 ui-monospace,SFMono-Regular,monospace; overflow:auto; max-height:460px; white-space:pre-wrap; overflow-wrap:anywhere }
+.message-body code { font-size:.86em; background:var(--accent-soft); padding:2px 5px; border-radius:5px }
+.message-body pre code { background:none; padding:0 }
+.message-body h1,.message-body h2,.message-body h3 { font-size:19px; font-weight:600; letter-spacing:-.02em; line-height:1.45; margin:24px 0 10px }
+.message-body a { color:var(--accent) }.message-body blockquote { border-left:3px solid var(--line); padding-left:18px; margin-left:0; color:var(--muted) }
+.message-body .table-scroll { overflow:auto }.message-body table { display:block; overflow:auto; border-collapse:collapse; max-width:100%; font-size:13px }.message-body th,.message-body td { padding:9px 12px; border:1px solid var(--line) }
+.message-body img { max-width:100% }
+.conversation-empty { color:var(--muted); text-align:center; margin:55px auto; max-width:360px; line-height:1.8 }
+.load-history { display:block; margin:24px auto }
+.jump-live { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); box-shadow:var(--shadow); background:var(--solid); border-radius:24px; z-index:10 }
+#conversation-end { height:1px }
+@media(max-width:680px) {
+  .agent-grid { grid-template-columns:1fr }.agent-card { padding:21px; border-radius:17px }.project-heading h2 { font-size:19px }
+  .session-heading { flex-direction:column; align-items:flex-start; gap:12px }.session-heading h1 { font-size:22px }.session-subheading { align-items:flex-start }
+  .conversation-wrap { padding-top:24px }.chat-message.user { max-width:94%; padding:16px 18px }.message-body { font-size:14px }.conversation-intro { margin-bottom:30px }
+  .page-footer { margin-bottom:70px }.agent-card-bottom { font-size:11px }
+}
+@media(prefers-reduced-motion:reduce) { .agent-card { transition:none }.agent-card:hover { transform:none } }
+@media(max-width:560px) {
+  .navigation-inner { padding-inline:12px; gap:0; justify-content:space-between }
+  .navigation-inner>a { flex:1; min-width:0; flex-direction:column; gap:5px; padding-inline:3px; font-size:11px; white-space:nowrap }
 }

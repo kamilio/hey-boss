@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Workers · Hey Boss</title>
+    <title>Agents · Hey Boss</title>
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/components.css" />
     <link rel="stylesheet" href="/fleet.css" />
@@ -12,17 +12,32 @@
     <script src="/fleet.js" defer></script>
   </head>
   <body>
-    <a class="skip-link" href="#main">Skip to workers</a>
+    <a class="skip-link" href="#main">Skip to agents</a>
     <!--app-shell-->
     <main id="main" tabindex="-1">
-      <div class="page-heading"><div><div class="eyebrow"><span data-icon="user"></span>Your workforce</div><h1>Workers</h1><p class="page-description">The supervisor coordinates workers. Workers manage Codex agents.</p></div><button class="button" id="refresh" type="button"><span data-icon="refresh"></span>Refresh</button></div>
       <div id="error" class="error" role="alert" hidden></div>
-      <section id="overview" class="overview" aria-label="Fleet overview"></section>
-      <p id="copy-status" class="sr-only" role="status"></p>
-      <section id="machines" class="machines" aria-label="Supervisor, workers and agents" tabindex="-1"><p>Loading running workers…</p></section>
-      <details class="activity glass"><summary>Recent fleet activity · <span id="event-count"></span></summary><ol id="events" aria-label="Recent fleet events"></ol></details>
-      <section id="conflicts" class="activity glass" hidden><h2>Changes needing review</h2><p>These changes are saved. Canonical data was preserved.</p><ul id="conflict-list"></ul></section>
-      <footer class="page-footer"><span class="footer-mark" data-icon="spark"></span><span>Changes are saved locally and synchronized whenever connected.</span><span class="footer-product">Hey Boss Workers</span></footer>
+      <div id="overview-page">
+        <div class="page-heading"><div><div class="eyebrow"><span data-icon="spark"></span>Making things happen</div><h1>Agents</h1><p id="overview-note" class="page-description">Your projects, and the work behind them.</p></div><a class="button" id="show-all" href="/agents" hidden>All projects</a></div>
+        <section id="projects" aria-label="Agents by project"><p class="loading-note">Finding your conversations…</p></section>
+        <details id="device-settings" class="device-settings"><summary>Manage devices</summary><p class="device-help">Pause new tasks or restart an agent service on a device.</p><div id="device-list"></div></details>
+        <section id="conflicts" class="device-settings" hidden><h2>Changes needing review</h2><ul id="conflict-list"></ul></section>
+      </div>
+      <div id="session-page" hidden>
+        <header class="session-header">
+          <a id="back" class="back-link" href="/agents"><span data-icon="arrow-left"></span>Agents</a>
+          <div class="session-heading"><div><p id="session-context" class="session-context"></p><h1 id="session-title">Loading conversation…</h1></div><div id="session-state"></div></div>
+          <div class="session-subheading"><p id="session-status" role="status"></p><a id="session-issue" class="project-issues"></a></div>
+        </header>
+        <div class="conversation-wrap">
+          <div class="conversation-intro"><span data-icon="spark"></span><span>The conversation behind the work</span></div>
+          <button id="load-earlier" class="button load-history" type="button" hidden>Load earlier messages</button>
+          <div id="conversation" aria-label="Agent conversation" aria-busy="false"></div>
+          <p id="conversation-empty" class="conversation-empty" role="status">Loading the saved conversation…</p>
+          <div id="conversation-end"></div>
+        </div>
+        <button id="jump-live" class="button jump-live" type="button" hidden>↓ Latest activity</button>
+      </div>
+      <footer class="page-footer"><span data-icon="spark"></span><span>Good work, in good company.</span><button id="refresh" class="button small" type="button"><span data-icon="refresh"></span>Refresh</button></footer>
     </main>
   </body>
 </html>

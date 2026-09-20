@@ -17,3 +17,5 @@ __pycache__/
 .playwright-cli/
 
 mobile/public/artifact-web/
+
+mobile/public/agent-web/

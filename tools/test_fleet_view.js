@@ -24,3 +24,15 @@ assert.equal(elapsed({started_at: now + 1000}, now), '0m00s');
 assert.equal(elapsed({}, now), '0m00s');
 assert.deepEqual(fleetView({}, now).live, []);
 console.log('Fleet visibility and elapsed time checks passed');
+const {projectView} = require('../src/issues/web/fleet.js');
+const projectRun = {id:'a',project_id:'named:Atlas',project_name:'Atlas',title:'Fix reconnect',started_at:1,finished_at:null};
+const projects = projectView({machines:[
+ {host:'local',state:'connected',heartbeat:99,workers:[{pid:1,runs:[projectRun,{...projectRun,id:'done',finished_at:2}]}]},
+ {host:'remote',state:'disconnected',heartbeat:80,workers:[{pid:1,runs:[{...projectRun,id:'b',project_id:'named:Beacon',project_name:'Beacon'}]}]},
+]}, now);
+assert.deepEqual(projects.map(p=>p.name), ['Atlas','Beacon']);
+assert.equal(projects[0].active.length,1);
+assert.equal(projects[0].history.length,1);
+assert.equal(projects[1].active[0].online,false);
+assert.deepEqual(projectView({machines:[]},now),[]);
+console.log('Project grouping checks passed');

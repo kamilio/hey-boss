@@ -77,11 +77,15 @@ one coding session. A companion synchronizes a machine and applies worker contro
 Run `hey-boss fleet setup --source /path/to/hey-boss` once on the supervisor machine
 to manage the existing SSH machine inventory automatically. The supervisor
 installs companions, mirrors issue queues, distributes saved worker configurations,
-and redeploys changed source builds. Open `/workers` in the Issues web app for a
-Supervisor → Worker → Agent tree of running workers, their current tasks,
-elapsed task time, goal state, and pause/resume/stop/restart controls. Session IDs
-stay hidden behind copy buttons. Saved workers, disconnected snapshots, and
-recent attempts are collapsed separately; they do not inflate live counts.
+and redeploys changed source builds. Open **Agents** (`/agents`) for a project
+view of each task and the device where it runs. Open a task for its live Codex
+conversation: the original request, saved replies, and expandable tool activity.
+Conversations open at the latest activity; load earlier messages above it.
+Live updates preserve your reading position. Completed conversations remain under each project's history;
+disconnected tasks show their last known state. **Manage devices** keeps
+pause/resume/stop/restart controls out of the task overview. `/workers` remains
+available as an alias. Paired devices can read the same conversations through
+the authenticated supervisor bridge; hidden projects stay inaccessible.
 Fleet database access uses the CLI bundled SQLite across all machines. Companions
 keep local replicas and continue allocated work offline; their
 transaction journals sync on reconnect. Allocations do not expire when a machine
@@ -690,7 +694,7 @@ Nested relationships, queue sorting and offline sync are covered in
 
 ### Remote worker restart
 
-Run `hey-boss worker --host HOST restart WORKER_ID` on the fleet supervisor machine, or use Restart on `/workers`. For a local worker use `hey-boss worker restart WORKER_ID`. These controls require `hey-boss fleet setup`. Check `hey-boss fleet status` for the durable signal acknowledgment; queued does not mean restarted.
+Run `hey-boss worker --host HOST restart WORKER_ID` on the fleet supervisor machine, or use Restart under **Manage devices** on `/agents`. For a local worker use `hey-boss worker restart WORKER_ID`. These controls require `hey-boss fleet setup`. Check `hey-boss fleet status` for the durable signal acknowledgment; queued does not mean restarted.
 
 The supervisor and companion remain alive. The companion stops the old worker and its owned Codex sessions, then starts a replacement with the same ID and saved settings. It acknowledges only after the replacement registers. A cross-process lock prevents reconciliation from launching a duplicate; interrupted requests replay safely and failures retry with a delay capped at five minutes. A new Stop request supersedes an unfinished restart. Restart explicitly cancels active sessions; Pause drains them. If the old worker or its sessions cannot stop, the companion reports the error and does not launch a duplicate.
 
