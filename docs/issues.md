@@ -876,3 +876,11 @@ If sync is interrupted, resume interactive planning on the original machine and
 checkout; an already runnable bound issue retains its status. Workers receive
 the plan path as context and implement from the synced body. This flow neither
 commits nor transfers the plan document.
+
+## Progress status
+
+An owner can publish green, orange or red progress updates with
+`hey-boss issue status NUMBER green --comment 'The fix passes tests. Checking the phone layout next.'`.
+The issue list and read-only web viewers show the current message; its separate
+history starts collapsed. Use comments for lasting findings and final verification.
+See [Issue progress](issue-status.md) for ownership rules, periodic updates and sync.

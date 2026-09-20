@@ -63,7 +63,8 @@ Project defaults to the repository across worktrees. Fleet companions keep durab
 hey-boss issue list --unassigned --json
 hey-boss issue create --title 'Fix reconnect' --body 'Describe the problem' --request-id reconnect-1
 hey-boss issue claim 1
-hey-boss issue comment 1 --body Investigating
+hey-boss issue status 1 green --comment 'Checking what causes the reconnect failure.'
+hey-boss issue comment 1 --body 'Sleep drops the connection before the retry timer starts.'
 hey-boss issue close 1 --comment 'Fixed and verified'
 hey-boss issue web
 ```
@@ -81,6 +82,20 @@ Create a draft only when the user explicitly asks for a draft. Otherwise create 
 Use `issue create --title TITLE --draft` for a persisted draft without files or sessions, `issue edit NUMBER --draft` to draft an eligible issue, and `issue undraft NUMBER` to make it runnable. Explicit human planning uses `create --interactive` or `edit NUMBER --interactive`, optionally with `--file PATH`. File-bound issues keep syncing every ten seconds after planning ends; assigned issues continue receiving plan edits.
 
 Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
+
+While you own an issue, publish a short status after claiming, when the next step
+or risk changes, and at least every ten minutes during active work:
+`hey-boss issue status NUMBER green --comment 'The fix passes tests. Checking the phone layout next.'`
+Use **green** for on track, **orange** for a risk you are working through, and
+**red** when trouble prevents progress. Write one sentence in simple human
+language: what is happening and, when useful, what comes next. Avoid tool logs,
+file lists, jargon, and repetitive updates. Status comments are one line, up to
+500 characters. Set the final status before closing or handing off ownership.
+Only the owner of an open, non-draft issue can update it; status never claims,
+blocks, closes, or changes an issue's revision. The web is a read-only viewer.
+`issue status-history NUMBER --limit 20 --offset 0` reads its separate history.
+Use ordinary **comments** for lasting findings, decisions, essential questions,
+and final verification. Keep routine progress in status so comments stay useful.
 
 `issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
 its claim; `list --state blocked` finds paused work. Blocking should be rare:

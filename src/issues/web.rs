@@ -493,6 +493,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/fleet.js"),
             )),
+            "/status.css" => Some(("text/css; charset=utf-8", include_bytes!("web/status.css"))),
+            "/status.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/status.js"))),
             "/app.css" => Some(("text/css; charset=utf-8", include_bytes!("web/app.css"))),
             "/components.css" => Some((
                 "text/css; charset=utf-8",

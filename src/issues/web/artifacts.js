@@ -10,6 +10,7 @@ const HeyBossArtifacts = (() => {
     return `${mobile?"/project-resource":kind==="issue"?"/":"/mm"}#${params}`;
   };
   let mobile = false;
+  const author=value=>value==="human:boss"?"Boss":value.startsWith("human:")?value.slice(6):value.startsWith("codex:")?"Codex":value.startsWith("claude:")?"Claude":value;
   async function rpc(context,operation,reading,requestID) {
     const payload = {project:context.project,operation,...(context.host?{host:context.host}:{}),request_id:reading?null:(requestID||crypto.randomUUID())};
     let response;try { response = await fetch(mobile?"/api/artifact-requests":"/api/action",{method:"POST",headers:{"Content-Type":"application/json",...(mobile?{}:{"X-Hey-Boss-CSRF":context.csrf})},body:JSON.stringify(payload),signal:AbortSignal.timeout(20000)}); } catch(e) {throw failure("Connection interrupted. "+(reading?"Reconnect and try again.":"Retry this pending save with the same content after reconnecting."),!reading);}
@@ -270,7 +271,6 @@ const HeyBossArtifacts = (() => {
       mode("reading");
       const content=doc.body_html||'<p class="artifact-muted">This document is empty. Choose Edit to start writing.</p>';
       const previous=$("#artifact-reading"),reuse=previous&&previous.dataset.artifact===doc.id&&readingHTML===content;
-      const author=value=>value==="human:boss"?"Boss":value.startsWith("human:")?value.slice(6):value.startsWith("codex:")?"Codex":value.startsWith("claude:")?"Claude":value;
       const comment=c=>`<p class="artifact-comment-meta"><strong title="${esc(c.author)}">${esc(author(c.author))}</strong><time datetime="${esc(c.created_at)}" title="${esc(new Date(c.created_at).toLocaleString())}">${esc(date(c.created_at))}</time></p><div class="markdown">${c.body_html}</div>`;
       const replies=new Map();
       for(const c of v.comments)if(c.parent){if(!replies.has(c.parent))replies.set(c.parent,[]);replies.get(c.parent).push(c);}
@@ -414,10 +414,13 @@ const HeyBossArtifacts = (() => {
     window.addEventListener("hashchange",navigate);window.addEventListener("beforeunload",()=>keepDraft());
     await navigate();
   }
-  let resourceGeneration=0,resourcePicker;
+  let resourceGeneration=0,resourcePicker,resourceStatusTimer;
+  window.addEventListener("pagehide",()=>clearInterval(resourceStatusTimer));
+  window.addEventListener("pageshow",event=>{if(event.persisted&&$("#resource-main"))startResource();});
   async function startResource() {
     if(!$("#resource-main"))return;
     const ticket=++resourceGeneration;
+    clearInterval(resourceStatusTimer);
     mobile=true;HeyBossUI.icons();
     $("#resource-status").textContent="Loading project resource…";
     $("#resource-content").replaceChildren();$("#resource-artifacts").replaceChildren();
@@ -440,7 +443,23 @@ const HeyBossArtifacts = (() => {
       const links=await api(context,issue?{command:"links",issue:Number(issue)}:{command:"links",node:resource.id});
       if(ticket!==resourceGeneration)return;
       document.title=resource.title+" · Hey Boss";
-      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p><article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article><section id="resource-attachments"></section>`;
+      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p>${issue?HeyBossStatus.card(resource,author):""}<article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article><section id="resource-attachments"></section>`;
+      if(issue){
+        const attach=()=>HeyBossStatus.mount($(".issue-progress-card"),resource,author,offset=>rpc(context,{action:"status_history",number:Number(issue),limit:20,offset},true));
+        let update=attach(),refreshing=false;
+        resourceStatusTimer=setInterval(async()=>{
+          if(document.hidden||refreshing)return;
+          refreshing=true;
+          try{
+            const result=await rpc(context,{action:"status_view",number:Number(issue)},true);
+            if(ticket!==resourceGeneration)return;
+            const next={...resource,status:result.status,assignee:result.assignee};
+            if(update(next)==="remount"){Object.assign(resource,next);update=attach();}
+            else Object.assign(resource,next);
+          }catch{/* Keep the last update and its original timestamp while offline. */}
+          finally{refreshing=false;}
+        },15000);
+      }
       HeyBossAttachments.mount($("#resource-attachments"),{...context,target:{kind:issue?"issue":"node",id:issue?String(issue):resource.id},readonly:!!resource.deleted_at});
       mount($("#resource-artifacts"),{...context,...(issue?{issue:Number(issue)}:{node:resource.id}),artifacts:links.artifacts});
       $("#resource-status").textContent="";
