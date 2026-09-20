@@ -306,6 +306,23 @@ enum Action {
         #[command(flatten)]
         body: Body,
     },
+    /// Publish a short progress update (green=on track, orange=at risk, red=in trouble).
+    Status {
+        number: i64,
+        #[arg(value_enum)]
+        level: issues::StatusLevel,
+        /// One line of simple human language, up to 500 characters.
+        #[arg(long)]
+        comment: String,
+    },
+    /// Read progress updates, newest first, separately from durable comments.
+    StatusHistory {
+        number: i64,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
     /// Resolve a comment while preserving its content.
     ResolveComment { number: i64, comment_id: i64 },
     /// Reopen a resolved comment.
@@ -753,6 +770,16 @@ impl Options {
                 body: body
                     .read()?
                     .ok_or_else(|| Error::invalid("comment requires --body or --file"))?,
+            },
+            Action::Status { number, level, comment } => Operation::Status {
+                number: *number,
+                level: *level,
+                comment: comment.clone(),
+            },
+            Action::StatusHistory { number, limit, offset } => Operation::StatusHistory {
+                number: *number,
+                limit: *limit,
+                offset: *offset,
             },
             Action::ResolveComment { number, comment_id }
             | Action::UnresolveComment { number, comment_id } => Operation::ResolveComment {
@@ -1223,6 +1250,17 @@ pub(crate) fn print_text(value: &Value) {
             println!("\nShowing recent comments; use history for earlier comments.");
         }
     }
+    if let Some(updates) = value["updates"].as_array() {
+        if updates.is_empty() {
+            println!("No status updates yet.");
+        }
+        for update in updates {
+            println!("{} · {} · {}\n{}", line(&update["level"]), line(&update["author"]), status_datetime(&update["created_at"]), line(&update["comment"]));
+        }
+        if let Some(offset) = value["next_offset"].as_u64() {
+            println!("More updates: use --offset {offset}");
+        }
+    }
     if let Some(events) = value["events"].as_array() {
         for event in events {
             println!(
@@ -1239,6 +1277,20 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(id) = value.get("comment_id").filter(|n| !n.is_null()) {
         println!("Saved comment {id}.");
+    }
+}
+fn status_datetime(value: &Value) -> String {
+    let seconds = value.as_i64().unwrap_or(0) / 1000;
+    let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let mut text = [0_u8; 64];
+    // localtime_r writes the tm before strftime reads it; the output is bounded
+    // and local to this call, so concurrent CLI requests share no static buffer.
+    unsafe {
+        if libc::localtime_r(&seconds, time.as_mut_ptr()).is_null() {
+            return "Unknown time".into();
+        }
+        let size = libc::strftime(text.as_mut_ptr().cast(), text.len(), c"%Y-%m-%d %H:%M %Z".as_ptr(), time.as_ptr());
+        String::from_utf8_lossy(&text[..size]).into_owned()
     }
 }
 fn print_issue_line(issue: &Value) {
@@ -1270,6 +1322,9 @@ fn print_issue_line(issue: &Value) {
             "es"
         }
     );
+    if let Some(status) = issue["status"].as_object() {
+        println!("  Status [{}]: {}", line(&status["level"]), line(&status["comment"]));
+    }
     if let Some(number) = issue["parent"]["number"].as_i64() {
         println!(
             "  Parent: #{} {}{}",

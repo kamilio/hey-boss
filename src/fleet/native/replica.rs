@@ -11,6 +11,7 @@ pub(super) const TABLES: &[(&str, &[&str])] = &[
     ("projects", &["id"]),
     ("agents", &["id"]),
     ("issues", &["project_id", "number"]),
+    ("issue_status_updates", &["id"]),
     (
         "issue_agent_launches",
         &["project_id", "issue_number", "run_id"],
@@ -455,7 +456,21 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             ));
         }
     }
-    if append(table) {
+    if table == "issue_status_updates" {
+        if !before.is_null() || after.is_null() {
+            return Err(invalid("Status history cannot be rewritten"));
+        }
+        if !old.is_null() && old != after {
+            return Err(invalid("Status update identity already exists"));
+        }
+        if old.is_null() && change["bootstrap"] != true {
+            let owned = rows(db,"SELECT 1 FROM issues i JOIN fleet_allocations a ON a.project_id=i.project_id AND a.issue_number=i.number WHERE i.project_id=? AND i.number=? AND i.assignee=? AND a.node=? AND i.state='open' AND i.draft=0 AND i.deleted_at IS NULL",&[after["project_id"].clone(),after["issue_number"].clone(),after["author"].clone(),json!(node)])?;
+            if owned.is_empty() {
+                return Err(invalid("Status owner or machine allocation changed while offline; update retained for review"));
+            }
+        }
+        put_row(db, table, &after)?;
+    } else if append(table) {
         if !before.is_null() || after.is_null() {
             return Err(invalid("Append-only history cannot be rewritten"));
         }
@@ -1534,6 +1549,39 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn offline_status_keeps_stable_history_and_current_update_on_every_replica() {
+        let main = Fixture::new();
+        main.db.execute("UPDATE issues SET assignee='human:fixture'",[]).unwrap();
+        main.db.execute("INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",[]).unwrap();
+        main.capture();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(&agent.db, "agent", &snapshot(&main.db,"agent").unwrap(), &[]).unwrap();
+        for (id, level, at) in [("status-one","green",100), ("status-two","orange",101)] {
+            agent.db.execute("INSERT INTO issue_status_updates VALUES(?1,'named:Native fleet',1,'human:fixture',?2,'Checking the layout.',?3)", rusqlite::params![id,level,at]).unwrap();
+        }
+        let changes = journal(&agent.db,0).unwrap();
+        let receipts = accept_changes(&main.db,"agent",&changes).unwrap();
+        assert!(receipts.iter().all(|r|r["state"]!="conflict"), "{receipts:?}");
+        accept_changes(&main.db,"agent",&changes).unwrap();
+        apply_pull(&agent.db,"agent",&snapshot(&main.db,"agent").unwrap(),&receipts).unwrap();
+        for db in [&main.db,&agent.db] {
+            assert_eq!(db.query_row("SELECT count(*) FROM issue_status_updates",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(db.query_row("SELECT id FROM issue_status_updates ORDER BY created_at DESC,id DESC LIMIT 1",[],|r|r.get::<_,String>(0)).unwrap(),"status-two");
+        }
+        let third = Fixture::new(); install_capture(&third.db,"agent","third").unwrap();
+        apply_pull(&third.db,"third",&snapshot(&main.db,"third").unwrap(),&[]).unwrap();
+        assert_eq!(third.db.query_row("SELECT count(*) FROM issue_status_updates",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        let change=json!({"seq":999,"table_name":"issue_status_updates","before_json":rows(&agent.db,"SELECT * FROM issue_status_updates WHERE id='status-one'",&[]).unwrap()[0].to_string(),"after_json":null});
+        assert_eq!(accept_changes(&main.db,"agent",&[change]).unwrap()[0]["state"],"conflict");
+        main.db.execute("UPDATE issues SET assignee=NULL",[]).unwrap();
+        agent.db.execute("INSERT INTO issue_status_updates VALUES('status-stale','named:Native fleet',1,'human:fixture','red','A stale owner update.',102)",[]).unwrap();
+        let replay = accept_changes(&main.db,"agent",&journal(&agent.db,0).unwrap()).unwrap();
+        assert!(replay.iter().any(|r|r["state"]=="conflict"));
+        assert_eq!(main.db.query_row("SELECT count(*) FROM issue_status_updates",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     }
 
     #[test]

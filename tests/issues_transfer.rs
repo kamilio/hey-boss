@@ -37,6 +37,11 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     let create = json!({"action":"create","title":"Keep everything","body":"**Markdown**","labels":["ready"],"draft":true});
     call("Source", create.clone(), None).unwrap();
     call("Destination", create, None).unwrap();
+    call("Source", json!({"action":"undraft","number":1}), None).unwrap();
+    call("Source", json!({"action":"claim","number":1,"force":false}), None).unwrap();
+    call("Source", json!({"action":"status","number":1,"level":"green","comment":"The fix passes tests."}), None).unwrap();
+    call("Source", json!({"action":"unassign","number":1,"force":false}), None).unwrap();
+    call("Source", json!({"action":"edit","number":1,"draft":true,"add_labels":[],"remove_labels":[]}), None).unwrap();
     let comment = call(
         "Source",
         json!({"action":"comment","number":1,"body":"Preserved comment"}),
@@ -63,6 +68,10 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     let destination = call("Destination", json!({"action":"view","number":2}), None).unwrap();
     assert_eq!(destination["comments"][0]["body"], "Preserved comment");
     assert_eq!(destination["comments"][0]["resolved"], true);
+    assert_eq!(destination["issue"]["status"]["comment"], "The fix passes tests.");
+    let status_history = call("Destination", json!({"action":"status_history","number":2,"limit":20,"offset":0}), None).unwrap();
+    assert_eq!(status_history["updates"].as_array().unwrap().len(), 1);
+    assert_eq!(status_history["updates"][0]["level"], "green");
     let map = call(
         "Source",
         json!({"action":"mindmap","operation":{"command":"view","node":"moving"}}),
