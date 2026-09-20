@@ -319,7 +319,7 @@ impl AgentSession {
                     Some(s) => ("thread/resume", json!({"threadId":s.id})),
                     None => ("thread/start", json!({"ephemeral":false})),
                 };
-                let result = client.rpc(method, params)?;
+                let result = client.rpc(method, crate::codex_permissions::thread(params))?;
                 client.attach(required(&result["thread"], "id")?, None)?;
             }
             Provider::Claude => {

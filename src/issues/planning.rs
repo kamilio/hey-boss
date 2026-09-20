@@ -527,7 +527,7 @@ pub fn interactive(
     }
     drop(_new_lock);
     drop(_existing_lock);
-    let mut codex = Command::new("codex")
+    let mut codex = crate::codex_permissions::apply(&mut Command::new("codex"))
         .current_dir(&checkout)
         .arg(format!("We are planning in {}", plan.path))
         .spawn()?;

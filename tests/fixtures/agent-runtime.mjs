@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const provider = process.env.HEY_BOSS_FIXTURE_PROVIDER;
 const args = process.argv.slice(2);
+if (provider === 'codex') {
+  for (const setting of ['approval_policy="on-request"', 'approvals_reviewer="auto_review"', 'sandbox_mode="workspace-write"']) {
+    if (!args.some((arg, i) => arg === '-c' && args[i + 1] === setting)) throw new Error(`Missing hardcoded Auto permission setting: ${setting}`);
+  }
+}
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 let session = '00000000-0000-0000-0000-000000000001';
 let file;
@@ -89,7 +94,10 @@ for await (const chunk of process.stdin) {
     }
     if (r.method === 'initialized') continue;
     let result = {};
-    if (r.method === 'thread/start' || r.method === 'thread/resume') result = {thread:{id:session}};
+    if (r.method === 'thread/start' || r.method === 'thread/resume') {
+      if (p.approvalPolicy !== 'on-request' || p.approvalsReviewer !== 'auto_review' || p.sandbox !== 'workspace-write') throw new Error('Thread must explicitly use Auto permissions, including on resume');
+      result = {thread:{id:session}};
+    }
     if (r.method === 'turn/start') { turn = 'fixture-turn-' + (++turnNumber); result = {turn:{id:turn}}; }
     if (r.method === 'turn/steer') result = {turnId:turn};
     if (r.method === 'thread/read') result = {thread:{id:session,status:{type:streaming?'active':'idle'},canAcceptDirectInput:streaming}};

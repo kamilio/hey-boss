@@ -5,6 +5,7 @@ pub(super) fn command(provider: Provider, binary: &Path, resume: Option<&Session
     match provider {
         Provider::Codex => {
             command.args(["app-server", "--listen", "stdio://"]);
+            crate::codex_permissions::apply(&mut command);
         }
         Provider::Claude => {
             command.args([

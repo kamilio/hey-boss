@@ -583,6 +583,7 @@ impl Codex {
             &std::env::var_os("PATH").unwrap_or_default(),
         ));
         let mut command = Command::new(binary);
+        crate::codex_permissions::apply(&mut command);
         command
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(&job.config.cwd)
@@ -1041,7 +1042,13 @@ fn run_thread(
             json!({"cwd":job.config.cwd,"ephemeral":false}),
         )
     };
-    let result = c.rpc(method, params, store, job, stop)?;
+    let result = c.rpc(
+        method,
+        crate::codex_permissions::thread(params),
+        store,
+        job,
+        stop,
+    )?;
     let session = result["thread"]["id"]
         .as_str()
         .ok_or_else(|| Error::new("worker_error", "Codex did not return a session ID"))?

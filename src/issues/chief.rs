@@ -150,7 +150,8 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
         if let Some(id) = &session {
             command.args(["resume", id]);
         }
-        command.args(["--json","--skip-git-repo-check","-c","approval_policy=\"never\""])
+        crate::codex_permissions::apply(&mut command);
+        command.args(["--json","--skip-git-repo-check"])
             .arg(format!("Project: {}. Use hey-boss issue and mm commands in this project.\n\n{}\n\nRun one organizing pass, then stop. Workers handle all code changes; do not start a goal.",job.project,job.prompt))
             .current_dir(&job.cwd).process_group(0)
             .env("HEY_BOSS_ISSUE_DB",path).env("HEY_BOSS_ISSUE_PROJECT",&job.project)

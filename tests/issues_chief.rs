@@ -168,6 +168,16 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     );
     drop(worker);
     fs::write(f.0.join("fail"), "").unwrap();
+    for launch in fs::read_to_string(f.0.join("launches.txt"))
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("exec "))
+    {
+        assert!(launch.contains("-c approval_policy=\"on-request\""));
+        assert!(launch.contains("-c approvals_reviewer=\"auto_review\""));
+        assert!(launch.contains("-c sandbox_mode=\"workspace-write\""));
+        assert!(!launch.contains("approval_policy=\"never\""));
+    }
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
     let worker = start(false);

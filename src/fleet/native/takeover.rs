@@ -20,7 +20,12 @@ pub(super) fn command(host: &str, directory: &str, session: &str) -> Result<Stri
     {
         return Err(invalid("Resume details are not available for this session"));
     }
-    let local = format!("cd {} && codex resume {}", quote(directory), quote(session));
+    let resume = format!(
+        "codex resume {} {}",
+        crate::codex_permissions::INTERACTIVE_FLAG,
+        quote(session)
+    );
+    let local = format!("cd {} && {resume}", quote(directory));
     if host == "local" {
         return Ok(local);
     }
@@ -31,7 +36,7 @@ pub(super) fn command(host: &str, directory: &str, session: &str) -> Result<Stri
     let remote = format!(
         "cd {} && exec \"${{SHELL:-/bin/sh}}\" -lic {}",
         quote(directory),
-        quote(&format!("codex resume {}", quote(session)))
+        quote(&resume)
     );
     Ok(format!("ssh -t {} {}", quote(host), quote(&remote)))
 }
@@ -81,12 +86,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8(decoded.stdout).unwrap().trim(),
-            format!("codex resume {}", quote(SESSION))
+            format!("codex resume --approve-for-me {}", quote(SESSION))
         );
         assert!(
             !command("local", directory, SESSION)
                 .unwrap()
                 .contains("ssh")
+        );
+        assert!(
+            command("local", directory, SESSION)
+                .unwrap()
+                .contains("--approve-for-me")
         );
         for (host, dir, session) in [
             ("-bad", "/repo", SESSION),
