@@ -4,14 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -561,12 +560,9 @@ pub(crate) fn recover(store: &mut Store, machine: &str) -> Result<()> {
 }
 
 struct Codex {
-    child: Child,
-    input: ChildStdin,
-    inbox: mpsc::Receiver<Result<Value>>,
+    process: crate::agent_process::Process,
     pending: VecDeque<Value>,
     next_id: u64,
-    start: String,
     session: Option<String>,
     native_goal: bool,
     approvals: super::worker_approvals::Approvals,
@@ -586,7 +582,6 @@ impl Codex {
         command
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(&job.config.cwd)
-            .process_group(0)
             .env("HEY_BOSS_ISSUE_DB", path)
             .env("HEY_BOSS_ISSUE_PROJECT", &job.project.id)
             .env(
@@ -599,45 +594,13 @@ impl Codex {
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CLAUDE_SESSION_ID")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = command.spawn()?;
-        let Some(start) = crate::agents::process_identity(child.id()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::new("worker_error", "Codex exited during launch"));
-        };
-        let input = child.stdin.take().unwrap();
-        let output = child.stdout.take().unwrap();
-        let (send, inbox) = mpsc::sync_channel(128);
-        thread::spawn(move || {
-            let mut reader = BufReader::new(output);
-            loop {
-                let mut line = Vec::new();
-                let read =
-                    Read::take(&mut reader, 8 * 1024 * 1024 + 1).read_until(b'\n', &mut line);
-                let value = match read {
-                    Ok(0) => break,
-                    Ok(_) if line.len() > 8 * 1024 * 1024 => {
-                        Err(Error::new("worker_error", "Codex event exceeded 8 MiB"))
-                    }
-                    Ok(_) => serde_json::from_slice(&line).map_err(Error::from),
-                    Err(e) => Err(e.into()),
-                };
-                let bad = value.is_err();
-                if send.send(value).is_err() || bad {
-                    break;
-                }
-            }
-        });
+            .env_remove("PI_SESSION_ID")
+            .env_remove("CLAUDECODE");
+        let process = crate::agent_process::Process::spawn(&mut command)?;
         Ok(Self {
-            child,
-            input,
-            inbox,
+            process,
             pending: VecDeque::new(),
             next_id: 0,
-            start,
             session: None,
             native_goal: false,
             approvals: Default::default(),
@@ -663,20 +626,12 @@ impl Codex {
         Ok(None)
     }
     fn send(&mut self, value: Value) -> Result<()> {
-        serde_json::to_writer(&mut self.input, &value)?;
-        self.input.write_all(b"\n")?;
-        self.input.flush()?;
-        Ok(())
+        self.process.send(&value).map_err(Error::from)
     }
     fn receive(&mut self) -> Result<Option<Value>> {
-        match self.inbox.recv_timeout(Duration::from_millis(200)) {
-            Ok(v) => v.map(Some),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(_) => Err(Error::new(
-                "worker_error",
-                "Codex disconnected before reporting completion",
-            )),
-        }
+        self.process
+            .receive(Duration::from_millis(200))
+            .map_err(Error::from)
     }
     fn check(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
         if store.worker_model_expired(job)? {
@@ -869,9 +824,7 @@ impl Codex {
 }
 impl Drop for Codex {
     fn drop(&mut self) {
-        let _ = stop_group(self.child.id(), &self.start);
-        // Reap the parent even if it exited before its process identity was read.
-        let _ = self.child.wait();
+        let _ = self.process.stop();
         // The server is stopped before its remaining Inbox questions are cancelled.
         self.approvals = Default::default();
     }
@@ -1049,7 +1002,7 @@ fn run_codex(
     validate_config(&job.config, &job.project)?;
     Codex::check(store, job, stop)?;
     let mut c = Codex::spawn(path, job)?;
-    store.worker_process(&job.id, c.child.id())?;
+    store.worker_process(&job.id, c.process.pid())?;
     store.worker_event(&job.id, "Launching Codex", None)?;
     let outcome = run_thread(&mut c, store, job, stop);
     if let Err(error) = &outcome {
