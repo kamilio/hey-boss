@@ -1657,7 +1657,7 @@ func auditMachineHealth() {
     ui.logSearch.stringValue = "no-such-process"; ui.rebuildItems()
     precondition(ui.items.isEmpty && ui.selectedEvent.stringValue.contains("No entries match"))
     ui.logSearch.stringValue = ""; ui.render(snapshot)
-    ui.kind.selectedSegment = 2; ui.switchKind()
+    ui.kind.selectedSegment = 3; ui.switchKind()
     precondition(ui.items.first!.detail.contains("not merged"))
     ui.logSearch.stringValue = "connections"; ui.rebuildItems(); precondition(ui.table.numberOfRows == 1)
     ui.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -1684,6 +1684,18 @@ func auditMachineHealth() {
     ui.clean.performClick(nil)
     RunLoop.main.run(until: Date().addingTimeInterval(0.1))
     precondition(calls.last == ["clean", "--json"])
+    var caches = value
+    var cacheConfig = value["config"] as! [String: Any]; cacheConfig["clean_caches"] = true; caches["config"] = cacheConfig
+    caches["caches"] = [["name": "/Users/example/Library/Caches/Google/Chrome", "detail": "Inactive disposable cache; eligible", "eligible": true]]
+    caches["removed_caches"] = 3; caches["disk_available_change_bytes"] = -1_048_576
+    ui.render(try! HealthSnapshot.decode(JSONSerialization.data(withJSONObject: caches)))
+    ui.kind.selectedSegment = 2; ui.switchKind()
+    precondition(ui.items.count == 1 && ui.items[0].name.contains("Chrome") && ui.cachesEnabled.state == .on)
+    precondition(ui.footer.stringValue.contains("3 caches") && ui.footer.stringValue.contains("-1.0 MiB"))
+    precondition(ui.table.tableColumn(withIdentifier: .init("age"))?.isHidden == true)
+    ui.cachesEnabled.performClick(nil); RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    precondition(calls.contains(["configure", "--caches", "false"]))
+    ui.kind.selectedSegment = 0; ui.switchKind()
     ui.automatic.performClick(nil)
     RunLoop.main.run(until: Date().addingTimeInterval(0.1))
     precondition(calls.contains(["disable"]) && calls.last == ["status", "--json"])
