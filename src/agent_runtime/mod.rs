@@ -263,12 +263,13 @@ impl AgentSession {
             std::env::current_exe()?.parent().unwrap().to_owned(),
         ];
         paths.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
+            &launch
+                .env
+                .get(std::ffi::OsStr::new("PATH"))
+                .cloned()
+                .or_else(|| std::env::var_os("PATH"))
+                .unwrap_or_default(),
         ));
-        command.current_dir(launch.cwd).envs(launch.env).env(
-            "PATH",
-            std::env::join_paths(paths).map_err(io::Error::other)?,
-        );
         for key in [
             "HEY_BOSS_AGENT_ID",
             "CODEX_THREAD_ID",
@@ -279,6 +280,12 @@ impl AgentSession {
         ] {
             command.env_remove(key);
         }
+        // Discard inherited caller identity, then honor explicit owned-session
+        // context supplied by the embedding application.
+        command.current_dir(launch.cwd).envs(launch.env).env(
+            "PATH",
+            std::env::join_paths(paths).map_err(io::Error::other)?,
+        );
         let process = Process::spawn(&mut command)?;
         let mut client = Self {
             provider: launch.provider,
