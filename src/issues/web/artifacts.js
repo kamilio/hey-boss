@@ -128,6 +128,8 @@ const HeyBossArtifacts = (() => {
 
   async function start() {
     if(!$("#artifact-main"))return;
+    const skip=$(".skip-link[href='#artifact-main']");
+    if(skip)skip.onclick=e=>{e.preventDefault();$("#artifact-main").scrollIntoView({block:"start"});$("#artifact-main").focus({preventScroll:true});};
     HeyBossUI.icons();
     const route=()=>new URLSearchParams(location.hash.slice(1));
     const status=s=>{if($("#artifact-status").textContent!==s)$("#artifact-status").textContent=s;};
