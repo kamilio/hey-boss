@@ -23,6 +23,7 @@ pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checko
 pub const DEFAULT_MAIN_PROMPT: &str =
     "Commit your changes. If a Git remote is configured, push to main.";
 pub const DEFAULT_PRS_PROMPT: &str = "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {{number}} '<pr-url>'`.";
+pub(crate) const PR_HANDOFF_PROMPT: &str = "PR handoff: Keep the issue open until the actual fix PR is merged. CI passing and a ready-for-review handoff are not a merge. Continue in this session until required CI and reviews are complete, code feedback and findings are addressed, and conflicts are resolved. Only when the fix is fully merge-ready, record the verification and remaining merge step in an issue comment, then hand it to Boss with `hey-boss issue assign-to-boss {{number}}` and report completed. Do not close the issue at this handoff or merge automatically. If work remains, continue working; if blocked, report blocked rather than completed or assigning it to Boss. Review attachment purposes: supporting evidence PRs do not all need to merge. An explicitly requested source/group closure may still close normally.";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptOverrides {
@@ -919,6 +920,13 @@ fn prompt(job: &Job) -> (String, bool, String) {
         template(workspace, job),
         template(delivery, job)
     );
+    // Lifecycle rules also apply to saved/custom delivery prompts. Preview,
+    // claims, new sessions and resumed sessions all use this assembly path.
+    let instructions = if job.config.prs_enabled {
+        format!("{instructions}\n\n{}", template(PR_HANDOFF_PROMPT, job))
+    } else {
+        instructions
+    };
     let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
         format!("{instructions}\n\nPlan document: {path}")
     } else {
@@ -1439,6 +1447,26 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pr_handoff_instructions_survive_custom_delivery_prompts() {
+        for custom in [None, Some("Publish custom PR {{number}}.".into())] {
+            let config = ProjectConfig {
+                prs_enabled: true,
+                prompt_overrides: PromptOverrides {
+                    prs: custom,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (text, _, _) = preview(&config, &project(), issue());
+            assert!(text.contains("Keep the issue open until the actual fix PR is merged"));
+            assert!(text.contains("hey-boss issue assign-to-boss 7"));
+            assert!(text.contains("CI passing and a ready-for-review handoff are not a merge"));
+            assert!(text.contains("supporting evidence PRs"));
+        }
+        let (text, _, _) = preview(&ProjectConfig::default(), &project(), issue());
+        assert!(!text.contains("assign-to-boss"));
+    }
     fn project() -> Project {
         Project {
             id: "named:a'b $(touch nope)".into(),

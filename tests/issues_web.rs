@@ -1413,14 +1413,21 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
                     "Ship directly 1."
                 }
             );
-            assert_eq!(preview["prompt"], expected);
+            if prs {
+                let text = preview["prompt"].as_str().unwrap();
+                assert!(text.starts_with(&format!("{expected}\n\nPR handoff:")));
+                assert!(text.contains("Keep the issue open until the actual fix PR is merged"));
+                assert!(text.contains("hey-boss issue assign-to-boss 1"));
+            } else {
+                assert_eq!(preview["prompt"], expected);
+            }
             assert_eq!(preview["use_goal"], true);
             web.ok(json!({"action":"configure_project","prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides}));
             let settings = web.ok(json!({"action":"project_settings"}));
             assert_eq!(settings["worktree_enabled"], worktree);
             assert_eq!(settings["prompt_overrides"], overrides);
             let claim = web.ok(json!({"action":"claim","number":1,"force":false}));
-            assert_eq!(claim["instructions"], expected);
+            assert_eq!(claim["instructions"], preview["prompt"]);
         }
     }
     let version = web.ok(json!({"action":"project_settings"}))["version"].clone();
