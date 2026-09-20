@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync('src/issues/web/routes.js', 'utf8').replace('/* ROUTE_DEFINITIONS */', fs.readFileSync('src/issues/web/routes.json', 'utf8'));
+const source = fs.readFileSync('src/issues/web/routes.js', 'utf8').replace('/* ROUTE_DEFINITIONS */ []', fs.readFileSync('src/issues/web/routes.json', 'utf8'));
 const context = vm.createContext({URL, URLSearchParams, module:{exports:{}}});
 vm.runInContext(source, context);
 const router = context.module.exports;
