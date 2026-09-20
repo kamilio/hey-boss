@@ -71,6 +71,20 @@
 .load-history { display:block; margin:24px auto }
 .jump-live { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); box-shadow:var(--shadow); background:var(--solid); border-radius:24px; z-index:10 }
 #conversation-end { height:1px }
+.session-actions { display:flex; align-items:center; flex-wrap:wrap; gap:14px; margin-top:18px }
+.session-actions:has(> [hidden]):not(:has(> :not([hidden]))) { display:none }
+.resume-panel { margin-top:22px; padding:22px; border:1px solid var(--line); border-radius:16px; background:var(--surface) }
+.resume-panel h2,.takeover-dialog h2 { margin:0 0 10px; font-size:20px; letter-spacing:-.025em }
+.resume-panel p,.takeover-dialog p { color:var(--muted); font-size:13px; line-height:1.7 }
+.resume-command { display:flex; align-items:flex-start; gap:12px; margin-top:16px }
+.resume-command code { flex:1; min-width:0; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--input); font:12px/1.75 ui-monospace,SFMono-Regular,monospace; overflow-wrap:anywhere; white-space:pre-wrap; user-select:all }
+#copy-status:empty { display:none }
+.takeover-dialog { width:min(480px,calc(100% - 32px)); box-sizing:border-box; padding:28px; border:1px solid var(--line); border-radius:22px; background:var(--solid); color:var(--text); box-shadow:var(--shadow) }
+.takeover-dialog::backdrop { background:#14243b70; backdrop-filter:blur(4px) }
+.takeover-task { padding:12px 14px; background:var(--input); border-radius:10px; overflow-wrap:anywhere }
+.takeover-dialog-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:10px; margin-top:24px }
+.takeover-dialog button,.resume-command button,#takeover-open { min-height:44px }
+@media(max-width:680px) { .resume-command { flex-direction:column }.resume-command code { box-sizing:border-box; width:100% }.resume-command button { width:100% }.takeover-dialog { padding:22px }.takeover-dialog-actions { flex-direction:column-reverse }.takeover-dialog-actions button { width:100% } }
 @media(max-width:680px) {
   .agent-grid { grid-template-columns:1fr }.agent-card { padding:21px; border-radius:17px }.project-heading h2 { font-size:19px }
   .session-heading { flex-direction:column; align-items:flex-start; gap:12px }.session-heading h1 { font-size:22px }.session-subheading { align-items:flex-start }
