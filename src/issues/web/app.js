@@ -470,7 +470,8 @@ function listPullRequests(issue) {
       } catch {
         /* Keep old attached links readable if URL parsing fails. */
       }
-      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}" aria-label="Open pull request ${esc(title)}">${icon("link")}${esc(title)}</a>`;
+      const purpose = prPurposeLabel(pr.purpose);
+      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)} · ${purpose}" aria-label="Open pull request ${esc(title)} · ${purpose}">${icon("link")}${esc(title)}<span class="pr-purpose-label">${purpose}</span></a>`;
     })
     .join("");
 }
@@ -962,8 +963,11 @@ function renderDetail(value) {
   if ($("#pr-form"))
     $("#pr-form").onsubmit = (event) => {
       event.preventDefault();
-      changePullRequest("add_pull_request", $("#pr-url").value);
+      changePullRequest("add_pull_request", $("#pr-url").value, $("#pr-purpose").value);
     };
+  $$('[data-pr-purpose]').forEach((select) => {
+    select.onchange = () => changePullRequest("classify_pull_request", select.dataset.prPurpose, select.value, select);
+  });
 }
 let markdownSequence = 0;
 function secureLinks() {
@@ -1762,20 +1766,42 @@ async function boot() {
 }
 boot();
 
-function renderPullRequests(issue) {
-  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><div class="pr-links">${(issue.pull_requests || []).map((pr) => `<div class="pr-link"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>`).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : '<form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><button class="button small" type="submit">Attach PR</button><p id="pr-error" class="form-error" role="alert" hidden></p></form>'}</div>`;
+const PR_PURPOSES = {
+  unspecified: "Unspecified",
+  fix: "Fix",
+  prerequisite: "Prerequisite",
+  "supporting-evidence": "Supporting evidence",
+};
+function prPurposeLabel(purpose) {
+  return PR_PURPOSES[purpose] || PR_PURPOSES.unspecified;
 }
-async function changePullRequest(action, url) {
+function prPurposeOptions(purpose = "unspecified") {
+  return Object.entries(PR_PURPOSES).map(([value, label]) => `<option value="${value}"${value === purpose ? " selected" : ""}>${label}</option>`).join("");
+}
+function renderPullRequests(issue) {
+  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><p class="field-help pr-purpose-help">Identify fixes, prerequisites, and supporting evidence. Review every linked PR.</p><div class="pr-links">${(issue.pull_requests || []).map((pr) => `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form><p id="pr-error" class="form-error" role="alert" hidden></p>`}</div>`;
+}
+async function changePullRequest(action, url, purpose, control) {
   const project = model.project.id,
-    number = model.detail.issue.number;
+    number = model.detail.issue.number,
+    host = model.route.host;
+  const current = () => model.project?.id === project && model.route.host === host && model.route.issue === number;
+  const restoreFocus = control === document.activeElement;
   const button = $("#pr-form button");
   if (button) button.disabled = true;
+  if (control) control.disabled = true;
+  const errorEl = $("#pr-error");
+  if (errorEl) errorEl.hidden = true;
   try {
-    await mutate({ action, number, url }, project);
-    detailCache.delete(detailKey(project,number));
+    await mutate({ action, number, url, ...(purpose ? {purpose} : {}) }, project, host);
+    if (!current()) return;
     await renderRoute();
-    toast(action === "add_pull_request" ? "PR attached" : "PR removed");
+    if (!current()) return;
+    if (restoreFocus) $$('[data-pr-purpose]').find(select => select.dataset.prPurpose === url)?.focus({preventScroll:true});
+    toast(action === "add_pull_request" ? "PR attached" : action === "classify_pull_request" ? "PR purpose updated" : "PR removed");
   } catch (error) {
+    if (!current()) return;
+    if (control) control.value = control.dataset.savedPurpose;
     const el = $("#pr-error");
     if (el) {
       el.textContent = error.message;
@@ -1783,6 +1809,7 @@ async function changePullRequest(action, url) {
     } else toast(error.message, true);
   } finally {
     if (button) button.disabled = false;
+    if (control) control.disabled = false;
   }
 }
 
