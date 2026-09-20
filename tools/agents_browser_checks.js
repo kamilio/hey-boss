@@ -10,7 +10,7 @@ async page => {
  check(await page.locator('.project-section').count()===3,'Tasks grouped into three projects');
  check(await page.locator('.project-section').first().locator('.agent-card:not(.history-card)').count()===2,'Agents on separate devices appear together under their project');
  check(await page.locator('.location-label').allTextContents().then(v=>v.includes('Devbox')),'Device is a simple label');
- check(!(await page.locator('#overview-page').innerText()).match(/Supervisor|worker|capacity|session ID|heartbeat/),'Overview uses human language');
+ check(!(await page.locator('#projects').innerText()).match(/Supervisor|worker|capacity|session ID|heartbeat/),'Task overview uses human language');
  check(await page.locator('.is-quiet').innerText()==='Last seen','Disconnected task never says it is live');
  await page.locator('.project-history summary').click();check(await page.locator('.history-card').isVisible(),'Completed conversation is accessible');
  await page.locator('.project-history summary').focus();await page.locator('#refresh').click();await page.waitForTimeout(600);

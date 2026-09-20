@@ -60,12 +60,21 @@ pub(crate) fn is_home_project(project: &Project) -> bool {
     else {
         return false;
     };
+    let directory = Path::new(directory);
+    // RPCs and fleet replicas can describe another machine's home directory.
+    if directory == Path::new("/root")
+        || directory
+            .parent()
+            .is_some_and(|parent| parent == Path::new("/home") || parent == Path::new("/Users"))
+    {
+        return true;
+    }
     let Some(home) = std::env::var_os("HOME") else {
         return false;
     };
     let home = std::path::PathBuf::from(home);
     let home = home.canonicalize().unwrap_or(home);
-    Path::new(directory) == home
+    directory == home
 }
 
 pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> Project {
@@ -210,6 +219,27 @@ pub fn presence(actor: &Actor, local_machine: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn home_projects_are_ignored_across_machines_but_checkouts_are_kept() {
+        for path in ["/home/remote", "/Users/remote", "/root"] {
+            assert!(is_home_project(&Project {
+                id: format!("local:remote:{path}"),
+                name: "Home".into()
+            }));
+        }
+        for id in [
+            "local:remote:/home/remote/project",
+            "local:remote:/Users/remote/project",
+            "local:remote:/root/project",
+            "github.com/example/home",
+            "named:Home",
+        ] {
+            assert!(!is_home_project(&Project {
+                id: id.into(),
+                name: "Project".into()
+            }));
+        }
+    }
     fn agent(pid: u32, session: Option<&str>, evidence: &str) -> crate::agents::Agent {
         crate::agents::Agent {
             id: format!("pid-{pid}"),
