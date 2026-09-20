@@ -85,6 +85,24 @@ It verifies successful completion, exact session reuse and preserved conversatio
 content. It passed locally with Codex 0.155.1, Claude Code 2.1.278 and Pi 0.84.4;
 use the installed CLI versions reported by the test environment when reproducing.
 
+The opt-in live control suite uses the real authenticated Claude and Pi CLIs,
+timed foreground shell tools and scratch-only files. Pi loads a small local
+extension through a transparent executable wrapper; its dialogs and replies
+travel through the actual Pi RPC implementation, not a protocol fixture.
+
+```sh
+cargo test --locked --test agent_live_controls -- --ignored --nocapture --test-threads=1
+```
+
+It passed with Claude Code 2.1.278 and Pi 0.84.4. Both providers were checked for
+steering, stale guards, active-tool interruption, recovery, lack of delayed tool
+effects beyond the original tool deadline, and cancellation of queued steering.
+Claude additionally passed explicit Write approval denial/allowance and rejection
+of unknown/repeated decision IDs. Pi passed select/confirm/input/editor responses,
+invalid and repeated input rejection, dialog cancellation, acknowledgment after
+preflight input, and owned-process interruption of a pending dialog. Pi still has
+no native tool permission broker.
+
 ## Provider-neutral goals
 
 `ManagedGoal` supplies continuation without requiring a native goal service.
