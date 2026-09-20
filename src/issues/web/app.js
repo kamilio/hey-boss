@@ -1766,7 +1766,8 @@ document.addEventListener("click", async event => {
     saveComment();
     await renderRoute();
     if (!current()) return;
-    $("[data-draft-action]")?.focus({preventScroll:true});
+    const next = $("[data-draft-action]");
+    (next && !next.disabled ? next : $("[data-edit]") || $("#main")).focus({preventScroll:true});
     toast(ready ? "Issue marked ready for agents" : "Issue moved to draft");
   } catch(error) {
     if (!current()) return;

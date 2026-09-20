@@ -87,6 +87,7 @@ async page => {
   await page.getByRole('button',{name:'Mark ready',exact:true}).click();
   await page.locator('[data-draft-action="draft"]').waitFor();
   check(await page.getByRole('button',{name:'Move to draft',exact:true}).isDisabled(), 'Ready detail explains disabled drafting');
+  check(await page.getByRole('button',{name:'Edit',exact:true}).evaluate(el => el === document.activeElement), 'Readiness restores focus when drafting is disabled');
   await action({action:'configure_project',drafts_enabled:true});
   await page.reload({waitUntil:'domcontentloaded'});
   await page.getByRole('button',{name:'Move to draft',exact:true}).click();
