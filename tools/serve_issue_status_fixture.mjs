@@ -27,6 +27,13 @@ const web=spawn(binary,['issue','--project',project.id,'web','--port','4796','--
 const store=new HubStore();store.setIssueProjects([project]);
 const app=createApp({store,hubToken:'synthetic-status-fixture-'.repeat(4),secure:false,origin:'http://127.0.0.1:52070'});
 app.get('/fixture/pairing',(_req,res)=>res.json({code:store.pairing()}));
+app.get('/fixture/history',(_req,res)=>res.json(cli(['status-history','1','--limit','100'])));
+let burst=0;
+app.post('/fixture/status',(_req,res)=>{
+ let result;burst++;
+ for(let step=1;step<=3;step++)result=cli(['status','1','green','--comment',`A new update arrived while reading history, check ${burst}, step ${step}.`]);
+ res.json(result);
+});
 const server=app.listen(52070,'127.0.0.1',()=>console.log(JSON.stringify({mobile:'http://127.0.0.1:52070',code:store.pairing()})));
 let busy=false;
 const timer=setInterval(()=>{

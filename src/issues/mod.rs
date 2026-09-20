@@ -365,6 +365,8 @@ pub enum Operation {
         number: i64,
         limit: u32,
         offset: u32,
+        #[serde(default)]
+        before: Option<i64>,
     },
     StatusView {
         number: i64,

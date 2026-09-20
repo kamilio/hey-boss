@@ -788,6 +788,7 @@ impl Options {
                 number: *number,
                 limit: *limit,
                 offset: *offset,
+                before: None,
             },
             Action::ResolveComment { number, comment_id }
             | Action::UnresolveComment { number, comment_id } => Operation::ResolveComment {

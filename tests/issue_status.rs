@@ -43,11 +43,99 @@ impl Fixture {
     fn create(&self) {
         self.run("owner", &["create", "--title", "Ship status"], 0);
     }
+    fn history(&self, offset: u32, before: Option<i64>) -> Value {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut operation =
+            serde_json::json!({"action":"status_history","number":1,"limit":2,"offset":offset});
+        if let Some(before) = before {
+            operation["before"] = before.into();
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&self.0)
+            .env("HEY_BOSS_ISSUE_DB", self.0.join("issues.db"))
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .args(["issue", "rpc"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                serde_json::json!({
+                    "version":1,"project":{"id":"named:Status QA","name":"Status QA"},
+                    "project_override":null,"actor":null,"operation":operation,"request_id":null
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success());
+        let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(value["ok"], true, "{value}");
+        value
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn history_pages_keep_their_snapshot_when_new_updates_arrive() {
+    let f = Fixture::new();
+    f.create();
+    f.run("owner", &["claim", "1"], 0);
+    for step in 0..5 {
+        f.run(
+            "owner",
+            &[
+                "status",
+                "1",
+                "green",
+                "--comment",
+                &format!("Step {step}."),
+            ],
+            0,
+        );
+    }
+    let first = f.history(0, None);
+    let snapshot = first["snapshot_at"]
+        .as_i64()
+        .expect("History must return its reading boundary");
+    for step in 0..3 {
+        f.run(
+            "owner",
+            &[
+                "status",
+                "1",
+                "orange",
+                "--comment",
+                &format!("New step {step}."),
+            ],
+            0,
+        );
+    }
+    let second = f.history(2, Some(snapshot));
+    let third = f.history(4, Some(snapshot));
+    let comments: Vec<_> = [&first, &second, &third]
+        .into_iter()
+        .flat_map(|page| page["updates"].as_array().unwrap())
+        .map(|update| update["comment"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        comments,
+        ["Step 4.", "Step 3.", "Step 2.", "Step 1.", "Step 0."]
+    );
+    assert!(third["next_offset"].is_null());
+    assert_eq!(second["snapshot_at"], snapshot);
+    assert_eq!(f.history(0, None)["updates"][0]["comment"], "New step 2.");
 }
 
 #[test]
