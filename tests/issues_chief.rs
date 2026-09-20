@@ -1,5 +1,8 @@
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, path::PathBuf, process::Command};
+
+static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -7,10 +10,7 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!(
             "hb-chief-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)
