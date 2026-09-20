@@ -28,6 +28,8 @@ mod artifacts;
 mod batch;
 #[path = "transfer.rs"]
 mod transfer;
+#[path = "status.rs"]
+mod status;
 
 const APPLICATION_ID: i64 = 0x48424953;
 const SCHEMA_VERSION: i64 = 13;
@@ -147,7 +149,7 @@ fn migrate_blocked(db: &Connection) -> Result<()> {
     Ok(())
 }
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
@@ -169,11 +171,14 @@ struct Issue {
     plan: Option<super::planning::Plan>,
     #[serde(default)]
     agent_launch_count: i64,
+    #[serde(default)]
+    status: Option<Value>,
 }
 fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
         agent_launch_count: row.get(16)?,
+        status: row.get::<_, Option<String>>(17)?.map(|s| serde_json::from_str(&s)).transpose().map_err(|e| rusqlite::Error::FromSqlConversionFailure(17,rusqlite::types::Type::Text,Box::new(e)))?,
         sort_order: row.get(13)?,
         draft: row.get(14)?,
         plan: row
@@ -415,7 +420,8 @@ fn validate(r: &Request) -> Result<()> {
                 identifier(text, "search", 1024)?;
             }
         }
-        Operation::History { limit, .. } => page(*limit)?,
+        Operation::Status { comment, .. } => status::validate(comment)?,
+        Operation::History { limit, .. } | Operation::StatusHistory { limit, .. } => page(*limit)?,
         _ => {}
     }
     match &r.operation {
@@ -666,6 +672,7 @@ impl Store {
             db.execute_batch(super::chief::SCHEMA)?;
         }
         agent_launches::migrate(&db)?;
+        status::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         Ok(Self {
             db,
@@ -920,7 +927,7 @@ impl Store {
                         if *all { -1_i64 } else { i64::from(*limit) + 1 },
                         if *all { 0 } else { *offset }
                     ],
-                    |row| Ok((row_issue(row)?, row.get::<_, i64>(17)?)),
+                    |row| Ok((row_issue(row)?, row.get::<_, i64>(18)?)),
                 )?;
                 let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let more = !*all && found.len() > *limit as usize;
@@ -992,6 +999,9 @@ impl Store {
                 }
                 json!({"ok":true,"project":project,"issue":get_issue(&tx,&project.id,*number,true)?,"changed":changed,"order_version":order_version+i64::from(changed)})
             }
+            Operation::Status { number, level, comment } => status::update(&tx, &project, actor.unwrap(), *number, *level, comment, now)?,
+            Operation::StatusHistory { number, limit, offset } => status::history(&tx, &project, *number, *limit, *offset)?,
+            Operation::StatusView { number } => status::current(&tx, &project, *number)?,
             Operation::View { number } => {
                 let issue = get_issue(&tx, &project.id, *number, true)?;
                 if issue.deleted_at.is_some()

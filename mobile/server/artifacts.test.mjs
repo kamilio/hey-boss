@@ -4,6 +4,18 @@ import {HubStore} from './store.mjs';
 import {createApp} from './index.mjs';
 const project={id:'named:Artifacts',name:'Artifacts'};
 const payload={project:project.id,operation:{action:'artifact',operation:{command:'create',title:'Plan',body:'# Plan'}},request_id:'artifact-1'};
+test('paired devices may read status history but cannot publish status',()=>{
+ const store=new HubStore();store.setIssueProjects([project]);
+ try {
+  const operation={action:'status_history',number:1,limit:20,offset:0};
+  const first=store.artifactRequest('phone',{project:project.id,operation});
+  assert.equal(first.status,'pending');
+  store.finishArtifact(first.id,{ok:true,updates:[{level:'green',comment:'Testing the layout.'}],next_offset:null});
+  assert.equal(store.artifactResult('phone',first.id).result.updates[0].level,'green');
+  assert.throws(()=>store.artifactResult('other',first.id),/not found/);
+  assert.throws(()=>store.artifactRequest('phone',{project:project.id,operation:{action:'status',number:1,level:'red',comment:'Not authorized.'},request_id:'no-write'}),/artifact/);
+ } finally {store.close();}
+});
 test('artifact transport deduplicates mutations, isolates devices and keeps authoritative results',()=>{
  const store=new HubStore();store.setIssueProjects([project]);
  const first=store.artifactRequest('phone',payload);

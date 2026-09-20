@@ -733,11 +733,11 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         let action: Action = serde_json::from_slice(&bytes)?;
         if matches!(
             action.operation,
-            Operation::ReadPlan { .. } | Operation::BindPlan { .. }
+            Operation::ReadPlan { .. } | Operation::BindPlan { .. } | Operation::Status { .. }
         ) {
             return Err(Error::new(
                 "forbidden",
-                "Plan files are bound and read through the terminal workflow",
+                "Plan files and issue status updates use the terminal workflow",
             ));
         }
         if let Operation::Mindmap { operation } = &action.operation {

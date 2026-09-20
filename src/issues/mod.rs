@@ -356,6 +356,19 @@ pub enum Operation {
         number: i64,
         body: String,
     },
+    Status {
+        number: i64,
+        level: StatusLevel,
+        comment: String,
+    },
+    StatusHistory {
+        number: i64,
+        limit: u32,
+        offset: u32,
+    },
+    StatusView {
+        number: i64,
+    },
     ResolveComment {
         number: i64,
         comment_id: i64,
@@ -412,6 +425,8 @@ impl Operation {
                 | Self::View { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
+                | Self::StatusHistory { .. }
+                | Self::StatusView { .. }
                 | Self::Batch { dry_run: true, .. }
         )
     }
@@ -464,12 +479,32 @@ impl Operation {
             | Self::AssignBoss { number, .. }
             | Self::Unassign { number, .. }
             | Self::Comment { number, .. }
+            | Self::Status { number, .. }
+            | Self::StatusHistory { number, .. }
+            | Self::StatusView { number }
             | Self::ResolveComment { number, .. }
             | Self::Close { number, .. }
             | Self::Block { number, .. }
             | Self::Reopen { number, .. }
             | Self::Delete { number, .. }
             | Self::Restore { number } => Some(*number),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusLevel {
+    Green,
+    Orange,
+    Red,
+}
+impl StatusLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Orange => "orange",
+            Self::Red => "red",
         }
     }
 }

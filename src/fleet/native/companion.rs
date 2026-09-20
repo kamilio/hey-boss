@@ -42,6 +42,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
         for table in [
             "agents",
             "issues",
+            "issue_status_updates",
             "issue_subtasks",
             "comments",
             "events",

@@ -178,7 +178,7 @@ impl Mobile {
             let request_id = transport_id(&request["id"])?;
             let project = projects.get(request["project"].as_str().unwrap_or(""));
             let operation = request.get("operation").cloned().unwrap_or(json!({}));
-            let read = operation["action"] == "view"
+            let read = operation["action"] == "view" || operation["action"] == "status_history" || operation["action"] == "status_view"
                 || operation["action"] == "mindmap"
                     && matches!(
                         operation["operation"]["command"].as_str(),

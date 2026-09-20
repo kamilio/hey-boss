@@ -124,7 +124,7 @@ export class HubStore{
  artifactRequest(device,value){return this.transaction(()=>{
   const commands=['list','view','preview','create','edit','archive','comment','resolve','link','unlink','links'];
   const attachment=value?.operation?.action==='attachment'&&['list','upload','download','remove'].includes(value.operation.operation?.command);
-  const resourceRead=value?.operation?.action==='view'||value?.operation?.action==='mindmap'&&['view','show'].includes(value.operation.operation?.command);
+  const resourceRead=['view','status_view','status_history'].includes(value?.operation?.action)||value?.operation?.action==='mindmap'&&['view','show'].includes(value.operation.operation?.command);
   if(!value||!attachment&&!resourceRead&&(value.operation?.action!=='artifact'||!commands.includes(value.operation.operation?.command))||value.host)throw new HubError(400,'Only project artifact operations are accepted');
   const reading=resourceRead||['list','view','links','preview','download'].includes(value.operation.operation.command);
   if(!reading&&(typeof value.request_id!=='string'||!/^[-a-zA-Z0-9_]{1,128}$/.test(value.request_id)))throw new HubError(400,'An artifact mutation request ID is required');
