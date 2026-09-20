@@ -30,6 +30,7 @@ const HeyBossArtifacts = (() => {
   }
   const api=(context,operation,requestID)=>rpc(context,{action:"artifact",operation},reads.has(operation.command),requestID);
   function anchorText(range) {
+    if(!range.commonAncestorContainer.querySelector?.(".artifact-diagram"))return range.toString();
     const fragment=range.cloneContents();
     // The server anchors against rendered Markdown. Keep original code text,
     // excluding generated SVG labels and diagram controls from that context.
