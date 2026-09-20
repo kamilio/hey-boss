@@ -177,6 +177,8 @@
 .agent-launch-count:not(.launch-help-dismissed):focus .agent-launch-help { display: block; }
 .sidebar .agent-launch-count { display: flex; }
 .sidebar .agent-launch-help { width: 100%; max-width: 260px; }
+.launch-help-below .agent-launch-help { bottom: auto; top: calc(100% + 8px); }
+.launch-help-below::after { bottom: auto; top: 100%; }
 .issue-time-link {
   position: relative;
   z-index: 1;

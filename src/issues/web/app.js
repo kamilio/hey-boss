@@ -824,10 +824,22 @@ function agentLaunchCount(issue, showZero = false) {
   return `<span class="agent-launch-count" tabindex="0" aria-label="${label}. ${help}">${icon("refresh")}<span>${label}</span><span class="agent-launch-help" aria-hidden="true">${help}</span></span>`;
 }
 
+function positionLaunchHelp(badge) {
+  const help = $(".agent-launch-help", badge);
+  badge.classList.remove("launch-help-below");
+  const bounds = badge.getBoundingClientRect();
+  help.style.left = `${Math.max(16, Math.min(bounds.left, innerWidth - help.offsetWidth - 16)) - bounds.left}px`;
+  const panel = badge.closest(".issue-panel");
+  if (help.getBoundingClientRect().top < Math.max(16, panel?.getBoundingClientRect().top || 0)) badge.classList.add("launch-help-below");
+}
 for (const type of ["pointerover", "focusin"]) document.addEventListener(type, event => {
   const badge = event.target.closest(".agent-launch-count");
-  if (badge && !badge.contains(event.relatedTarget)) badge.classList.remove("launch-help-dismissed");
+  if (badge && !badge.contains(event.relatedTarget)) {
+    badge.classList.remove("launch-help-dismissed");
+    positionLaunchHelp(badge);
+  }
 });
+window.addEventListener("resize", () => $$(".agent-launch-count:hover, .agent-launch-count:focus").forEach(positionLaunchHelp));
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
   const badges = $$(".agent-launch-count:hover, .agent-launch-count:focus");
