@@ -315,8 +315,6 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
 }
 
 #[test]
-fn comment_resolution_preserves_content_is_reversible_and_scoped_to_issue() {
-#[test]
 fn artifact_diagrams_are_bundled_locally_and_preserve_markdown_source() {
     let web = Web::start();
     let bundle = web.http("GET", "/artifact-diagrams.js", &[], b"");
@@ -339,6 +337,8 @@ fn artifact_diagrams_are_bundled_locally_and_preserve_markdown_source() {
     assert!(saved["artifact"]["body_html"].as_str().unwrap().contains("language-mermaid"));
 }
 
+#[test]
+fn comment_resolution_preserves_content_is_reversible_and_scoped_to_issue() {
     let web = Web::start();
     for title in ["First", "Second"] {
         web.ok(json!({"action":"create","title":title,"body":"","labels":[]}));
@@ -411,7 +411,7 @@ fn markdown_preview_issue_and_comment_share_complete_rendering() {
         "<strong>bold</strong>",
         "<em>emphasis</em>",
         "<del>strikethrough</del>",
-        "<ol start=\"3\">",
+        "<ol class=\"markdown-short-list\" start=\"3\">",
         "type=\"checkbox\"",
         "<table>",
         "markdown-align-right",

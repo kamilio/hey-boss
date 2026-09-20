@@ -30,7 +30,24 @@ pub fn render_review_document(source: &str) -> String {
 }
 /// Controlled Markdown HTML for embedding in an existing document.
 pub fn render_fragment(source: &str) -> String {
-    let mut body = render_body(source, false);
+    let (body, list_sizes) = render_body(source, false);
+    // Parser-generated list tags follow the same order as the list events.
+    // Raw HTML and code are escaped, so they cannot create matching tags here.
+    let mut decorated = String::with_capacity(body.len());
+    let mut cursor = 0;
+    let tags = body.match_indices('<').filter(|(offset, _)| {
+        let tag = &body[*offset..];
+        tag.starts_with("<ul>") || tag.starts_with("<ol>") || tag.starts_with("<ol start=")
+    });
+    for ((offset, _), count) in tags.zip(list_sizes) {
+        if count <= 120 {
+            decorated.push_str(&body[cursor..offset + 3]);
+            decorated.push_str(" class=\"markdown-short-list\"");
+            cursor = offset + 3;
+        }
+    }
+    decorated.push_str(&body[cursor..]);
+    let mut body = decorated;
     // The embedded app forbids inline styles. Convert only parser-generated
     // table alignment attributes; source HTML has already been escaped.
     for alignment in ["left", "center", "right"] {
@@ -51,7 +68,7 @@ pub(crate) fn parser_options() -> Options {
         | Options::ENABLE_GFM
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
 }
-fn render_body(source: &str, source_map: bool) -> String {
+fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
     let options = parser_options();
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let line_starts: Vec<usize> = std::iter::once(0)
@@ -88,10 +105,50 @@ fn render_body(source: &str, source_map: bool) -> String {
             (event, range)
         },
     ).collect();
+    let mut list_sizes = Vec::new();
+    let mut list_stack = Vec::new();
+    let mut item_stack = Vec::new();
+    let mut nested_items = std::collections::HashSet::new();
+    for (index, (event, _)) in events.iter().enumerate() {
+        match event {
+            Event::Start(Tag::List(_)) => {
+                if let Some(&item) = item_stack.last() {
+                    nested_items.insert(item);
+                }
+                list_stack.push(list_sizes.len());
+                list_sizes.push(0usize);
+            }
+            Event::Start(Tag::Item) => {
+                item_stack.push(index);
+                if let Some(&list) = list_stack.last() {
+                    list_sizes[list] += 1;
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let Some(list) = list_stack.pop()
+                    && let Some(&parent) = list_stack.last()
+                {
+                    list_sizes[parent] += list_sizes[list];
+                }
+            }
+            Event::End(TagEnd::Item) => {
+                item_stack.pop();
+            }
+            _ => {}
+        }
+    }
     for index in 0..events.len() {
         let Event::TaskListMarker(checked) = events[index].0 else {
             continue;
         };
+        let item = if index > 1 && matches!(events[index - 1].0, Event::Start(Tag::Paragraph)) {
+            index - 2
+        } else {
+            index - 1
+        };
+        if matches!(events[item].0, Event::Start(Tag::Item)) && !nested_items.contains(&item) {
+            events[item].0 = Event::Html("<li class=\"markdown-task\">".into());
+        }
         let mut label = String::new();
         for (event, _) in &events[index + 1..] {
             match event {
@@ -211,7 +268,7 @@ fn render_body(source: &str, source_map: bool) -> String {
     }
     let mut body = String::new();
     html::push_html(&mut body, styled.into_iter());
-    body
+    (body, list_sizes)
 }
 
 /// Link prose only, after Markdown parsing, so code and explicit link labels stay
@@ -248,7 +305,7 @@ fn autolink_text(text: &str, finder: &LinkFinder) -> Option<String> {
     Some(html)
 }
 fn render(source: &str, source_map: bool) -> String {
-    let body = render_body(source, source_map);
+    let body = render_body(source, source_map).0;
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -346,6 +403,11 @@ mod tests {
             html.contains("aria-label=\"Keep context and code\""),
             "{html}"
         );
+        assert_eq!(
+            html.matches("<li class=\"markdown-task\">").count(),
+            2,
+            "{html}"
+        );
         assert!(
             html.contains("aria-label=\"Review &lt;script&gt;literally&lt;/script&gt;\""),
             "{html}"
@@ -363,6 +425,27 @@ mod tests {
         assert!(nested.contains("aria-label=\"Child\""), "{nested}");
         let review = render_review_document("- [x] <b>literal</b> and context\n");
         assert!(!review.contains("aria-label=\"<span"), "{review}");
+    }
+
+    #[test]
+    fn fragment_list_containment_leaves_long_nested_outlines_measurable() {
+        let mut source = "- [x] Parent\n".to_owned();
+        for index in 0..150 {
+            source.push_str(&format!("  - [x] Child {index}\n"));
+        }
+        let html = render_fragment(&source);
+        assert!(!html.contains("markdown-short-list"), "{html}");
+        assert_eq!(
+            html.matches("<li class=\"markdown-task\">").count(),
+            150,
+            "{html}"
+        );
+        assert!(html.contains("aria-label=\"Parent\""), "{html}");
+        assert!(
+            render_fragment("3. First\n4. Second\n")
+                .contains("<ol class=\"markdown-short-list\" start=\"3\">")
+        );
+        assert!(render_document("3. First\n4. Second\n").contains("<ol start=\"3\">"));
     }
 
     #[test]
