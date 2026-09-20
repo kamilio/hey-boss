@@ -118,6 +118,13 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
         .unwrap();
     assert_eq!(graph["nodes"][0]["artifacts"][0]["id"], id);
     assert_eq!(graph["nodes"][1]["artifacts"][0]["id"], id);
+    let first_node = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["title"] == "first")
+        .unwrap()["id"]
+        .clone();
     assert_eq!(
         run(&mut store, json!({"command":"view","id":id}))["comments"]
             .as_array()
@@ -133,7 +140,14 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
         run(&mut store, json!({"command":"view","id":id}))["artifact"]["title"],
         "Shared"
     );
-    assert!(run(&mut store, json!({"command":"view","id":id}))["backlinks"][0]["title"].is_null());
+    let viewed = run(&mut store, json!({"command":"view","id":id}));
+    let removed_link = viewed["backlinks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|link| link["target"] == first_node)
+        .unwrap();
+    assert!(removed_link["title"].is_null());
 }
 
 #[test]
