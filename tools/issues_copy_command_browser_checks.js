@@ -60,6 +60,7 @@ async (page) => {
     model.projects = [model.project];
   }, special);
 
+  const queueHost = await page.evaluate(() => ({host: model.route.host, defaultHost: model.defaultHost}));
   await page.evaluate(() => { model.route.host = "dev'box"; });
   await button.click();
   check((await page.evaluate(() => copiedCommands.at(-1))).includes(" --host 'dev'\\''box'"),
@@ -68,6 +69,10 @@ async (page) => {
   await button.click();
   check((await page.evaluate(() => copiedCommands.at(-1))).includes(" --host 'controller'"),
     "A remotely hosted web server includes its default queue host");
+  await page.evaluate(({host, defaultHost}) => {
+    model.route.host = host;
+    model.defaultHost = defaultHost;
+  }, queueHost);
 
   await page.evaluate(() => {
     navigator.clipboard.writeText = async () => { throw new Error("Denied"); };
