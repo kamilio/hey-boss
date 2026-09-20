@@ -142,7 +142,14 @@ fn status_validates_short_plain_text_and_keeps_history_through_restore() {
     let f = Fixture::new();
     f.create();
     f.run("owner", &["claim", "1"], 0);
-    for text in ["", "   ", "two\nlines", "bad\u{0000}text"] {
+    for text in [
+        "",
+        "   ",
+        "two\nlines",
+        "two\u{2028}lines",
+        "two\u{2029}paragraphs",
+        "bad\u{0000}text",
+    ] {
         if text.contains('\0') {
             continue;
         } // argv cannot contain NUL.

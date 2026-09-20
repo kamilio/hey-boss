@@ -28,7 +28,9 @@ fn exists(db: &Connection) -> Result<bool> {
 }
 
 pub(super) fn validate(comment: &str) -> Result<()> {
-    let controls = comment.chars().any(char::is_control);
+    let controls = comment
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'));
     let comment = comment.trim();
     if comment.is_empty() || comment.chars().count() > 500 || controls {
         return Err(Error::invalid(
