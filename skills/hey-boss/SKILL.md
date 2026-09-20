@@ -90,6 +90,33 @@ changing state, assignment, PR links or history. Omit the guard for unconditiona
 reopening. Retry an identical successful `--request-id` to receive its original
 result, even if the issue has changed since.
 
+## Guarded issue triage batches
+
+Use `issue batch --file triage.json --dry-run --json` to preview and
+`issue batch --file triage.json --request-id review-head-ID --json` to apply.
+`--file -` reads stdin. Input is a JSON array of up to 100 unique issues / 1 MiB:
+
+```json
+[{"number":12,"if_version":7,"expected_assignee":"codex:session","add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"unassign"}]
+```
+
+Every entry requires a version and exact owner guard (`null` means unassigned).
+`assignment` is `keep` (default), `unassign`, or `boss`; arrays default empty.
+For caller-verified ready work, invert those labels and use `boss`. Guards
+authorize handing off the exact expected claim, including another actor's;
+newer claims and unclaimed worker reservations are protected. The entire array
+is atomic within one project/authority. Any rejection blocks all changes;
+CLI exit 4 retains compact JSON `accepted:false`, `applied:false`, ordered
+`results` with `rejected` errors and `blocked` entries. Success returns compact
+before/after labels, owner and version; each changed issue advances once.
+Preview saves nothing and forbids a request ID. Applying requires one; identical
+retries return the original accepted or rejected result. Changed payloads conflict;
+reassess rejected guards with fresh reads and a new ID. Batch never reviews,
+merges, closes issues or controls workers; the caller assesses readiness.
+Use `--host SUPERVISOR` from fleet companions: replica stores reject batches
+because offline row replay cannot preserve atomicity. SSH sends one group with
+no local fallback; separate authorities have separate transactions.
+
 ## GitHub issue imports
 
 `hey-boss issue drain-github --dry-run` previews issues created by the authenticated

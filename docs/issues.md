@@ -510,6 +510,77 @@ do not consume their keys. Request IDs are scoped to project and actor and
 retained in the database. Without one, separate create/comment calls are separate
 writes. Use `view` to fetch current state after replaying an older result.
 
+## Guarded batch triage
+
+Use `issue batch --file triage.json` (or `--file -` for stdin) to couple label
+changes and ownership handoffs. The entire JSON array is **one guarded group**
+within one project on one authoritative host. Every entry requires a positive
+`number`, positive `if_version`, and `expected_assignee`: an exact actor ID,
+`"human:boss"`, or explicit `null` for unassigned. Missing guards are invalid.
+
+```json
+[
+  {
+    "number": 12,
+    "if_version": 7,
+    "expected_assignee": "codex:session",
+    "add_labels": ["rework needed"],
+    "remove_labels": ["PR ready"],
+    "assignment": "unassign"
+  },
+  {
+    "number": 13,
+    "if_version": 4,
+    "expected_assignee": null,
+    "add_labels": ["PR ready"],
+    "remove_labels": ["rework needed"],
+    "assignment": "boss"
+  }
+]
+```
+
+`assignment` accepts `keep` (default), `unassign`, or `boss`. Label arrays default
+to empty; each entry must request at least one label or assignment update.
+Unrelated labels, issue text, state, PR attachments and subtask relationships
+are preserved. The two guards explicitly authorize changing that exact owner's
+claim, even when it belongs to another actor; there is no force option. A newer
+claim or an unclaimed worker reservation cannot be overridden. Boss assignment
+requires an open, undrafted issue. The caller must assess PR readiness: batching
+does not review or merge PRs, close issues, or control workers.
+
+```sh
+hey-boss issue batch --file triage.json --dry-run --json
+hey-boss issue batch --file triage.json --request-id review-head-abc123 --json
+```
+
+Preview saves no issue changes, history, agent/project updates, or retry record
+and cannot use a request ID. Its `after.version` is the version a real change
+would produce; preview does not reserve it. Applying requires a stable request
+ID. A changed issue advances once and gets one `triaged` audit event containing
+its before/after labels, assignee and version. No-op entries keep their versions.
+
+If any entry is missing, deleted, stale, invalid against current state, or
+reserved, **no issues in the group change**. JSON returns `ok:true` for a processed
+group, `accepted:false`, `applied:false`, and ordered `results`: offending entries
+are `rejected` with an error, while other entries are `blocked`. The CLI exits 4.
+Successful results use `changed`/`unchanged`; previews use
+`would_change`/`unchanged`. Compact `before`/`after` snapshots contain version,
+assignee and labels. Check `accepted`/`applied` as well as the exit code.
+
+Both accepted and rejected real group results are saved with the request ID in
+the same transaction. Identical retries with the same project and actor return
+the original result even after issues change; different payloads with that ID
+conflict. To reassess a rejected group, fetch current versions/owners and use a
+new ID. Invalid input and database/transport failures do not themselves save a
+result; an uncertain transport outcome must retry the identical request first.
+
+Limits are 100 unique issues and 1 MiB of input; unknown fields and conflicting
+add/remove labels are invalid. `--host` / `HEY_BOSS_ISSUE_HOST` route the entire
+group as one SSH RPC without local fallback. Upgrade both ends. There is no
+cross-host transaction: separate calls to separate authorities commit separately.
+Fleet companion replica stores refuse batches because their row-wise offline
+replay cannot preserve group atomicity; use `--host SUPERVISOR` there.
+
 ## SQLite storage and remote authority
 
 The database holds projects, issues, agent session metadata, comments, history,
