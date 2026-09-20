@@ -35,33 +35,42 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     let (s, v, k) = row.ok_or_else(|| Error::new("not_found", "Worker was not found"))?;
     Ok((serde_json::from_str(&s)?, v, k))
 }
+struct ProjectSettingsRow {
+    prompt: String,
+    prs: bool,
+    version: i64,
+    drafts_enabled: bool,
+    plan_template: String,
+    worktree_enabled: bool,
+    overrides: String,
+}
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
-    let row: Option<(String, bool, i64, String, bool, String, bool, String)> = db
-        .query_row(
-            "SELECT prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides FROM project_settings WHERE project_id=?1",
-            [&p.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
-        )
-        .optional()?;
-    let (
+    let row = db.query_row(
+        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides FROM project_settings WHERE project_id=?1",
+        [&p.id],
+        |r| Ok(ProjectSettingsRow {
+            prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
+            drafts_enabled: r.get(3)?, plan_template: r.get(4)?,
+            worktree_enabled: r.get(5)?, overrides: r.get(6)?,
+        }),
+    ).optional()?;
+    let ProjectSettingsRow {
         prompt,
         prs,
         version,
-        _legacy_name,
         drafts_enabled,
         plan_template,
         worktree_enabled,
         overrides,
-    ) = row.unwrap_or((
-        worker::DEFAULT_PROMPT.into(),
-        false,
-        0,
-        "Boss".into(),
-        true,
-        "plans/{timestamp}-{number}.md".into(),
-        false,
-        "{}".into(),
-    ));
+    } = row.unwrap_or_else(|| ProjectSettingsRow {
+        prompt: worker::DEFAULT_PROMPT.into(),
+        prs: false,
+        version: 0,
+        drafts_enabled: true,
+        plan_template: "plans/{timestamp}-{number}.md".into(),
+        worktree_enabled: false,
+        overrides: "{}".into(),
+    });
     let prompt_overrides: worker::PromptOverrides = serde_json::from_str(&overrides)?;
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();

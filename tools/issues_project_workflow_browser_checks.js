@@ -4,6 +4,7 @@ async page => {
   const check = (ok, label) => { if (!ok) throw Error(label); checks.push(label); };
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('http://127.0.0.1:4782/#project=named%3AWorkflow%20QA', {waitUntil:'domcontentloaded'});
+  await page.reload({waitUntil:'domcontentloaded'});
   await page.waitForFunction(() => model.project?.id === 'named:Workflow QA');
   await page.evaluate(async () => api({action:'configure_project',prompt:'Claim and implement `{{issue_command}}`.',worktree_enabled:false,prs_enabled:false,prompt_overrides:{}}, model.project.id));
   await page.setViewportSize({width:1440,height:1000});
@@ -46,6 +47,22 @@ async page => {
   check(!(await preview()).includes('Inactive edit'),'Inactive override excluded');
   await page.screenshot({path:`output/playwright/${prefix}-desktop-light.png`});
   check(await page.locator('.settings-preview').evaluate(el=>el.getBoundingClientRect().left>document.querySelector('.settings-editor').getBoundingClientRect().right),'Desktop preview on the right');
+  const failedSave = async route => {
+    if (route.request().postDataJSON()?.operation?.action === 'configure_project') {
+      return route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({ok:false,error:{code:'io_error',message:'Synthetic save failure'}})});
+    }
+    return route.continue();
+  };
+  await page.route('**/api/action', failedSave);
+  await page.locator('#project-settings-form button[type=submit]').click();
+  await page.getByRole('alert').filter({hasText:'Synthetic save failure'}).waitFor();
+  check(await page.locator('#project-settings-dialog').evaluate(el=>el.open),'Failed save keeps editor open');
+  check(await page.locator('#project-prompt').isEnabled(),'Failed save restores editable fields');
+  check(await page.locator('#project-settings-form button[type=submit]').isEnabled(),'Failed save allows retry');
+  await page.locator('#project-prompt-main').fill('Publish main for {{number}}.\n');
+  await ready('Publish a PR');
+  check(await page.getByRole('alert').filter({hasText:'Synthetic save failure'}).isVisible(),'Preview updates preserve save error');
+  await page.unroute('**/api/action', failedSave);
   await page.locator('#project-settings-form button[type=submit]').click();
   await page.waitForFunction(()=>!document.querySelector('#project-settings-dialog').open);
   check(await page.locator('#project-settings-trigger').evaluate(el=>el===document.activeElement),'Save restores focus');
