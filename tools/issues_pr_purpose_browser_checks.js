@@ -68,7 +68,7 @@ async page => {
   await evidence.selectOption('supporting-evidence');
   await page.waitForFunction(() => document.querySelector('[data-pr-purpose$="/15006"]')?.dataset.savedPurpose === 'supporting-evidence');
   await page.locator('[data-remove-pr$="/15067"]').click();
-  await page.waitForFunction(() => !document.querySelector('[data-pr-purpose$="/15067"]'));
+  await page.waitForFunction(() => document.querySelectorAll('[data-pr-purpose]').length === 4 && !document.querySelector('[data-pr-purpose$="/15067"]'));
   check(await page.locator('[data-pr-purpose]').count() === 4, 'Removal preserves other classified links');
   await page.goto(`http://127.0.0.1:4782/#project=${encodeURIComponent(seed.project)}`, {waitUntil:'domcontentloaded'});
   await page.waitForSelector('.issue-pr-link');
