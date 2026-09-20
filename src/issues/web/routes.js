@@ -1,7 +1,7 @@
 "use strict";
 // This table is embedded from routes.json by both the Rust server and mobile build.
 const HeyBossRoutes = (() => {
-  const rules = /* ROUTE_DEFINITIONS */;
+  const rules = /* ROUTE_DEFINITIONS */ [];
   const issueNumber = value => /^[1-9]\d*$/.test(value || "") && Number.isSafeInteger(Number(value));
   function resolve(url = location.href) {
     const address = new URL(url);

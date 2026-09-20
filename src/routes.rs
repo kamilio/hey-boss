@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 pub const DEFINITIONS: &str = include_str!("issues/web/routes.json");
 pub fn javascript() -> String {
-    include_str!("issues/web/routes.js").replace("/* ROUTE_DEFINITIONS */", DEFINITIONS)
+    include_str!("issues/web/routes.js").replace("/* ROUTE_DEFINITIONS */ []", DEFINITIONS)
 }
 #[derive(Deserialize)]
 struct Rule {
@@ -42,10 +42,11 @@ fn parameters(value: &str) -> Result<HashMap<String, String>> {
         }
     }
     let mut params = HashMap::new();
-    for (key, value) in reqwest::Url::parse(&format!("http://localhost/?{value}"))
-        .map_err(|_| Error::invalid("Invalid URL parameters"))?
-        .query_pairs()
-    {
+    let mut address = reqwest::Url::parse("http://localhost/").expect("valid parameter base URL");
+    // set_query preserves literal '#' inside a fragment parameter; reparsing a
+    // concatenated URL would incorrectly treat it as the start of a fragment.
+    address.set_query(Some(value));
+    for (key, value) in address.query_pairs() {
         // URLSearchParams.get uses the first duplicate, not the last.
         params
             .entry(key.into_owned())
