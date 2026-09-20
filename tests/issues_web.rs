@@ -317,6 +317,28 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
 }
 
 #[test]
+fn progress_is_read_only_on_the_web_and_history_is_a_separate_read() {
+    let web = Web::start();
+    let created = web.ok(json!({"action":"create","title":"Progress","body":"","labels":[]}));
+    let number = created["issue"]["number"].as_i64().unwrap();
+    let write = web.action(&web.project, json!({"action":"status","number":number,"level":"green","comment":"Checking the layout."}), Some("web-progress"));
+    assert_eq!(write.status, 403);
+    assert_eq!(write.json()["error"]["code"], "forbidden");
+    assert!(web.ok(json!({"action":"status_history","number":number,"limit":20,"offset":0}))["updates"].as_array().unwrap().is_empty());
+    let current = web.ok(json!({"action":"status_view","number":number}));
+    assert!(current["status"].is_null());
+    assert!(current.get("issue").is_none());
+    assert!(current.get("body").is_none());
+    let large = web.ok(json!({"action":"create","title":"Large description","body":"x".repeat(1_000_000),"labels":[]}));
+    let current = web.ok(json!({"action":"status_view","number":large["issue"]["number"]}));
+    assert!(serde_json::to_vec(&current).unwrap().len()<2000);
+    for (path, kind) in [("/status.js", "text/javascript"), ("/status.css", "text/css")] {
+        let reply = web.http("GET", path, &[], b"");
+        assert_eq!(reply.status, 200); assert!(reply.headers.contains(kind));
+    }
+}
+
+#[test]
 fn takeover_requires_csrf_and_json_before_contacting_the_fleet() {
     let web = Web::start();
     let body = br#"{"host":"local","run":"synthetic"}"#;
