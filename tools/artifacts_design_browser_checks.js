@@ -1,0 +1,40 @@
+// Run with playwright-cli run-code against an isolated artifact fixture.
+async page => {
+  const checks=[];
+  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
+  const origin=await page.evaluate(()=>location.origin);
+  await page.setViewportSize({width:1440,height:1000});
+  await page.goto(origin+'/artifacts#project=Artifact+Studio');
+  await page.locator('.artifact-row').first().waitFor();
+  await page.locator('.artifact-row').filter({hasText:'Workspace design notes'}).click();
+  await page.locator('#artifact-reading').waitFor();
+  check(!await page.getByRole('heading',{name:'Artifacts',exact:true}).isVisible(),'Reader has one contextual page heading');
+  check(!await page.getByRole('button',{name:'Archive',exact:true}).isVisible(),'Secondary document actions stay out of the reading surface');
+  await page.locator('.artifact-menu summary').click();
+  check(await page.getByRole('button',{name:'Export Markdown',exact:true}).isVisible(),'Export remains available from document actions');
+  await page.keyboard.press('Escape');
+  check(!await page.getByRole('button',{name:'Export Markdown',exact:true}).isVisible(),'Escape closes document actions');
+  check(!await page.getByRole('textbox',{name:'Reply to comment'}).first().isVisible(),'Reply composers are collapsed until needed');
+  await page.locator('.artifact-reply summary').first().click();
+  check(await page.getByRole('textbox',{name:'Reply to comment'}).first().isVisible(),'Reply opens its composer');
+  await page.getByRole('button',{name:'Edit',exact:true}).click();
+  await page.getByRole('textbox',{name:'Markdown',exact:true}).fill('# Preview check\n\n**Readable** draft.');
+  await page.getByRole('button',{name:'Preview',exact:true}).click();
+  await page.locator('#artifact-edit-preview strong').waitFor();
+  check(!await page.getByRole('textbox',{name:'Markdown',exact:true}).isVisible(),'Preview replaces the writing surface');
+  await page.getByRole('button',{name:'Write',exact:true}).click();
+  check(await page.getByRole('textbox',{name:'Markdown',exact:true}).inputValue()==='# Preview check\n\n**Readable** draft.','Switching back to Write preserves content');
+  await page.setViewportSize({width:390,height:844});
+  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Editor fits a phone viewport');
+  await page.getByRole('button',{name:'Back',exact:true}).click();
+  await page.locator('#artifact-reading').waitFor();
+  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Reader fits a phone viewport');
+  await page.getByRole('link',{name:'All artifacts',exact:true}).click();
+  await page.getByRole('searchbox',{name:'Search artifacts',exact:true}).fill('no-matching-document');
+  await page.getByText('No matching artifacts',{exact:true}).waitFor();
+  check(await page.getByRole('button',{name:'Clear search',exact:true}).isVisible(),'Search has a useful empty state');
+  await page.getByRole('button',{name:'Clear search',exact:true}).click();
+  await page.locator('.artifact-row').first().waitFor();
+  check(true,'Clear search restores the library');
+  return {checks};
+}
