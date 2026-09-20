@@ -22,163 +22,175 @@ function elapsed(run, now = Date.now()) {
   const hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds / 60) % 60;
   return `${hours ? hours + "h" : ""}${hours ? String(minutes).padStart(2, "0") : minutes}m${String(seconds % 60).padStart(2, "0")}s`;
 }
-if (typeof module !== "undefined") module.exports = {fleetView, elapsed};
-if (typeof document !== "undefined") (() => {
-  const $ = (id) => document.getElementById(id);
-  HeyBossUI.icons();
-  const picker = new HeyBossUI.ProjectPicker({
-    onSelect(project) { location.hash = new URLSearchParams({project}).toString(); },
-  });
-  let projects = [], defaultProject;
-  function projectContext() {
-    const id = HeyBossUI.projectId(defaultProject.id);
-    picker.update(projects, projects.find(p => p.id === id) || defaultProject);
-  }
-  addEventListener("hashchange", projectContext);
-  const connection = (connected) => {
-    const status = $("connection");
-    status.classList.toggle("offline", !connected);
-    status.querySelector("span").textContent = connected ? "Connected" : "Reconnecting…";
-  };
-  let csrf, refreshing = false, last = null;
-  const element = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
-  const age = (at) => { if (!at) return "Not yet"; const s = Math.max(0, Math.floor(Date.now()/1000-at)); return s < 5 ? "Just now" : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s/60)}m ago` : `${Math.floor(s/3600)}h ago`; };
-  const clock = (at) => new Date(at * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
-  const pair = (parent, label, value) => { const p = element("span", "", label + " "); p.append(element("b", "", value)); parent.append(p); };
-  function runRow(run, machine, offline = false) {
-    const row = element("div", "run"), heading = element("div", "run-heading");
-    heading.append(element("strong", "", `${run.project_name || ""} #${run.number} · ${run.title || ""}`));
-    const duration = element("time", "duration", elapsed(run, offline ? (machine.heartbeat || 0) * 1000 : Date.now()));
-    Object.assign(duration.dataset, {started: run.started_at ?? "", finished: run.finished_at ?? "", snapshot: offline ? (machine.heartbeat || 0) * 1000 : ""});
-    duration.setAttribute("aria-label", `Time on task: ${duration.textContent}`);
-    heading.append(duration); row.append(heading);
-    const meta = element("div", "run-meta");
-    meta.append(element("span", offline ? "offline-run" : "", `${offline ? "Last seen " : ""}${run.state} · Codex${run.session_id ? "" : " · not launched"}`));
-    if (run.goal?.status) meta.append(element("span", "", `Goal: ${run.goal.status}`));
-    if (run.reservation_expires && run.finished_at == null && !offline) meta.append(element("span", "", `Claim in ${Math.max(0, Math.ceil((run.reservation_expires - Date.now()) / 1000))}s`));
-    if (run.session_id) {
-      const copy = element("button", "button small copy-session", "Copy session ID");
-      copy.type = "button";
-      Object.assign(copy.dataset, {session: run.session_id, focus: `${machine.host}:${run.id}:copy`});
-      copy.setAttribute("aria-label", `Copy Codex session ID for ${run.project_name || "issue"} #${run.number}`);
-      meta.append(copy);
+// An agent belongs to its task's project, regardless of its machine or scheduler.
+function projectView(data, now = Date.now()) {
+  const groups = new Map();
+  for (const machine of data.machines || []) {
+    const online = machine.state === 'connected' && now / 1000 - (machine.heartbeat || 0) <= 15;
+    for (const worker of machine.workers || []) for (const run of worker.runs || []) {
+      const id = run.project_id;
+      if (!groups.has(id)) groups.set(id, {id, name: run.project_name || id || 'Project', active: [], history: []});
+      const entry = {run, machine, worker, online: online && worker.pid > 0};
+      groups.get(id)[run.finished_at == null ? 'active' : 'history'].push(entry);
     }
-    row.append(meta);
-    if (run.last_event || run.summary) row.append(element("small", "run-event", run.last_event || run.summary));
+  }
+  return [...groups.values()].sort((a,b) => Number(b.active.length > 0) - Number(a.active.length > 0) || a.name.localeCompare(b.name));
+}
+function agentState(entry) {
+  if (!entry.online && entry.run.finished_at == null) return 'Last seen';
+  return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
+}
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState};
+if (typeof document !== 'undefined') (() => {
+  const $ = id => document.getElementById(id);
+  const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
+  const mobile = document.documentElement.dataset.agentMobile === 'true';
+  const detail = location.pathname.endsWith('/session');
+  const base = '/agents';
+  const route = () => new URLSearchParams(location.hash.slice(1));
+  let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
+  let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=true, selected;
+  const seen = new Set();
+  HeyBossUI.icons();
+  const picker = new HeyBossUI.ProjectPicker({onSelect(project){location.href=base+'#'+new URLSearchParams({project});}});
+  function context() {
+    if(!defaultProject)return;
+    const id=route().get('project')||defaultProject.id;
+    picker.update(projects, projects.find(p=>p.id===id)||defaultProject);
+    if(last)render(last);
+  }
+  const link = (entry) => base+'/session#'+new URLSearchParams({project:entry.run.project_id,host:entry.machine.host,run:entry.run.id});
+  const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
+  function card(entry, history=false) {
+    const {run,machine}=entry;
+    const a=element('a',history?'agent-card history-card':'agent-card');a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;
+    const top=element('div','agent-card-top');top.append(stateBadge(entry),element('span','location-label',machine.hostname||machine.host));
+    const title=element('h3','',run.title||'Preparing your task');
+    const activity=run.last_event||'';
+    const preview=element('p','agent-preview',run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
+    const bottom=element('div','agent-card-bottom');bottom.append(element('span','',`Issue #${run.number}`),element('span','open-conversation',history?'Read conversation →':'Open conversation →'));
+    a.append(top,title,preview,bottom);return a;
+  }
+  function renderOverview(data) {
+    const focus=document.activeElement?.dataset.focus;
+    const open=new Set([...$('projects').querySelectorAll('details[open]')].map(d=>d.dataset.section));
+    const filter=route().get('project');
+    const groups=projectView(data).filter(p=>!filter||p.id===filter);
+    $('show-all').hidden=!filter;
+    $('overview-note').textContent=groups.some(p=>p.active.length)?'A little closer to done. See what’s moving.':'Your projects, and the work behind them.';
+    const sections=groups.map(group=>{
+      const section=element('section','project-section');
+      const heading=element('div','project-heading');const title=element('div');
+      title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':'Recent work'));
+      const issues=element('a','project-issues','View issues →');issues.href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:group.id});
+      heading.append(title,issues);section.append(heading);
+      const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);
+      if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id);section.append(history);}
+      return section;
+    });
+    if(!sections.length){const empty=element('section','agents-empty');empty.append(element('div','empty-orbit','✧'),element('h2','','Room for your next idea'),element('p','','When an agent picks up a task, its conversation will appear here.'));sections.push(empty);}
+    $('projects').replaceChildren(...sections);
+    if(focus)[...$('projects').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
+    renderDevices(data);
+  }
+  function renderDevices(data) {
+    const open=$('device-settings').open;
+    const controls=[];
+    for(const machine of data.machines||[])for(const worker of machine.workers||[]){
+      const row=element('div','device-row');row.append(element('span','',machine.hostname||machine.host));
+      const buttons=element('div','device-actions');
+      for(const [action,label] of [[worker.config?.enabled?'pause':'resume',worker.config?.enabled?'Pause new tasks':'Resume tasks'],['restart','Restart'],['stop','Stop']]){
+        const b=element('button','button small',label);b.type='button';Object.assign(b.dataset,{signal:action,host:machine.host,worker:worker.id,focus:machine.host+':'+worker.id+':'+action});b.setAttribute('aria-label',label+' on '+(machine.hostname||machine.host));buttons.append(b);
+      }
+      row.append(buttons);
+      for(const signal of (data.signals||[]).filter(s=>s.host===machine.host&&s.worker===worker.id&&s.state!=='acknowledged'))row.append(element('p','device-note',`${signal.signal}: ${signal.state}${machine.state==='connected'?'':' · waiting for connection'}`));
+      controls.push(row);
+    }
+    const focus=document.activeElement?.dataset.focus;
+    $('device-list').replaceChildren(...controls);$('device-settings').open=open;
+    if(focus)[...$('device-list').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
+    $('device-settings').hidden=mobile||!controls.length;
+    const conflicts=data.conflicts||[];$('conflicts').hidden=!conflicts.length;
+    $('conflict-list').replaceChildren(...conflicts.map(c=>element('li','',c.reason)));
+  }
+  function renderDetail(data) {
+    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>e.machine.host===route().get('host')&&e.run.id===route().get('run'));
+    $('back').href=base+(route().get('project')?'#'+new URLSearchParams({project:route().get('project')}):'');
+    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent='This agent is no longer in recent activity.';return;}
+    const {run,machine}=selected;
+    document.title=(run.title||'Conversation')+' · Hey Boss';
+    $('session-title').textContent=run.title||'Preparing your task';
+    $('session-context').textContent=(run.project_name||'Project')+' · '+(machine.hostname||machine.host);
+    $('session-state').replaceChildren(stateBadge(selected));
+    $('session-issue').href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
+    $('session-status').textContent=!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
+    if(!loaded&&!loading)loadConversation();
+  }
+  function render(data) {last=data;if(detail)renderDetail(data);else renderOverview(data);}
+  async function read(path) {
+    const response=await fetch(path,{cache:'no-store'});const data=await response.json();
+    if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not connect. Try again.');return data;
+  }
+  function fail(error) {$('error').textContent=error.message;$('error').hidden=false;}
+  async function refresh() {
+    if(refreshing)return;refreshing=true;
+    try{render(await read('/api/fleet/status'));$('error').hidden=true;}catch(e){fail(e);if(last)render(last);}finally{refreshing=false;}
+  }
+  function message(item) {
+    const row=element(item.role==='tool'||item.role==='activity'?'details':'article','chat-message '+item.role);row.dataset.message=item.id;
+    if(item.role==='tool'||item.role==='activity'){
+      const summary=element('summary','',({'Result':'Tool result','Thinking':'Thinking','exec_command':'Run a command','functions.exec':'Use tools','functions.apply_patch':'Edit files','apply_patch':'Edit files','write_stdin':'Check a command','Search':'Search the web'})[item.label]||'Tool activity');
+      const pre=element('pre','',item.label+'\n\n'+item.text);pre.tabIndex=0;row.append(summary,pre);
+    }else{
+      const label=element('div','message-author',item.role==='user'?'You':'Codex');const body=element('div','message-body');
+      if(item.html&&item.role==='assistant')body.innerHTML=item.html;else body.textContent=item.text;
+      row.append(label,body);
+    }
     return row;
   }
-  function workerBlock(machine, worker, data, mode = "live") {
-    const block = element("section", "worker"), heading = element("div", "worker-heading");
-    const active = (worker.runs || []).filter(r => r.finished_at == null);
-    const status = mode === "offline" ? "Last known worker" : mode === "saved" ? "Not running" : worker.upgrading ? "Updating · draining" : worker.config?.enabled ? "Running" : active.length ? "Paused · draining" : "Paused";
-    heading.append(element("h3", "", worker.config?.name || "Worker"), element("span", "capacity", `${status}${mode === "live" ? ` · ${active.length} / ${worker.config?.concurrency || 1} agents` : ""}`));
-    block.append(heading, element("p", "worker-project", `${machine.hostname || machine.host} · ${(worker.config?.projects || []).map(p => p.split("/").slice(-1)[0]).join(" · ") || "All projects"}`));
-    const agents = element("div", "agents");
-    for (const run of active) agents.append(runRow(run, machine, mode !== "live"));
-    if (!active.length) agents.append(element("p", "empty", mode === "live" ? `No active agents · ${worker.eligible || 0} eligible tasks` : "No active agents reported"));
-    block.append(agents);
-    const controls = element("div", "controls");
-    const toggle = mode === "saved" || !worker.config?.enabled ? ["resume", "Resume"] : ["pause", "Pause"];
-    for (const [action, label] of [toggle, ["restart", "Restart"], ["stop", "Stop"]]) {
-      const button = element("button", action === "stop" ? "button small danger" : "button small", label);
-      button.type = "button";
-      Object.assign(button.dataset, {host: machine.host, worker: worker.id, signal: action, focus: `${machine.host}:${worker.id}:${action}`});
-      button.setAttribute("aria-label", `${label} ${worker.config?.name || "worker"} on ${machine.hostname || machine.host}`);
-      controls.append(button);
-    }
-    block.append(controls);
-    const pending = (data.signals || []).filter(s => s.host === machine.host && s.worker === worker.id && s.state !== "acknowledged").slice(0, 2);
-    for (const signal of pending) block.append(element("p", "signal-state", `${signal.signal} · ${signal.state}${mode === "offline" ? " · queued until reconnect" : ""}`));
-    const history = (worker.runs || []).filter(r => r.finished_at != null);
-    if (history.length) {
-      const details = element("details", "history");
-      details.dataset.section = `history:${machine.host}:${worker.id}`;
-      details.append(element("summary", "", `Recent attempts (${history.length})`));
-      for (const run of history) details.append(runRow(run, machine));
-      block.append(details);
-    }
-    return block;
+  async function loadConversation(earlier=false) {
+    if(loading||!selected)return;
+    loading=true;const token=generation;
+    $('load-earlier').disabled=true;$('conversation').setAttribute('aria-busy','true');
+    try{
+      const initial=!loaded;
+      const query={host:selected.machine.host,run:selected.run.id,cursor};
+      if(earlier)query.before=olderCursor;else if(initial)query.latest=1;
+      const oldHeight=document.documentElement.scrollHeight,oldScroll=scrollY;
+      const data=await read('/api/fleet/conversation?'+new URLSearchParams(query));
+      if(token!==generation||disposed)return;
+      const entries=data.messages.filter(m=>!seen.has(m.id));
+      const fragment=document.createDocumentFragment();
+      for(const item of entries){seen.add(item.id);fragment.append(message(item));}
+      if(earlier)$('conversation').prepend(fragment);else $('conversation').append(fragment);
+      if(!earlier)cursor=data.cursor;loaded=true;
+      if(initial||earlier){olderCursor=data.older_cursor||0;$('load-earlier').hidden=!data.has_earlier;}
+      if(earlier)scrollTo(0,oldScroll+document.documentElement.scrollHeight-oldHeight);
+      $('conversation-empty').hidden=seen.size>0;
+      $('conversation-empty').textContent=data.availability==='waiting'?(selected.run.finished_at!=null?'Saved history is unavailable on this device.':'The agent is getting started. Its saved conversation will appear here.'):'No messages yet. This page will update as the agent works.';
+      if(!earlier&&follow&&entries.length){$('conversation-end').scrollIntoView({behavior:'instant',block:'end'});}
+      $('jump-live').hidden=follow||!seen.size;
+      if(data.has_more&&!earlier)setTimeout(()=>loadConversation(),0);
+    }catch(e){fail(e);}finally{if(token===generation){loading=false;$('load-earlier').disabled=false;$('conversation').setAttribute('aria-busy','false');}}
   }
-  function render(data) {
-    last = data;
-    const focus = document.activeElement?.dataset.focus;
-    const open = new Set([...$("machines").querySelectorAll("details[open]")].map(d => d.dataset.section));
-    const view = fleetView(data), machines = data.machines || [];
-    $("overview").replaceChildren(...[[view.live.length, "Running workers"], [view.active, "Active agents"], [view.capacity, "Agent capacity"], [view.offline.length, "Disconnected machines"]].map(([value, label]) => {
-      const card = element("div", "metric glass"); card.append(element("strong", "", String(value)), element("span", "", label)); return card;
-    }));
-    const tree = element("article", "supervisor glass"), heading = element("div", "machine-header"), title = element("div");
-    title.append(element("h2", "machine-title", "Supervisor"), element("p", "machine-subtitle", `${view.supervisor?.hostname || view.supervisor?.host || "Fleet"} · coordinates workers and queue`));
-    heading.append(title); tree.append(heading);
-    const workers = element("div", "worker-tree");
-    for (const {machine, worker} of view.live) workers.append(workerBlock(machine, worker, data));
-    if (!view.live.length) workers.append(element("p", "empty", "No workers running right now."));
-    tree.append(workers);
-    const sections = [tree];
-    if (view.saved.length) {
-      const saved = element("details", "secondary glass"); saved.dataset.section = "saved";
-      saved.append(element("summary", "", `Saved workers · not running (${view.saved.length})`));
-      for (const {machine, worker} of view.saved) saved.append(workerBlock(machine, worker, data, "saved"));
-      sections.push(saved);
-    }
-    if (view.offline.length) {
-      const offline = element("details", "secondary glass"); offline.dataset.section = "offline";
-      offline.append(element("summary", "", `Disconnected machines · last known activity (${view.offline.length})`));
-      offline.append(element("p", "machine-notice", "These snapshots are not included in running counts. Work may continue while disconnected."));
-      for (const machine of view.offline) {
-        const card = element("section", "offline-machine");
-        card.append(element("h3", "machine-title", machine.hostname || machine.host), element("p", "machine-subtitle", `Last seen ${age(machine.heartbeat)}`));
-        for (const worker of machine.workers || []) card.append(workerBlock(machine, worker, data, "offline"));
-        offline.append(card);
-      }
-      sections.push(offline);
-    }
-    const diagnostics = element("details", "secondary glass"); diagnostics.dataset.section = "diagnostics";
-    diagnostics.append(element("summary", "", "Machine connections and sync"));
-    for (const machine of machines) {
-      const card = element("section", "diagnostic-machine");
-      card.append(element("h3", "machine-title", machine.hostname || machine.host));
-      const meta = element("div", "machine-meta");
-      pair(meta, "Connection", view.offline.includes(machine) ? "Disconnected" : "Connected");
-      pair(meta, "Heartbeat", age(machine.heartbeat)); pair(meta, "Waiting to sync", machine.pending || 0);
-      pair(meta, "Software", machine.deployment || machine.build?.match(/build ([a-f0-9]+)/)?.[1] || "Installed"); card.append(meta);
-      if (machine.error || machine.deployment_error || machine.configuration_error) card.append(element("p", "machine-notice", machine.configuration_error || machine.deployment_error || machine.error));
-      diagnostics.append(card);
-    }
-    sections.push(diagnostics);
-    $("machines").replaceChildren(...sections);
-    for (const details of $("machines").querySelectorAll("details")) details.open = open.has(details.dataset.section);
-    if (focus) [...document.querySelectorAll("button[data-focus]")].find(b => b.dataset.focus === focus)?.focus({preventScroll: true});
-    const events=(data.events||[]).filter(e=>e.kind!=="heartbeat").slice(-15).reverse();$("event-count").textContent="Live events";$("events").replaceChildren(...events.map(e=>{const li=element("li","");li.append(element("time","",clock(e.at)),element("span","event-host",e.host),element("span","event-detail",e.detail));return li;}));
-    $("conflicts").hidden=!(data.conflicts||[]).length;$("conflict-list").replaceChildren(...(data.conflicts||[]).map(c=>{const li=element("li",""),details=element("details","");details.append(element("summary","",`${c.table_name}: ${c.reason} · ${c.id}`));if(c.saved_change){const pre=element("pre","",c.saved_change);details.append(pre);}li.append(details);return li;}));
-  }
-  async function refresh() { if(refreshing)return; refreshing=true;try{const response=await fetch("/api/fleet/status",{cache:"no-store"});const data=await response.json();if(!response.ok||data.ok===false)throw new Error(data.error?.message||data.error||"Supervisor unavailable");render(data);$("error").hidden=true;}catch(e){$("error").textContent=e.message;$("error").hidden=false;if(last){const stale=structuredClone(last);for(const m of stale.machines||[])if(Date.now()/1000-(m.heartbeat||0)>15)m.state="disconnected";render(stale);}}finally{refreshing=false;} }
-  async function post(value){for(let attempt=0;attempt<2;attempt++){const response=await fetch("/api/fleet",{method:"POST",headers:{"Content-Type":"application/json","X-Hey-Boss-CSRF":csrf},body:JSON.stringify(value)});if(response.status===403&&attempt===0){const bootstrap=await fetch("/api/bootstrap",{cache:"no-store"});csrf=(await bootstrap.json()).csrf;continue;}const data=await response.json();if(!response.ok||data.ok===false)throw new Error(data.error?.message||data.error||"Signal failed");return data;}}
-  $("refresh").addEventListener("click",refresh);
-  $("machines").addEventListener("click", async event => {
-    const button = event.target.closest("button[data-session]");
-    if (!button) return;
-    try {
-      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(button.dataset.session);
-      else {
-        const input = element("textarea", "clipboard-input", button.dataset.session);
-        document.body.append(input); input.select();
-        let copied;
-        try { copied = document.execCommand("copy"); } finally { input.remove(); button.focus({preventScroll: true}); }
-        if (!copied) throw new Error("Clipboard unavailable. Copy session ID from a secure browser connection.");
-      }
-      $("copy-status").textContent = "Session ID copied.";
-    } catch (error) { $("error").textContent = error.message; $("error").hidden = false; }
-  });
-  $("machines").addEventListener("click",async e=>{const b=e.target.closest("button[data-signal]");if(!b)return;b.disabled=true;try{await post({kind:"signal",host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:crypto.randomUUID()});await refresh();}catch(e){$("error").textContent=e.message;$("error").hidden=false;}finally{b.disabled=false;}});
-  (async()=>{try{const response=await fetch("/api/bootstrap");const data=await response.json();csrf=data.csrf;projects=data.projects || [];defaultProject=data.project;projectContext();await refresh();const events=new EventSource("/api/fleet/events");const connected=()=>{connection(true);refresh();};events.addEventListener("connected",connected);events.onmessage=connected;events.onerror=()=>{connection(false);};}catch(e){$("error").textContent=e.message;$("error").hidden=false;}})();
-  setInterval(() => {
-    if (document.hidden) return;
-    for (const time of document.querySelectorAll('time.duration[data-finished=""][data-snapshot=""]')) {
-      time.textContent = elapsed({started_at: time.dataset.started === "" ? undefined : Number(time.dataset.started)}, Date.now());
-      time.setAttribute("aria-label", `Time on task: ${time.textContent}`);
-    }
-  }, 1000);
-  setInterval(()=>{if(!document.hidden)refresh();},15000);
-  document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
+  $('overview-page').hidden=detail;$('session-page').hidden=!detail;
+  if(detail){document.body.classList.add('conversation-page');$('load-earlier').onclick=()=>{follow=false;loadConversation(true);};$('jump-live').onclick=()=>{follow=true;$('conversation-end').scrollIntoView({behavior:'smooth',block:'end'});$('jump-live').hidden=true;};addEventListener('scroll',()=>{follow=$('conversation-end').getBoundingClientRect().bottom<=innerHeight+160;$('jump-live').hidden=follow||!seen.size;},{passive:true});}
+  $('refresh').onclick=async()=>{await refresh();if(detail)await loadConversation();};
+  $('device-list').onclick=async event=>{
+    const b=event.target.closest('button[data-signal]');if(!b)return;
+    if(b.dataset.signal==='stop'&&!confirm('Stop agents on this device? Their saved conversations will remain available.'))return;
+    b.disabled=true;
+    try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:crypto.randomUUID()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
+  };
+  addEventListener('hashchange',()=>{if(detail){generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('pagehide',()=>{disposed=true;generation++;});
+  addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
+  (async()=>{try{
+    const data=await read(mobile?'/api/agent-bootstrap':'/api/bootstrap');csrf=data.csrf;projects=data.projects||[];defaultProject=data.project||projects[0];context();
+    if(mobile){$('quick-issue-open').hidden=true;$('nav-inbox').href='/';$('nav-issues').href='/#issues';$('nav-mindmaps').hidden=true;}
+    await refresh();
+    if(!mobile){const events=new EventSource('/api/fleet/events');events.addEventListener('connected',()=>refresh());events.onmessage=()=>refresh();events.onerror=()=>{$('connection').classList.add('offline');$('connection').querySelector('span').textContent='Reconnecting…';};events.onopen=()=>{$('connection').classList.remove('offline');$('connection').querySelector('span').textContent='Connected';};}
+  }catch(e){fail(e);}})();
+  setInterval(()=>{if(!document.hidden){refresh();if(detail)loadConversation();}},3000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();if(detail)loadConversation();}});
 })();

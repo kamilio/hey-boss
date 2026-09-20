@@ -104,7 +104,7 @@ worker controls. `fleet supervisor` and `fleet companion` run these background
 services; `fleet setup` manages their installation.
 
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
-`--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory. Agents continue allocated work offline and replay durable changes on reconnect. `/workers` shows live connections, sync, tasks, and worker controls; `fleet status` shows the same fleet in the CLI. The terminal shows the
+`--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory. Agents continue allocated work offline and replay durable changes on reconnect. `/agents` groups tasks by project with device labels and separate live conversation pages. Saved requests, replies and tool activity load in pages; disconnected tasks show their last known state. Paired web devices read through the authenticated supervisor bridge. Manage devices contains service controls; `/workers` remains an alias; `fleet status` shows the same fleet in the CLI. The terminal shows the
 queue host and database.
 Use `worker --host HOST --directory /remote/checkout` (or set `HEY_BOSS_ISSUE_HOST`)
 to run the worker and its Codex sessions on the authoritative SSH host. New remote

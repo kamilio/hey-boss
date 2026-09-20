@@ -104,7 +104,7 @@ function date(at) {
     const hash = new URLSearchParams({project});
     if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
     $("#nav-mindmaps").href = `/mm#${hash}`;
-    $("#nav-workers").href = `/workers#${hash}`;
+    $("#nav-workers").href = `/agents#${hash}`;
     if (location.pathname !== "/") {
       $("#nav-issues").href = `/#${hash}`;
       $("#nav-inbox").href = `/#${new URLSearchParams({project, view:"inbox"})}`;
