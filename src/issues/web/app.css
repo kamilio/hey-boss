@@ -2529,13 +2529,77 @@ button.avatar.self:hover {
 .preview-choices { font-size:11px; color:var(--accent); margin-top:12px; }
 #project-instructions-preview { padding:18px; margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; min-height:220px; }
 .planning-settings { border-top:1px solid var(--line); padding-top:14px; font-size:12px; }
-.planning-settings summary { cursor:pointer; color:var(--muted); margin-bottom:12px; }
-.planning-settings .workflow-toggle { margin-bottom:12px; }
+.planning-settings summary { cursor:pointer; color:var(--text); font-size:14px; font-weight:600; padding:8px 0; margin-bottom:12px; }
+.planning-settings .draft-choice { margin:0 0 18px; }
 .project-settings-body > .form-error { grid-column:1/-1; }
 @media (max-width:800px) {
  .project-settings-body { grid-template-columns:1fr; gap:12px; padding:16px; }
  .settings-preview { position:static; }
  .settings-section-heading { align-items:flex-start; }
+}
+
+/* Drafts are a saved issue state, with an explicit transition to agent pickup. */
+.draft-badge, .state-pill.draft {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 8%, var(--solid));
+  border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent);
+}
+.draft-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.issue-state.draft { color: var(--muted); }
+.draft-notice {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: -8px 0 26px;
+  padding: 18px 20px;
+  border: 1px dashed color-mix(in srgb, var(--muted) 40%, transparent);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.draft-notice-icon { display:flex; color:var(--muted); }
+.draft-notice > div:nth-child(2) { flex:1; min-width:0; }
+.draft-notice h2 { margin:0 0 3px; font-size:14px; font-weight:600; }
+.draft-notice p { margin:0; color:var(--muted); font-size:12px; }
+.draft-notice .form-error { color:var(--danger); margin-top:10px; }
+.draft-notice .button { flex-shrink:0; }
+.readiness-status { font-size:12px; font-weight:600; }
+.issue-readiness .button { margin-top:5px; min-height:36px; }
+.issue-plan { margin-top:16px; padding:12px; border-radius:8px; background:var(--hover); border:1px solid var(--line); }
+.issue-plan h3 { margin:0 0 6px; font-size:11px; font-weight:600; }
+.issue-plan code { font-size:11px; overflow-wrap:anywhere; }
+.draft-choice {
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+  padding:14px;
+  margin:18px 0;
+  border:1px solid var(--line);
+  border-radius:10px;
+  background:var(--hover);
+  cursor:pointer;
+}
+.draft-choice input { width:18px; height:18px; margin:2px 0 0; flex-shrink:0; accent-color:var(--accent); }
+.draft-choice > span:first-of-type { display:grid; gap:4px; flex:1; min-width:0; }
+.draft-choice strong { font-size:12px; font-weight:600; }
+.draft-choice > span > span { color:var(--muted); font-size:11px; line-height:1.6; }
+.draft-choice.selected { border-color:var(--accent); background:var(--accent-soft); }
+.draft-choice.unavailable { cursor:default; }
+.draft-choice:focus-within { outline:2px solid var(--accent); outline-offset:3px; }
+@media (max-width:480px) {
+  .draft-notice { display:grid; grid-template-columns:18px minmax(0,1fr); gap:10px; padding:16px; }
+  .draft-notice-icon { padding-top:2px; }
+  .draft-notice .button { grid-column:2; justify-self:start; }
+  .draft-choice { padding:12px; gap:10px; }
+  #editor-draft-control > .draft-badge { display:none; }
 }
 @media (max-width:480px) {
  .workflow-branches { grid-template-columns:1fr; }
