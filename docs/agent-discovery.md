@@ -1,5 +1,10 @@
 # Agent discovery notes
 
+The home directory (`~`) is not automatically registered as a local project.
+Discovery ignores it, and read-only CLI commands launched there do not add it to
+the project list. Creating issues or notifications from home requires an explicit
+`--project`; directories below home and repository checkouts still register normally.
+
 Investigated on 2026-09-14 with running Codex and Claude sessions on the Mac.
 
 ## Sources inspected

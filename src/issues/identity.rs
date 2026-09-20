@@ -52,6 +52,22 @@ pub fn project(cwd: &Path, machine: &str) -> Result<Project> {
     })
 }
 
+pub(crate) fn is_home_project(project: &Project) -> bool {
+    let Some((_, directory)) = project
+        .id
+        .strip_prefix("local:")
+        .and_then(|id| id.split_once(':'))
+    else {
+        return false;
+    };
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let home = std::path::PathBuf::from(home);
+    let home = home.canonicalize().unwrap_or(home);
+    Path::new(directory) == home
+}
+
 pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> Project {
     let id = git
         .origin

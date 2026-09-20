@@ -636,6 +636,11 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let project = resolve_project(&tx, detected, override_id)?;
+        if override_id.is_none() && super::identity::is_home_project(&project) {
+            return Err(Error::invalid(
+                "The home directory is not a project. Use --project or run from a project directory.",
+            ));
+        }
         identifier(&project.id, "project ID", 8192)?;
         identifier(&project.name, "project name", 1024)?;
         let now = SystemTime::now()
@@ -664,14 +669,27 @@ impl Store {
         // Existing-project reads use a WAL snapshot and do not compete with
         // worker reservations, event writes, or replica synchronization.
         let detected = resolve_project(&self.db, &r.project, r.project_override.as_deref())?;
+        let home = r.project_override.is_none() && super::identity::is_home_project(&detected);
+        if write
+            && home
+            && !matches!(
+                r.operation,
+                Operation::ConfigureGlobal { .. } | Operation::ControlWorker { .. }
+            )
+        {
+            return Err(Error::invalid(
+                "The home directory is not a project. Use --project or run from a project directory.",
+            ));
+        }
         let register = !matches!(
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
-        ) && !self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
-            [&detected.id],
-            |row| row.get::<_, bool>(0),
-        )?;
+        ) && !home
+            && !self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                [&detected.id],
+                |row| row.get::<_, bool>(0),
+            )?;
         let legacy_runtime = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |row| row.get::<_, bool>(0))?;
         let behavior = if write || register || legacy_runtime {
             TransactionBehavior::Immediate
@@ -714,7 +732,7 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        if write || register {
+        if (write || register) && !home {
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
         }
         if write {
@@ -1131,6 +1149,9 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (project, activity) in projects {
+            if super::identity::is_home_project(project) {
+                continue;
+            }
             identifier(&project.id, "project ID", 8192)?;
             identifier(&project.name, "project name", 1024)?;
             let at = (*activity).clamp(0, now);

@@ -16,6 +16,9 @@ pub(super) fn projects(snapshot: &Snapshot, machine: &str) -> Vec<(Project, i64)
         } else {
             continue;
         };
+        if identity::is_home_project(&project) {
+            continue;
+        }
         let at = agent
             .activity_at
             .into_iter()
