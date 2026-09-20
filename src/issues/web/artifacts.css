@@ -82,15 +82,44 @@
 .artifact-reading h1, .artifact-reading h2 { border-bottom: 0; padding-bottom: 0; }
 .artifact-reading pre { max-width: 100%; overflow: auto; }
 .artifact-reading pre code { font-size: 12px; }
+.artifact-diagram { margin: 24px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--input); overflow: hidden; }
+.artifact-diagram figcaption { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 600; }
+.artifact-diagram-stage { padding: 24px 16px; overflow: auto; max-height: 560px; }
+.artifact-diagram-stage:empty { display: none; }
+.artifact-diagram-stage > svg { display: block; width: auto; height: auto; max-width: none; margin: 0 auto; }
+.artifact-diagram details { border-top: 1px solid var(--line); }
+.artifact-diagram summary { padding: 10px 16px; cursor: pointer; color: var(--muted); font-size: 12px; }
+.artifact-diagram pre { margin: 0; border: 0; border-radius: 0; }
+.artifact-diagram-status { margin: 0; padding: 16px; font-size: 13px; color: var(--muted); }
+.artifact-diagram-status:empty { display: none; }
+.artifact-diagram-rendering { position: fixed; left: -100000px; top: 0; visibility: hidden; }
+.artifact-diagram-dialog { width: min(1400px, 96vw); max-width: 96vw; height: 90dvh; max-height: 90dvh; padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--solid); color: var(--text); }
+.artifact-diagram-dialog::backdrop { background: #0009; }
+.artifact-diagram-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.artifact-diagram-controls { display: flex; align-items: center; gap: 8px; }
+.artifact-diagram-controls output { min-width: 44px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.artifact-diagram-controls .button { min-height: 40px; }
+.artifact-diagram-viewport { height: calc(100% - 66px); overflow: auto; padding: 16px; background: var(--input); }
+.artifact-diagram-viewport > svg { display: block; max-width: none; margin: 0 auto; }
+/* Shared SVG icons and issue badges must not change diagram text/layout. Apply
+   this while Mermaid measures labels as well as in both finished views. */
+:is(.artifact-diagram-stage,.artifact-diagram-viewport,.artifact-diagram-rendering) svg { stroke: none; stroke-width: 0; fill: initial; }
+:is(.artifact-diagram-stage,.artifact-diagram-viewport,.artifact-diagram-rendering) svg text { stroke: none; }
+:is(.artifact-diagram-stage,.artifact-diagram-viewport,.artifact-diagram-rendering) svg .label { font-size: 16px; font-weight: 400; line-height: 1.5; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.artifact-diagram-rendering > svg { width: auto; height: auto; }
+@media (max-width: 520px) {
+  .artifact-diagram-dialog > header { flex-wrap: wrap; padding: 10px; }
+  .artifact-diagram-dialog > header > strong { display: none; }
+  .artifact-diagram-controls { width: 100%; justify-content: space-between; gap: 4px; }
+  .artifact-diagram-stage { padding: 16px 10px; }
+}
 .artifact-reading table { font-size: 13px; }
 .artifact-reading.artifact-large > :is(p,h1,h2,h3,h4,h5,h6,hr),
-.artifact-reading.artifact-large li:has(> input[type="checkbox"]),
-.artifact-reading.artifact-large li:has(> p > input[type="checkbox"]) {
+.artifact-reading.artifact-large .markdown-task {
   content-visibility: auto;
   contain-intrinsic-size: auto 60px;
 }
-.artifact-reading.artifact-large li:has(> input[type="checkbox"]),
-.artifact-reading.artifact-large li:has(> p > input[type="checkbox"]) { contain-intrinsic-size: auto 27px; }
+.artifact-reading.artifact-large .markdown-task { contain-intrinsic-size: auto 27px; }
 .artifact-backlinks { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 20px; padding: 20px 4px; }
 .artifact-backlinks h2 { font-size: 12px; color: var(--muted); font-weight: 500; margin: 0; }
 .artifact-links { padding: 0; list-style: none; margin: 0; display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; }
@@ -236,7 +265,7 @@
 #artifact-document:has(.comments-hidden) > .back-link { margin-left: max(0px, calc((100% - 820px) / 2)); }
 /* Short lists can defer offscreen work without the huge height changes of a
    single long outline. Keep long lists fully measurable for in-document links. */
-.artifact-reading.artifact-large > :is(ul,ol):not(:has(> li:nth-child(121))) {
+.artifact-reading.artifact-large > .markdown-short-list {
   content-visibility: auto;
   contain-intrinsic-size: auto 66px;
 }

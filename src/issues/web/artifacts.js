@@ -29,6 +29,16 @@ const HeyBossArtifacts = (() => {
     return value;
   }
   const api=(context,operation,requestID)=>rpc(context,{action:"artifact",operation},reads.has(operation.command),requestID);
+  function anchorText(range) {
+    const fragment=range.cloneContents();
+    // The server anchors against rendered Markdown. Keep original code text,
+    // excluding generated SVG labels and diagram controls from that context.
+    for(const diagram of fragment.querySelectorAll(".artifact-diagram")){
+      const source=diagram.querySelector("pre");
+      if(source)diagram.replaceWith(source);else diagram.remove();
+    }
+    return fragment.textContent;
+  }
   // Only split at complete top-level elements. Quoted attributes may contain >;
   // lists, code, tables and inline markup retain their original HTML structure.
   function* markdownBlocks(html) {
@@ -74,9 +84,30 @@ const HeyBossArtifacts = (() => {
   }
   async function renderMarkdown(root,html) {
     root.classList.toggle("artifact-large",html.length>=32000);
-    if(html.length<32000){root.innerHTML=html;return;}
-    root.setAttribute("aria-busy","true");root.replaceChildren();
-    if(await appendMarkdown(root,html))root.removeAttribute("aria-busy");
+    if(html.length<32000)root.innerHTML=html;
+    else{
+      root.setAttribute("aria-busy","true");root.replaceChildren();
+      if(!await appendMarkdown(root,html))return;
+      root.removeAttribute("aria-busy");
+    }
+    if(!root.querySelector("pre > code.language-mermaid"))return;
+    try{await loadDiagrams();if(root.isConnected)window.HeyBossArtifactDiagrams.mount(root);}
+    catch(e){
+      if(!root.isConnected)return;
+      const note=document.createElement("p");note.className="artifact-muted";note.textContent="Diagrams could not load. The Mermaid source is shown below.";
+      root.prepend(note);
+    }
+  }
+  let diagramBundle;
+  function loadDiagrams() {
+    if(window.HeyBossArtifactDiagrams)return Promise.resolve();
+    return diagramBundle ||= new Promise((resolve,reject)=>{
+      const script=document.createElement("script");
+      script.type="module";
+      script.src=mobile?"/artifact-web/artifact-diagrams.js":"/artifact-diagrams.js";
+      script.onload=resolve;script.onerror=()=>{diagramBundle=null;script.remove();reject(Error("Could not load diagrams"));};
+      document.head.appendChild(script);
+    });
   }
   let editorBundle;
   function loadEditor() {
@@ -304,11 +335,15 @@ const HeyBossArtifacts = (() => {
         if(!selection.rangeCount||selection.isCollapsed||pendingComment||reader.hasAttribute("aria-busy"))return;
         const range=selection.getRangeAt(0);
         if(!reader.contains(range.commonAncestorContainer))return;
+        for(const node of [range.startContainer,range.endContainer]){
+          const diagram=(node.nodeType===1?node:node.parentElement)?.closest(".artifact-diagram");
+          if(diagram&&!diagram.querySelector("pre").contains(node))return;
+        }
         const quote=selection.toString();
         if(!quote.trim()||new TextEncoder().encode(quote).length>8192)return;
         const before=range.cloneRange();before.selectNodeContents(reader);before.setEnd(range.startContainer,range.startOffset);
         const after=range.cloneRange();after.selectNodeContents(reader);after.setStart(range.endContainer,range.endOffset);
-        candidate={quote,prefix:Array.from(before.toString().slice(-160)).slice(-80).join(""),suffix:Array.from(after.toString().slice(0,160)).slice(0,80).join("")};
+        candidate={quote,prefix:Array.from(anchorText(before).slice(-160)).slice(-80).join(""),suffix:Array.from(anchorText(after).slice(0,160)).slice(0,80).join("")};
         selectionButton.hidden=false;
         if(!matchMedia("(max-width: 900px)").matches){
           const rect=range.getBoundingClientRect();

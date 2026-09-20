@@ -1,8 +1,10 @@
-import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync,cpSync,rmSync} from 'node:fs';
 const source=new URL('../src/issues/web/',import.meta.url);
 const destination=new URL('./public/artifact-web/',import.meta.url);
 mkdirSync(destination,{recursive:true});
-for(const name of ['artifacts.html','artifact-editor.js','artifacts.js','artifacts.css','components.js','components.css','app.css','icon.png']){
+rmSync(new URL('diagram-assets/',destination),{recursive:true,force:true});
+cpSync(new URL('diagram-assets/',source),new URL('diagram-assets/',destination),{recursive:true});
+for(const name of ['artifacts.html','artifact-editor.js','artifact-diagrams.js','artifacts.js','artifacts.css','components.js','components.css','app.css','icon.png']){
  let value=readFileSync(new URL(name,source));
  if(name==='artifacts.html'){
   let html=value.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replace(/<!--[^]*?-->/g,''));
