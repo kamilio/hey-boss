@@ -79,6 +79,36 @@ async page => {
   await page.getByRole('button', {name: 'Comment on selection', exact: true}).focus();
   await page.keyboard.press('Space');
   await visibleComposer('keyboard-space-comments-open');
+  const touchContext = await page.context().browser().newContext({
+    hasTouch: true, isMobile: true, viewport: {width: 390, height: 844}, reducedMotion: 'reduce'
+  });
+  try {
+    const phone = await touchContext.newPage();
+    phone.on('pageerror', error => errors.push(error.message));
+    // Use the same served script when this check runs against a source override.
+    const source = await page.evaluate(() => fetch('/artifacts.js').then(response => response.text()));
+    await phone.route('**/artifacts.js', route => route.fulfill({contentType: 'application/javascript', body: source}));
+    await phone.goto(url);
+    const passage = phone.locator('#artifact-reading h2').nth(20);
+    await passage.scrollIntoViewIfNeeded();
+    // Native long-press selection uses browser UI; exercise its Range with a real touch tap.
+    await passage.evaluate(element => {
+      const range = document.createRange(); range.setStart(element.firstChild, 0); range.setEnd(element.firstChild, 7);
+      getSelection().removeAllRanges(); getSelection().addRange(range);
+    });
+    await phone.getByRole('button', {name: 'Comment on selection', exact: true}).tap();
+    await phone.waitForFunction(() => {
+      const field = document.querySelector('#artifact-comment'), rect = field.getBoundingClientRect();
+      return document.activeElement === field && rect.top >= 0 && rect.bottom <= innerHeight;
+    }, null, {timeout: 3000});
+    if (await phone.locator('#artifact-quote').innerText() !== 'Passage') throw Error('Touch selection quote lost');
+    await phone.locator('#artifact-comment').fill('Touch review');
+    await phone.locator('#artifact-comment-form button[type=submit]').tap();
+    await phone.getByText('Touch review', {exact: true}).waitFor();
+    const saved = await action({command: 'view', id});
+    if (saved.comments.at(-1).quote !== 'Passage' || saved.comments.at(-1).outdated) throw Error('Touch comment lost its selection anchor');
+    checks.push('touch-tap: visible quoted composer and anchored publication');
+  } finally { await touchContext.close(); }
   if (errors.length) throw Error(errors.join('\n'));
   return {checks, scriptErrors: errors};
 }

@@ -316,7 +316,8 @@ const HeyBossArtifacts = (() => {
           selectionButton.style.top=Math.max(12,Math.min(rect.bottom+8,innerHeight-selectionButton.offsetHeight-12))+"px";
         }
       };
-      selectionButton.onpointerdown=e=>e.preventDefault();
+      // Preserve mouse selections without suppressing WebKit's touch click.
+      selectionButton.onpointerdown=e=>{if(e.pointerType!=="touch")e.preventDefault();};
       selectionButton.onclick=()=>{
         if(!candidate)return;
         anchor=candidate;candidate=null;selectionButton.hidden=true;showAnchor();
