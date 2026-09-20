@@ -39,7 +39,7 @@ pub fn render_fragment(source: &str) -> String {
             &format!(" class=\"markdown-align-{alignment}\""),
         );
     }
-    body = body.replace("<pre>", "<pre tabindex=\"0\" aria-label=\"Code block\">");
+    body = body.replace("<pre>", "<pre tabindex=\"0\">");
     body
 }
 /// Share the reader's dialect with document selection matching.
@@ -350,12 +350,7 @@ mod tests {
             html.contains("aria-label=\"Review &lt;script&gt;literally&lt;/script&gt;\""),
             "{html}"
         );
-        assert_eq!(
-            html.matches("<pre tabindex=\"0\" aria-label=\"Code block\">")
-                .count(),
-            2,
-            "{html}"
-        );
+        assert_eq!(html.matches("<pre tabindex=\"0\">").count(), 2, "{html}");
         assert!(
             html.contains("disabled=\"\" type=\"checkbox\" checked=\"\""),
             "{html}"
