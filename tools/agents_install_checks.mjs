@@ -8,7 +8,7 @@ const run=(args,options={})=>{const r=spawnSync(binary,args,{encoding:'utf8',...
 const version=run(['--version']).trim();if(!version.includes(expected))throw Error('Installed build mismatch');
 const root=mkdtempSync(join(tmpdir(),'hey-boss-agent-check-'));let web;
 try{
- const env={...process.env,HEY_BOSS_ISSUE_DB:join(root,'issues.db'),HEY_BOSS_FLEET_STATE:join(root,'fleet'),CODEX_HOME:join(root,'codex')};
+ const env={...process.env,HEY_BOSS_AGENT_ID:'human:agents-verification',HEY_BOSS_ISSUE_DB:join(root,'issues.db'),HEY_BOSS_FLEET_STATE:join(root,'fleet'),CODEX_HOME:join(root,'codex')};
  for(const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_STATE_DIR'])delete env[key];
  run(['issue','--project','Agents verification','create','--title','Saved conversation'],{env,cwd:root});
  const session='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',path=join(root,'codex/sessions/2026/09/19/rollout-test-'+session+'.jsonl');mkdirSync(resolve(path,'..'),{recursive:true});
