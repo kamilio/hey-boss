@@ -91,7 +91,12 @@ class Planning(unittest.TestCase):
         self.assertFalse(issue['draft'])
         self.assertEqual((issue['title'],issue['body']), ('Final title','Final body'))
         path = issue['plan']['path']
-        self.assertEqual((self.checkout / 'codex-args').read_text().strip(), 'We are planning in '+path)
+        self.assertEqual((self.checkout / 'codex-args').read_text().splitlines(), [
+            '-c', 'approval_policy="on-request"',
+            '-c', 'approvals_reviewer="auto_review"',
+            '-c', 'sandbox_mode="workspace-write"',
+            'We are planning in '+path,
+        ])
         self.cli('claim','1')
         (self.checkout / path).write_text('# Assigned edit\n\nStill syncing\n')
         self.wait_for(lambda: self.cli('view','1')['issue']['title']=='Assigned edit')
