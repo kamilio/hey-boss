@@ -369,7 +369,11 @@ fn respond(mut request: tiny_http::Request, app: &App) {
         ("X-Frame-Options", "DENY"),
         (
             "Content-Security-Policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            if artifact_page {
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            } else {
+                "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            },
         ),
     ] {
         response.add_header(Header::from_bytes(name, value).unwrap());
@@ -378,6 +382,9 @@ fn respond(mut request: tiny_http::Request, app: &App) {
         Header::from_bytes(
             "Server-Timing",
             format!("app;dur={:.2}", start.elapsed().as_secs_f64() * 1000.0),
+    // Mermaid's sanitized SVG includes scoped styles. Only its document page
+    // permits those styles; script execution remains restricted to local assets.
+    let artifact_page = request.url().split('?').next() == Some("/artifacts");
         )
         .unwrap(),
     );
@@ -437,6 +444,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/components.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/components.js"),
+            )),
+            "/artifact-diagrams.js" => Some((
+                "application/javascript; charset=utf-8",
+                include_bytes!("web/artifact-diagrams.js"),
             )),
             "/quick-issue.js" => Some((
                 "text/javascript; charset=utf-8",
@@ -509,6 +520,13 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                             ""
                         },
                     )
+            _ if path.starts_with("/diagram-assets/") => {
+                let diagrams: &[(&str, &[u8])] = include!("web/diagram-assets.rs");
+                diagrams
+                    .iter()
+                    .find(|(name, _)| *name == path)
+                    .map(|(_, bytes)| ("application/javascript; charset=utf-8", *bytes))
+            }
                     .replace(
                         "<!--workers-current-->",
                         if path == "/workers" {
