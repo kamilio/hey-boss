@@ -183,14 +183,24 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
         let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&path)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env("HEY_BOSS_INBOX_SOCKET", f.root.join("absent-inbox.sock"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
-            .args(["issue", "create", "--title", name, "--json"])
+            .args([
+                "issue",
+                "--agent",
+                "human:worker-test",
+                "create",
+                "--title",
+                name,
+                "--json",
+            ])
             .output()
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
