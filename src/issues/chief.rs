@@ -23,6 +23,13 @@ pub(in crate::issues) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS project_c
  pid INTEGER,process_start TEXT,state TEXT NOT NULL DEFAULT 'idle',summary TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(project_id,machine));";
 const INTERVAL_MS: i64 = 60 * 60 * 1000;
+type Reservation = (
+    i64,
+    Option<u32>,
+    Option<String>,
+    Option<u32>,
+    Option<String>,
+);
 
 #[derive(Clone)]
 pub(in crate::issues) struct Job {
@@ -45,7 +52,7 @@ impl Store {
                 continue;
             }
             // Empty/disabled/not-due projects do not acquire a writer lock.
-            let old: Option<(i64, Option<u32>, Option<String>, Option<u32>, Option<String>)> = self.db.query_row(
+            let old: Option<Reservation> = self.db.query_row(
                 "SELECT next_at,owner_pid,owner_start,pid,process_start FROM project_chiefs WHERE project_id=?1 AND machine=?2",
                 params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
             if let Some((next, owner, start, pid, process_start)) = &old {
@@ -74,7 +81,7 @@ impl Store {
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             // An optimistic comparison makes concurrent schedulers contend only for due work.
-            let current: Option<(i64,Option<u32>,Option<String>,Option<u32>,Option<String>)> = tx.query_row(
+            let current: Option<Reservation> = tx.query_row(
                 "SELECT next_at,owner_pid,owner_start,pid,process_start FROM project_chiefs WHERE project_id=?1 AND machine=?2",
                 params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
             if current != old {
@@ -168,10 +175,10 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                         Ok(0) | Err(_) => break,
                         Ok(_) if line.len() > 1024 * 1024 => break,
                         _ => {
-                            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                                if send.send(value).is_err() {
-                                    break;
-                                }
+                            if let Ok(value) = serde_json::from_slice::<Value>(&line)
+                                && send.send(value).is_err()
+                            {
+                                break;
                             }
                         }
                     }
