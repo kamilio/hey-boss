@@ -39,79 +39,6 @@ fn default_config(db: &Connection, project: &Project) -> Result<ProjectConfig> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn progress_writes_are_atomic_and_contention_is_nonfatal() {
-        let root = std::env::temp_dir().join(format!(
-            "hb-worker-progress-{}",
-            crate::issues::worker::random_id().unwrap()
-        ));
-        std::fs::create_dir(&root).unwrap();
-        {
-            let path = root.join("issues.db");
-            let mut store = Store::open(&path).unwrap();
-            store.db.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Progress','Progress',2,0,0)", []).unwrap();
-            store
-                .db
-                .execute("INSERT INTO agents VALUES('agent','{}',0)", [])
-                .unwrap();
-            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Progress',1,'Task','','open','agent',0,0,1,'[]')", []).unwrap();
-            store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('run','named:Progress',1,'{}','agent','running',1,'start','unit',0,0)", []).unwrap();
-            store.db.execute_batch("CREATE TRIGGER reject_progress BEFORE UPDATE ON worker_runs BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
-            assert!(store.worker_event("run", "must roll back", None).is_err());
-            assert_eq!(
-                store
-                    .db
-                    .query_row("SELECT count(*) FROM worker_events", [], |r| r
-                        .get::<_, i64>(0))
-                    .unwrap(),
-                0
-            );
-            store
-                .db
-                .execute_batch("DROP TRIGGER reject_progress;")
-                .unwrap();
-
-            store.db.busy_timeout(Duration::from_millis(25)).unwrap();
-            let mut other = rusqlite::Connection::open(&path).unwrap();
-            let tx = other
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
-            store
-                .worker_event("run", "temporary contention", None)
-                .unwrap();
-            tx.rollback().unwrap();
-            for number in 0..105 {
-                store
-                    .worker_event("run", &number.to_string(), None)
-                    .unwrap();
-            }
-            assert_eq!(
-                store
-                    .db
-                    .query_row("SELECT count(*) FROM worker_events", [], |r| r
-                        .get::<_, i64>(0))
-                    .unwrap(),
-                100
-            );
-            assert_eq!(
-                store
-                    .db
-                    .query_row(
-                        "SELECT last_event FROM worker_runs WHERE id='run'",
-                        [],
-                        |r| r.get::<_, String>(0)
-                    )
-                    .unwrap(),
-                "104"
-            );
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
 fn config(db: &Connection, project: &Project) -> Result<(ProjectConfig, i64)> {
     let saved: Option<(String, i64)> = db
         .query_row(
@@ -484,5 +411,79 @@ impl Store {
         rows.into_iter()
             .map(|(text, pid, start)| Ok((serde_json::from_str(&text)?, pid, start)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_writes_are_atomic_and_contention_is_nonfatal() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-worker-progress-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Progress','Progress',2,0,0)", []).unwrap();
+            store
+                .db
+                .execute("INSERT INTO agents VALUES('agent','{}',0)", [])
+                .unwrap();
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Progress',1,'Task','','open','agent',0,0,1,'[]')", []).unwrap();
+            store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('run','named:Progress',1,'{}','agent','running',1,'start','unit',0,0)", []).unwrap();
+            store.db.execute_batch("CREATE TRIGGER reject_progress BEFORE UPDATE ON worker_runs BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+            assert!(store.worker_event("run", "must roll back", None).is_err());
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM worker_events", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            store
+                .db
+                .execute_batch("DROP TRIGGER reject_progress;")
+                .unwrap();
+
+            store.db.busy_timeout(Duration::from_millis(25)).unwrap();
+            let mut other = rusqlite::Connection::open(&path).unwrap();
+            let tx = other
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            store
+                .worker_event("run", "temporary contention", None)
+                .unwrap();
+            tx.rollback().unwrap();
+            for number in 0..105 {
+                store
+                    .worker_event("run", &number.to_string(), None)
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM worker_events", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                100
+            );
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT last_event FROM worker_runs WHERE id='run'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "104"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
