@@ -1,5 +1,5 @@
 async page => {
-  const checks = [], errors = [];
+  const checks = [], errors = [], engine = page.context().browser().browserType().name();
   const check = (ok, label) => {if (!ok) throw Error(label);checks.push(label);};
   page.on('pageerror', e => errors.push(e.message));
   const url = 'http://127.0.0.1:4794/#project=named%3ALaunch%20QA';
@@ -21,7 +21,9 @@ async page => {
       await badge.hover();
       check(await badge.locator('.agent-launch-help').isVisible(),`${theme}/${width}: hover help`);
       check(await fits('.agent-launch-count:hover .agent-launch-help'),`${theme}/${width}: hover help fits`);
-      await page.screenshot({path:`output/playwright/issue44/${theme}-${width}-list.png`});
+      await badge.locator('.agent-launch-help').hover();
+      check(await badge.locator('.agent-launch-help').isVisible(),'Help stays open when hovered');
+      await page.screenshot({path:`output/playwright/issue44/${engine}-${theme}-${width}-list.png`});
       await badge.focus();
       await page.mouse.move(0,0);
       check(await badge.locator('.agent-launch-help').isVisible(),`${theme}/${width}: keyboard help`);
@@ -36,12 +38,26 @@ async page => {
       await detail.hover();
       check(await fits('.agent-launch-help:visible'), `${theme}/${width}: detail help fits`);
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),`${theme}/${width}: detail has no horizontal scroll`);
-      await page.screenshot({path:`output/playwright/issue44/${theme}-${width}-detail.png`});
+      await page.screenshot({path:`output/playwright/issue44/${engine}-${theme}-${width}-detail.png`});
       await page.goto(url+'&issue=1');
       await page.locator('.sidebar .agent-launch-count').waitFor();
       check((await page.locator('.sidebar .agent-launch-count').textContent()).startsWith('0 agent launches'),'Zero available in detail');
     }
   }
+  await page.route('**/api/action', async route => {
+    if (route.request().postDataJSON().operation.action !== 'list') return route.continue();
+    const response = await route.fetch(), body = await response.json();
+    body.issues[0].agent_launch_count = 2;
+    await route.fulfill({response,json:body});
+  });
+  await page.goto(url);
+  await page.locator('#issue-list .agent-launch-count').nth(0).waitFor();
+  const first = page.locator('#issue-list .agent-launch-count').nth(0);
+  await first.hover();
+  check(await first.locator('.agent-launch-help').evaluate(el => {
+    const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2));
+  }),'First row help is not clipped by the list');
+  await page.unroute('**/api/action');
   await page.goto(url+'&issue=3');
   await page.locator('.sidebar .agent-launch-count').waitFor();
   await page.getByLabel('Your comment').fill('Keep this unsent comment while launch metadata refreshes.');
