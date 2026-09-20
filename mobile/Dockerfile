@@ -11,6 +11,6 @@ WORKDIR /app
 COPY mobile/package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-COPY mobile/server/index.mjs mobile/server/store.mjs mobile/server/markdown-text.mjs ./server/
+COPY mobile/server/*.mjs ./server/
 EXPOSE 8787
 CMD ["node","server/index.mjs"]
