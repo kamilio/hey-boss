@@ -38,6 +38,80 @@ fn default_config(db: &Connection, project: &Project) -> Result<ProjectConfig> {
         ..ProjectConfig::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_writes_are_atomic_and_contention_is_nonfatal() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-worker-progress-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Progress','Progress',2,0,0)", []).unwrap();
+            store
+                .db
+                .execute("INSERT INTO agents VALUES('agent','{}',0)", [])
+                .unwrap();
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Progress',1,'Task','','open','agent',0,0,1,'[]')", []).unwrap();
+            store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('run','named:Progress',1,'{}','agent','running',1,'start','unit',0,0)", []).unwrap();
+            store.db.execute_batch("CREATE TRIGGER reject_progress BEFORE UPDATE ON worker_runs BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+            assert!(store.worker_event("run", "must roll back", None).is_err());
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM worker_events", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            store
+                .db
+                .execute_batch("DROP TRIGGER reject_progress;")
+                .unwrap();
+
+            store.db.busy_timeout(Duration::from_millis(25)).unwrap();
+            let mut other = rusqlite::Connection::open(&path).unwrap();
+            let tx = other
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            store
+                .worker_event("run", "temporary contention", None)
+                .unwrap();
+            tx.rollback().unwrap();
+            for number in 0..105 {
+                store
+                    .worker_event("run", &number.to_string(), None)
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM worker_events", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                100
+            );
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT last_event FROM worker_runs WHERE id='run'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "104"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
 fn config(db: &Connection, project: &Project) -> Result<(ProjectConfig, i64)> {
     let saved: Option<(String, i64)> = db
         .query_row(
@@ -293,15 +367,36 @@ impl Store {
                         && issue.closed_by.as_deref() == Some(&job.actor.id))
             })
     }
-    pub(crate) fn worker_event(&self, id: &str, text: &str, goal: Option<&Value>) -> Result<()> {
+    pub(crate) fn worker_event(
+        &mut self,
+        id: &str,
+        text: &str,
+        goal: Option<&Value>,
+    ) -> Result<()> {
         let text: String = text.chars().take(2000).collect();
-        self.db.execute(
-            "INSERT INTO worker_events(run_id,created_at,text) VALUES(?1,?2,?3)",
-            params![id, now(), text],
-        )?;
-        self.db.execute("UPDATE worker_runs SET last_event=?2,updated_at=?3,goal=coalesce(?4,goal) WHERE id=?1 AND finished_at IS NULL",params![id,text,now(),goal.map(serde_json::to_string).transpose()?])?;
-        self.db.execute("DELETE FROM worker_events WHERE run_id=?1 AND id NOT IN(SELECT id FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 100)",[id])?;
-        Ok(())
+        let goal = goal.map(serde_json::to_string).transpose()?;
+        let result = (|| -> Result<()> {
+            let tx = self
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let timestamp = now();
+            tx.execute(
+                "INSERT INTO worker_events(run_id,created_at,text) VALUES(?1,?2,?3)",
+                params![id, timestamp, text],
+            )?;
+            tx.execute("UPDATE worker_runs SET last_event=?2,updated_at=?3,goal=coalesce(?4,goal) WHERE id=?1 AND finished_at IS NULL",params![id,text,timestamp,goal])?;
+            tx.execute("DELETE FROM worker_events WHERE run_id=?1 AND id NOT IN(SELECT id FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 100)",[id])?;
+            tx.commit()?;
+            Ok(())
+        })();
+        match result {
+            // Progress is observational: a busy logger must not kill Codex.
+            Err(error) if error.code == "database_busy" => {
+                eprintln!("Worker progress database busy; skipped an activity update");
+                Ok(())
+            }
+            result => result,
+        }
     }
     pub(crate) fn worker_finish(&mut self, job: &Job, state: &str, summary: &str) -> Result<()> {
         let tx = self
