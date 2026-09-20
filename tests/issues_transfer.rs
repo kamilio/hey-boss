@@ -182,7 +182,9 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     db.execute("UPDATE fleet_meta SET role='agent'", [])
         .unwrap();
     assert_eq!(
-        call("Source", transfer_child, None).unwrap_err().code,
+        call("Source", transfer_child.clone(), None)
+            .unwrap_err()
+            .code,
         "conflict"
     );
     db.execute("UPDATE fleet_meta SET role='standalone'", [])
@@ -215,6 +217,8 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
         })
         .unwrap();
     assert_eq!(foreign_keys, 0);
+    let moved_child = call("Source", transfer_child, None).unwrap();
+    assert_eq!(moved_child["drafts_enabled"], false);
     drop(db);
     drop(call);
     drop(store);

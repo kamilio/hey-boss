@@ -968,16 +968,16 @@ impl Store {
             }
             operation => mutate(&tx, &project, actor.unwrap(), operation, now)?,
         };
-        result["drafts_enabled"] =
-            registry::project_settings(&tx, &project)?["drafts_enabled"].clone();
-        let settings = super::global_settings::read(&tx)?;
-        result["boss"] =
-            json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
         let response_project = if matches!(r.operation, Operation::Transfer { .. }) {
             serde_json::from_value::<Project>(result["project"].clone())?
         } else {
             project.clone()
         };
+        result["drafts_enabled"] =
+            registry::project_settings(&tx, &response_project)?["drafts_enabled"].clone();
+        let settings = super::global_settings::read(&tx)?;
+        result["boss"] =
+            json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
         if let Some(issue) = result.get_mut("issue")
             && let Some(number) = issue["number"].as_i64()
         {
