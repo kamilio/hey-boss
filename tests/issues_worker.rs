@@ -170,6 +170,116 @@ impl Drop for Worker {
         let _ = self.0.wait();
     }
 }
+
+#[test]
+fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
+    let f = Fixture::new("multi-checkout");
+    f.setup(&[]); // This issue is outside the selected checkouts.
+    let mut projects = Vec::new();
+    for name in ["atlas checkout", "beacon"] {
+        let path = f.root.join(name);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("mode.txt"), "delay-unclaimed").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&path)
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .args(["issue", "create", "--title", name, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        projects.push((
+            value["project"]["id"].as_str().unwrap().to_owned(),
+            path.canonicalize().unwrap(),
+        ));
+    }
+    let start = |args: &[&str]| {
+        Worker(
+            Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+                .current_dir(&f.root)
+                .env("HEY_BOSS_ISSUE_DB", &f.db)
+                .env("HEY_BOSS_INBOX_SOCKET", f.root.join("absent-inbox.sock"))
+                .env(
+                    "HEY_BOSS_CODEX",
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/codex-worker.py"),
+                )
+                .env_remove("HEY_BOSS_ISSUE_HOST")
+                .args(["worker", "--json"])
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut worker = start(&[
+        "-C",
+        "atlas checkout",
+        "--cwd",
+        "beacon",
+        "--concurrency",
+        "2",
+    ]);
+    let status = f.wait(|s| {
+        s["active"] == 2
+            && s["runs"].as_array().is_some_and(|runs| {
+                runs.iter()
+                    .all(|r| r["state"] == "awaiting_claim" && r["session_id"].is_string())
+            })
+    });
+    let id = status["worker_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        status["config"]["directories"].as_object().unwrap().len(),
+        2
+    );
+    for (project, path) in &projects {
+        assert_eq!(
+            status["config"]["directories"][project],
+            path.to_str().unwrap()
+        );
+        assert!(
+            status["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["project_id"] == *project)
+        );
+        let protocol = fs::read_to_string(path.join("protocol.jsonl")).unwrap();
+        let messages: Vec<Value> = protocol
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let thread = messages
+            .iter()
+            .find(|m| m["method"] == "thread/start")
+            .unwrap();
+        assert_eq!(thread["params"]["cwd"], path.to_str().unwrap());
+    }
+    worker.stop();
+    let mut restarted = start(&["--id", &id]);
+    let restored = f.wait(|s| {
+        s["active"] == 2
+            && s["runs"].as_array().is_some_and(|runs| {
+                runs.iter()
+                    .filter(|r| r["finished_at"].is_null())
+                    .all(|r| r["state"] == "awaiting_claim" && r["session_id"].is_string())
+            })
+    });
+    assert_eq!(restored["config"]["projects"], status["config"]["projects"]);
+    assert_eq!(
+        restored["config"]["directories"],
+        status["config"]["directories"]
+    );
+    restarted.stop();
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+}
 #[test]
 fn completed_pr_worker_keeps_fix_open_and_hands_it_to_boss() {
     let f = Fixture::new("pr-handoff");

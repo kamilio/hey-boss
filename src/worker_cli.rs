@@ -17,8 +17,14 @@ pub struct Options {
     /// Scan all visible projects with known local checkout directories.
     #[arg(long)]
     all_projects: bool,
-    #[arg(long)]
-    directory: Option<std::path::PathBuf>,
+    /// Checkout to work in; repeat for multiple projects. Paths belong to --host when remote.
+    #[arg(
+        long = "cwd",
+        short = 'C',
+        visible_alias = "directory",
+        conflicts_with = "all_projects"
+    )]
+    directory: Vec<std::path::PathBuf>,
     #[arg(long)]
     name: Option<String>,
     /// Restore this worker's saved settings; concurrent use of an ID is rejected.
@@ -78,7 +84,7 @@ pub fn run(o: &Options) -> Result<()> {
                 client: Client {
                     binary: std::env::current_exe()?,
                     host: o.host.clone(),
-                    directory: o.directory.clone(),
+                    directory: o.directory.first().cloned(),
                     timeout: std::time::Duration::from_secs(10),
                 },
                 id: o.id.clone(),
@@ -122,7 +128,8 @@ pub fn run(o: &Options) -> Result<()> {
     }
     let cwd = o
         .directory
-        .clone()
+        .first()
+        .cloned()
         .unwrap_or(std::env::current_dir()?)
         .canonicalize()?;
     let machine = issues::identity::machine()?;
@@ -196,34 +203,33 @@ pub fn run(o: &Options) -> Result<()> {
             ..Settings::default()
         }
     };
-    if o.id.is_none() || o.all_projects || !o.project.is_empty() {
-        c.projects = if o.all_projects {
-            vec![]
-        } else if o.project.is_empty() {
-            vec![base.id.clone()]
-        } else {
-            o.project
-                .iter()
-                .map(|p| {
-                    store
-                        .execute(&request(
-                            Operation::Projects {
-                                include_hidden: true,
-                            },
-                            Some(p.clone()),
-                        ))
-                        .map(|v| v["project"]["id"].as_str().unwrap().to_owned())
-                })
-                .collect::<Result<_>>()?
-        };
-        c.directory = if c.projects == vec![base.id.clone()] {
-            cwd.to_string_lossy().into()
-        } else {
-            String::new()
-        };
-    }
-    if o.directory.is_some() {
-        c.directory = cwd.to_string_lossy().into();
+    if o.id.is_none() || o.all_projects || !o.project.is_empty() || !o.directory.is_empty() {
+        let selected = o
+            .project
+            .iter()
+            .map(|p| {
+                store
+                    .execute(&request(
+                        Operation::Projects {
+                            include_hidden: true,
+                        },
+                        Some(p.clone()),
+                    ))
+                    .map(|v| v["project"]["id"].as_str().unwrap().to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let paths = o
+            .directory
+            .iter()
+            .map(|path| {
+                let path = path.canonicalize()?;
+                if !path.is_dir() {
+                    return Err(Error::invalid("Choose an existing checkout directory"));
+                }
+                Ok((issues::identity::project(&path, &machine)?, path))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        configure_scope(&mut c, &base, &cwd, selected, paths, o.all_projects)?;
     }
     if let Some(n) = o.concurrency {
         c.concurrency = n;
@@ -289,17 +295,58 @@ fn dashboard_enabled(o: &Options) -> bool {
     !o.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
+fn configure_scope(
+    c: &mut Settings,
+    base: &issues::Project,
+    cwd: &std::path::Path,
+    selected: Vec<String>,
+    paths: Vec<(issues::Project, std::path::PathBuf)>,
+    all_projects: bool,
+) -> Result<()> {
+    c.directory.clear();
+    c.directories.clear();
+    c.projects = if all_projects {
+        vec![]
+    } else if !selected.is_empty() {
+        selected
+    } else if paths.is_empty() {
+        vec![base.id.clone()]
+    } else {
+        paths.iter().map(|(p, _)| p.id.clone()).collect()
+    };
+    c.projects.sort();
+    c.projects.dedup();
+    if paths.len() == 1 && c.projects.len() == 1 {
+        c.directory = paths[0].1.to_string_lossy().into_owned();
+    } else {
+        for (project, path) in paths {
+            if !c.projects.contains(&project.id) {
+                return Err(Error::invalid(format!(
+                    "Checkout {} is not in the selected --project filters",
+                    path.display()
+                )));
+            }
+            let path = path.to_string_lossy().into_owned();
+            if let Some(previous) = c.directories.insert(project.id, path.clone())
+                && previous != path
+            {
+                return Err(Error::invalid(
+                    "Choose only one checkout per project for this worker",
+                ));
+            }
+        }
+        if c.directories.is_empty() && c.projects == [base.id.clone()] {
+            c.directory = cwd.to_string_lossy().into_owned();
+        }
+    }
+    Ok(())
+}
+
 fn remote_arguments(o: &Options) -> Vec<String> {
     let mut args = vec!["worker".into()];
     args.extend(["--history".into(), o.history.to_string()]);
     for (flag, value) in [
         ("--concurrency", o.concurrency.map(|v| v.to_string())),
-        (
-            "--directory",
-            o.directory
-                .as_ref()
-                .map(|v| v.to_string_lossy().into_owned()),
-        ),
         ("--name", o.name.clone()),
         ("--id", o.id.clone()),
         ("--prompt", o.prompt.clone()),
@@ -308,6 +355,9 @@ fn remote_arguments(o: &Options) -> Vec<String> {
         if let Some(value) = value {
             args.extend([flag.into(), value]);
         }
+    }
+    for path in &o.directory {
+        args.extend(["--cwd".into(), path.to_string_lossy().into_owned()]);
     }
     for (flag, values) in [("--project", &o.project), ("--tag", &o.tags)] {
         for value in values {
@@ -354,9 +404,14 @@ fn run_remote(o: &Options, host: &str) -> Result<()> {
     if !hey_boss::health::remote::valid_host(host) {
         return Err(Error::invalid("Invalid authoritative SSH host"));
     }
-    if o.action.is_none() && o.id.is_none() && o.directory.is_none() && !o.all_projects {
+    if o.action.is_none()
+        && o.id.is_none()
+        && o.directory.is_empty()
+        && !o.all_projects
+        && o.project.is_empty()
+    {
         return Err(Error::invalid(
-            "A remote worker needs --directory PATH pointing to its checkout on the authoritative host; Codex sessions run on that host",
+            "A remote worker needs --cwd PATH, --project, or --all-projects on the authoritative host; Codex sessions run on that host",
         ));
     }
     let status = std::process::Command::new("ssh")
@@ -396,6 +451,138 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         options: Options,
+    }
+    fn scope_project(name: &str) -> issues::Project {
+        issues::Project {
+            id: format!("repo/{name}"),
+            name: name.into(),
+        }
+    }
+    #[test]
+    fn checkout_scope_infers_projects_and_replaces_saved_mappings() {
+        let atlas = scope_project("Atlas");
+        let beacon = scope_project("Beacon");
+        let mut c = Settings {
+            directory: "/old".into(),
+            projects: vec!["old".into()],
+            ..Settings::default()
+        };
+        configure_scope(
+            &mut c,
+            &atlas,
+            std::path::Path::new("/shell"),
+            vec![],
+            vec![
+                (atlas.clone(), "/work/atlas".into()),
+                (beacon.clone(), "/work/beacon".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.projects, [atlas.id.clone(), beacon.id.clone()]);
+        assert!(c.directory.is_empty());
+        assert_eq!(c.directories[&atlas.id], "/work/atlas");
+        assert_eq!(c.directories[&beacon.id], "/work/beacon");
+        configure_scope(
+            &mut c,
+            &atlas,
+            std::path::Path::new("/shell"),
+            vec![],
+            vec![],
+            true,
+        )
+        .unwrap();
+        assert!(c.projects.is_empty() && c.directories.is_empty() && c.directory.is_empty());
+    }
+    #[test]
+    fn checkout_scope_respects_project_filters_and_rejects_ambiguous_checkouts() {
+        let atlas = scope_project("Atlas");
+        let beacon = scope_project("Beacon");
+        let mut c = Settings::default();
+        configure_scope(
+            &mut c,
+            &atlas,
+            std::path::Path::new("/shell"),
+            vec![atlas.id.clone(), beacon.id.clone()],
+            vec![(atlas.clone(), "/work/atlas".into())],
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.directories.len(), 1);
+        assert!(!c.directories.contains_key(&beacon.id));
+        assert!(
+            configure_scope(
+                &mut c,
+                &atlas,
+                std::path::Path::new("/shell"),
+                vec![atlas.id.clone()],
+                vec![
+                    (atlas.clone(), "/work/atlas".into()),
+                    (beacon, "/work/beacon".into())
+                ],
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            configure_scope(
+                &mut c,
+                &atlas,
+                std::path::Path::new("/shell"),
+                vec![],
+                vec![
+                    (atlas.clone(), "/work/atlas".into()),
+                    (atlas.clone(), "/work/atlas-other".into())
+                ],
+                false
+            )
+            .is_err()
+        );
+        configure_scope(
+            &mut c,
+            &atlas,
+            std::path::Path::new("/shell"),
+            vec!["named:Custom".into()],
+            vec![(atlas.clone(), "/work/atlas".into())],
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.directory, "/work/atlas");
+        assert!(c.directories.is_empty());
+    }
+    #[test]
+    fn explicit_checkouts_cannot_be_combined_with_all_projects() {
+        assert!(
+            TestCli::try_parse_from(["worker", "-C", "/work/atlas", "--all-projects"]).is_err()
+        );
+    }
+    #[test]
+    fn checkout_flags_are_repeatable_and_forwarded_to_the_remote_host() {
+        let cli = TestCli::try_parse_from([
+            "worker",
+            "-C",
+            "/work/atlas",
+            "--cwd",
+            "/work/beacon",
+            "--directory",
+            "/work/other project",
+            "--project",
+            "Atlas",
+            "--project",
+            "Beacon",
+        ])
+        .unwrap();
+        let args = remote_arguments(&cli.options);
+        let paths: Vec<_> = args
+            .windows(2)
+            .filter(|a| a[0] == "--cwd")
+            .map(|a| a[1].as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["/work/atlas", "/work/beacon", "/work/other project"]
+        );
+        assert_eq!(args.iter().filter(|a| *a == "--project").count(), 2);
     }
     #[test]
     fn remote_arguments_preserve_filters_and_put_status_after_options() {

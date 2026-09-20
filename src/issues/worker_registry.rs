@@ -133,11 +133,7 @@ fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> 
             .prompt
             .clone()
             .unwrap_or_else(|| defaults["prompt"].as_str().unwrap().into()),
-        cwd: if c.directory.is_empty() {
-            directory(db, p)?
-        } else {
-            c.directory.clone()
-        },
+        cwd: checkout(db, c, p)?,
         concurrency: c.concurrency,
         labels: c.tags.clone(),
         use_goal: c.use_goal,
@@ -150,6 +146,16 @@ fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> 
             defaults["prompt_overrides"].clone(),
         )?),
     })
+}
+
+fn checkout(db: &Connection, c: &Settings, p: &Project) -> Result<String> {
+    if let Some(path) = c.directories.get(&p.id) {
+        Ok(path.clone())
+    } else if !c.directory.is_empty() {
+        Ok(c.directory.clone())
+    } else {
+        directory(db, p)
+    }
 }
 
 impl Store {
@@ -180,11 +186,7 @@ impl Store {
                 if result.iter().any(|(id, _, _)| id == &project.id) {
                     continue;
                 }
-                let cwd = if config.directory.is_empty() {
-                    directory(&self.db, project)?
-                } else {
-                    config.directory.clone()
-                };
+                let cwd = checkout(&self.db, &config, project)?;
                 if cwd.is_empty() {
                     continue;
                 }
@@ -805,6 +807,44 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn multi_checkout_runtime_and_chief_use_the_project_mapping() {
+        let root = std::env::temp_dir().join(format!("hb-multi-checkout-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY,owner_pid INTEGER,owner_start TEXT)").unwrap();
+            let mut directories = serde_json::Map::new();
+            for name in ["Atlas", "Beacon"] {
+                let path = root.join(name);
+                std::fs::create_dir(&path).unwrap();
+                let id = format!("named:{name}");
+                directories.insert(id.clone(), json!(path));
+                store.db.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,0,0)", params![id, name]).unwrap();
+                store.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,chief_enabled) VALUES(?1,'Work',0,1,1)", [&id]).unwrap();
+            }
+            let settings: Settings = serde_json::from_value(json!({
+                "projects": ["named:Atlas", "named:Beacon"], "directories": directories, "enabled": true
+            })).unwrap();
+            for name in ["Atlas", "Beacon"] {
+                let p = Project {
+                    id: format!("named:{name}"),
+                    name: name.into(),
+                };
+                assert_eq!(
+                    runtime(&store.db, &settings, &p).unwrap().cwd,
+                    root.join(name).to_string_lossy()
+                );
+            }
+            store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('multi','cli',?1,1,0)", [serde_json::to_string(&settings).unwrap()]).unwrap();
+            let chiefs = store.chief_candidates(Some("multi")).unwrap();
+            assert_eq!(chiefs.len(), 2);
+            for (id, cwd, _) in chiefs {
+                assert_eq!(cwd, directories[&id].as_str().unwrap());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn directory_discovery_scales_with_project_associations() {
         let db = Connection::open_in_memory().unwrap();
