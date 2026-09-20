@@ -207,3 +207,20 @@
 @media (prefers-reduced-motion: reduce) {
   .artifact-row { transition: none; }
 }
+
+.artifact-selection-action { position: fixed; z-index: 10; box-shadow: var(--shadow); }
+@media (max-width: 900px) {
+  .artifact-selection-action { left: auto !important; top: auto !important; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); }
+}
+
+#artifact-error { margin-bottom: 20px; background: var(--surface); font-size: 13px; }
+#artifact-error p { margin: 0; }
+#artifact-error .button { margin-top: 12px; }
+.artifact-loading { padding: 24px; }
+.artifact-loading span { display: block; height: 14px; width: 65%; border-radius: 5px; background: var(--line); margin: 16px 0; }
+.artifact-loading span:nth-child(2) { width: 85%; }
+.artifact-loading span:nth-child(3) { width: 45%; }
+.artifact-loading-document { max-width: 820px; min-height: 300px; margin: 0 auto; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+
+.artifact-code-editor { min-width: 0; }
+.artifact-code-editor:focus-within { outline: 2px solid var(--accent); outline-offset: 8px; border-radius: 2px; }

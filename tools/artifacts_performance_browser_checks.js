@@ -19,14 +19,28 @@ async page => {
     await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,1000)));
     const reading=await page.evaluate(()=>{artifactProbe.stop=true;return {maxFrameGap:Math.max(...artifactProbe.frames),elapsed:performance.now()-artifactProbe.started,blocks:document.querySelector('#artifact-reading').children.length};});
     await page.locator('#artifact-edit').click();
-    const typing=await page.locator('#artifact-body').evaluate(async field=>{
+    if(Number(row.title.split(' ').pop())>32000)await page.locator('.cm-content').waitFor();
+    const field=page.getByRole('textbox',{name:'Markdown',exact:true});
+    const virtual=await field.evaluate(el=>el.isContentEditable);
+    const typing=virtual?null:await field.evaluate(async field=>{
       const events=[],writes=[];const original=Storage.prototype.setItem;
       Storage.prototype.setItem=function(key,value){const started=performance.now();const result=original.call(this,key,value);writes.push(performance.now()-started);return result;};
       try{for(let i=0;i<20;i++){const started=performance.now();field.value+='a';field.dispatchEvent(new Event('input'));events.push(performance.now()-started);await new Promise(resolve=>setTimeout(resolve,20));}await new Promise(resolve=>setTimeout(resolve,400));}
       finally{Storage.prototype.setItem=original;}
       return {maxInputTime:Math.max(...events),draftWrites:writes.length,maxDraftWriteTime:Math.max(0,...writes)};
     });
-    results.push({title:row.title,reading,typing});
+    await field.focus();
+    await field.press('ControlOrMeta+End');
+    await field.evaluate(field=>{
+      window.keyboardProbe={events:[],frames:[],stop:false};
+      field.addEventListener('beforeinput',()=>{keyboardProbe.inputStart=performance.now();});
+      field.addEventListener('input',()=>{keyboardProbe.events.push(performance.now()-keyboardProbe.inputStart);});
+      let previous=performance.now();const tick=now=>{keyboardProbe.frames.push(now-previous);previous=now;if(!keyboardProbe.stop)requestAnimationFrame(tick);};requestAnimationFrame(tick);
+    });
+    await field.pressSequentially(' A smoother writing experience.',{delay:20});
+    await page.waitForTimeout(400);
+    const keyboard=await page.evaluate(()=>{keyboardProbe.stop=true;return {maxInputTime:Math.max(...keyboardProbe.events),maxFrameGap:Math.max(...keyboardProbe.frames),characters:keyboardProbe.events.length};});
+    results.push({title:row.title,reading,typing,keyboard,virtualEditor:virtual});
     await page.locator('#artifact-cancel').click();
   }
   return {engine:page.context().browser().browserType().name(),results};
