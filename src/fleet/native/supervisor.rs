@@ -945,6 +945,9 @@ impl Supervisor {
         }
     }
     fn handle(&self, mut stream: UnixStream) -> Result<()> {
+        // macOS accepted sockets inherit the listener's nonblocking mode.
+        // Blocking writes with the existing timeout must send the whole frame.
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(15)))?;
         stream.set_write_timeout(Some(Duration::from_secs(15)))?;
         let request = read_frame(&mut BufReader::new(stream.try_clone()?))?
