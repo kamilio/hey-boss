@@ -289,6 +289,111 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
+fn reopen_version_guard_is_atomic_and_retries_locally_and_on_the_authoritative_host() {
+    for remote in [false, true] {
+        let f = Fixture::new();
+        let bin = f.root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let shim = bin.join("ssh");
+        fs::write(&shim, "#!/bin/sh\nexec \"$ISSUE_TEST_BIN\" issue rpc\n").unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+        let run = |args: &[&str], code: i32| {
+            let mut command = f.cmd("session-a", args);
+            if remote {
+                command
+                    .args(["--host", "devbox"])
+                    .env(
+                        "PATH",
+                        format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                    )
+                    .env("HEY_BOSS_ISSUE_DB", f.root.join("remote/issues.db"))
+                    .env("ISSUE_TEST_BIN", env!("CARGO_BIN_EXE_hey-boss"));
+            }
+            let output = command.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(code),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        };
+        run(&["create", "--title", "Guarded reopen"], 0);
+        run(
+            &["pr", "add", "1", "https://github.com/example/repo/pull/1"],
+            0,
+        );
+        let closed = run(&["close", "1"], 0);
+        let version = closed["issue"]["version"].as_i64().unwrap().to_string();
+        let before = run(&["view", "1"], 0);
+        let history = run(&["history", "1"], 0);
+        let stale = run(
+            &["reopen", "1", "--if-version", "1", "--request-id", "stale"],
+            4,
+        );
+        assert_eq!(stale["error"]["code"], "conflict");
+        assert_eq!(
+            stale["error"]["message"],
+            format!("Issue changed; current version is {version}")
+        );
+        assert_eq!(run(&["view", "1"], 0), before);
+        assert_eq!(run(&["history", "1"], 0), history);
+
+        let args = [
+            "reopen",
+            "1",
+            "--if-version",
+            &version,
+            "--request-id",
+            "reopen-once",
+        ];
+        let reopened = run(&args, 0);
+        assert_eq!(reopened["changed"], true);
+        assert_eq!(reopened["issue"]["state"], "open");
+        assert_eq!(
+            reopened["issue"]["version"],
+            closed["issue"]["version"].as_i64().unwrap() + 1
+        );
+        assert!(reopened["issue"]["assignee"].is_null());
+        assert!(reopened["issue"]["closed_at"].is_null());
+        assert_eq!(
+            reopened["issue"]["pull_requests"],
+            closed["issue"]["pull_requests"]
+        );
+        run(&["claim", "1"], 0);
+        let claimed = run(&["view", "1"], 0);
+        let history = run(&["history", "1"], 0);
+        // A successful retry returns the original response even after subsequent writes.
+        assert_eq!(run(&args, 0), reopened);
+        run(&["reopen", "1", "--if-version", &version], 4);
+        assert_eq!(run(&["view", "1"], 0), claimed);
+        assert_eq!(run(&["history", "1"], 0), history);
+        assert_eq!(run(&["reopen", "1"], 0)["changed"], false);
+        let current = claimed["issue"]["version"].as_i64().unwrap().to_string();
+        assert_eq!(
+            run(&["reopen", "1", "--if-version", &current], 0)["changed"],
+            false
+        );
+        run(&["reopen", "1", "--request-id", "legacy-reopen"], 0);
+        if remote {
+            assert!(!f.db.exists(), "remote writes must not fall back locally");
+        } else {
+            // Preserve pre-guard payloads so old unguarded request IDs still replay.
+            let payload: String = f
+                .sql()
+                .query_row(
+                    "SELECT payload FROM requests WHERE request_id='legacy-reopen'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(payload, r#"{"action":"reopen","number":1}"#);
+        }
+    }
+}
+
+#[test]
 fn lifecycle_markdown_and_audit_are_durable() {
     let f = Fixture::new();
     let md = "# Reconnect\n\n- [ ] Wake from sleep\n\n```sh\necho '$HOME `date`'\n```\nZażółć 🦀\n";

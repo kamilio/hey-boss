@@ -309,7 +309,12 @@ enum Action {
         force: bool,
     },
     /// Reopen a closed issue without assigning it.
-    Reopen { number: i64 },
+    Reopen {
+        number: i64,
+        /// Reject reopening if another writer has changed this version.
+        #[arg(long)]
+        if_version: Option<i64>,
+    },
     /// Soft-delete an issue; its number and history are retained.
     Delete {
         number: i64,
@@ -731,7 +736,10 @@ impl Options {
                 comment: comment.clone(),
                 force: *force,
             },
-            Action::Reopen { number } => Operation::Reopen { number: *number },
+            Action::Reopen { number, if_version } => Operation::Reopen {
+                number: *number,
+                if_version: *if_version,
+            },
             Action::Delete { number, force } => Operation::Delete {
                 number: *number,
                 force: *force,

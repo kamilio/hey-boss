@@ -84,6 +84,12 @@ Claim before work; stop on conflict (exit 4). Never force another session's clai
 
 Reuse `--request-id` for identical uncertain retries; `view` reads current state; `edit --if-version N` protects concurrent changes. Test with separate `HEY_BOSS_ISSUE_DB` and `web --no-discovery`.
 
+`issue reopen NUMBER --if-version N` reopens only if the issue still has the version
+read with `view`, including on `--host`. A mismatch returns conflict (exit 4) before
+changing state, assignment, PR links or history. Omit the guard for unconditional
+reopening. Retry an identical successful `--request-id` to receive its original
+result, even if the issue has changed since.
+
 ## GitHub issue imports
 
 `hey-boss issue drain-github --dry-run` previews issues created by the authenticated

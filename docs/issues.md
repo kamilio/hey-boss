@@ -409,6 +409,7 @@ the associated agent.
 | `unassign 1` | Clear your claim, leaving the issue open |
 | `close 1` | Complete the issue, clear its claim, and record who closed it |
 | `reopen 1` | Reopen the issue without assigning it |
+| `reopen 1 --if-version N` | Reopen only if the issue still has revision N; conflicts exit 4 without changing the issue or history, including on `--host` |
 | `delete 1` | Soft-delete the issue and clear its claim |
 | `restore 1` | Recover a deleted issue in its previous open/closed state, unassigned |
 

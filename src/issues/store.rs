@@ -1419,7 +1419,13 @@ fn mutate(
                 issue.closed_at = Some(now);
             }
         }
-        Operation::Reopen { .. } => {
+        Operation::Reopen { if_version, .. } => {
+            if if_version.is_some_and(|v| v != issue.version) {
+                return Err(Error::conflict(format!(
+                    "Issue changed; current version is {}",
+                    issue.version
+                )));
+            }
             if issue.state != "open" {
                 action = "reopened";
                 data = json!({"previous_closed_by":issue.closed_by,"previous_closed_at":issue.closed_at});

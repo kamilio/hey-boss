@@ -330,6 +330,8 @@ pub enum Operation {
     },
     Reopen {
         number: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_version: Option<i64>,
     },
     Delete {
         number: i64,
@@ -415,7 +417,7 @@ impl Operation {
             | Self::Comment { number, .. }
             | Self::ResolveComment { number, .. }
             | Self::Close { number, .. }
-            | Self::Reopen { number }
+            | Self::Reopen { number, .. }
             | Self::Delete { number, .. }
             | Self::Restore { number } => Some(*number),
         }
