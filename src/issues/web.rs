@@ -342,6 +342,9 @@ fn allowed(request: &tiny_http::Request, app: &App) -> bool {
 
 fn respond(mut request: tiny_http::Request, app: &App) {
     let start = std::time::Instant::now();
+    // Mermaid's sanitized SVG includes scoped styles. Only its document page
+    // permits those styles; script execution remains restricted to local assets.
+    let artifact_page = request.url().split('?').next() == Some("/artifacts");
     let reply = route(&mut request, app);
     let (status, kind, bytes) = match reply {
         Ok(value) => value,
@@ -382,9 +385,6 @@ fn respond(mut request: tiny_http::Request, app: &App) {
         Header::from_bytes(
             "Server-Timing",
             format!("app;dur={:.2}", start.elapsed().as_secs_f64() * 1000.0),
-    // Mermaid's sanitized SVG includes scoped styles. Only its document page
-    // permits those styles; script execution remains restricted to local assets.
-    let artifact_page = request.url().split('?').next() == Some("/artifacts");
         )
         .unwrap(),
     );
@@ -482,6 +482,13 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 include_bytes!("web/project-settings.js"),
             )),
             "/icon.png" => Some(("image/png", include_bytes!("web/icon.png"))),
+            _ if path.starts_with("/diagram-assets/") => {
+                let diagrams: &[(&str, &[u8])] = include!("web/diagram-assets.rs");
+                diagrams
+                    .iter()
+                    .find(|(name, _)| *name == path)
+                    .map(|(_, bytes)| ("application/javascript; charset=utf-8", *bytes))
+            }
             _ => None,
         };
         if let Some((kind, data)) = asset {
@@ -520,13 +527,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                             ""
                         },
                     )
-            _ if path.starts_with("/diagram-assets/") => {
-                let diagrams: &[(&str, &[u8])] = include!("web/diagram-assets.rs");
-                diagrams
-                    .iter()
-                    .find(|(name, _)| *name == path)
-                    .map(|(_, bytes)| ("application/javascript; charset=utf-8", *bytes))
-            }
                     .replace(
                         "<!--workers-current-->",
                         if path == "/workers" {

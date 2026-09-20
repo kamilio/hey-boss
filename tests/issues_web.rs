@@ -323,18 +323,33 @@ fn artifact_diagrams_are_bundled_locally_and_preserve_markdown_source() {
     assert!(bundle.headers.contains("script-src 'self'"));
     assert!(!bundle.body.is_empty());
     let loader = String::from_utf8(bundle.body).unwrap();
-    let module = loader.split("./diagram-assets/").nth(1).unwrap().split('"').next().unwrap();
+    let module = loader
+        .split("./diagram-assets/")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
     let chunk = web.http("GET", &format!("/diagram-assets/{module}"), &[], b"");
     assert_eq!(chunk.status, 200);
     assert!(chunk.headers.contains("application/javascript"));
     assert!(!chunk.body.is_empty());
-    assert_eq!(web.http("GET", "/diagram-assets/missing.js", &[], b"").status, 404);
+    assert_eq!(
+        web.http("GET", "/diagram-assets/missing.js", &[], b"")
+            .status,
+        404
+    );
     let source = "```mermaid\nflowchart LR\n A[Save <data>] --> B[Recover]\n```";
     let result = web.ok(json!({"action":"artifact","operation":{"command":"create","title":"Recovery diagram","body":source}}));
     let id = result["artifact"]["id"].as_str().unwrap();
     let saved = web.ok(json!({"action":"artifact","operation":{"command":"view","id":id}}));
     assert_eq!(saved["artifact"]["body"], source);
-    assert!(saved["artifact"]["body_html"].as_str().unwrap().contains("language-mermaid"));
+    assert!(
+        saved["artifact"]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("language-mermaid")
+    );
 }
 
 #[test]
