@@ -366,6 +366,19 @@ fn organization_snapshot(db: &Connection, p: &Project) -> Result<BTreeMap<String
         .collect::<rusqlite::Result<_>>()?)
 }
 
+type LinkKey = (String, String, String);
+
+fn link_snapshot(db: &Connection, key: &LinkKey) -> Result<Value> {
+    Ok(db
+        .query_row(
+            "SELECT description FROM mindmap_links WHERE source=?1 AND target=?2 AND kind=?3",
+            params![key.0, key.1, key.2],
+            |r| Ok(json!({"description":r.get::<_,Option<String>>(0)?})),
+        )
+        .optional()?
+        .unwrap_or(Value::Null))
+}
+
 fn batch(
     db: &Connection,
     p: &Project,
@@ -374,6 +387,8 @@ fn batch(
     now: i64,
 ) -> Result<Value> {
     let base_version = version(db, &p.id)?;
+    let before = organization_snapshot(db, p)?;
+    db.execute_batch("SAVEPOINT mindmap_batch")?;
     // Bind all selectors against the original map. Changing an alias never
     // changes the meaning of a later selector in the same input.
     let mut touched = BTreeSet::new();
@@ -382,7 +397,7 @@ fn batch(
         same_project(&node, p)?;
         Ok(id(&node).to_owned())
     };
-    let operations = edits
+    let mut operations = edits
         .iter()
         .map(|edit| {
             let mut op = edit.operation();
@@ -402,13 +417,43 @@ fn batch(
                         *selector = resolve(selector)?;
                     }
                 }
+                Operation::Link { .. } => {}
                 _ => unreachable!(),
             }
             Ok(op)
         })
         .collect::<Result<Vec<_>>>()?;
-    let before = organization_snapshot(db, p)?;
-    db.execute_batch("SAVEPOINT mindmap_batch")?;
+    // Bind organization selectors first: typed endpoints may add reference
+    // nodes, but those must not become selectors for earlier/later node edits.
+    let mut created_nodes = BTreeMap::new();
+    let mut links_before = BTreeMap::new();
+    let mut link_projects = BTreeMap::new();
+    for op in &mut operations {
+        if let Operation::Link { from, to, kind, .. } = op {
+            let mut projects = BTreeSet::new();
+            for selector in [&mut *from, &mut *to] {
+                let node = match select(db, p, selector, false, now, &mut touched) {
+                    Ok(node) => node,
+                    Err(error) if error.code == "not_found" => {
+                        let node = select(db, p, selector, true, now, &mut touched)?;
+                        created_nodes.insert(
+                            id(&node).to_owned(),
+                            node["project_id"].as_str().unwrap().to_owned(),
+                        );
+                        node
+                    }
+                    Err(error) => return Err(error),
+                };
+                projects.insert(node["project_id"].as_str().unwrap().to_owned());
+                *selector = id(&node).to_owned();
+            }
+            let key = (from.clone(), to.clone(), kind.clone());
+            if !links_before.contains_key(&key) {
+                links_before.insert(key.clone(), link_snapshot(db, &key)?);
+                link_projects.insert(key, projects);
+            }
+        }
+    }
     for op in &operations {
         execute_single(db, p, op, now, false)?;
     }
@@ -446,25 +491,57 @@ fn batch(
             }
         }
     }
-    let changed_nodes = after
+    let mut changed_nodes = after
         .iter()
         .filter(|(id, value)| before.get(*id) != Some(*value))
-        .map(|(id, value)| json!({"id":id,"before":before[id],"after":value}))
+        .map(|(id, value)| json!({"id":id,"before":before.get(id),"after":value}))
         .collect::<Vec<_>>();
-    let changed = !changed_nodes.is_empty();
+    // Include reference nodes created in other maps without copying their bodies.
+    for (node, project) in &created_nodes {
+        if project != &p.id {
+            let snapshot = db.query_row(
+                "SELECT alias,parent_id,position,title,display_label FROM mindmap_nodes WHERE id=?1",
+                [node],
+                |r| Ok(json!({"alias":r.get::<_,Option<String>>(0)?,
+                    "parent_id":r.get::<_,Option<String>>(1)?,"position":r.get::<_,i64>(2)?,
+                    "title":r.get::<_,String>(3)?,"display_label":r.get::<_,Option<String>>(4)?})),
+            )?;
+            changed_nodes.push(json!({"id":node,"before":null,"after":snapshot}));
+        }
+    }
+    let mut changed_projects = created_nodes.values().cloned().collect::<BTreeSet<_>>();
+    if after != before {
+        changed_projects.insert(p.id.clone());
+    }
+    let mut changed_links = Vec::new();
+    for (key, before) in links_before {
+        let after = link_snapshot(db, &key)?;
+        if before != after {
+            changed_projects.extend(link_projects[&key].iter().cloned());
+            changed_links
+                .push(json!({"from":key.0,"to":key.1,"kind":key.2,"before":before,"after":after}));
+        }
+    }
+    let changed = !changed_nodes.is_empty() || !changed_links.is_empty();
     if !changed {
         // Also undo timestamps when a sequence cancels its own edits.
         db.execute_batch("ROLLBACK TO mindmap_batch")?;
-    } else {
-        db.execute("INSERT INTO mindmaps(project_id,version) VALUES(?1,1) ON CONFLICT(project_id) DO UPDATE SET version=version+1", [&p.id])?;
+    }
+    for project in &changed_projects {
+        db.execute("INSERT INTO mindmaps(project_id,version) VALUES(?1,1) ON CONFLICT(project_id) DO UPDATE SET version=version+1", [project])?;
         db.execute(
             "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
-            params![p.id, now],
+            params![project, now],
         )?;
     }
     db.execute_batch("RELEASE mindmap_batch")?;
+    let affected_projects = changed_projects
+        .iter()
+        .map(|project| Ok(json!({"project":project,"version":version(db,project)?})))
+        .collect::<Result<Vec<_>>>()?;
     let result = json!({"ok":true,"project":p,"changed":changed,"dry_run":dry_run,
-        "base_version":base_version,"version":version(db,&p.id)?,"changed_nodes":changed_nodes});
+        "base_version":base_version,"version":version(db,&p.id)?,"changed_nodes":changed_nodes,
+        "changed_links":changed_links,"affected_projects":affected_projects});
     ReadBudget::default().charge(&result)?;
     Ok(result)
 }

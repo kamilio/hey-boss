@@ -231,8 +231,9 @@ one project; cycles are rejected. Automatic issue→PR relationships come from
 `issue pr add/remove`. Only confirmed pending Inbox notices appear; an unavailable
 Inbox is reported explicitly. Map reads never complete notices or change issues.
 `mm batch --file edits.json` (or `--file -` for stdin) atomically applies a JSON
-array of `edit` (`node`, `title` or `clear_label`), `alias` (`node`, `alias`), and
-`move` (`node`, optional `under`/`before`/`after`) entries. Each object requires the
+array of `edit` (`node`, `title` or `clear_label`), `alias` (`node`, `alias`),
+`move` (`node`, optional `under`/`before`/`after`), and `link` (`from`, `to`, `kind`,
+optional `description`) entries. Each object requires the
 exact `command` discriminator, not `action`; `mm batch --help` shows the complete
 format and copy-ready examples. For existing selectors, save this as `edits.json`:
 
@@ -240,7 +241,8 @@ format and copy-ready examples. For existing selectors, save this as `edits.json
 [
   {"command":"edit","node":"issue:12","title":"Keep replies safe"},
   {"command":"alias","node":"followup","alias":"reply-followup"},
-  {"command":"move","node":"followup","under":"existing-topic"}
+  {"command":"move","node":"followup","under":"existing-topic"},
+  {"command":"link","from":"followup","to":"issue:12","kind":"depends-on","description":"Replies need this fix"}
 ]
 ```
 
@@ -258,8 +260,16 @@ introduced by an earlier entry. Omitted/null `alias` clears it; omitted/null
 `before`/`after`. `clear_label:true` restores an issue's title and excludes `title`.
 Unknown fields/commands and body edits are rejected. Limits: 1 MiB/10,000 entries.
 Invalid nodes, duplicate requested labels/aliases, cycles and stale versions roll
-back everything. JSON returns compact `changed_nodes` before/after metadata and
-one resulting version; empty/net no-op batches do not advance it. Identical
+back everything. Link entries follow `mm link`: cross-project endpoints and missing
+typed resource references are supported; missing aliases/IDs and self-links fail.
+Required `kind` is nonblank, at most 64 bytes, without control characters;
+`pull-request` is reserved. `description` is at most 16 KiB; null, omission or
+blank text clears it. Invalid descriptions/kinds reject the whole transaction.
+JSON returns compact `changed_nodes` and `changed_links` before/after metadata
+(stable `from`/`to`/`kind`, description objects; null before means a new link),
+one resulting version and `affected_projects`. Each affected map advances once;
+the single guard applies to the selected map. Empty/net no-op batches do not
+advance versions. Identical
 `--request-id` retries are safe after alias changes; dry runs cannot use request IDs.
 
 `mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.

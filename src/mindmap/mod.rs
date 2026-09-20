@@ -81,6 +81,12 @@ pub enum BatchEdit {
         before: Option<String>,
         after: Option<String>,
     },
+    Link {
+        from: String,
+        to: String,
+        kind: String,
+        description: Option<String>,
+    },
 }
 impl BatchEdit {
     pub(super) fn operation(&self) -> Operation {
@@ -111,6 +117,18 @@ impl BatchEdit {
                 under: under.clone(),
                 before: before.clone(),
                 after: after.clone(),
+                if_version: None,
+            },
+            Self::Link {
+                from,
+                to,
+                kind,
+                description,
+            } => Operation::Link {
+                from: from.clone(),
+                to: to.clone(),
+                kind: kind.clone(),
+                description: description.clone(),
                 if_version: None,
             },
         }
