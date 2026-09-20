@@ -52,12 +52,14 @@ pub enum Action {
     AddRoot { path: PathBuf },
     /// Remove a directory from the cleaner's scope.
     RemoveRoot { path: PathBuf },
-    /// Independently enable or disable process/worktree cleanup.
+    /// Independently enable or disable process/worktree/cache cleanup.
     Configure {
         #[arg(long, action = clap::ArgAction::Set)]
         processes: Option<bool>,
         #[arg(long, action = clap::ArgAction::Set)]
         worktrees: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        caches: Option<bool>,
     },
     #[command(hide = true)]
     Run,
@@ -112,6 +114,7 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
         Action::Configure {
             processes,
             worktrees,
+            caches,
         } => {
             let mut args = vec!["configure".into()];
             if let Some(value) = processes {
@@ -119,6 +122,9 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
             }
             if let Some(value) = worktrees {
                 args.extend(["--worktrees".into(), value.to_string()]);
+            }
+            if let Some(value) = caches {
+                args.extend(["--caches".into(), value.to_string()]);
             }
             args
         }
@@ -156,11 +162,18 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
         bytes(s.metrics.swap_used_bytes)
     );
     println!(
-        "Automatic cleanup: {} · stopped {} processes · removed {} worktrees",
+        "Automatic cleanup: {} · stopped {} processes · removed {} worktrees · removed {} caches",
         if s.config.automatic { "on" } else { "off" },
         s.harvested_processes,
-        s.removed_worktrees
+        s.removed_worktrees,
+        s.removed_caches
     );
+    if let Some(change) = s.disk_available_change_bytes {
+        println!(
+            "Net free disk-space change: {:+.1} MiB (includes concurrent writes and shared blocks)",
+            change as f64 / 1_048_576.0
+        );
+    }
     println!(
         "{} process groups and {} worktrees inspected. Codex and active work are protected.",
         s.processes.len(),
@@ -280,6 +293,7 @@ pub fn run(action: &Action) -> io::Result<()> {
         Action::Configure {
             processes,
             worktrees,
+            caches,
         } => {
             let _lock = store.lock()?;
             let mut config = store.config()?;
@@ -289,10 +303,13 @@ pub fn run(action: &Action) -> io::Result<()> {
             if let Some(v) = worktrees {
                 config.clean_worktrees = *v;
             }
+            if let Some(v) = caches {
+                config.clean_caches = *v;
+            }
             store.save("config.json", &config)?;
             store.record_setting(&format!(
-                "Process harvesting: {}; worktree cleanup: {}",
-                config.harvest_processes, config.clean_worktrees
+                "Process harvesting: {}; worktree cleanup: {}; cache cleanup: {}",
+                config.harvest_processes, config.clean_worktrees, config.clean_caches
             ))?;
             println!("Cleanup settings updated.");
             Ok(())

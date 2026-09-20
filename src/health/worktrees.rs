@@ -180,13 +180,13 @@ fn repositories(roots: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_paths() -> io::Result<Vec<PathBuf>> {
+pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
     super::linux::open_paths()
 }
 
 /// Read-only snapshot of files/cwds owned by this user. Incomplete inspection fails closed.
 #[cfg(not(target_os = "linux"))]
-fn open_paths() -> io::Result<Vec<PathBuf>> {
+pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
     let o = output(
         Command::new("lsof").args([
             "-nP",
@@ -200,7 +200,7 @@ fn open_paths() -> io::Result<Vec<PathBuf>> {
     )?;
     if !o.status.success() || !o.stderr.is_empty() {
         return Err(io::Error::other(
-            "Cannot inspect open files; worktrees preserved",
+            "Cannot inspect open files; cleanup preserved",
         ));
     }
     let value = String::from_utf8(o.stdout).map_err(io::Error::other)?;
@@ -350,7 +350,7 @@ fn eligible(
             newest = newest.max(modified(&path).map_err(|e| e.to_string())?);
         }
     }
-    if at.saturating_sub(newest) < policy.min_age {
+    if at.saturating_sub(newest) < policy.min_age.min(3600) {
         return Err("Recently created or changed; preserved".into());
     }
     check_submodules(&w.path)?;
@@ -371,14 +371,12 @@ fn eligible(
     if head != w.head {
         return Err("Checkout changed during inspection; preserved".into());
     }
-    let retained_branch = policy.manual
-        && git_text(&w.path, &["symbolic-ref", "--quiet", "HEAD"])
-            .ok()
-            .filter(|s| s.starts_with("refs/heads/"))
-            .is_some_and(|branch| {
-                git_text(&w.path, &["rev-parse", "--verify", &branch])
-                    .is_ok_and(|value| value == head)
-            });
+    let retained_branch = git_text(&w.path, &["symbolic-ref", "--quiet", "HEAD"])
+        .ok()
+        .filter(|s| s.starts_with("refs/heads/"))
+        .is_some_and(|branch| {
+            git_text(&w.path, &["rev-parse", "--verify", &branch]).is_ok_and(|value| value == head)
+        });
     let merged = remote_base(&w.path).is_some_and(|base| {
         output(
             &mut git(&w.path, &["merge-base", "--is-ancestor", &head, &base]),
@@ -405,7 +403,12 @@ fn eligible(
         let path = w.path.join(std::ffi::OsStr::from_bytes(file));
         newest = newest.max(modified(&path).map_err(|e| e.to_string())?);
     }
-    if at.saturating_sub(newest) < policy.min_age {
+    let required_age = if merged {
+        policy.min_age.min(3600)
+    } else {
+        policy.min_age
+    };
+    if at.saturating_sub(newest) < required_age {
         return Err("Recently created or changed; preserved".into());
     }
     Ok(head)
@@ -569,9 +572,9 @@ pub fn clean(
             retained.insert(key.clone());
             let ready = at.saturating_sub(first) >= config.observation_seconds;
             let mut detail = if ready {
-                "Old, clean, unused, and merged"
+                "Clean and unused; merged or old with a retained branch"
             } else {
-                "Old and merged; observing before cleanup"
+                "Merged or old with a retained branch; observing before cleanup"
             }
             .to_owned();
             if ready && apply {
@@ -776,6 +779,7 @@ mod tests {
         };
         let future = now() + 30 * 86400;
         assert!(check(&w, &[], future).is_ok());
+        assert!(check(&w, &[], now() + 3601).is_ok());
         assert!(
             check(&trees[0], &[], future)
                 .unwrap_err()
@@ -814,17 +818,20 @@ mod tests {
         assert!(check(&w, &[], future).is_err());
         git_text(&work, &["commit", "-am", "unmerged"]).unwrap();
         let unmerged = list(&main).unwrap()[1].clone();
-        assert!(
-            check(&unmerged, &[], future)
-                .unwrap_err()
-                .contains("not merged")
-        );
+        // Old named-branch work can be removed without losing its commits.
+        assert!(check(&unmerged, &[], future).is_ok());
+        assert!(check(&unmerged, &[], now() + 3601).is_err());
         let manual = Policy {
             min_age: 0,
             manual: true,
         };
         assert!(eligible(&unmerged, &main, &[], &[], &table, manual, now()).is_ok());
         git_text(&work, &["checkout", "--detach"]).unwrap();
+        assert!(
+            check(&list(&main).unwrap()[1], &[], future)
+                .unwrap_err()
+                .contains("not merged")
+        );
         assert!(
             eligible(
                 &list(&main).unwrap()[1],

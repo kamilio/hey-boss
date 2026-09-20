@@ -4,6 +4,18 @@ use super::text;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[allow(clippy::unnecessary_cast)]
+pub(super) fn disk_available_bytes() -> Option<u64> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::ffi::CString::new(home).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), info.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let s = unsafe { info.assume_init() };
+    Some((s.f_bavail as u64).saturating_mul(s.f_frsize as u64))
+}
+
 #[allow(clippy::unnecessary_cast)] // statvfs widths differ between Darwin and Linux.
 pub(super) fn metrics() -> Metrics {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
