@@ -27,6 +27,7 @@ impl Fixture {
         let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
         c.current_dir(&self.root)
             .env("HEY_BOSS_ISSUE_DB", &self.db)
+            .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent-inbox.sock"))
             .env(
                 "HEY_BOSS_CODEX",
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py"),
@@ -86,6 +87,7 @@ impl Fixture {
             Command::new(binary)
                 .current_dir(&self.root)
                 .env("HEY_BOSS_ISSUE_DB", &self.db)
+                .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent-inbox.sock"))
                 .env("HEY_BOSS_TEST_CLI", self.notification_cli())
                 .env(
                     "HEY_BOSS_CODEX",
