@@ -25,8 +25,10 @@ impl Fixture {
     fn new(mode: &str) -> Self {
         let root = PathBuf::from(format!("/tmp/hb61-{}-{mode}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
-        // Keep live-worker upgrade detection independent of concurrent local builds.
-        fs::copy(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).unwrap();
+        // Pin the built inode across Cargo's atomic binary replacement. Unlike
+        // copying in parallel tests, this opens no executable for writing that
+        // another fork can briefly inherit and trigger Linux ETXTBSY.
+        fs::hard_link(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).unwrap();
         fs::write(root.join("mode.txt"), mode).unwrap();
         let listener = UnixListener::bind(root.join("inbox.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
