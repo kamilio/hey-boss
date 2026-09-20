@@ -29,19 +29,35 @@ const HeyBossArtifacts = (() => {
     if(!root)return;
     const render = artifacts => {
       root.classList.add("artifact-relationship");
-      root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${esc(a.title)}${a.archived?" (archived)":""}</a><button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}">Unlink</button></li>`).join("")}</ul><a class="button" href="${esc(url(context.project,null,{new:"1",...(context.issue?{issue:context.issue}:{node:context.node}),...(context.host?{host:context.host}:{})}))}">Create artifact</a><button type="button" class="button" data-attach>Attach existing</button><div data-attach-form></div><p role="alert" hidden></p>`;
+      root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul class="artifact-attachment-list" ${artifacts.length?"":"hidden"}>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${HeyBossUI.icon("docs")}<span>${esc(a.title)}${a.archived?'<small>Archived</small>':""}</span></a><button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}" title="Unlink artifact">${HeyBossUI.icon("x")}</button></li>`).join("")}</ul><div class="artifact-attachment-actions"><a class="artifact-text-button" href="${esc(url(context.project,null,{new:"1",...(context.issue?{issue:context.issue}:{node:context.node}),...(context.host?{host:context.host}:{})}))}">${HeyBossUI.icon("plus")}Create artifact</a><button type="button" class="artifact-text-button" data-attach>${HeyBossUI.icon("link")}Attach existing</button></div><div data-attach-form></div><p role="alert" hidden></p>`;
       const error=e=>{const p=$("[role=alert]",root);p.hidden=false;p.textContent=e.message;};
       const target=context.issue?{issue:context.issue}:{node:context.node};
       root.querySelectorAll("[data-unlink]").forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(context,{command:"unlink",id:b.dataset.unlink,...target});render(artifacts.filter(a=>a.id!==b.dataset.unlink));}catch(e){b.disabled=false;error(e);}});
       $("[data-attach]",root).onclick=async()=>{
-        try {
-          const form=$("[data-attach-form]",root);
-          form.innerHTML='<form><label>Find artifact <input type="search" aria-label="Find artifact to attach"></label><select aria-label="Artifact to attach"></select><button class="button" type="submit">Attach</button></form>';
-          const load=async()=>{const v=await api(context,{command:"list",query:$("input",form).value,archived:false});if(!form.isConnected)return;$("select",form).innerHTML=v.artifacts.map(a=>`<option value="${esc(a.id)}">${esc(a.title)}</option>`).join("");};
-          let timer;$("input",form).oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>load().catch(error),250);};
-          $("form",form).onsubmit=async e=>{e.preventDefault();const id=$("select",form).value;if(!id)return;const button=$("button",form);button.disabled=true;try{await api(context,{command:"link",id,...target});const v=await api(context,{command:"links",...target});render(v.artifacts);}catch(err){button.disabled=false;error(err);}};
-          await load();$("input",form).focus();
-        }catch(e){error(e);}
+        const panel=$("[data-attach-form]",root),actions=$(".artifact-attachment-actions",root);
+        panel.innerHTML='<form class="artifact-attachment-picker"><input type="search" aria-label="Find artifact to attach" placeholder="Search documents…"><select aria-label="Artifact to attach" disabled></select><p class="artifact-muted" data-attach-status role="status">Loading documents…</p><div><button class="button" type="submit" disabled>Attach</button><button class="artifact-text-button" type="button" aria-label="Cancel attachment" data-attach-cancel>Cancel</button></div></form>';
+        const form=$("form",panel),search=$("input",form),select=$("select",form),button=$("button[type=submit]",form),status=$("[data-attach-status]",form);
+        actions.hidden=true;
+        let generation=0,timer;
+        const cancel=()=>{clearTimeout(timer);generation++;panel.innerHTML="";actions.hidden=false;$("[data-attach]",root).focus();};
+        $("[data-attach-cancel]",form).onclick=cancel;
+        form.onkeydown=e=>{if(e.key==="Escape"){e.preventDefault();cancel();}};
+        const attached=new Set(artifacts.map(a=>a.id));
+        const load=async()=>{
+          const seq=++generation;select.disabled=true;button.disabled=true;status.textContent="Loading documents…";
+          try{const value=await api(context,{command:"list",query:search.value,archived:false});if(!form.isConnected||seq!==generation)return;
+            const choices=value.artifacts.filter(a=>!attached.has(a.id));
+            select.innerHTML=choices.map(a=>`<option value="${esc(a.id)}">${esc(a.title)}</option>`).join("");
+            select.disabled=button.disabled=!choices.length;status.textContent=choices.length?"":search.value.trim()?"No matching artifacts":"No unattached artifacts";
+          }catch(err){if(form.isConnected&&seq===generation){status.textContent="";error(err);}}
+        };
+        search.oninput=()=>{clearTimeout(timer);generation++;select.disabled=true;button.disabled=true;timer=setTimeout(load,250);};
+        form.onsubmit=async e=>{
+          e.preventDefault();const id=select.value;if(!id||button.disabled)return;button.disabled=true;select.disabled=true;search.disabled=true;
+          try{await api(context,{command:"link",id,...target});const value=await api(context,{command:"links",...target});if(form.isConnected)render(value.artifacts);}
+          catch(err){if(form.isConnected){button.disabled=false;select.disabled=false;search.disabled=false;error(err);}}
+        };
+        search.focus();await load();
       };
     };
     render(context.artifacts||[]);
@@ -49,7 +65,7 @@ const HeyBossArtifacts = (() => {
 
   async function start() {
     if(!$("#artifact-main"))return;
-    HeyBossUI.icons($("#artifact-main"));
+    HeyBossUI.icons();
     const route=()=>new URLSearchParams(location.hash.slice(1));
     const status=s=>{if($("#artifact-status").textContent!==s)$("#artifact-status").textContent=s;};
     const icon=name=>HeyBossUI.icon(name);
@@ -127,7 +143,7 @@ const HeyBossArtifacts = (() => {
       const replies=new Map();
       for(const c of v.comments)if(c.parent){if(!replies.has(c.parent))replies.set(c.parent,[]);replies.get(c.parent).push(c);}
       const threads=v.comments.filter(c=>!c.parent).map(c=>{
-        const body=`${c.quote?`<blockquote>${esc(c.quote)}</blockquote>${c.outdated?'<p class="artifact-muted">Outdated selection · discussion preserved</p>':""}`:""}${comment(c)}${(replies.get(c.id)||[]).map(r=>`<div class="reply">${comment(r)}</div>`).join("")}<div class="artifact-thread-actions"><details class="artifact-reply"><summary>Reply</summary><form data-reply="${c.id}"><textarea aria-label="Reply to comment" required placeholder="Write a reply…" rows="3"></textarea><button class="button" type="submit">Reply</button></form></details><button class="artifact-text-button" type="button" data-resolve="${c.id}" data-resolved="${!c.resolved}">${c.resolved?"Reopen thread":"Resolve"}</button></div>`;
+        const body=`${c.quote?`<blockquote>${esc(c.quote)}</blockquote>${c.outdated?'<p class="artifact-muted">Outdated selection · discussion preserved</p>':""}`:""}${comment(c)}${(replies.get(c.id)||[]).map(r=>`<div class="reply">${comment(r)}</div>`).join("")}<div class="artifact-thread-actions"><details class="artifact-reply"><summary>Reply</summary><form data-reply="${c.id}"><textarea aria-label="Reply to comment" required placeholder="Write a reply…" rows="3">${esc(drafts.get(`${draftKey(doc.id)}:reply:${c.id}`)?.body||"")}</textarea><button class="button" type="submit">Reply</button></form></details><button class="artifact-text-button" type="button" data-resolve="${c.id}" data-resolved="${!c.resolved}">${c.resolved?"Reopen thread":"Resolve"}</button></div>`;
         return c.resolved?`<details class="artifact-thread resolved"><summary>Resolved · ${esc(c.body.slice(0,70))}</summary>${body}</details>`:`<section class="artifact-thread">${body}</section>`;
       }).join("");
       const backlinks=v.backlinks.map(l=>{const href=mobile?`/project-resource#${new URLSearchParams({project:context.project,[l.kind==="issue"?"issue":"node"]:l.target})}`:l.kind==="issue"?`/#${new URLSearchParams({project:context.project,issue:l.target,...(context.host?{host:context.host}:{})})}`:`/mm#${new URLSearchParams({project:context.project,node:l.target,...(context.host?{host:context.host}:{})})}`;return `<li>${l.title?`<a href="${esc(href)}">${esc(l.title)}${l.kind==="issue"?` · #${esc(l.target)}`:""}</a>`:`<span class="artifact-muted">Removed ${esc(l.kind)} · ${esc(l.target)}</span>`}</li>`;}).join("");
@@ -150,7 +166,21 @@ const HeyBossArtifacts = (() => {
       const mutate=async(op,button)=>{button.disabled=true;try{const r=await api(context,op);if(!button.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Saved");}catch(e){button.disabled=false;error(e);}};
       $("#artifact-archive").onclick=e=>mutate({command:"archive",id:doc.id,archived:!doc.archived,if_version:doc.version},e.currentTarget);
       $("#artifact-document").querySelectorAll("[data-resolve]").forEach(b=>b.onclick=()=>mutate({command:"resolve",id:doc.id,comment_id:Number(b.dataset.resolve),resolved:b.dataset.resolved==="true"},b));
-      $("#artifact-document").querySelectorAll("[data-reply]").forEach(f=>f.onsubmit=e=>{e.preventDefault();const body=$("textarea",f).value;if(body.trim())mutate({command:"comment",id:doc.id,parent:Number(f.dataset.reply),body},$("button",f));});
+      $("#artifact-document").querySelectorAll("[data-reply]").forEach(form=>{
+        const field=$("textarea",form),button=$("button",form),key=`${draftKey(doc.id)}:reply:${form.dataset.reply}`;
+        let pending=drafts.get(key)?.pending||null;
+        field.readOnly=!!pending;
+        const keep=()=>drafts.set(key,{body:field.value,pending});
+        field.oninput=keep;
+        form.onsubmit=async e=>{
+          e.preventDefault();if(button.disabled||!field.value.trim())return;
+          button.disabled=true;
+          pending ||= {operation:{command:"comment",id:doc.id,parent:Number(form.dataset.reply),body:field.value},requestID:crypto.randomUUID()};
+          field.readOnly=true;keep();
+          try{const r=await api(context,pending.operation,pending.requestID);drafts.remove(key);if(!form.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Reply saved");}
+          catch(err){if(!form.isConnected)return;button.disabled=false;if(!err.uncertain){pending=null;field.readOnly=false;keep();}error(err);if(err.uncertain)status("Reply pending · retry after reconnecting");}
+        };
+      });
       const commentKey=`${draftKey(doc.id)}:comment`;
       let pendingComment=drafts.get(commentKey)?.pending||null;
       $("#artifact-comment").value=drafts.get(commentKey)?.body||"";$("#artifact-comment").readOnly=!!pendingComment;
@@ -195,7 +225,7 @@ const HeyBossArtifacts = (() => {
   }
   async function startResource() {
     if(!$("#resource-main"))return;
-    mobile=true;
+    mobile=true;HeyBossUI.icons();
     const params=new URLSearchParams(location.hash.slice(1));
     try {
       const response=await fetch("/api/artifact-bootstrap"),boot=await response.json();

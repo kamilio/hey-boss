@@ -139,10 +139,22 @@
 .artifact-conflict { margin-top: 20px; padding: 20px; background: var(--surface); border: 1px solid var(--danger); border-radius: 12px; }
 .artifact-conflict pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
 /* Attachments on issue and mindmap detail surfaces. */
-.artifact-relationship form { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
-.artifact-relationship select { max-width: 100%; }
-.artifact-relationship ul { padding-left: 18px; }
-.artifact-relationship [data-unlink] { margin-left: 8px; font-size: 12px; color: var(--muted); background: transparent; }
+.artifact-relationship .artifact-attachment-list { list-style: none; padding: 0; margin: 10px 0; }
+.artifact-attachment-list li { display: flex; align-items: start; gap: 4px; margin: 4px 0; }
+.artifact-attachment-list a { display: flex; align-items: start; gap: 8px; flex: 1; min-width: 0; padding: 7px 0; font-size: 12px; overflow-wrap: anywhere; }
+.artifact-attachment-list a > svg { width: 15px; height: 15px; margin-top: 2px; color: var(--muted); }
+.artifact-attachment-list small { display: block; font-size: 10px; color: var(--muted); margin-top: 2px; }
+.artifact-relationship [data-unlink] { display: grid; place-items: center; width: 30px; height: 32px; border-radius: 6px; color: var(--muted); background: transparent; flex-shrink: 0; }
+.artifact-relationship [data-unlink]:hover { background: var(--hover); color: var(--danger); }
+.artifact-relationship [data-unlink] svg { width: 13px; height: 13px; }
+.artifact-attachment-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.artifact-attachment-actions .artifact-text-button { font-size: 11px; }
+.artifact-attachment-actions svg { width: 13px; height: 13px; }
+.artifact-relationship .artifact-attachment-picker { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.artifact-attachment-picker input, .artifact-attachment-picker select { min-width: 0; width: 100%; max-width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--input); font-size: 12px; }
+.artifact-attachment-picker > div { display: flex; align-items: center; gap: 14px; }
+.artifact-attachment-picker [data-attach-status] { margin: 0; }
+.artifact-attachment-picker [data-attach-status]:empty { display: none; }
 .artifact-relationship p[role="alert"] { color: var(--danger); }
 @media (max-width: 1100px) {
   .artifact-layout { gap: 24px; grid-template-columns: minmax(0, 1fr) 260px; }

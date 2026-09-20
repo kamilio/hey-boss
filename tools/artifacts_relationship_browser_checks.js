@@ -27,6 +27,12 @@ async page => {
   await page.locator('#node-artifacts a').filter({hasText:title}).waitFor();
   await page.getByRole('button',{name:'Unlink '+title,exact:true}).click();
   await page.getByRole('button',{name:'Attach existing',exact:true}).click();
+  await page.getByRole('searchbox',{name:'Find artifact to attach',exact:true}).fill('no-matching-attachment');
+  await page.getByText('No matching artifacts',{exact:true}).waitFor();
+  if(!await page.getByRole('button',{name:'Attach',exact:true}).isDisabled())throw Error('Empty attachment search leaves Attach enabled');
+  await page.getByRole('button',{name:'Cancel attachment',exact:true}).click();
+  if(await page.getByRole('searchbox',{name:'Find artifact to attach',exact:true}).count())throw Error('Cancel leaves the attachment picker open');
+  await page.getByRole('button',{name:'Attach existing',exact:true}).click();
   await page.getByRole('searchbox',{name:'Find artifact to attach',exact:true}).fill(title);
   await page.waitForFunction(()=>document.querySelector('[aria-label="Artifact to attach"]')?.options.length===1);
   await page.getByRole('button',{name:'Attach',exact:true}).click();
