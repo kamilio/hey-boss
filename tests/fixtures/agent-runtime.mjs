@@ -34,6 +34,7 @@ function complete(interrupted = false) {
 function prompt(text) {
   streaming = true;
   output = text;
+  if (text === 'owned identity') output = process.env.HEY_BOSS_AGENT_ID ?? 'missing';
   if (text.includes('goal fixture')) {
     goalTurns += 1;
     if (goalTurns === 2) output = JSON.stringify({status:'completed',summary:'Goal fixture verified'});
