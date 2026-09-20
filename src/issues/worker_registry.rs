@@ -36,24 +36,37 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
-    let row: Option<(String, bool, i64, String, bool, String)> = db
+    let row: Option<(String, bool, i64, String, bool, String, bool, String)> = db
         .query_row(
-            "SELECT prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template FROM project_settings WHERE project_id=?1",
+            "SELECT prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides FROM project_settings WHERE project_id=?1",
             [&p.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
         )
         .optional()?;
-    let (prompt, prs, version, _legacy_name, drafts_enabled, plan_template) = row.unwrap_or((
+    let (
+        prompt,
+        prs,
+        version,
+        _legacy_name,
+        drafts_enabled,
+        plan_template,
+        worktree_enabled,
+        overrides,
+    ) = row.unwrap_or((
         worker::DEFAULT_PROMPT.into(),
         false,
         0,
         "Boss".into(),
         true,
         "plans/{timestamp}-{number}.md".into(),
+        false,
+        "{}".into(),
     ));
+    let prompt_overrides: worker::PromptOverrides = serde_json::from_str(&overrides)?;
+    let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"prs_enabled":prs,"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 fn directory(db: &Connection, p: &Project) -> Result<String> {
@@ -100,6 +113,12 @@ fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> 
         use_goal: c.use_goal,
         enabled: true,
         prs_enabled: c.prs_enabled.unwrap_or(defaults["prs_enabled"] == true),
+        worktree_enabled: c
+            .worktree_enabled
+            .unwrap_or(defaults["worktree_enabled"] == true),
+        prompt_overrides: c.prompt_overrides.clone().unwrap_or(serde_json::from_value(
+            defaults["prompt_overrides"].clone(),
+        )?),
     })
 }
 const ELIGIBLE:&str="i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
@@ -339,6 +358,8 @@ pub(super) fn execute(
             prompt,
             boss_name,
             prs_enabled,
+            worktree_enabled,
+            prompt_overrides,
             drafts_enabled,
             plan_template,
             if_version,
@@ -347,6 +368,12 @@ pub(super) fn execute(
             let prompt = prompt
                 .clone()
                 .unwrap_or_else(|| defaults["prompt"].as_str().unwrap().into());
+            let prompt = worker::base_prompt(&prompt);
+            let worktree_enabled = worktree_enabled.unwrap_or(defaults["worktree_enabled"] == true);
+            let prompt_overrides = prompt_overrides.clone().unwrap_or(serde_json::from_value(
+                defaults["prompt_overrides"].clone(),
+            )?);
+            prompt_overrides.validate()?;
             let legacy_name = boss_name
                 .clone()
                 .unwrap_or_else(|| defaults["boss_name"].as_str().unwrap().into());
@@ -368,7 +395,7 @@ pub(super) fn execute(
             if let Some(name) = boss_name {
                 crate::issues::global_settings::configure(db, name, None)?;
             }
-            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,plan_template=excluded.plan_template",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,plan_template])?;
+            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,plan_template=excluded.plan_template,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,plan_template,worktree_enabled,serde_json::to_string(&prompt_overrides)?])?;
             project_settings(db, p)
         }
         Operation::PullRequests { number }

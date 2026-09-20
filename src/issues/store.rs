@@ -38,6 +38,16 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
         "plan_template",
         "TEXT NOT NULL DEFAULT 'plans/{timestamp}-{number}.md'",
     ),
+    (
+        "project_settings",
+        "worktree_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "project_settings",
+        "prompt_overrides",
+        "TEXT NOT NULL DEFAULT '{}'",
+    ),
     ("mindmap_nodes", "display_label", "TEXT"),
 ];
 

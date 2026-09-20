@@ -98,6 +98,23 @@ class FleetTests(unittest.TestCase):
             fleet.allocate(self.main, 'agent', self.workers)
         self.assertEqual(self.main.execute('SELECT count(*) FROM fleet_allocations').fetchone()[0], 1)
 
+    def test_workflow_project_settings_replicate_and_legacy_rows_use_defaults(self):
+        overrides = json.dumps({'worktree': 'Isolate {{number}}', 'main': 'Ship {{number}}'})
+        with self.main:
+            self.main.execute('INSERT INTO project_settings(project_id,prompt,prs_enabled,version,worktree_enabled,prompt_overrides) VALUES(?,?,?,?,?,?)', (PROJECT, 'Shared instructions', 1, 1, 1, overrides))
+            snapshot = fleet.export_snapshot(self.main, 'agent')
+        with self.agent:
+            fleet.apply_pull(self.agent, 'agent', snapshot, [])
+        settings = dict(self.agent.execute('SELECT * FROM project_settings WHERE project_id=?', (PROJECT,)).fetchone())
+        self.assertEqual(settings['worktree_enabled'], 1)
+        self.assertEqual(json.loads(settings['prompt_overrides']), json.loads(overrides))
+        settings.pop('worktree_enabled')
+        settings.pop('prompt_overrides')
+        with self.agent:
+            fleet.put_row(self.agent, 'project_settings', settings)
+        saved = self.agent.execute('SELECT worktree_enabled,prompt_overrides FROM project_settings WHERE project_id=?', (PROJECT,)).fetchone()
+        self.assertEqual(tuple(saved), (0, '{}'))
+
     def test_supervisor_status_preserves_existing_saved_state(self):
         with mock.patch.object(fleet, 'STATE', self.root), mock.patch.object(fleet, 'worker_status', return_value=[]):
             supervisor = fleet.Supervisor(self.main_path, 'main')

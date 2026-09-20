@@ -262,7 +262,7 @@ def put_row(db, table, row):
     # Durable journals captured before schema 11 still replay after upgrade.
     # Supply only the native migration defaults; unknown/missing fields stay errors.
     defaults = {'issues': {'draft': 0, 'plan': None},
-                'project_settings': {'drafts_enabled': 1, 'plan_template': 'plans/{timestamp}-{number}.md'}}
+                'project_settings': {'drafts_enabled': 1, 'plan_template': 'plans/{timestamp}-{number}.md', 'worktree_enabled': 0, 'prompt_overrides': '{}'}}
     row = {**defaults.get(table, {}), **row}
     columns = [r['name'] for r in db.execute('PRAGMA table_info(' + table + ')')]
     if set(row) != set(columns):

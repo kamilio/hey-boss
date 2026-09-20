@@ -192,7 +192,7 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        "Claim and implement `hey-boss issue view 1`.\n\nCommit your changes."
+        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
     );
     w.stop();
 }
@@ -214,7 +214,7 @@ fn custom_prompt_slash_goal_preserves_all_lines() {
     let goal = t.iter().find(|v| v["method"] == "thread/goal/set").unwrap();
     assert_eq!(
         goal["params"]["objective"],
-        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal."
+        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
     );
     let turn = t.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(
@@ -1540,6 +1540,47 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
         assert_eq!(issue["issue"]["draft"], false);
         assert!(issue["issue"]["plan"].is_null());
         assert_eq!(issue["comments"][0]["body"], "Preserved history");
+        worker.stop();
+    }
+}
+
+#[test]
+fn worker_worktree_flags_override_project_choices() {
+    for (mode, project_enabled, flag, expected) in [
+        (
+            "worktree-flag",
+            false,
+            "--worktree",
+            "dedicated Git worktree",
+        ),
+        ("checkout-flag", true, "--no-worktree", "existing checkout"),
+    ] {
+        let f = Fixture::new(mode);
+        fs::write(f.root.join("mode.txt"), "completed").unwrap();
+        f.setup(&[flag]);
+        f.cli(&[
+            "settings",
+            "set",
+            if project_enabled {
+                "--worktree"
+            } else {
+                "--no-worktree"
+            },
+        ]);
+        let mut worker = f.worker();
+        let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        assert_eq!(status["config"]["worktree_enabled"], !project_enabled);
+        let transcript = f.transcript();
+        let turn = transcript
+            .iter()
+            .find(|v| v["method"] == "turn/start")
+            .unwrap();
+        assert!(
+            turn["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
         worker.stop();
     }
 }

@@ -30,6 +30,12 @@ pub struct Options {
     prs: bool,
     #[arg(long, conflicts_with = "prs")]
     no_prs: bool,
+    /// Add instructions to use a dedicated Git worktree for each issue.
+    #[arg(long, conflicts_with = "no_worktree")]
+    worktree: bool,
+    /// Override project settings to use the existing checkout.
+    #[arg(long, conflicts_with = "worktree")]
+    no_worktree: bool,
     /// Seconds allowed for Codex to claim its reserved issue.
     #[arg(long)]
     claim_timeout: Option<u32>,
@@ -231,6 +237,11 @@ pub fn run(o: &Options) -> Result<()> {
     } else if o.no_prs {
         c.prs_enabled = Some(false);
     }
+    if o.worktree {
+        c.worktree_enabled = Some(true);
+    } else if o.no_worktree {
+        c.worktree_enabled = Some(false);
+    }
     if let Some(seconds) = o.claim_timeout {
         c.reservation_seconds = seconds;
     }
@@ -278,6 +289,8 @@ fn remote_arguments(o: &Options) -> Vec<String> {
         (o.all_projects, "--all-projects"),
         (o.prs, "--prs"),
         (o.no_prs, "--no-prs"),
+        (o.worktree, "--worktree"),
+        (o.no_worktree, "--no-worktree"),
         (o.json, "--json"),
     ] {
         if enabled {
@@ -366,12 +379,14 @@ mod tests {
             "ready",
             "--id",
             "saved",
+            "--worktree",
             "--json",
             "status",
         ]);
         let args = remote_arguments(&cli.options);
         assert!(!args.contains(&"--host".into()));
         assert!(args.contains(&"--all-projects".into()));
+        assert!(args.contains(&"--worktree".into()));
         assert!(args.windows(2).any(|a| a == ["--tag", "ready"]));
         assert!(args.windows(2).any(|a| a == ["--concurrency", "1"]));
         assert_eq!(args.last().unwrap(), "status");
