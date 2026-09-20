@@ -174,7 +174,7 @@ enum Action {
         #[arg(long)]
         mobile_origin: Option<String>,
     },
-    /// List projects by recent activity, with open/closed issue counts.
+    /// List projects by recent activity, with issue state counts.
     Projects {
         /// Include hidden projects.
         #[arg(long)]
@@ -191,7 +191,7 @@ enum Action {
     RestoreProject,
     /// List open issues in the current project.
     List {
-        #[arg(long, default_value = "open", value_parser = ["open", "closed", "all", "deleted"])]
+        #[arg(long, default_value = "open", value_parser = ["open", "blocked", "closed", "all", "deleted"])]
         state: String,
         #[arg(long, conflicts_with = "unassigned")]
         mine: bool,
@@ -320,7 +320,16 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
-    /// Reopen a closed issue without assigning it.
+    /// Block an issue and clear its claim. Use rarely: make every effort to resolve
+    /// it first, ask the user for help via hey-boss ask, and describe the blocker.
+    Block {
+        number: i64,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Reopen a blocked or closed issue without assigning it.
     Reopen {
         number: i64,
         /// Reject reopening if another writer has changed this version.
@@ -760,6 +769,20 @@ impl Options {
                 comment: comment.clone(),
                 force: *force,
             },
+            Action::Block {
+                number,
+                comment,
+                force,
+            } => {
+                eprintln!(
+                    "Warning: blocking should be rare. Make every effort to resolve the issue first; raise questions and ask the user for help via hey-boss ask. Explain the blocker in --comment. Reopen when it can proceed."
+                );
+                Operation::Block {
+                    number: *number,
+                    comment: comment.clone(),
+                    force: *force,
+                }
+            }
             Action::Reopen { number, if_version } => Operation::Reopen {
                 number: *number,
                 if_version: *if_version,
@@ -1095,8 +1118,8 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(projects) = value["projects"].as_array() {
         println!(
-            "{:<28} {:>6} {:>8} {:>10} {:>7} {:>8}  PROJECT",
-            "NAME", "OPEN", "CLAIMED", "UNASSIGNED", "CLOSED", "DELETED"
+            "{:<28} {:>6} {:>8} {:>10} {:>8} {:>7} {:>8}  PROJECT",
+            "NAME", "OPEN", "CLAIMED", "UNASSIGNED", "BLOCKED", "CLOSED", "DELETED"
         );
         for project in projects {
             let name = format!(
@@ -1111,11 +1134,12 @@ pub(crate) fn print_text(value: &Value) {
             let open = project["open"].as_i64().unwrap_or(0);
             let unassigned = project["unassigned"].as_i64().unwrap_or(0);
             println!(
-                "{:<28} {:>6} {:>8} {:>10} {:>7} {:>8}  {}",
+                "{:<28} {:>6} {:>8} {:>10} {:>8} {:>7} {:>8}  {}",
                 name,
                 open,
                 open - unassigned,
                 unassigned,
+                project["blocked"].as_i64().unwrap_or(0),
                 project["closed"].as_i64().unwrap_or(0),
                 project["deleted"].as_i64().unwrap_or(0),
                 line(&project["id"])

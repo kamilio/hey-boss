@@ -27,5 +27,5 @@ CREATE VIEW issue_pickup_ready AS
    SELECT r.child_number FROM issue_subtasks r JOIN descendants d ON r.parent_number=d.number
     JOIN issues child ON child.project_id=r.project_id AND child.number=r.child_number
     WHERE r.project_id=i.project_id AND child.deleted_at IS NULL
-  ) SELECT 1 FROM descendants d JOIN issues child ON child.project_id=i.project_id AND child.number=d.number WHERE child.state='open'
+  ) SELECT 1 FROM descendants d JOIN issues child ON child.project_id=i.project_id AND child.number=d.number WHERE child.state IN ('open','blocked')
  );

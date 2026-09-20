@@ -25,6 +25,27 @@ hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 Bodies and comments are Markdown text stored directly in SQLite. No Markdown
 file is required. `create` allows an empty body; comments must contain text.
 
+Issues have **Open**, **Blocked**, **Closed**, and **Deleted** views. Blocked
+issues retain their content and history, release their claim, and pause worker
+pickup. Blocking should be rare: make every effort to resolve the problem first,
+raise questions and ask the user for help with `hey-boss ask`. Explain what needs
+to change in a comment, then reopen when work can proceed:
+
+```sh
+hey-boss issue block 1 --comment 'Waiting for the user to restore access.'
+hey-boss issue list --state blocked
+hey-boss issue reopen 1
+```
+
+The CLI prints this guidance when blocking; the web **Block issue** action shows
+it before applying the change and saves any entered comment with the transition.
+Workers automatically block an issue after five unsuccessful launched attempts
+in its current open cycle. Cancellations, interruptions and unlaunched
+reservations do not consume that budget. Reopening starts a fresh budget, retaining
+all prior agent runs. A blocked subtask still prevents its parent from pickup.
+Blocking a closed issue requires reopening it first. Deleting and restoring a
+blocked issue preserves its blocked state. Worker Retry requires an open issue.
+
 Each comment has a subtle **Resolve** action. Resolved comments collapse into a
 compact row; **Show comment** expands their original content, and **Unresolve**
 restores the full card. Resolution persists across reloads and fleet sync without

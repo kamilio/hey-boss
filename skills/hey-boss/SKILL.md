@@ -82,6 +82,16 @@ Use `issue create --title TITLE --draft` for a persisted draft without files or 
 
 Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
 
+`issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
+its claim; `list --state blocked` finds paused work. Blocking should be rare:
+make every effort to resolve the issue, raise questions via `hey-boss ask`, and
+ask the user for help before giving up. Explain the blocker and what enables
+progress. `issue reopen NUMBER` resumes eligibility with a fresh retry budget.
+Workers automatically block after five unsuccessful launched attempts per open
+cycle; cancellations, interruptions and unlaunched reservations do not count.
+Blocked subtasks continue to hold their parent. Worker Retry does not reopen
+blocked issues; reopen explicitly when the blocker is resolved.
+
 Reuse `--request-id` for identical uncertain retries; `view` reads current state; `edit --if-version N` protects concurrent changes. Test with separate `HEY_BOSS_ISSUE_DB` and `web --no-discovery`.
 
 `issue reopen NUMBER --if-version N` reopens only if the issue still has the version

@@ -366,6 +366,11 @@ pub enum Operation {
         comment: Option<String>,
         force: bool,
     },
+    Block {
+        number: i64,
+        comment: Option<String>,
+        force: bool,
+    },
     Reopen {
         number: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -461,6 +466,7 @@ impl Operation {
             | Self::Comment { number, .. }
             | Self::ResolveComment { number, .. }
             | Self::Close { number, .. }
+            | Self::Block { number, .. }
             | Self::Reopen { number, .. }
             | Self::Delete { number, .. }
             | Self::Restore { number } => Some(*number),

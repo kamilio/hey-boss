@@ -30,7 +30,7 @@ mod batch;
 mod transfer;
 
 const APPLICATION_ID: i64 = 0x48424953;
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
@@ -105,6 +105,46 @@ fn migration_error(error: Error, path: &Path) -> Error {
             error.message
         ),
     )
+}
+
+// Rebuild only the constrained table, retaining every column, index and fleet
+// journal trigger. Foreign keys are disabled outside this atomic transaction;
+// copying rows must not emit changes or rewrite child references.
+fn migrate_blocked(db: &Connection) -> Result<()> {
+    let sql: String = db.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='issues'",
+        [],
+        |r| r.get(0),
+    )?;
+    let objects = {
+        let mut query = db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name='issues' AND type IN ('index','trigger') AND sql IS NOT NULL")?;
+        query
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    db.execute_batch(
+        "CREATE TEMP TABLE blocked_migration AS SELECT * FROM issues; DROP TABLE issues;",
+    )?;
+    db.execute_batch(&sql.replace("'open','closed'", "'open','blocked','closed'"))?;
+    db.execute_batch(
+        "INSERT INTO issues SELECT * FROM blocked_migration; DROP TABLE blocked_migration;",
+    )?;
+    for sql in objects {
+        db.execute_batch(&sql)?;
+    }
+    let violation: Option<String> = db
+        .query_row(
+            "SELECT \"table\" FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(table) = violation {
+        return Err(Error::invalid(format!(
+            "Foreign key violation in {table}; migration rolled back"
+        )));
+    }
+    Ok(())
 }
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
 const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count";
@@ -335,7 +375,11 @@ fn validate(r: &Request) -> Result<()> {
             }
         }
         Operation::Comment { body: text, .. } => body(text, true)?,
-        Operation::Close {
+        Operation::Block {
+            comment: Some(text),
+            ..
+        }
+        | Operation::Close {
             comment: Some(text),
             ..
         } => body(text, true)?,
@@ -349,9 +393,9 @@ fn validate(r: &Request) -> Result<()> {
             search,
             ..
         } => {
-            if !["open", "closed", "all", "deleted"].contains(&state.as_str()) {
+            if !["open", "blocked", "closed", "all", "deleted"].contains(&state.as_str()) {
                 return Err(Error::invalid(
-                    "State must be open, closed, all, or deleted",
+                    "State must be open, blocked, closed, all, or deleted",
                 ));
             }
             if assignee.is_some() && (*mine || *unassigned) {
@@ -509,6 +553,7 @@ impl Store {
                 .map_err(|e| migration_error(e, path))?
                 .is_empty();
         if version < SCHEMA_VERSION || needs_repair {
+            db.pragma_update(None, "foreign_keys", false)?;
             let mut migrate = || -> Result<()> {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -580,11 +625,17 @@ impl Store {
                         "ALTER TABLE {table} ADD COLUMN {column} {definition};"
                     ))?;
                 }
+                if version > 0 && version < 13 {
+                    migrate_blocked(&tx)?;
+                }
+                tx.execute_batch(include_str!("subtask-readiness.sql"))?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.commit()?;
                 Ok(())
             };
-            migrate().map_err(|e| migration_error(e, path))?;
+            let result = migrate().map_err(|e| migration_error(e, path));
+            db.pragma_update(None, "foreign_keys", true)?;
+            result?;
         }
         let journal: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
         if !journal.eq_ignore_ascii_case("wal") {
@@ -796,13 +847,14 @@ impl Store {
                     coalesce(sum(i.state='closed' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.deleted_at IS NOT NULL),0),
                     coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL),0),
-                    p.activity_at,p.hidden_at,p.created_at
+                    p.activity_at,p.hidden_at,p.created_at,
+                    coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0)
                     FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
                     WHERE ?1 OR p.hidden_at IS NULL GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
-                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?
+                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 let mut query = tx.prepare("SELECT DISTINCT j.value FROM issues i,json_each(i.labels) j WHERE i.project_id=?1 AND i.deleted_at IS NULL ORDER BY j.value")?;
                 let labels = query
@@ -1492,6 +1544,34 @@ fn mutate(
                 issue.closed_at = Some(now);
             }
         }
+        Operation::Block {
+            comment: text,
+            force,
+            ..
+        } => {
+            ownership(&issue, actor, *force)?;
+            if issue.state == "closed" {
+                return Err(Error::conflict(
+                    "Reopen the closed issue before blocking it",
+                ));
+            }
+            if issue.state == "blocked" && text.is_some() {
+                return Err(Error::conflict(
+                    "Issue is already blocked; use comment to add further findings",
+                ));
+            }
+            if issue.state != "blocked" {
+                if let Some(body) = text {
+                    comment_id = Some(comment(db, &project.id, number, actor, body, now)?);
+                }
+                action = "blocked";
+                data = json!({"previous_assignee":issue.assignee,"forced":force});
+                issue.state = "blocked".into();
+                issue.assignee = None;
+                issue.closed_at = None;
+                issue.closed_by = None;
+            }
+        }
         Operation::Reopen { if_version, .. } => {
             if if_version.is_some_and(|v| v != issue.version) {
                 return Err(Error::conflict(format!(
@@ -1500,8 +1580,13 @@ fn mutate(
                 )));
             }
             if issue.state != "open" {
+                if issue.state == "blocked" {
+                    // Explicitly reopening a blocker also releases old approval
+                    // holds and cooldowns; it must actually resume eligibility.
+                    db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL", params![project.id,number])?;
+                }
                 action = "reopened";
-                data = json!({"previous_closed_by":issue.closed_by,"previous_closed_at":issue.closed_at});
+                data = json!({"previous_state":issue.state,"previous_closed_by":issue.closed_by,"previous_closed_at":issue.closed_at});
                 issue.state = "open".into();
                 issue.assignee = None;
                 issue.closed_by = None;
@@ -1544,7 +1629,7 @@ CREATE INDEX project_names ON projects(name);
 CREATE TABLE agents(id TEXT PRIMARY KEY, metadata TEXT NOT NULL CHECK(json_valid(metadata)), last_seen INTEGER NOT NULL);
 CREATE TABLE issues(
  project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL CHECK(number>0),
- title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','closed')),
+ title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','blocked','closed')),
  assignee TEXT REFERENCES agents(id), created_by TEXT NOT NULL REFERENCES agents(id), closed_by TEXT REFERENCES agents(id),
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER, deleted_at INTEGER,
  version INTEGER NOT NULL CHECK(version>0), labels TEXT NOT NULL CHECK(json_valid(labels)),

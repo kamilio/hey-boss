@@ -207,6 +207,9 @@ pub(super) fn execute(
                     "retry" => {
                         let number: Option<i64> = db.query_row("SELECT issue_number FROM worker_runs WHERE id=?1 AND project_id=?2 AND finished_at IS NOT NULL AND state!='completed'",params![id,project.id],|r|r.get(0)).optional()?;
                         let number=number.ok_or_else(||Error::conflict("Only a stopped, blocked or failed run can be retried"))?;
+                        if get_issue(db, &project.id, number, false)?.state != "open" {
+                            return Err(Error::conflict("Reopen the issue before retrying its agent"));
+                        }
                         db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL",params![project.id,number])?
                     },
                     _ => return Err(Error::invalid("Unknown worker control")),
@@ -424,6 +427,25 @@ impl Store {
                 "Issue ownership or requirements changed while Codex worked. Review the session before closing.\n\n{summary}"
             );
         }
+        // Count unsuccessful attempts in this open cycle, not cancellations or
+        // pre-launch reservations. Reopening is an explicit fresh retry budget.
+        let exhausted = if matches!(state, "failed" | "blocked" | "claim_timeout") {
+            let failures: i64 = tx.query_row(
+                "SELECT count(*) FROM (SELECT 1 FROM worker_runs r WHERE r.project_id=?1 AND r.issue_number=?2
+                 AND r.finished_at IS NOT NULL AND r.state IN ('failed','blocked','claim_timeout')
+                 AND r.started_at>=coalesce((SELECT max(created_at) FROM events WHERE project_id=?1 AND issue_number=?2 AND action='reopened'),0)
+                 AND EXISTS(SELECT 1 FROM issue_agent_launches launches WHERE launches.project_id=r.project_id AND launches.issue_number=r.issue_number AND launches.run_id=r.id) LIMIT 4)",
+                params![job.project.id, job.number()], |r| r.get(0),
+            )?;
+            let launched: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_agent_launches WHERE project_id=?1 AND issue_number=?2 AND run_id=?3)",
+                params![job.project.id, job.number(), job.id],
+                |r| r.get(0),
+            )?;
+            launched && failures >= 4
+        } else {
+            false
+        };
         if (own || handed_off) && issue.deleted_at.is_none() && issue.state == "open" {
             let report = format!("### Worker {}\n\n{}", state, summary);
             if state == "completed" && !job.config.prs_enabled {
@@ -473,6 +495,22 @@ impl Store {
                     )?;
                 }
             }
+        }
+        if exhausted
+            && issue.state == "open"
+            && issue.deleted_at.is_none()
+            && (own || issue.assignee.is_none())
+            && issue.title == job.issue["title"]
+            && issue.body == job.issue["body"]
+        {
+            mutate(
+                &tx, &job.project, &job.actor,
+                &Operation::Block {
+                    number: job.number(),
+                    comment: Some("Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup.".into()),
+                    force: false,
+                }, now(),
+            )?;
         }
         tx.execute(
             "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
@@ -610,6 +648,132 @@ mod tests {
     impl Drop for HandoffFixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn fifth_unsuccessful_launch_blocks_and_reopen_resets_budget() {
+        let mut f = HandoffFixture::new(false);
+        f.store
+            .db
+            .execute(
+                "UPDATE worker_runs SET session_id='session' WHERE id=?1",
+                [&f.job.id],
+            )
+            .unwrap();
+        for n in 0..4 {
+            f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,session_id) VALUES(?1,?2,1,'{}',?3,'failed',1,'start','unit',0,0,1,'session')", params![format!("failed-{n}"),f.job.project.id,f.job.actor.id]).unwrap();
+        }
+        f.store.db.execute("INSERT INTO issue_agent_launches SELECT id,project_id,issue_number,started_at FROM worker_runs", []).unwrap();
+        f.store
+            .worker_finish(&f.job, "failed", "Still unable to resolve dependency")
+            .unwrap();
+        assert_eq!(f.issue().state, "blocked");
+        assert!(f.issue().assignee.is_none());
+        let version = f.issue().version;
+        f.store
+            .worker_finish(&f.job, "failed", "duplicate")
+            .unwrap();
+        assert_eq!(f.issue().version, version);
+        f.apply(Operation::Reopen {
+            number: 1,
+            if_version: None,
+        });
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM worker_runs WHERE retry_allowed=0",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "Reopening releases old holds and cooldowns"
+        );
+        f.apply(Operation::Claim {
+            number: 1,
+            force: false,
+        });
+        f.store
+            .db
+            .execute(
+                "UPDATE worker_runs SET finished_at=NULL,started_at=?2 WHERE id=?1",
+                params![f.job.id, now()],
+            )
+            .unwrap();
+        f.store
+            .worker_finish(&f.job, "failed", "First new attempt")
+            .unwrap();
+        assert_eq!(f.issue().state, "open");
+    }
+
+    #[test]
+    fn retry_budget_counts_real_launches_and_protects_changed_issues() {
+        for mode in [
+            "fourth",
+            "unlaunched",
+            "unlaunched_current",
+            "cancelled",
+            "unassigned",
+            "new_owner",
+            "changed_scope",
+        ] {
+            let mut f = HandoffFixture::new(false);
+            for n in 0..if mode == "fourth" { 3 } else { 4 } {
+                let state = if mode == "cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,session_id) VALUES(?1,?2,1,'{}',?3,?4,1,'start','unit',0,0,1,'resumed-session')", params![format!("previous-{n}"),f.job.project.id,f.job.actor.id,state]).unwrap();
+            }
+            if mode != "unlaunched" {
+                f.store.db.execute("INSERT INTO issue_agent_launches SELECT id,project_id,issue_number,started_at FROM worker_runs WHERE finished_at IS NOT NULL", []).unwrap();
+            }
+            if mode != "unlaunched_current" {
+                f.store.db.execute("INSERT INTO issue_agent_launches SELECT id,project_id,issue_number,started_at FROM worker_runs WHERE finished_at IS NULL", []).unwrap();
+            }
+            match mode {
+                "unassigned" => f.apply(Operation::Unassign {
+                    number: 1,
+                    force: false,
+                }),
+                "new_owner" => f.apply(Operation::AssignBoss {
+                    number: 1,
+                    force: false,
+                }),
+                "changed_scope" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET title='New requirements'", [])
+                        .unwrap();
+                }
+                _ => {}
+            }
+            f.store
+                .worker_finish(
+                    &f.job,
+                    if mode == "unassigned" {
+                        "claim_timeout"
+                    } else {
+                        "failed"
+                    },
+                    "Unsuccessful attempt",
+                )
+                .unwrap();
+            assert_eq!(
+                f.issue().state,
+                if mode == "unassigned" {
+                    "blocked"
+                } else {
+                    "open"
+                },
+                "{mode}"
+            );
+            if mode == "new_owner" {
+                assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+            }
         }
     }
 

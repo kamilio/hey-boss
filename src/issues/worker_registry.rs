@@ -396,6 +396,16 @@ pub(super) fn execute(
                     let (p, n) = row.ok_or_else(|| {
                         Error::conflict("Only finished unsuccessful runs can be retried")
                     })?;
+                    let state: String = db.query_row(
+                        "SELECT state FROM issues WHERE project_id=?1 AND number=?2",
+                        params![p, n],
+                        |r| r.get(0),
+                    )?;
+                    if state != "open" {
+                        return Err(Error::conflict(
+                            "Reopen the issue before retrying its agent",
+                        ));
+                    }
                     db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL",params![p,n])?;
                 }
                 _ => return Err(Error::invalid("Unknown worker action")),

@@ -54,6 +54,46 @@
 .state-tabs button[data-state="closed"].selected svg {
   color: var(--purple);
 }
+.state-tabs button[data-state="blocked"].selected svg,
+.issue-state.blocked {
+  color: var(--blocked-text, #9b620c);
+}
+@media (max-width: 400px) {
+  .list-heading .state-tabs { gap: 8px; }
+  .list-heading .state-tabs button { gap: 3px; font-size: 10px; }
+  .state-tabs button svg { display: none; }
+  .state-tabs .tab-count { min-width: 0; padding: 1px 3px; }
+}
+.state-pill.blocked {
+  color: var(--blocked-text, #9b620c);
+  background: #bd850f15;
+  border-color: #bd850f40;
+}
+.blocked-notice {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  margin: 20px 0;
+  border: 1px solid #bd850f40;
+  border-radius: 12px;
+  background: #bd850f0a;
+}
+.blocked-notice > div:first-child { color: var(--blocked-text, #9b620c); }
+.blocked-notice > div:nth-child(2) { flex: 1; min-width: 0; }
+.blocked-notice h2 { margin: 0 0 6px; font-size: 14px; }
+.blocked-notice p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.blocked-notice .button { flex-shrink: 0; }
+@media (prefers-color-scheme: dark) {
+  :root { --blocked-text: #e5b75d; }
+}
+@media (max-width: 640px) {
+  .state-tabs { overflow-x: auto; min-width: 0; }
+  .state-tabs button { flex-shrink: 0; }
+  .blocked-notice { flex-wrap: wrap; gap: 12px; padding: 16px; }
+  .blocked-notice > div:nth-child(2) { flex-basis: calc(100% - 40px); }
+  .blocked-notice .button { margin-left: 36px; }
+}
 .list-sort {
   font-size: 10px;
   color: var(--faint);
