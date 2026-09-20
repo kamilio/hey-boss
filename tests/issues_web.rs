@@ -640,17 +640,17 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         (
             None,
             false,
-            "Claim and implement `hey-boss issue view <number>`.\n\nCommit your changes.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.",
         ),
         (
             Some("/goal"),
             true,
-            "Claim and implement `hey-boss issue view <number>`.\n\nCommit your changes.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.",
         ),
         (
             Some("/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}"),
             true,
-            "Assign and implement `hey-boss issue view <number>`.\nCommit your changes.",
+            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.",
         ),
     ] {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
@@ -1302,5 +1302,91 @@ fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
         w.action(&w.project, json!({"action":"read_plan","plan":plan}), None)
             .status,
         403
+    );
+}
+
+#[test]
+fn project_workflow_prompts_select_branches_and_match_claims() {
+    let web = Web::start();
+    web.ok(json!({"action":"create","title":"Workflow fixture","body":"","labels":[]}));
+    let overrides = json!({"worktree":"Isolate issue {{number}}.","checkout":"Use checkout {{number}}.","prs":"Review with PR {{number}}.","main":"Ship directly {{number}}."});
+    for worktree in [false, true] {
+        for prs in [false, true] {
+            let config = json!({"projects":[web.project],"prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides});
+            let preview = web.ok(json!({"action":"preview_worker","config":config,"number":1}));
+            let expected = format!(
+                "Implement hey-boss issue view 1.\n\n{}\n\n{}",
+                if worktree {
+                    "Isolate issue 1."
+                } else {
+                    "Use checkout 1."
+                },
+                if prs {
+                    "Review with PR 1."
+                } else {
+                    "Ship directly 1."
+                }
+            );
+            assert_eq!(preview["prompt"], expected);
+            assert_eq!(preview["use_goal"], true);
+            web.ok(json!({"action":"configure_project","prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides}));
+            let settings = web.ok(json!({"action":"project_settings"}));
+            assert_eq!(settings["worktree_enabled"], worktree);
+            assert_eq!(settings["prompt_overrides"], overrides);
+            let claim = web.ok(json!({"action":"claim","number":1,"force":false}));
+            assert_eq!(claim["instructions"], expected);
+        }
+    }
+    let version = web.ok(json!({"action":"project_settings"}))["version"].clone();
+    let bad = web.action(
+        &web.project,
+        json!({"action":"configure_project","prompt_overrides":{"main":" "},"if_version":version}),
+        None,
+    );
+    assert_eq!(bad.status, 400);
+    assert_eq!(
+        web.ok(json!({"action":"project_settings"}))["version"],
+        version
+    );
+}
+
+#[test]
+fn project_workflow_legacy_templates_reset_and_version_guards() {
+    let web = Web::start();
+    web.ok(json!({"action":"configure_project","prompt":"/goal Claim {{issue_command}}.\n\n{{ commit_instruction }}", "worktree_enabled":true,"prompt_overrides":{"worktree":"Custom isolated {{number}}."}}));
+    let settings = web.ok(json!({"action":"project_settings"}));
+    assert_eq!(settings["prompt"], "/goal Claim {{issue_command}}.");
+    let preview = web
+        .ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":null}));
+    assert!(
+        preview["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Custom isolated <number>.")
+    );
+    assert_eq!(
+        preview["prompt"]
+            .as_str()
+            .unwrap()
+            .matches("Commit your changes.")
+            .count(),
+        1
+    );
+    web.ok(json!({"action":"configure_project","prompt_overrides":{"worktree":null},"if_version":settings["version"]}));
+    let stale = web.action(&web.project, json!({"action":"configure_project","worktree_enabled":false,"if_version":settings["version"]}), None);
+    assert_eq!(stale.status, 409);
+    let preview = web
+        .ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":null}));
+    assert!(
+        preview["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("dedicated Git worktree")
+    );
+    assert!(
+        !preview["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Custom isolated")
     );
 }

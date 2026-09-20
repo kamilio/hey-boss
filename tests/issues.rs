@@ -2220,3 +2220,27 @@ fn interactive_requires_a_human_terminal_before_creating_anything() {
             .is_empty()
     );
 }
+
+#[test]
+fn workflow_additive_migration_repairs_missing_columns_without_losing_settings() {
+    let f = Fixture::new();
+    f.create();
+    f.run(
+        "session-a",
+        &[
+            "settings",
+            "set",
+            "--prompt",
+            "Preserved base",
+            "--prs-enabled",
+            "--worktree",
+        ],
+    );
+    f.sql().execute_batch("ALTER TABLE project_settings DROP COLUMN worktree_enabled; ALTER TABLE project_settings DROP COLUMN prompt_overrides;").unwrap();
+    let settings = f.run("session-a", &["settings", "show"]);
+    assert_eq!(settings["prompt"], "Preserved base");
+    assert_eq!(settings["prs_enabled"], true);
+    assert_eq!(settings["worktree_enabled"], false);
+    assert!(settings["prompt_overrides"]["worktree"].is_null());
+    assert_eq!(settings["version"], 1);
+}

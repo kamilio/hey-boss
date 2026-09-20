@@ -133,7 +133,7 @@ enum Action {
     },
     #[command(skip)]
     GlobalSettings { operation: Operation },
-    /// Project instructions and whether agents should create and attach PRs.
+    /// Shared and conditional project prompts, worktree choices, and PR behavior.
     Settings {
         #[command(subcommand)]
         command: SettingsAction,
@@ -371,6 +371,10 @@ enum SettingsAction {
         boss_name: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
+        #[arg(long, conflicts_with = "no_worktree")]
+        worktree: bool,
+        #[arg(long)]
+        no_worktree: bool,
         #[arg(long, conflicts_with = "no_prs")]
         prs_enabled: bool,
         #[arg(long)]
@@ -467,12 +471,16 @@ impl Options {
                     prompt,
                     prs_enabled,
                     no_prs,
+                    worktree,
+                    no_worktree,
                     drafts_enabled,
                     no_drafts,
                     plan_template,
                 } => {
                     if boss_name.is_none()
                         && prompt.is_none()
+                        && !worktree
+                        && !no_worktree
                         && !prs_enabled
                         && !no_prs
                         && !drafts_enabled
@@ -480,7 +488,7 @@ impl Options {
                         && plan_template.is_none()
                     {
                         return Err(Error::invalid(
-                            "Specify --prompt, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
+                            "Specify --prompt, --worktree, --no-worktree, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
                         ));
                     }
                     Operation::ConfigureProject {
@@ -491,6 +499,14 @@ impl Options {
                         } else {
                             None
                         },
+                        worktree_enabled: if *worktree {
+                            Some(true)
+                        } else if *no_worktree {
+                            Some(false)
+                        } else {
+                            None
+                        },
+                        prompt_overrides: None,
                         plan_template: plan_template.clone(),
                         boss_name: boss_name.clone(),
                         prompt: prompt.clone(),
@@ -887,7 +903,8 @@ fn print_text(value: &Value) {
     }
     if value.get("prs_enabled").is_some() {
         println!(
-            "PRs enabled: {}\nPrompt: {}",
+            "Worktrees enabled: {}\nPRs enabled: {}\nShared prompt: {}",
+            value["worktree_enabled"],
             value["prs_enabled"],
             markdown(&value["prompt"])
         );

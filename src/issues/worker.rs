@@ -17,8 +17,53 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const DEFAULT_PROMPT: &str =
-    "Claim and implement `{{issue_command}}`.\n\n{{commit_instruction}}";
+pub const DEFAULT_PROMPT: &str = "Claim and implement `{{issue_command}}`.";
+pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for this issue. Create it before editing files and keep unrelated changes intact.";
+pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checkout.";
+pub const DEFAULT_MAIN_PROMPT: &str =
+    "Commit your changes. If a Git remote is configured, push to main.";
+pub const DEFAULT_PRS_PROMPT: &str = "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {{number}} '<pr-url>'`.";
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PromptOverrides {
+    pub worktree: Option<String>,
+    pub checkout: Option<String>,
+    pub prs: Option<String>,
+    pub main: Option<String>,
+}
+impl PromptOverrides {
+    pub fn validate(&self) -> Result<()> {
+        for text in [&self.worktree, &self.checkout, &self.prs, &self.main]
+            .into_iter()
+            .flatten()
+        {
+            if text.trim().is_empty() || text.len() > 32000 {
+                return Err(Error::invalid(
+                    "Workflow prompts must contain 1–32000 bytes, or null to use the default",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+// Old saved templates still load, but delivery instructions now belong to the workflow.
+pub(crate) fn base_prompt(text: &str) -> String {
+    let mut output = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("}}") else {
+            output.push_str(&rest[start..]);
+            return output.trim_end().to_owned();
+        };
+        if rest[start + 2..start + end].trim() != "commit_instruction" {
+            output.push_str(&rest[start..start + end + 2]);
+        }
+        rest = &rest[start + end + 2..];
+    }
+    output.push_str(rest);
+    output.trim_end().to_owned()
+}
 pub const DEFAULT_CLAIM_TIMEOUT_SECONDS: u32 = 600;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -30,6 +75,8 @@ pub struct Settings {
     pub directory: String,
     pub prompt: Option<String>,
     pub prs_enabled: Option<bool>,
+    pub worktree_enabled: Option<bool>,
+    pub prompt_overrides: Option<PromptOverrides>,
     pub use_goal: bool,
     pub reservation_seconds: u32,
     pub enabled: bool,
@@ -44,6 +91,8 @@ impl Default for Settings {
             directory: String::new(),
             prompt: None,
             prs_enabled: None,
+            worktree_enabled: None,
+            prompt_overrides: None,
             use_goal: false,
             reservation_seconds: DEFAULT_CLAIM_TIMEOUT_SECONDS,
             enabled: false,
@@ -76,6 +125,9 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
     {
         return Err(Error::invalid("Prompt must contain 1–32000 bytes"));
     }
+    if let Some(overrides) = &c.prompt_overrides {
+        overrides.validate()?;
+    }
     if !c.directory.is_empty()
         && (!Path::new(&c.directory).is_absolute() || !Path::new(&c.directory).is_dir())
     {
@@ -103,6 +155,8 @@ pub struct ProjectConfig {
     pub use_goal: bool,
     pub enabled: bool,
     pub prs_enabled: bool,
+    pub worktree_enabled: bool,
+    pub prompt_overrides: PromptOverrides,
 }
 impl Default for ProjectConfig {
     fn default() -> Self {
@@ -114,6 +168,8 @@ impl Default for ProjectConfig {
             use_goal: false,
             enabled: false,
             prs_enabled: false,
+            worktree_enabled: false,
+            prompt_overrides: PromptOverrides::default(),
         }
     }
 }
@@ -150,6 +206,7 @@ pub(crate) fn random_id() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 pub fn validate_config(c: &ProjectConfig, p: &Project) -> Result<()> {
+    c.prompt_overrides.validate()?;
     if c.prompt.trim().is_empty() || c.prompt.len() > 32_000 {
         return Err(Error::invalid("Worker prompt must contain 1–32000 bytes"));
     }
@@ -746,9 +803,7 @@ fn template(text: &str, job: &Job) -> String {
             "number" => number_text(job),
             "title" => job.issue["title"].as_str().unwrap().into(),
             "body" => job.issue["body"].as_str().unwrap().into(),
-            "commit_instruction" => {
-                commit_instruction(&job.config.cwd, job.config.prs_enabled, job)
-            }
+            "commit_instruction" => String::new(),
             _ => match key.split_once(char::is_whitespace) {
                 Some(("create_issue_command", project)) if !project.trim().is_empty() => {
                     create_issue_command(Some(project.trim()))
@@ -773,24 +828,6 @@ fn number_text(job: &Job) -> String {
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| job.number().to_string())
-}
-fn commit_instruction(cwd: &str, prs: bool, job: &Job) -> String {
-    let remote = !cwd.is_empty()
-        && Command::new("git")
-            .args(["remote"])
-            .current_dir(cwd)
-            .output()
-            .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
-    if remote && prs {
-        format!(
-            "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {} '<pr-url>'`.",
-            number_text(job)
-        )
-    } else if remote {
-        "Commit your changes and push to main.".into()
-    } else {
-        "Commit your changes.".into()
-    }
 }
 pub(crate) fn preview(
     config: &ProjectConfig,
@@ -823,7 +860,7 @@ pub(crate) fn preview(
     prompt(&job)
 }
 fn prompt(job: &Job) -> (String, bool, String) {
-    let rendered = template(&job.config.prompt, job);
+    let rendered = template(&base_prompt(&job.config.prompt), job);
     let after_goal = rendered
         .trim_start()
         .strip_prefix("/goal")
@@ -838,6 +875,29 @@ fn prompt(job: &Job) -> (String, bool, String) {
     } else {
         rendered
     };
+    let overrides = &job.config.prompt_overrides;
+    let workspace = if job.config.worktree_enabled {
+        overrides
+            .worktree
+            .as_deref()
+            .unwrap_or(DEFAULT_WORKTREE_PROMPT)
+    } else {
+        overrides
+            .checkout
+            .as_deref()
+            .unwrap_or(DEFAULT_CHECKOUT_PROMPT)
+    };
+    let delivery = if job.config.prs_enabled {
+        overrides.prs.as_deref().unwrap_or(DEFAULT_PRS_PROMPT)
+    } else {
+        overrides.main.as_deref().unwrap_or(DEFAULT_MAIN_PROMPT)
+    };
+    let instructions = format!(
+        "{}\n\n{}\n\n{}",
+        instructions.trim_end(),
+        template(workspace, job),
+        template(delivery, job)
+    );
     let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
         format!("{instructions}\n\nPlan document: {path}")
     } else {
@@ -1364,6 +1424,11 @@ mod tests {
             name: "Prompt test".into(),
         }
     }
+    fn with_workflow(base: &str) -> String {
+        format!(
+            "{base}\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
+        )
+    }
     fn issue() -> Value {
         json!({"number":7,"title":"Literal {{body}}","body":"Literal {{title}}"})
     }
@@ -1376,7 +1441,9 @@ mod tests {
         let (text, _, _) = preview(&c, &project(), issue());
         assert_eq!(
             text,
-            "hey-boss issue view 7 | Literal {{body}} | Literal {{title}} | {{unknown}}"
+            with_workflow(
+                "hey-boss issue view 7 | Literal {{body}} | Literal {{title}} | {{unknown}}"
+            )
         );
     }
     #[test]
@@ -1390,7 +1457,9 @@ mod tests {
         assert_eq!(objective, text);
         assert_eq!(
             text,
-            "If safe-bash fails, report with `hey-boss issue create --project 'poe-code' --title '<title>' --body '<markdown>'`. hey-boss issue create --title '<title>' --body '<markdown>' | hey-boss issue create --project 'Team'\\''s project $(touch nope); x' --title '<title>' --body '<markdown>' | {{unknown}} | Literal {{body}}"
+            with_workflow(
+                "If safe-bash fails, report with `hey-boss issue create --project 'poe-code' --title '<title>' --body '<markdown>'`. hey-boss issue create --title '<title>' --body '<markdown>' | hey-boss issue create --project 'Team'\\''s project $(touch nope); x' --title '<title>' --body '<markdown>' | {{unknown}} | Literal {{body}}"
+            )
         );
     }
     #[test]
@@ -1406,7 +1475,7 @@ mod tests {
             assert!(!text.trim().is_empty());
             assert!(!objective.trim().is_empty());
             if prompt != "/goal" {
-                assert_eq!(text, "Implement issue 7");
+                assert_eq!(text, with_workflow("Implement issue 7"));
                 assert_eq!(objective, text);
             }
         }
@@ -1423,7 +1492,7 @@ mod tests {
                 ..Default::default()
             };
             let (text, goal, objective) = preview(&config, &project(), issue());
-            assert_eq!(text, "First sentence.\nSecond sentence.");
+            assert_eq!(text, with_workflow("First sentence.\nSecond sentence."));
             assert_eq!(objective, text);
             assert!(goal);
         }
@@ -1454,7 +1523,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "hey-boss issue view <number>. Keep issue view 123 literal."
+            with_workflow("hey-boss issue view <number>. Keep issue view 123 literal.")
         );
     }
     #[test]
