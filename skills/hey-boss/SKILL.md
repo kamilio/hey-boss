@@ -344,3 +344,16 @@ Use the authoritative supervisor host from companions; artifacts, like mindmaps,
 fleet issue replicas. Web/Fly use existing project authentication and the supervisor bridge.
 Test using a separate `HEY_BOSS_ISSUE_DB`. Interrupted mutations must retry the same request ID
 and payload; stale document revisions must be merged explicitly rather than overwritten.
+
+## File attachments
+
+`hey-boss attachment upload PATH --issue NUMBER` stores any regular file up to
+10 MiB on the authoritative host. Use `--node SELECTOR` or `--artifact ID` instead
+for mindmap nodes and artifacts. `list --issue NUMBER --json` exposes file IDs,
+filenames, sizes and SHA-256. `download FILE_ID` materializes a private temporary
+copy on the caller's machine; `--output PATH` selects a filename or existing
+directory. Existing files are never overwritten. `remove FILE_ID` deletes the file.
+Project/host/actor/request-ID conventions match issues. From fleet companions use
+`--host SUPERVISOR`; file contents are not part of issue replica row sync. Reuse
+identical request IDs for uncertain upload/removal retries. The web resource views
+support file selection, drag-and-drop upload, download and confirmed removal.
