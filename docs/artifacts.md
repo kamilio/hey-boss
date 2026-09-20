@@ -20,6 +20,9 @@ selection quotes appear as outdated. Quotes retain nearby text to distinguish
 repeated passages.
 
 The editor switches between **Preview** and **Write** without losing draft text.
+Its controls remain reachable while scrolling. Ordinary drafts grow with their
+text; large files use a bounded writing area. Opening Comments on a small screen
+brings the conversation into view, and closing it returns to document controls.
 The Markdown editor saves drafts in this browser and reports draft, saving,
 saved and error states. Save publishes the draft. Revision checks reject stale
 edits. Load the latest revision for comparison, merge it into your draft, then

@@ -1,14 +1,15 @@
 // Visual matrix for the synthetic Artifact Studio fixture, using playwright-cli.
 async page => {
   const origin=await page.evaluate(()=>location.origin);
+  const engine=page.context().browser().browserType().name();
   const errors=[],checks=[],screenshots=[];
   page.on('pageerror',e=>errors.push(e.message));
   const check=async name=>{
     const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);
     if(overflow)throw Error('Page overflow: '+name);
     checks.push(name);
-    const path='output/playwright/artifact-redesign/'+name+'.png';
-    await page.screenshot({path,fullPage:true});screenshots.push(path);
+    const path='output/playwright/artifact-redesign/'+engine+'-'+name+'.png';
+    await page.screenshot({path,fullPage:true,caret:'initial'});screenshots.push(path);
   };
   for(const theme of ['light','dark']) {
     await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
