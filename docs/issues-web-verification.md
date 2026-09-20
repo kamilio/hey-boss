@@ -522,36 +522,3 @@ browser sessions were preserved. The verified source and both installs remained
 Rust companion test was ignored, with explicit Linux worker/goal smoke coverage
 recorded separately.
 
-## Project workflow settings · issue 39 · 2026-09-19
-
-The settings dialog now separates shared instructions from workspace and delivery
-choices. Both conditional branches remain editable; included branches are marked,
-and each prompt distinguishes a built-in default from a project override. The
-assembled preview sits beside the editor on desktop and below it on narrow
-screens. Save failures retain edits and remain visible while the preview updates.
-
-Verification used a separate synthetic `Workflow QA` database and Inbox socket:
-
-- Chromium and WebKit each passed **53 interaction/layout checks**, including all
-  four worktree/PR combinations, inactive overrides, default reset, goal display,
-  persistence, save failure/retry, cancel, Escape, and focus restoration.
-- Desktop at 1440 × 1000 and widths of 768, 390, and 320 pixels were checked for
-  overflow, preview placement, and footer visibility. Light/dark screenshots were
-  visually reviewed, including the 320-pixel WebKit preview.
-- Axe found **zero violations in eight audits**: desktop/mobile, light/dark, in
-  both browsers.
-- **110 issue/web/worker integration tests**, six prompt unit tests, three worker
-  CLI unit tests, and two fleet replication/legacy replay tests passed. Integration
-  tests clear `HEY_BOSS_ISSUE_PROJECT` inherited from worker sessions.
-- Rustfmt, clippy with warnings denied, JavaScript syntax, and diff checks passed.
-
-The broader local health inspection tests timed out or failed their process/state
-assertions, and one unrelated secret CLI test returned BrokenPipe. Those failures
-were outside the changed feature; the feature suites above completed successfully.
-
-The repeatable browser suite is `tools/issues_project_workflow_browser_checks.js`.
-Review artifacts are under `output/playwright/issue39-*`, including
-[desktop light](../output/playwright/issue39-desktop-light.png),
-[desktop dark](../output/playwright/issue39-desktop-dark.png),
-[mobile light](../output/playwright/issue39-mobile-light.png), and
-[WebKit narrow preview](../output/playwright/issue39-webkit-mobile-preview-320.png).
