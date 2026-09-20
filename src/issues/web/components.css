@@ -340,6 +340,12 @@ main {
   gap: 20px;
   margin-bottom: 34px;
 }
+.inbox-heading {
+  flex-wrap: wrap;
+}
+.inbox-heading > div:first-child {
+  min-width: 0;
+}
 .eyebrow {
   display: flex;
   gap: 7px;

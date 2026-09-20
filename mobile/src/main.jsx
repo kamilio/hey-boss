@@ -29,6 +29,7 @@ function App(){
  const [state,setState]=useState(null),[paired,setPaired]=useState(null),[tab,setTab]=useState(location.hash==='#issues'?'issues':'inbox'),[code,setCode]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pushBusy,setPushBusy]=useState(false),[settingsBusy,setSettingsBusy]=useState(false);
  const [drafts,setDrafts]=useState(savedDrafts),[sending,setSending]=useState(null),[selectedID,setSelectedID]=useState(null),[detail,setDetail]=useState(null),[detailLoading,setDetailLoading]=useState(false),[detailError,setDetailError]=useState('');
+ const [clearSnapshot,setClearSnapshot]=useState(null),[clearing,setClearing]=useState(false),[clearError,setClearError]=useState('');
  useEffect(()=>{try{localStorage.setItem('hey-boss-drafts',JSON.stringify(drafts));}catch{}},[drafts]);
  useEffect(()=>{if(!state)return;const handled=new Set(state.tasks.filter(t=>t.status!=='pending').map(t=>t.taskID));setDrafts(current=>{if(!Object.keys(current).some(id=>handled.has(id)))return current;return Object.fromEntries(Object.entries(current).filter(([id])=>!handled.has(id)));});},[state]);
  const deepLink=useRef(null),detailGeneration=useRef(0),refreshing=useRef(null);
@@ -78,6 +79,11 @@ function App(){
   try{await api('/tasks/'+encodeURIComponent(task.taskID)+'/resolve',{result});setDrafts(d=>{const n={...d};delete n[task.taskID];return n;});await refresh();if(selectedID===task.taskID)await loadDetail(task.taskID);}
   catch(e){setError(e.message);if(e.status===409)await refresh();}finally{setSending(null);}
  }
+ async function clearInbox(){
+  if(clearing||!clearSnapshot?.length)return;setClearing(true);setClearError('');
+  try{const value=await api('/tasks/clear',{taskIDs:clearSnapshot.map(t=>t.taskID)});setClearSnapshot(null);setNotice(value.cleared+' notices cleared. History is in Activity.');await refresh();}
+  catch(e){setClearError(e.message);await refresh();}finally{setClearing(false);}
+ }
  async function enablePush(){
   setPushBusy(true);setError('');try{
    if(!('PushManager'in window))throw Error('Add Hey Boss to your iPhone Home Screen, then open it there.');
@@ -105,7 +111,7 @@ function App(){
   <div className={'pull-refresh '+(pull.loading?'is-refreshing':'')} style={{height:pull.distance}} role="status" aria-live="polite">{pull.distance>0&&<span><RefreshCw size={18} style={{transform:pull.loading?undefined:`rotate(${pull.distance*3}deg)`}}/>{pull.loading?'Refreshing…':pull.ready?'Release to refresh':'Pull to refresh'}</span>}</div>
   <main>
    {paired===null?<div className="loading"><Spinner size="3"/><p>Connecting…</p></div>:!paired?<section className="pair-card glass"><MessageCircle size={30}/><h1>Connect your iPhone</h1><p>Updates and decisions, synced with your Mac.</p><form onSubmit={pair}><label htmlFor="pair-code">Pairing code</label><TextField.Root id="pair-code" value={code} onChange={e=>setCode(e.target.value)} placeholder="Enter code from your Mac" autoComplete="off" autoCapitalize="characters" size="3"/><Button size="3" loading={busy} disabled={!code.trim()} type="submit">Connect <ArrowUpRight size={16}/></Button></form>{!standalone&&<p className="install-note">Share → Add to Home Screen to enable notifications.</p>}</section>:<>
-   <div className="page-title"><h1>{tab==='inbox'?'Inbox':tab==='history'?'Activity':tab==='issues'?'Issues':'Settings'}</h1>{tab!=='settings'&&tab!=='issues'&&<div className="title-actions">{tab==='inbox'&&pending.length>0&&<span className="count">{pending.length}</span>}<button className="refresh-button" aria-label="Refresh inbox" disabled={pull.loading} onClick={pull.run}><RefreshCw size={18}/></button></div>}</div>
+   <div className="page-title"><h1 id="page-heading" tabIndex={-1}>{tab==='inbox'?'Inbox':tab==='history'?'Activity':tab==='issues'?'Issues':'Settings'}</h1>{tab!=='settings'&&tab!=='issues'&&<div className="title-actions">{tab==='inbox'&&<><span className="count">{pending.length}</span><button className="clear-inbox-button" disabled={!pending.length||clearing} onClick={()=>{setClearError('');setClearSnapshot(pending);}}><CheckCheck size={16}/>Clear all</button></>}<button className="refresh-button" aria-label="Refresh inbox" disabled={pull.loading} onClick={pull.run}><RefreshCw size={18}/></button></div>}</div>
    {tab==='issues'?<Issues api={api}/>:tab==='settings'?<section className="settings glass">
     <div className="settings-row"><span className="setting-label"><Bell size={18}/>Notifications<small>{state.pushEnabled?'Enabled':'Not enabled'}</small></span><Button size="2" variant="soft" loading={pushBusy} onClick={enablePush}>{state.pushEnabled?'Check':'Enable'}</Button></div>
     <div className="settings-block"><label id="routing-label">Send notifications</label><div className="segmented" role="group" aria-labelledby="routing-label">{[['automatic','When away'],['always','Always'],['off','Off']].map(([value,label])=><button key={value} disabled={settingsBusy} aria-pressed={(state.notifications?.mode||'automatic')===value} onClick={()=>savePreferences({mode:value})}>{label}</button>)}</div><p className="fine">{state.notifications?.mode==='off'?'Updates still appear in your inbox.':state.notifications?.mode==='always'?'Notify this iPhone even while you use your Mac.':state.notifications?.macState==='unknown'?'Waiting for Mac status. iPhone push stays paused.':state.notifications?.notifyPhone?'You’re away from your Mac. iPhone push is active.':'Your Mac is available. iPhone push is paused.'}</p></div>
@@ -123,6 +129,12 @@ function App(){
    {notice&&!error&&!connectionError&&<div className="message" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={()=>setNotice('')}><X size={18}/></button></div>}
   </main>
   {paired&&<nav aria-label="Main navigation">{glassNav(<div className="tabs">{[['inbox','Inbox',Inbox],['history','Activity',History],['issues','Issues',ListTodo]].map(([value,label,Icon])=><button key={value} className={tab===value?'selected':''} aria-current={tab===value?'page':undefined} onClick={()=>{setTab(value);setNotice('');}}><Icon size={21} strokeWidth={1.8}/><span>{label}</span>{value==='inbox'&&pending.length>0&&<b>{pending.length}</b>}</button>)}<a href="/agents" className="agent-tab"><span>Agents</span></a></div>)}</nav>}
+  <Dialog.Root open={clearSnapshot!==null} onOpenChange={open=>{if(!open&&!clearing)setClearSnapshot(null);}}><Dialog.Content className="clear-inbox-dialog" maxWidth="440px" onCloseAutoFocus={event=>{event.preventDefault();(document.querySelector(".clear-inbox-button:not(:disabled)")||document.getElementById("page-heading"))?.focus();}} onEscapeKeyDown={event=>{if(clearing)event.preventDefault();}} onPointerDownOutside={event=>{if(clearing)event.preventDefault();}}>
+   <Dialog.Title>Clear all unread notices?</Dialog.Title>
+   <Dialog.Description>{clearSnapshot?.length} notices will move to Activity. Updates and alerts become read. Pending questions and reviews are cancelled without an answer or approval. History will be kept.</Dialog.Description>
+   {clearError&&<p role="alert">{clearError}</p>}
+   <div className="clear-inbox-dialog-actions"><Dialog.Close><Button variant="soft" color="gray" disabled={clearing}>Keep unread</Button></Dialog.Close><Button color="red" disabled={clearing} onClick={clearInbox}>{clearing?'Clearing…':'Clear all'}</Button></div>
+  </Dialog.Content></Dialog.Root>
   <Dialog.Root open={selectedID!==null} onOpenChange={open=>{if(!open)closeReader();}}><Dialog.Content className="reader-dialog" aria-describedby={undefined} onOpenAutoFocus={event=>{event.preventDefault();document.getElementById('reader-heading')?.focus();}}>
    <div className="reader-top"><span className="reader-context">{selected?.project||'Update'}</span><Dialog.Close><button className="icon-button" aria-label="Close reader"><X size={20}/></button></Dialog.Close></div>
    <Dialog.Title id="reader-heading" tabIndex={-1}>{selected?.title||state?.tasks.find(t=>t.taskID===selectedID)?.title||'Loading update…'}</Dialog.Title>
