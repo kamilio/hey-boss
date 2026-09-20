@@ -25,13 +25,9 @@ CREATE INDEX worker_events_run ON worker_events(run_id,id DESC);
 
 fn default_config(db: &Connection, project: &Project) -> Result<ProjectConfig> {
     let cwd: Option<String> = db
-        .query_row(
-            "SELECT json_extract(a.metadata,'$.cwd') FROM agents a WHERE EXISTS(
-          SELECT 1 FROM issues i WHERE i.project_id=?1 AND (i.created_by=a.id OR i.assignee=a.id))
-          ORDER BY a.last_seen DESC LIMIT 1",
-            [&project.id],
-            |r| r.get(0),
-        )
+        .query_row(registry::PROJECT_DIRECTORIES, params![project.id, 1], |r| {
+            r.get(0)
+        })
         .optional()?;
     Ok(ProjectConfig {
         cwd: cwd.unwrap_or_default(),
