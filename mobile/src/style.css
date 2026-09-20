@@ -76,6 +76,4 @@ nav{width:260px;bottom:max(22px,env(safe-area-inset-bottom))}.nav-glass{padding:
 
 .issues-page{display:grid;gap:28px}.issue-form{display:grid;gap:12px;padding:22px}.issue-form h2,.issue-deliveries h2{margin:0 0 8px;font-size:21px}.issue-form label{font-size:13px;font-weight:600}.issue-form select{width:100%;min-height:44px;border:1px solid #8190a840;border-radius:10px;padding:10px;background:transparent;color:inherit;font:inherit}.issue-form .fine,.issue-deliveries>.fine{margin:0;font-size:12px}.issue-form .rt-Button{margin-top:8px}.issue-delivery{padding:20px;margin-top:12px;overflow-wrap:anywhere}.issue-delivery h3{margin:8px 0;font-size:18px}.issue-delivery p{font-size:13px}.issues-page .reader-error{margin:0;padding:8px 0}nav{width:min(350px,calc(100vw - 32px))}.tabs button{flex:1;min-width:0}
 
-.tabs .artifact-tab{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:inherit;text-decoration:none;font-size:12px;gap:6px}.tabs .artifact-tab::before{content:"▤";font-size:22px}
-
 .tabs .agent-tab{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:inherit;text-decoration:none;font-size:12px;gap:6px}.tabs .agent-tab::before{content:"✧";font-size:22px}
