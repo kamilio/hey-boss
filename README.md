@@ -68,7 +68,14 @@ Active work is the default; h switches to a separate completed-attempt history.
 appear separately only when `--history` is supplied. Concurrency limits active
 sessions only. Open, unassigned
 issues retry after unsuccessful attempts with a delay of 30 seconds to five
-minutes; approval requests remain on hold until explicitly retried.
+minutes. Codex command, network, file-change and permission approvals appear as
+issue-linked questions in Hey Boss Inbox. The worker keeps its session and claim
+while you decide; approving or declining continues that same session. Command
+and file approvals apply once, and permission grants last only for the current
+turn. Cancel or dismiss stops the attempt on a manual retry hold. Pending
+questions are cancelled when the request is resolved or the worker stops.
+Unsupported input requests or an unavailable Inbox still save the session on
+a manual retry hold; no action is automatically approved.
 The dashboard identifies selected projects and connectivity to the supervisor.
 **Supervisor → Worker → Agent:** the supervisor coordinates the fleet; each
 worker picks issues, manages its Codex agents, and handles retries. An agent is
@@ -281,6 +288,27 @@ sets the project prompt. Use `--no-chief` to disable it; an active pass is stopp
 Workers on the same machine share one Chief reservation per project. Separate
 authoritative issue stores keep their own Chief configuration and conversation.
 Stopping a worker stops its owned Chief too. Passes have a thirty-minute limit.
+
+## URL lookup
+
+Read an item from a copied web link with `hey-boss lookup 'URL'`. For example:
+
+```sh
+hey-boss lookup 'http://127.0.0.1:4781/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&issue=114'
+hey-boss lookup 'https://hey-boss-mobile-kamil.fly.dev/artifacts#project=named%3AAtlas&artifact=a-ID' --json
+```
+
+Lookup shares the web's resource route definitions for issues, Inbox notices,
+mindmap topics (including issue/PR/notice references), artifacts and agent
+conversations. Links to lists return their collection; issue list filters are
+preserved. `--json` includes the resolved `route` and the usual resource result,
+including document comments and links. Reads do not mark notices as read or
+change resources. Conversation reads return the existing bounded first page.
+The URL's explicit project wins over worker defaults; `--project` supplies context
+for links without a project. Issue resources honor `--host`, then the fragment's
+`host`, then `HEY_BOSS_ISSUE_HOST`. The URL origin is not contacted; the command
+reads your configured store or authenticated SSH backend. Inbox reads use the
+connected desktop, and conversation `host` identifies the owning fleet device.
 
 ## Upgrading every machine
 

@@ -983,7 +983,7 @@ fn markdown(value: &Value) -> String {
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .collect()
 }
-fn print_text(value: &Value) {
+pub(crate) fn print_text(value: &Value) {
     if let Some(destination) = value.get("moved_to") {
         println!(
             "Issue moved to {} ({}) #{}. Open it with --project {}.",

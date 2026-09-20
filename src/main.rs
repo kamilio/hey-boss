@@ -6,6 +6,7 @@ mod broker;
 mod companion;
 mod health_cli;
 mod issue_cli;
+mod lookup_cli;
 mod mindmap_cli;
 mod secret_cli;
 mod upgrade_cli;
@@ -155,6 +156,8 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Resolve a web URL and read its issue, document, topic, notice or conversation.
+    Lookup(lookup_cli::Options),
     /// Fleet supervisor, machine companions, durable replicas, and worker controls.
     Fleet {
         #[command(subcommand)]
@@ -494,6 +497,7 @@ impl Cli {
                 )
             }
             Command::Secret(_)
+            | Command::Lookup(_)
             | Command::Artifact(_)
             | Command::Attachment(_)
             | Command::Issue(_)
@@ -541,6 +545,7 @@ impl Cli {
         };
         let output = match self.command {
             Command::Secret(_)
+            | Command::Lookup(_)
             | Command::Artifact(_)
             | Command::Attachment(_)
             | Command::Issue(_)
@@ -752,6 +757,17 @@ fn main() {
 fn run() -> std::io::Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Command::Lookup(options) => {
+            if let Err(error) = lookup_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss lookup: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
         Command::Upgrade(options) => return upgrade_cli::run(options),
         Command::Fleet { action } => return hey_boss::fleet::run(action),
         Command::Secret(options) => return secret_cli::run(options),
