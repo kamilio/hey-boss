@@ -30,7 +30,6 @@ fn run_inner(action: &super::Action) -> Result<()> {
         ctrlc::set_handler(move || stop.store(true, std::sync::atomic::Ordering::Release))?;
     }
     match action {
-        super::Action::Database { .. } => unreachable!(),
         super::Action::Setup { source } => {
             if let Some(source) = source {
                 let source = source.canonicalize()?;
@@ -79,6 +78,8 @@ fn run_inner(action: &super::Action) -> Result<()> {
             );
             Ok(())
         }
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("Internal fleet command is handled before native dispatch"),
     }
 }
 fn local_request(ctx: &Context, value: Value) -> Result<Value> {
