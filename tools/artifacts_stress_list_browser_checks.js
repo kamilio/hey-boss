@@ -9,7 +9,11 @@ async page => {
   await page.evaluate(()=>{window.listProbe={frames:[],stop:false};let previous=performance.now();const tick=now=>{listProbe.frames.push(now-previous);previous=now;if(!listProbe.stop)requestAnimationFrame(tick);};requestAnimationFrame(tick);});
   await page.goto(origin+'/artifacts#project='+encodeURIComponent(project)+'&artifact='+saved.id);
   await page.locator('#artifact-reading').waitFor();await page.waitForFunction(()=>!document.querySelector('#artifact-reading').hasAttribute('aria-busy'));
-  const result=await page.locator('#artifact-reading').evaluate((reader,html)=>{listProbe.stop=true;const canonical=document.createElement('template');canonical.innerHTML=html;return {maxFrameGap:Math.max(...listProbe.frames),items:reader.querySelectorAll('ul > li').length,canonicalHTML:reader.innerHTML===canonical.innerHTML};},saved.body_html);
+  // Finish the frame probe before sending megabytes of canonical HTML through
+  // the automation bridge; compiling that comparison is not reader work.
+  const timing=await page.evaluate(()=>{listProbe.stop=true;return {maxFrameGap:Math.max(...listProbe.frames)};});
+  const semantics=await page.locator('#artifact-reading').evaluate((reader,html)=>{const canonical=document.createElement('template');canonical.innerHTML=html;return {items:reader.querySelectorAll('ul > li').length,canonicalHTML:reader.innerHTML===canonical.innerHTML};},saved.body_html);
+  const result={...timing,...semantics};
   if(result.items!==28000||!result.canonicalHTML)throw Error('Checklist lost its complete semantic HTML');
   if(result.maxFrameGap>150)throw Error('Checklist freezes the reader: '+JSON.stringify(result));
   return result;
