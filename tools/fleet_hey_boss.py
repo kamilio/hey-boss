@@ -204,6 +204,7 @@ def install_capture(db, role, node):
         db.execute('CREATE TABLE fleet_row_ids(origin TEXT NOT NULL,table_name TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER NOT NULL,PRIMARY KEY(origin,table_name,origin_id))')
         db.execute('INSERT INTO fleet_row_ids SELECT * FROM fleet_row_ids_legacy')
         db.execute('DROP TABLE fleet_row_ids_legacy')
+    db.execute('CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id)')
     if role == SUPERVISOR_ROLE:
         for table in APPEND:
             db.execute('INSERT OR IGNORE INTO fleet_row_ids SELECT ?,?,id,id FROM ' + table, (node, table))
@@ -433,21 +434,25 @@ def accept_changes(db, node, changes):
     return results
 
 
-def canonical_append(db, supervisor_node, table, row):
-    origin = db.execute('SELECT origin,origin_id FROM fleet_row_ids WHERE table_name=? AND local_id=?', (table, row['id'])).fetchone()
+def canonical_append(db, supervisor_node, table, row, row_ids=None):
+    def identity(table, local_id):
+        if row_ids is not None:
+            return row_ids.get((table, local_id))
+        return db.execute('SELECT origin,origin_id FROM fleet_row_ids WHERE table_name=? AND local_id=?', (table, local_id)).fetchone()
+    origin = identity(table, row['id'])
     row = dict(row)
     if origin:
         row['id'] = origin[1]
         if table == 'events':
             data = json.loads(row['data'])
             if isinstance(data, dict) and 'comment_id' in data:
-                comment = db.execute("SELECT origin,origin_id FROM fleet_row_ids WHERE table_name='comments' AND local_id=?", (data['comment_id'],)).fetchone()
+                comment = identity('comments', data['comment_id'])
                 resolution = row['action'] in ('comment_resolved', 'comment_unresolved')
-                if comment and (resolution or comment['origin'] == origin['origin']):
-                    data['comment_id'] = comment['origin_id']
+                if comment and (resolution or comment[0] == origin[0]):
+                    data['comment_id'] = comment[1]
                     if resolution:
-                        data['comment_origin'] = comment['origin']
-                        data['comment_origin_id'] = comment['origin_id']
+                        data['comment_origin'] = comment[0]
+                        data['comment_origin_id'] = comment[1]
                     row['data'] = encode(data)
         return {'origin': origin[0], 'row': row}
     return {'origin': supervisor_node, 'row': row}
@@ -455,18 +460,23 @@ def canonical_append(db, supervisor_node, table, row):
 
 def export_snapshot(db, node):
     if not db.in_transaction:
-        db.execute('BEGIN IMMEDIATE')
+        db.execute('BEGIN')
     supervisor_node = db.execute('SELECT node FROM fleet_meta WHERE id=1').fetchone()[0]
+    row_ids = {}
+    for row in db.execute('SELECT table_name,local_id,origin,origin_id FROM fleet_row_ids'):
+        row_ids.setdefault((row['table_name'], row['local_id']), (row['origin'], row['origin_id']))
     tables = {}
     for table in TABLES:
         rows = [dict(r) for r in db.execute('SELECT * FROM ' + table)]
-        tables[table] = [canonical_append(db, supervisor_node, table, r) for r in rows] if table in APPEND else rows
+        tables[table] = [canonical_append(db, supervisor_node, table, r, row_ids) for r in rows] if table in APPEND else rows
     return {'tables': tables, 'cursor': db.execute('SELECT coalesce(max(seq),0) FROM fleet_outbox').fetchone()[0],
             'allocations': [dict(r) for r in db.execute('SELECT * FROM fleet_allocations')],
             'ranges': [dict(r) for r in db.execute('SELECT project_id,first_number,last_number FROM fleet_ranges WHERE node=?', (node,))]}
 
 
 def export_incremental(db, node, cursor):
+    if not db.in_transaction:
+        db.execute('BEGIN')
     own = db.execute('SELECT node FROM fleet_meta WHERE id=1').fetchone()[0]
     changes = journal(db, cursor)
     for change in changes:
@@ -1260,6 +1270,10 @@ class Supervisor:
                         with connect_db(self.path) as db:
                             receipts = accept_changes(db, node, message['changes'])
                             allocate(db, node, workers)
+                            # Export a consistent WAL snapshot after releasing the
+                            # writer; history serialization must not block agents.
+                            db.commit()
+                            db.execute('BEGIN')
                             payload = export_snapshot(db, node) if message['cursor'] is None else export_incremental(db, node, message['cursor'])
                             # A rejected local row still needs the current canonical value.
                             corrections = {}
