@@ -307,3 +307,37 @@ fn companion_shutdown_preserves_existing_worker_and_claimed_agent() {
     ]);
     worker.0.wait().unwrap();
 }
+
+#[test]
+fn replaying_legacy_worker_configuration_does_not_rewrite_defaults() {
+    let f = Fixture::new();
+    f.issue();
+    let mut companion = f
+        .command(&["fleet", "companion", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(companion.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let mut input = companion.stdin.take().unwrap();
+    let frame = serde_json::json!({"version":1,"kind":"configure","controller":"fixture","revision":"legacy","workers":[{"id":"legacy-worker","intent":"pause","config":{"concurrency":1,"directory":f.root,"enabled":false,"projects":["named:Worker fixture"],"tags":[]}}]});
+    let mut versions = vec![];
+    for _ in 0..2 {
+        writeln!(input, "{frame}").unwrap();
+        input.flush().unwrap();
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        let ack: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ack["revision"], "legacy", "{ack}");
+        versions.push(f.worker_status()["workers"][0]["version"].clone());
+    }
+    drop(input);
+    assert!(companion.wait().unwrap().success());
+    assert_eq!(
+        versions[0], versions[1],
+        "Repeated configuration must be a no-op"
+    );
+}
