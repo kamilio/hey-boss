@@ -51,6 +51,9 @@ html,body{overscroll-behavior-y:none}
 .pull-refresh>span{display:flex;align-items:center;gap:9px;white-space:nowrap}
 .pull-refresh.is-refreshing svg{animation:refresh-spin .8s linear infinite}
 .title-actions{display:flex;align-items:center;gap:12px}.refresh-button{display:grid;place-items:center;width:44px;height:44px;border:0;border-radius:50%;background:transparent;color:#7e899a}
+.clear-inbox-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:0 12px;border:1px solid #7185a540;border-radius:14px;background:transparent;color:inherit;font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}.clear-inbox-button:hover{background:#7185a512}.clear-inbox-button:disabled{opacity:.45;cursor:default}.clear-inbox-dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px}.clear-inbox-dialog [role=alert]{color:var(--red-11)}
+@media(max-width:380px){.title-actions{gap:4px}.clear-inbox-button{padding:0 8px}.page-title h1{font-size:32px}}
+.clear-inbox-dialog-actions .rt-Button[data-accent-color="red"]{background:#b42336;color:#fff}.clear-inbox-dialog-actions .rt-Button[data-accent-color="red"]:hover{background:#961c2d}
 @keyframes refresh-spin{to{transform:rotate(360deg)}}
 
 /* A quieter canvas gives the refractive controls and task accents contrast. */

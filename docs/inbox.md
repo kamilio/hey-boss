@@ -22,6 +22,13 @@ cancelled; feedback alone does not finish a review. Answers use the existing
 native/mobile winner mechanism. Late answers cannot overwrite the winning result.
 Answer and review drafts persist locally, and Cmd/Ctrl+Enter submits them.
 
+**Clear all** moves unread notices to Activity after confirmation. It applies across
+all projects, including notices hidden by desktop search/project filters. Updates
+and alerts become read; pending questions and document reviews are cancelled,
+without an answer or approval. Existing answers and history are preserved. Notices
+arriving after the confirmation opens remain unread. The same action is available
+in the paired mobile Inbox and synchronizes through the existing outcome bridge.
+
 ## Issue links
 
 ```sh
