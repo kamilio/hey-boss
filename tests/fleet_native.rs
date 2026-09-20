@@ -341,3 +341,36 @@ fn replaying_legacy_worker_configuration_does_not_rewrite_defaults() {
         "Repeated configuration must be a no-op"
     );
 }
+
+#[test]
+fn large_status_response_is_complete_over_the_local_socket() {
+    let f = Fixture::new();
+    f.issue();
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+    )
+    .unwrap();
+    let saved = serde_json::json!({"offline-fixture":{"host":"offline-fixture","hostname":"h".repeat(65536),"workers":[]}});
+    db.execute(
+        "INSERT INTO fleet_state VALUES('machines',?1)",
+        [saved.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let mut supervisor = f.service("supervisor");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.root.join("fleet.sock").exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(50));
+    }
+    let status = f.cli(&["fleet", "status"]);
+    let machine = status["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["host"] == "offline-fixture")
+        .unwrap();
+    assert_eq!(machine["hostname"].as_str().unwrap().len(), 65536);
+    supervisor.terminate();
+}
