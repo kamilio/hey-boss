@@ -12,7 +12,6 @@ let streaming = false;
 let turnNumber = 0;
 let goalTurns = 0;
 let output = '';
-const queued = [];
 if (provider === 'pi') {
   file = args.includes('--session') ? args[args.indexOf('--session') + 1] : join(mkdtempSync(join(tmpdir(), 'hey-boss-pi-fixture-')), session + '.jsonl');
   writeFileSync(file, JSON.stringify({ type: 'session', id: session }) + '\n');
@@ -24,7 +23,6 @@ function complete(interrupted = false) {
     send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:interrupted ? 'interrupted' : 'completed'}}});
   } else if (provider === 'claude') {
     send({type:'result',session_id:session,subtype:interrupted ? 'error_during_execution' : 'success',is_error:interrupted,result:output,errors:interrupted ? ['interrupted'] : []});
-    if (queued.length) prompt(queued.shift());
   } else {
     send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:output}],stopReason:interrupted ? 'aborted' : 'stop'}});
     send({type:'agent_end',messages:[],willRetry:false});
@@ -102,7 +100,9 @@ for await (const chunk of process.stdin) {
       send({type:'control_response',response:{subtype:'success',request_id:r.request_id,response:{}}});
       if (r.request.subtype === 'interrupt') complete(true);
     } else if (r.type === 'user') {
-      if (!streaming) prompt(r.message.content); else queued.push(r.message.content);
+      // Claude may consume streaming input in the current tool loop and emit
+      // only one result. The client must dispatch its next-turn queue itself.
+      if (!streaming) prompt(r.message.content); else output = r.message.content;
     } else if (r.type === 'control_response') {
       if (r.response.response.behavior !== 'deny') throw new Error('expected explicit denial');
       complete();

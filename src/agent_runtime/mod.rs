@@ -207,7 +207,7 @@ pub struct AgentSession {
     stopped: bool,
     uncertain: bool,
     output_schema: Option<Value>,
-    queued_turns: VecDeque<String>,
+    queued_turns: VecDeque<(String, String)>,
     tasks: BTreeSet<String>,
 }
 impl AgentSession {
@@ -432,10 +432,15 @@ impl AgentSession {
                 }
             }
             Provider::Claude => {
-                self.send(&json!({"type":"user","session_id":self.session.as_ref().map(|s|s.id.as_str()).unwrap_or(""),"message":{"role":"user","content":text},"parent_tool_use_id":null}))?;
+                if self.queued_turns.len() >= 64 {
+                    return Err(io::Error::other("Agent steering queue exceeded limit"));
+                }
+                // SDK streaming input can be folded into the current tool loop
+                // without a second result. Own the queue so NextTurn has a
+                // deterministic guard and exactly one completion per prompt.
                 self.sequence += 1;
                 self.queued_turns
-                    .push_back(format!("hey-boss-turn-{}", self.sequence));
+                    .push_back((format!("hey-boss-turn-{}", self.sequence), text.into()));
             }
             Provider::Pi => {
                 self.rpc("steer", json!({"message":text}))?;
@@ -566,7 +571,7 @@ impl AgentSession {
             self.output.clone(),
             None,
             Value::Null,
-        );
+        )?;
         self.requests.clear();
         Ok(())
     }

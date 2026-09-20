@@ -220,9 +220,9 @@ impl AgentSession {
         output: String,
         structured_output: Option<Value>,
         usage: Value,
-    ) {
+    ) -> io::Result<()> {
         let Some(id) = self.turn.take() else {
-            return;
+            return Ok(());
         };
         self.requests.clear();
         self.events.push_back(Event::TurnCompleted {
@@ -232,11 +232,13 @@ impl AgentSession {
             structured_output,
             usage,
         });
-        if let Some(id) = self.queued_turns.pop_front() {
+        if let Some((id, text)) = self.queued_turns.pop_front() {
             self.output.clear();
             self.turn = Some(id.clone());
+            self.send(&json!({"type":"user","session_id":self.session.as_ref().map(|s|s.id.as_str()).unwrap_or(""),"message":{"role":"user","content":text},"parent_tool_use_id":null}))?;
             self.events.push_back(Event::TurnStarted { id });
         }
+        Ok(())
     }
     fn codex(&mut self, value: Value) -> io::Result<()> {
         let params = &value["params"];
@@ -318,7 +320,7 @@ impl AgentSession {
                     self.output.clone(),
                     serde_json::from_str(&self.output).ok(),
                     params["turn"]["usage"].clone(),
-                );
+                )?;
             }
             "thread/goal/updated" => self.events.push_back(Event::Goal(params["goal"].clone())),
             "serverRequest/resolved" => {
@@ -448,7 +450,7 @@ impl AgentSession {
                     output,
                     value.get("structured_output").cloned(),
                     value["usage"].clone(),
-                );
+                )?;
             }
             _ => self.events.push_back(Event::Other(value)),
         }
@@ -506,7 +508,7 @@ impl AgentSession {
                     self.output.clone(),
                     serde_json::from_str(&self.output).ok(),
                     Value::Null,
-                );
+                )?;
                 self.refresh_pi()?;
             }
             _ => self.events.push_back(Event::Other(value)),
