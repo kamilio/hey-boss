@@ -1,6 +1,7 @@
 //! Independent worker instances and first-class project instructions/PR links.
 use super::*;
 use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
+use std::collections::HashMap;
 pub(super) const SCHEMA: &str = "
 CREATE TABLE issue_workers(id TEXT PRIMARY KEY,kind TEXT NOT NULL,config TEXT NOT NULL,version INTEGER NOT NULL,owner_pid INTEGER,owner_start TEXT,machine TEXT,stop_requested INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
 ALTER TABLE worker_runs ADD COLUMN worker_id TEXT REFERENCES issue_workers(id);
@@ -463,43 +464,107 @@ pub(super) fn claim_instructions(
     };
     Ok(worker::preview(&config, p, issue.clone()).0)
 }
+fn ready_workers(db: &Connection, worker_id: Option<&str>) -> Result<Vec<(String, String)>> {
+    let mut stmt=db.prepare("SELECT id,config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start) AND (SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL)<json_extract(config,'$.concurrency') ORDER BY updated_at,id")?;
+    Ok(stmt
+        .query_map([worker_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+struct PreparedProject {
+    project: Project,
+    config: ProjectConfig,
+    defaults: Value,
+    valid: bool,
+}
+
 pub(super) fn reserve(
     store: &mut Store,
     machine: &str,
     worker_id: Option<&str>,
 ) -> Result<Option<Job>> {
+    // Legacy updates can arrive after open; migrate only when one is present.
+    if store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get::<_, bool>(0))? {
+        let tx = store.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        migrate_runtime(&tx)?;
+        tx.commit()?;
+    }
+    // Empty/full queues never request a write lock. Discover checkouts in a WAL
+    // snapshot, then run Git/filesystem/process validation before reserving.
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let mut prepared = HashMap::new();
+    for (id, text) in ready_workers(&tx, worker_id)? {
+        let settings: Settings = serde_json::from_str(&text)?;
+        let mut projects = HashMap::new();
+        for (project, _) in candidates(&tx, &settings, 100)? {
+            if !projects.contains_key(&project.id) {
+                let config = runtime(&tx, &settings, &project)?;
+                let defaults = project_settings(&tx, &project)?;
+                projects.insert(
+                    project.id.clone(),
+                    PreparedProject {
+                        project,
+                        config,
+                        defaults,
+                        valid: false,
+                    },
+                );
+            }
+        }
+        prepared.insert(id, (text, projects));
+    }
+    tx.commit()?;
+    let mut any_valid = false;
+    for (_, projects) in prepared.values_mut() {
+        for project in projects.values_mut() {
+            project.valid = !project.config.cwd.is_empty()
+                && worker::validate_config(&project.config, &project.project).is_ok();
+            any_valid |= project.valid;
+        }
+    }
+    if !any_valid {
+        return Ok(None);
+    }
+    let id = random_id()?;
+    let owner_pid = std::process::id();
+    let owner_start = crate::agents::process_identity(owner_pid)
+        .ok_or_else(|| Error::new("worker_error", "Cannot identify worker process"))?;
+    let host = crate::issues::identity::host();
     let tx = store
         .db
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
     migrate_runtime(&tx)?;
-    let mut stmt=tx.prepare("SELECT id,config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start) AND (SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL)<json_extract(config,'$.concurrency') ORDER BY updated_at,id")?;
-    let defs = stmt
-        .query_map([worker_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    for (worker_id, text) in defs {
+    // Recheck capacity, controls, filters and queue order atomically. A new
+    // project/configuration needs a fresh preflight on the next scheduler poll.
+    for (worker_id, text) in ready_workers(&tx, worker_id)? {
+        let Some((old_text, projects)) = prepared.get(&worker_id) else {
+            return Ok(None);
+        };
+        if old_text != &text {
+            return Ok(None);
+        }
         let settings: Settings = serde_json::from_str(&text)?;
         for (project, number) in candidates(&tx, &settings, 100)? {
-            let config = runtime(&tx, &settings, &project)?;
-            if config.cwd.is_empty() {
+            let Some(prepared) = projects.get(&project.id) else {
+                return Ok(None);
+            };
+            if prepared.defaults != project_settings(&tx, &project)? {
+                return Ok(None);
+            }
+            if !prepared.valid {
                 continue;
             }
-            // Reject a mismatched checkout before issuing a reservation.
-            if worker::validate_config(&config, &project).is_err() {
-                continue;
-            }
-            let id = random_id()?;
-            let owner_pid = std::process::id();
-            let owner_start = crate::agents::process_identity(owner_pid)
-                .ok_or_else(|| Error::new("worker_error", "Cannot identify worker process"))?;
+            let config = prepared.config.clone();
             let actor = Actor {
                 id: format!("reservation:{id}"),
                 kind: "worker".into(),
                 session_id: None,
                 machine: machine.into(),
-                host: crate::issues::identity::host(),
+                host: host.clone(),
                 pid: None,
                 process_start: None,
                 cwd: config.cwd.clone().into(),
@@ -612,6 +677,62 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_and_invalid_checkout_polls_do_not_wait_for_a_writer() {
+        let root = std::env::temp_dir().join(format!("hb-idle-worker-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store
+                .register_worker(
+                    None,
+                    &Settings {
+                        enabled: false,
+                        ..Settings::default()
+                    },
+                    "unit",
+                )
+                .unwrap();
+            store
+                .db
+                .busy_timeout(std::time::Duration::from_millis(25))
+                .unwrap();
+            let mut other = rusqlite::Connection::open(&path).unwrap();
+            let tx = other
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert!(reserve(&mut store, "unit", None).unwrap().is_none());
+            tx.rollback().unwrap();
+
+            store.db.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Idle','Idle',2,0,0)", []).unwrap();
+            store
+                .db
+                .execute("INSERT INTO agents VALUES('agent','{}',0)", [])
+                .unwrap();
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Idle',1,'Task','','open','agent',0,0,1,'[]')", []).unwrap();
+            let settings = Settings {
+                directory: root.to_string_lossy().into(),
+                projects: vec!["named:Idle".into()],
+                ..Settings::default()
+            };
+            let id = store.register_worker(None, &settings, "unit").unwrap();
+            store
+                .db
+                .execute(
+                    "UPDATE issue_workers SET config=json_set(config,'$.directory',?2) WHERE id=?1",
+                    params![id, root.join("missing-checkout").to_string_lossy()],
+                )
+                .unwrap();
+            let tx = other
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert!(reserve(&mut store, "unit", Some(&id)).unwrap().is_none());
+            tx.rollback().unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn legacy_marker_written_after_open_preserves_session_and_blocks_new_pickup() {
         let root = std::env::temp_dir().join(format!("hb-legacy-worker-{}", random_id().unwrap()));
