@@ -8,6 +8,7 @@ async page => {
   await page.goto(origin+'/artifacts#project='+encodeURIComponent(project)+'&artifact='+row.id);await page.reload();
   await page.evaluate(()=>{window.editorCSP=[];document.addEventListener('securitypolicyviolation',e=>editorCSP.push(e.violatedDirective));});
   await page.locator('#artifact-edit').click();
+  await page.locator('.cm-content').waitFor();
   const field=page.getByRole('textbox',{name:'Markdown',exact:true});
   if(!await field.evaluate(el=>el.isContentEditable))throw Error('Large draft still uses the slow full-document textarea');
   if((await page.evaluate(()=>editorCSP)).length)throw Error('Writing surface violates CSP');
