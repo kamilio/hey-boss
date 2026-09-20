@@ -398,6 +398,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/html; charset=utf-8",
                 include_bytes!("web/artifacts.html"),
             )),
+            "/artifact-editor.js" => Some((
+                "application/javascript; charset=utf-8",
+                include_bytes!("web/artifact-editor.js"),
+            )),
             "/artifacts.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/artifacts.js"),
