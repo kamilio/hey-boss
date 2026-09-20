@@ -18,7 +18,7 @@ for(const input of Object.keys(result.metafile.inputs)){
 }
 for(const directory of [...packages].sort()){
  const info=JSON.parse(readFileSync(join(directory,'package.json'),'utf8'));
- const license=['LICENSE','LICENSE.md','LICENSE.txt','license','LICENSE-MIT','COPYING'].map(name=>join(directory,name)).find(existsSync);
+ const license=['LICENSE','LICENSE.md','LICENSE.txt','license','license.md','license.txt','LICENSE-MIT','COPYING'].map(name=>join(directory,name)).find(existsSync);
  const readme=join(directory,'README.md');
  const text=license?readFileSync(license,'utf8'):existsSync(readme)?readFileSync(readme,'utf8').match(/^## License\s*\n([\s\S]*)/m)?.[1]:null;
  if(!text)throw Error('Missing bundled license: '+info.name);
