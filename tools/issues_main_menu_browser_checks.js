@@ -16,8 +16,8 @@ async page => {
     return value.project.id;
   });
   const open = async filtered => {
-    const params = new URLSearchParams({project, issue:'1', ...(filtered ?
-      {state:'closed', owner:'unassigned', label:'ready', search:'Return'} : {})});
+    const params = await page.evaluate(({project, filtered}) => new URLSearchParams({project, issue:'1', ...(filtered ?
+      {state:'closed', owner:'unassigned', label:'ready', search:'Return'} : {})}).toString(), {project, filtered});
     await page.goto(origin + '/#' + params);
     await page.waitForFunction(project => model.project?.id === project &&
       model.detail?.issue.number === 1 && !document.querySelector('#detail-view').hidden, project);
@@ -25,7 +25,7 @@ async page => {
   const list = async () => {
     await page.waitForFunction(() => !model.route.issue &&
       document.querySelector('#detail-view').hidden && !document.querySelector('#list-view').hidden);
-    check(!new URL(page.url()).hash.includes('issue='), 'List URL clears the issue selection');
+    check(await page.evaluate(() => !location.hash.includes('issue=')), 'List URL clears the issue selection');
     check(await page.locator('#nav-issues').getAttribute('aria-current') === 'page', 'Issues retains its selected navigation state');
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No horizontal overflow');
   };
