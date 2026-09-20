@@ -748,3 +748,5 @@ Unknown projects and conflicting mentions show an error; email addresses stay
 unchanged, and `\@poe-code` keeps literal `@poe-code` text in the title.
 
 Persistent project Markdown documents, revision-checked editing, comments and issue/mindmap links are available through **Artifacts** in the web menu and `hey-boss artifact`. See [Project artifacts](docs/artifacts.md).
+
+Issues, mindmap nodes and artifacts also support disk-backed files, drag-and-drop upload and remote CLI downloads through `hey-boss attachment`. See [File attachments](docs/attachments.md).
