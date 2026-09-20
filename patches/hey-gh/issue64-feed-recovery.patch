@@ -1,0 +1,442 @@
+--- a/src/dashboard.rs
++++ b/src/dashboard.rs
+@@ -7,6 +7,10 @@
+     time::Duration,
+ };
+ 
++// Account cycles publish once after each PR's work. Nested individual reads
++// must not emit partial intermediate rows or overwrite discovery metadata.
++tokio::task_local! { static ACCOUNT_PUBLICATION: (); }
++
+ const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
+   viewer { pullRequests(first: 20, after: $after, states: OPEN,
+     orderBy: {field: CREATED_AT, direction: ASC}) {
+@@ -189,6 +193,21 @@
+         seed_only: bool,
+         details_only: bool,
+     ) -> Result<Vec<String>> {
++        ACCOUNT_PUBLICATION
++            .scope(
++                (),
++                self.collect_pr_status_inner(freshness, ci_only, seed_only, details_only),
++            )
++            .await
++    }
++
++    async fn collect_pr_status_inner(
++        &self,
++        freshness: Freshness,
++        ci_only: bool,
++        seed_only: bool,
++        details_only: bool,
++    ) -> Result<Vec<String>> {
+         let mode = if ci_only { "ci" } else { "details" };
+         let started = tokio::time::Instant::now();
+         let deadline = tokio::time::Instant::now() + self.report_timeout();
+@@ -404,8 +423,7 @@
+                 (&node, discovery_at),
+                 discovered.then(|| !current.contains_key(&(repo.clone(), number))),
+                 established,
+-                if seed_only { "discovery" } else { mode },
+-                error,
++                &[(if seed_only { "discovery" } else { mode }, error)],
+             )
+             .await?;
+             // GitHub's list and detail endpoints can converge at different
+@@ -447,14 +465,38 @@
+         Ok(errors)
+     }
+ 
++    /// Reconcile only an already tracked PR. Individual observations neither
++    /// discover an account roster nor add another author's PR to that roster.
++    pub(crate) async fn publish_individual_pr_status(
++        &self,
++        repository: &str,
++        number: u64,
++        health: &[(&str, Option<String>)],
++    ) -> Result<()> {
++        if ACCOUNT_PUBLICATION.try_with(|_| ()).is_ok() {
++            return Ok(());
++        }
++        let resource = format!("{}{repository}/{number}", self.status_prefix());
++        if let Some(snapshot) = self.stored_snapshot(&resource).await? {
++            self.publish_pr_status(
++                (repository, number),
++                (&snapshot["pullRequest"], 0),
++                None,
++                true,
++                health,
++            )
++            .await?;
++        }
++        Ok(())
++    }
++
+     async fn publish_pr_status(
+         &self,
+         identity: (&str, u64),
+         discovery: (&Value, u64),
+         removed: Option<bool>,
+         established: bool,
+-        mode: &str,
+-        error: Option<String>,
++        health: &[(&str, Option<String>)],
+     ) -> Result<()> {
+         let (repo, number) = identity;
+         let (discovered, discovery_at) = discovery;
+@@ -602,7 +644,12 @@
+         } else {
+             Value::Null
+         };
+-        row["headCiState"] = graph_ci["state"].clone();
++        row["headCiState"] = if graph_ci.is_null() && discovered["headRefOid"] == row["headRefOid"]
++        {
++            discovered["headCiState"].clone()
++        } else {
++            graph_ci["state"].clone()
++        };
+         row["requiredChecks"] = self
+             .stored_snapshot(&format!("required_checks://{suffix}"))
+             .await?
+@@ -627,9 +674,11 @@
+             true
+         });
+         let mut source_errors = old["sourceErrors"].as_object().cloned().unwrap_or_default();
+-        source_errors.remove(mode);
+-        if let Some(error) = error {
+-            source_errors.insert(mode.into(), json!(error));
++        for (mode, error) in health {
++            source_errors.remove(*mode);
++            if let Some(error) = error {
++                source_errors.insert((*mode).into(), json!(error));
++            }
+         }
+         row["complete"] = json!(available && source_errors.is_empty());
+         row["sourceErrors"] = json!(source_errors);
+--- a/src/report.rs
++++ b/src/report.rs
+@@ -253,6 +253,7 @@
+                     let mut observations=vec![(format!("metadata://{suffix}"),json!({"conflicts":conflicts(&final_pr.data),"pull_request":final_pr.data}))];
+                     if complete { observations.push((format!("ci://{suffix}"),serde_json::to_value(&data).map_err(|e|Error::Invalid(e.to_string()))?)); }
+                     let cursor=self.observe_many(&observations).await?;
++                    self.publish_individual_pr_status(repository, number, &[("ci", source_error_message(&data.errors))]).await?;
+                     let validations=VALIDATIONS.with(|r|r.borrow().clone());
+                     let observed_at_ms=now_ms();
+                     let oldest_validation_at_ms=validations.iter().map(|r|r.validated_at_ms).min().unwrap_or(observed_at_ms);
+@@ -532,6 +533,15 @@
+                 ));
+             }
+             let head = self.observe_many(&observations).await?;
++            self.publish_individual_pr_status(
++                repository,
++                number,
++                &[
++                    ("ci", source_error_message(&report.ci.errors)),
++                    ("details", source_error_message(&report.errors)),
++                ],
++            )
++            .await?;
+             let cursor = complete.then_some(head);
+             return Ok(Report {
+                 data: report,
+@@ -897,6 +907,10 @@
+     }
+ }
+ 
++fn source_error_message(errors: &[SourceError]) -> Option<String> {
++    (!errors.is_empty()).then(|| json!(errors).to_string())
++}
++
+ fn collect(result: Result<Vec<Value>>, source: &str, errors: &mut Vec<SourceError>) -> Vec<Value> {
+     match result {
+         Ok(values) => values,
+--- a/tests/github.rs
++++ b/tests/github.rs
+@@ -2362,3 +2362,268 @@
+     assert!(reopened.changes.iter().any(|event| event.kind == "reopened"
+         && event.pull_request["repository"]["nameWithOwner"] == "acme/demo"));
+ }
++
++#[tokio::test]
++async fn issue64_complete_cached_report_recovers_same_head_feed_without_requests() {
++    let h = Harness::new().await;
++    h.mode("account");
++    let c = h.client();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    h.mode("account-ci-permission-fails");
++    assert!(
++        !c.refresh_pr_status(Freshness::Revalidate, true)
++            .await
++            .unwrap()
++            .is_empty()
++    );
++    assert!(
++        !c.refresh_pr_status(Freshness::Revalidate, false)
++            .await
++            .unwrap()
++            .is_empty()
++    );
++    let broken = c
++        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    assert_eq!(broken.pull_requests[0]["complete"], false);
++    assert!(broken.pull_requests[0]["sourceErrors"]["ci"].is_string());
++    assert!(broken.pull_requests[0]["sourceErrors"]["details"].is_string());
++    let calls = h.calls().len();
++    let report = c
++        .pr_report("acme/demo", 7, Freshness::CachedOnly)
++        .await
++        .unwrap();
++    assert!(report.complete);
++    let recovered = c
++        .pr_status_page(
++            Some("acme/demo"),
++            Some(&broken.cursor),
++            1000,
++            Duration::ZERO,
++        )
++        .await
++        .unwrap();
++    let row = &recovered
++        .changes
++        .last()
++        .expect("recovery replacement")
++        .pull_request;
++    assert_eq!(row["headRefOid"], broken.pull_requests[0]["headRefOid"]);
++    assert_eq!(row["complete"], true);
++    assert_eq!(row["sourceErrors"], json!({}));
++    assert_eq!(h.calls().len(), calls);
++    c.pr_report("acme/demo", 7, Freshness::CachedOnly)
++        .await
++        .unwrap();
++    assert!(
++        c.pr_status_page(
++            Some("acme/demo"),
++            Some(&recovered.cursor),
++            1000,
++            Duration::ZERO
++        )
++        .await
++        .unwrap()
++        .changes
++        .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn issue64_ci_recovery_preserves_independent_detail_failure() {
++    let h = Harness::new().await;
++    h.mode("account");
++    let c = h.client();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    h.mode("account-ci-permission-fails");
++    c.refresh_pr_status(Freshness::Revalidate, true)
++        .await
++        .unwrap();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    let broken = c
++        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    let report = c
++        .ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
++        .await
++        .unwrap();
++    assert!(report.complete);
++    let recovered = c
++        .pr_status_page(
++            Some("acme/demo"),
++            Some(&broken.cursor),
++            1000,
++            Duration::ZERO,
++        )
++        .await
++        .unwrap();
++    let row = &recovered
++        .changes
++        .last()
++        .expect("CI recovery replacement")
++        .pull_request;
++    assert!(row["sourceErrors"]["ci"].is_null());
++    assert!(row["sourceErrors"]["details"].is_string());
++    assert_eq!(row["complete"], false);
++}
++
++#[tokio::test]
++async fn issue64_individual_incomplete_ci_emits_failure_instead_of_green_feed() {
++    let h = Harness::new().await;
++    h.mode("account");
++    let c = h.client();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    let initial = c
++        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    h.mode("account-ci-permission-fails");
++    assert!(
++        !c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
++            .await
++            .unwrap()
++            .complete
++    );
++    let page = c
++        .pr_status_page(
++            Some("acme/demo"),
++            Some(&initial.cursor),
++            1000,
++            Duration::ZERO,
++        )
++        .await
++        .unwrap();
++    let row = &page
++        .changes
++        .last()
++        .expect("failure replacement")
++        .pull_request;
++    assert_eq!(row["complete"], false);
++    assert!(row["sourceErrors"]["ci"].is_string());
++}
++
++#[tokio::test]
++async fn issue64_detail_failure_remains_explicit_until_a_complete_report() {
++    let h = Harness::new().await;
++    h.mode("account");
++    let c = h.client();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    let initial = c
++        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    h.mode("graphql-errors");
++    let report = c
++        .pr_report("acme/demo", 7, Freshness::Revalidate)
++        .await
++        .unwrap();
++    assert!(!report.complete);
++    let page = c
++        .pr_status_page(
++            Some("acme/demo"),
++            Some(&initial.cursor),
++            1000,
++            Duration::ZERO,
++        )
++        .await
++        .unwrap();
++    let row = &page.changes.last().unwrap().pull_request;
++    assert_eq!(row["complete"], false);
++    assert!(
++        row["sourceErrors"]["details"]
++            .as_str()
++            .unwrap()
++            .contains("review_threads")
++    );
++    assert!(row["sourceErrors"]["ci"].is_null());
++    h.mode("account");
++    assert!(
++        c.pr_report("acme/demo", 7, Freshness::Revalidate)
++            .await
++            .unwrap()
++            .complete
++    );
++    let recovered = c
++        .pr_status_page(Some("acme/demo"), Some(&page.cursor), 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    assert_eq!(
++        recovered.changes.last().unwrap().pull_request["complete"],
++        true
++    );
++}
++
++#[tokio::test]
++async fn issue64_individual_reads_do_not_add_untracked_prs_to_the_account_feed() {
++    let h = Harness::new().await;
++    let c = h.client();
++    let initial = c
++        .pr_status_page(None, None, 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    assert!(
++        c.pr_report("acme/demo", 7, Freshness::Revalidate)
++            .await
++            .unwrap()
++            .complete
++    );
++    let page = c
++        .pr_status_page(None, Some(&initial.cursor), 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    assert!(page.changes.is_empty());
++    assert!(
++        c.pr_status_page(None, None, 1000, Duration::ZERO)
++            .await
++            .unwrap()
++            .pull_requests
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn issue64_new_head_recovery_does_not_reuse_the_old_head_rollup() {
++    let h = Harness::new().await;
++    h.mode("account-head-change");
++    let c = h.client();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    let initial = c
++        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
++        .await
++        .unwrap();
++    h.phase(1);
++    assert!(
++        c.pr_report("acme/demo", 7, Freshness::Revalidate)
++            .await
++            .unwrap()
++            .complete
++    );
++    let page = c
++        .pr_status_page(
++            Some("acme/demo"),
++            Some(&initial.cursor),
++            1000,
++            Duration::ZERO,
++        )
++        .await
++        .unwrap();
++    let row = &page.changes.last().unwrap().pull_request;
++    assert_eq!(row["headRefOid"], NEW_HEAD);
++    assert_eq!(row["ci"]["head_sha"], NEW_HEAD);
++    assert!(row["headCiState"].is_null());
++    assert_eq!(row["complete"], true);
++}
+--- a/skills/hey-gh/SKILL.md
++++ b/skills/hey-gh/SKILL.md
+@@ -50,6 +50,16 @@
+ source cursors are separate. The feed records observations; polling can miss
+ transitions entirely between reads.
+ 
++PR list/change commands can emit valid JSON and exit 1 when the envelope or
++returned rows contain source errors. Parse stdout even on that exit; preserve
++the cursor, replacements, hasMore and explicit errors atomically. Exit 0 from
++a fast read does not prove complete=true: details may still be hydrating.
++Transport/validation failures can instead have no envelope; never advance a
++cursor without a successfully parsed response. A complete individual PR read
++also publishes a replacement for an already tracked PR, clearing its recovered
++CI/detail errors. CI-only recovery preserves independent detail failures.
++Cached-only recovery validates cached evidence, not freshness or merge readiness.
++
+ Rust uses `ApiClient::pr_status`; HTTP uses `GET /v1/pr-status`; napi-rs Node
+ bindings use `api.prStatus({ cursor, waitSeconds: 30 })`. These share the daemon.
+ `hey-gh` implements a read-only subset of `gh pr` with an extended JSON envelope.
