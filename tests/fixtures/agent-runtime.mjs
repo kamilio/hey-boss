@@ -44,6 +44,7 @@ function prompt(text) {
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
   if (provider === 'pi') send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
   if (text.startsWith('hold')) return;
+  if (text.startsWith('queued goal')) { output = JSON.stringify({status:'completed',summary:'Initial turn verified'}); setTimeout(() => complete(), 300); return; }
   if (text === 'queued turns') { setTimeout(() => complete(), 300); return; }
   if (text === 'retry' && provider === 'pi') {
     send({type:'agent_end',messages:[],willRetry:true});
