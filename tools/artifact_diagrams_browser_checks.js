@@ -43,6 +43,7 @@ async page => {
   await dialog.getByRole('button',{name:'Fit',exact:true}).click();
   assert(await dialog.locator('output').innerText()===initialZoom,'Fit restores overview scale');
   await page.keyboard.press('Escape');
+  await dialog.waitFor({state:'detached'});
   assert(await page.locator('.artifact-diagram-dialog').count()===0,'Escape removes viewer');
   assert(await figures.first().locator('[data-expand]').evaluate(n=>n===document.activeElement),'Closing viewer restores keyboard focus');
   assert(await figures.first().locator('svg').count()===1,'Closing viewer restores inline diagram');
@@ -60,6 +61,7 @@ async page => {
       assert(await dialog.evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1;}),`${theme} ${size} expanded viewer fits screen`);
       await page.screenshot({path:`output/playwright/issue49/${mobile?'mobile':'native'}-${theme}-${size}-expanded.png`});
       await page.keyboard.press('Escape');
+      await dialog.waitFor({state:'detached'});
     }
   }
   await page.locator('#artifact-edit').click();
