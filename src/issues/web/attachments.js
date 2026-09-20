@@ -1,0 +1,107 @@
+"use strict";
+const HeyBossAttachments = (() => {
+  const limit = 10 * 1024 * 1024;
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+  const icon = name => HeyBossUI.icon(name);
+  const size = n => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  const api = (context, operation, requestID) => HeyBossArtifacts.rpc(context, {action:"attachment", operation}, ["list","download"].includes(operation.command), requestID);
+  function mount(root, context) {
+    if (!root) return;
+    let entries = [], busy = false, pending = null, queue = [], generation = 0;
+    root.classList.add("file-attachments");
+    root.innerHTML = `<div class="attachment-heading"><h2>Attachments</h2><span class="attachment-count"></span></div><ul class="attachment-list" aria-label="Attached files"></ul><p class="attachment-empty" hidden>No files attached yet.</p>${context.readonly ? "" : `<div class="attachment-drop"><span class="attachment-drop-icon" aria-hidden="true">${icon("docs")}</span><div><strong>Drop files here</strong><span>Any file type · up to 10 MB per file</span></div><button class="button small" type="button" data-choose>${icon("plus")}Choose files</button><input type="file" multiple hidden aria-label="Attach files"></div>`}<p class="attachment-status" role="status" aria-live="polite">Loading attachments…</p><div class="attachment-error" role="alert" hidden></div>`;
+    const $ = selector => root.querySelector(selector);
+    const status = message => { if (root.isConnected) $(".attachment-status").textContent = message; };
+    const error = (message, retry) => {
+      if (!root.isConnected) return;
+      const box = $(".attachment-error");box.hidden = false;
+      box.innerHTML = `<span>${esc(message)}</span>${retry ? '<button class="button small" type="button">Retry</button>' : ""}`;
+      if (retry) box.querySelector("button").onclick = () => {box.hidden = true;retry();};
+    };
+    const lock = value => {
+      busy = value;
+      root.dataset.busy = String(value);
+      root.querySelectorAll("button").forEach(button => button.disabled = value);
+      $("input") && ($("input").disabled = value);
+      $(".attachment-drop")?.classList.remove("drag-over");
+    };
+    const render = () => {
+      if (!root.isConnected) return;
+      $(".attachment-count").textContent = entries.length ? String(entries.length) : "";
+      $(".attachment-empty").hidden = !!entries.length;
+      $(".attachment-list").innerHTML = entries.map(file => `<li data-file="${esc(file.id)}"><span class="attachment-file-icon" aria-hidden="true">${icon("docs")}</span><div class="attachment-info"><button class="attachment-name" type="button" data-download="${esc(file.id)}" title="Download ${esc(file.name)}">${esc(file.name)}</button><span>${size(file.size)}</span></div><button class="icon-button" type="button" data-download="${esc(file.id)}" aria-label="Download ${esc(file.name)}" title="Download">${icon("download")}</button>${context.readonly ? "" : `<button class="icon-button attachment-remove" type="button" data-remove="${esc(file.id)}" aria-label="Remove ${esc(file.name)}" title="Remove">${icon("x")}</button>`}</li>`).join("");
+      if (busy) root.querySelectorAll("button").forEach(button => button.disabled = true);
+    };
+    async function refresh() {
+      const ticket = ++generation;
+      try {const value = await api(context, {command:"list",target:context.target});if(ticket !== generation || !root.isConnected)return;entries=value.attachments;render();status("");}
+      catch(e) {status("");error(e.message, refresh);}
+    }
+    async function uploads() {
+      if (busy) return;
+      lock(true);$(".attachment-error").hidden = true;let completed = 0;
+      try {
+        while (pending || queue.length) {
+          if (!pending) {
+            const file = queue.shift();
+            if (file.size > limit) {error(`${file.name} exceeds 10 MB. Choose a smaller file.`);continue;}
+            status(`Uploading ${file.name}…`);
+            const data = await new Promise((resolve,reject) => {
+              const reader = new FileReader();reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",")+1));reader.onerror = () => reject(Error(`Could not read ${file.name}. Choose it again.`));reader.readAsDataURL(file);
+            });
+            pending = {operation:{command:"upload",target:context.target,name:file.name,data},id:crypto.randomUUID()};
+          }
+          status(`Uploading ${pending.operation.name}…`);
+          const value = await api(context,pending.operation,pending.id);
+          entries.push(value.attachment);completed++;pending = null;render();
+          // A page navigation must not start new uploads to an old resource.
+          if (!root.isConnected) {queue=[];break;}
+        }
+        status(completed ? `Attached ${completed} file${completed === 1 ? "" : "s"}.` : "");
+      } catch(e) {
+        status("");
+        if (!e.uncertain) pending = null;
+        error(e.message, pending || queue.length ? uploads : null);
+      } finally {lock(false);}
+    }
+    if (!context.readonly) {
+      const input = $("input"),drop = $(".attachment-drop");
+      $("[data-choose]").onclick = () => input.click();
+      input.onchange = () => {queue.push(...input.files);input.value="";uploads();};
+      let depth=0;
+      drop.addEventListener("dragenter", e => {if(!e.dataTransfer.types.includes("Files"))return;e.preventDefault();depth++;if(!busy)drop.classList.add("drag-over");});
+      drop.addEventListener("dragover", e => {e.preventDefault();e.dataTransfer.dropEffect=busy?"none":"copy";});
+      drop.addEventListener("dragleave", () => {if(--depth<=0){depth=0;drop.classList.remove("drag-over");}});
+      drop.addEventListener("drop", e => {e.preventDefault();depth=0;drop.classList.remove("drag-over");if(busy)return;queue.push(...e.dataTransfer.files);uploads();});
+    }
+    root.addEventListener("click", async event => {
+      const download = event.target.closest("[data-download]");
+      if (download && !busy) {
+        lock(true);status("Preparing download…");
+        try {
+          const value = await api(context,{command:"download",id:download.dataset.download});
+          const binary = atob(value.data),bytes = new Uint8Array(binary.length);
+          for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+          const url = URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"}));
+          const link = document.createElement("a");link.href=url;link.download=value.attachment.name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status("Download ready.");
+        } catch(e) {status("");error(e.message);} finally {lock(false);}
+      }
+      const remove = event.target.closest("[data-remove]");
+      if (remove && !busy) {
+        const row = remove.closest("li"),name = entries.find(f=>f.id===remove.dataset.remove).name;
+        row.innerHTML = `<div class="attachment-confirm"><span>Remove ${esc(name)}?</span><div><button class="button small danger" type="button" data-confirm-remove="${esc(remove.dataset.remove)}">Remove</button><button class="button small" type="button" data-cancel-remove>Keep file</button></div></div>`;
+        row.querySelector("[data-cancel-remove]").focus();
+      }
+      if (event.target.closest("[data-cancel-remove]")) {render();$("[data-choose]")?.focus();}
+      const confirm = event.target.closest("[data-confirm-remove]");
+      if (confirm && !busy) {
+        const id = confirm.dataset.confirmRemove,requestID = confirm.dataset.requestId ||= crypto.randomUUID();
+        lock(true);status("Removing file…");
+        try {await api(context,{command:"remove",id},requestID);entries=entries.filter(f=>f.id!==id);render();status("File removed.");}
+        catch(e) {status("");error(e.message);}finally{lock(false);$("[data-choose]")?.focus();}
+      }
+    });
+    refresh();
+  }
+  return {mount};
+})();

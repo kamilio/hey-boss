@@ -13,6 +13,7 @@ const paths = {
   error:
     '<path d="M8 2h8l6 6v8l-6 6H8l-6-6V8Z" fill="currentColor" stroke="none"/><path d="m8 8 8 8M16 8l-8 8" stroke="var(--solid)" stroke-width="2"/>',
   bell: '<path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Z" fill="currentColor"/><path d="M10 21h4M12 2v2"/>',
+  download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
   docs: '<path d="M5 2h9l5 5v15H5Z"/><path d="M14 2v6h5M8 12h8M8 16h8M8 19h5"/>',
   question:
     '<path d="M21 11a9 9 0 0 1-9 9H4l-3 3v-12a10 10 0 0 1 20 0Z"/><path d="M9 8a3 3 0 1 1 5 2l-2 2v1M12 16v.5"/>',

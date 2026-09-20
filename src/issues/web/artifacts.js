@@ -284,9 +284,10 @@ const HeyBossArtifacts = (() => {
       $("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
         <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel"><button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"hide")}${doc.archived?"Restore":"Archive"}</button></div></details></div></header>
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
-        <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article>${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
+        <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
       if(reuse)$("#artifact-reading").replaceWith(previous);
       else{const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content);}
+      HeyBossAttachments.mount($("#artifact-attachments"), {...context,target:{kind:"artifact",id:doc.id}});
       readingHTML=content;
       const showComments=open=>{commentsOpen=open;$("#artifact-comments").hidden=!open;$(".artifact-layout").classList.toggle("comments-hidden",!open);$("#artifact-comments-toggle").setAttribute("aria-expanded",String(open));};
       $("#artifact-comments-toggle").onclick=()=>{
@@ -413,29 +414,40 @@ const HeyBossArtifacts = (() => {
     window.addEventListener("hashchange",navigate);window.addEventListener("beforeunload",()=>keepDraft());
     await navigate();
   }
+  let resourceGeneration=0,resourcePicker;
   async function startResource() {
     if(!$("#resource-main"))return;
+    const ticket=++resourceGeneration;
     mobile=true;HeyBossUI.icons();
+    $("#resource-status").textContent="Loading project resource…";
+    $("#resource-content").replaceChildren();$("#resource-artifacts").replaceChildren();
     const params=new URLSearchParams(location.hash.slice(1));
     try {
       const response=await fetch("/api/artifact-bootstrap"),boot=await response.json();
+      if(ticket!==resourceGeneration)return;
       if(!response.ok)throw Error(boot.error||"Pair this device to continue");
       const project=boot.projects.find(p=>p.id===params.get("project"));if(!project)throw Error("Project is unavailable");
-      new HeyBossUI.ProjectPicker({onSelect:id=>location.href=url(id)}).update(boot.projects,project);
+      resourcePicker ||= new HeyBossUI.ProjectPicker({onSelect:id=>location.href=url(id)});
+      resourcePicker.update(boot.projects,project);
       $("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;$("#nav-mindmaps").hidden=true;
       const context={project:project.id};
       const issue=params.get("issue"),node=params.get("node");
       const result=await rpc(context,issue?{action:"view",number:Number(issue)}:{action:"mindmap",operation:{command:"view",node,body_mode:"full"}},true);
+      if(ticket!==resourceGeneration)return;
       const resource=issue?result.issue:result.nodes.find(n=>n.id===node)||result.nodes[0];
       if(!resource)throw Error("Resource was removed");
       if(!resource.body_html){resource.body_html=(await api(context,{command:"preview",body:resource.body||""})).html;}
-      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p><article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article>`;
       const links=await api(context,issue?{command:"links",issue:Number(issue)}:{command:"links",node:resource.id});
+      if(ticket!==resourceGeneration)return;
+      document.title=resource.title+" · Hey Boss";
+      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p><article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article><section id="resource-attachments"></section>`;
+      HeyBossAttachments.mount($("#resource-attachments"),{...context,target:{kind:issue?"issue":"node",id:issue?String(issue):resource.id},readonly:!!resource.deleted_at});
       mount($("#resource-artifacts"),{...context,...(issue?{issue:Number(issue)}:{node:resource.id}),artifacts:links.artifacts});
       $("#resource-status").textContent="";
-    }catch(e){$("#resource-status").textContent=e.message;}
+    }catch(e){if(ticket===resourceGeneration)$("#resource-status").textContent=e.message;}
   }
+  if($("#resource-main"))window.addEventListener("hashchange",startResource);
   startResource();
   start();
-  return {mount,url};
+  return {mount,url,rpc};
 })();
