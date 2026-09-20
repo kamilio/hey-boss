@@ -4,6 +4,8 @@ import io
 import json
 import os
 import pathlib
+import re
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,6 +26,21 @@ class UpgradeTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(name)
         (root / 'skills/hey-boss/SKILL.md').write_text('Canonical skill')
+
+    def test_companion_archive_contains_every_native_build_input(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        installer = (root / 'src/companion.rs').read_text().split('Action::Install { host, source } => {', 1)[1]
+        arguments = installer.split('.args([', 1)[1].split('])', 1)[0]
+        inputs = re.findall(r'"([^"]+)"', arguments)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = pathlib.Path(directory) / 'companion.tar'
+            with tarfile.open(archive, 'w') as bundle:
+                for name in inputs:
+                    bundle.add(root / name, arcname=name)
+            extracted = pathlib.Path(directory) / 'source'
+            with tarfile.open(archive) as bundle:
+                bundle.extractall(extracted, filter='data')
+            self.assertEqual(upgrade.build_id(root), upgrade.build_id(extracted))
 
     def test_identity_ignores_checkout_path_and_detects_changes(self):
         with tempfile.TemporaryDirectory() as directory:

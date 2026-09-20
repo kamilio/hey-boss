@@ -186,7 +186,7 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "README.md",
                     "LICENSE",
                     "tools/upgrade_hey_boss.py",
-                    "tools/fleet_hey_boss.py",
+                    "tools/drain_github_issues.py",
                     "hey_boss_daemon.swift",
                     "package_hey_boss.swift",
                     "setup_hey_boss.swift",
