@@ -348,7 +348,7 @@ impl AgentSession {
                         || (value["subtype"] == "task_updated"
                             && matches!(
                                 value["patch"]["status"].as_str(),
-                                Some("completed" | "failed" | "stopped")
+                                Some("completed" | "failed" | "stopped" | "killed")
                             ))
                     {
                         self.tasks.remove(id);
