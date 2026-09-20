@@ -67,7 +67,7 @@
     return `${full ? `<button class="read-body" data-collapse-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>Show less</button>${error}` : ""}<div class="body" id="body-${esc(node.id)}" tabindex="-1">${node.body_html || esc(node.body)}</div>${node.body_truncated ? `<button class="read-body" data-read-body="${esc(node.id)}" ${loadingBodies.has(node.id) ? "disabled" : ""}>${loadingBodies.has(node.id) ? "Loading…" : "Read full text"}</button>` : ""}${full ? "" : error}`;
   }
   const mapUI = new HeyBossMap.Mindmap($("#mindmap"), {
-    select(id) { selected = id; render(); mapUI.focus(id, false); $("#map-details h2")?.focus({preventScroll:true}); },
+    select(id) { selected = id; render(); $("#map-details h2")?.focus({preventScroll:true}); },
     toggle(id) {
       const before = mapUI.data?.positions.get(id), y = before ? before.y * mapUI.camera.scale + mapUI.camera.y : null;
       collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); render();
@@ -80,7 +80,8 @@
     if (previous) {
       const nodes = allNodes(); let target = previous;
       while (target && !mapUI.data?.positions.has(target)) target = nodes.get(target)?.parent_id;
-      if (!target || !mapUI.focus(target)) $("#mindmap").focus({preventScroll:true});
+      const card = mapUI.cards.get(target)?.querySelector("[data-map-node]");
+      (card || $("#mindmap")).focus({preventScroll:true});
     }
   }
   function branches(expand) {
@@ -311,6 +312,7 @@
       $("#search").value = ""; const nodes = allNodes(); let node = nodes.get(topic.dataset.selectTopic);
       while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
       mapUI.select(topic.dataset.selectTopic);
+      mapUI.focus(topic.dataset.selectTopic, false);
     } else if (event.target.closest("[data-topic-outline]")) {
       collapsed.delete(selected); setView("outline"); const target = document.getElementById(selected);
       if (target) { target.tabIndex = -1; target.focus({preventScroll:true}); target.scrollIntoView({block:"start"}); }
