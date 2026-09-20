@@ -1,33 +1,39 @@
 /* Shared file surface. Uses the same theme and controls as Issues. */
-.file-attachments { min-width: 0; margin: 24px 0; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.attachment-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.attachment-heading h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.file-attachments { min-width: 0; margin: 12px 0; }
+.file-attachments[hidden], .attachment-heading[hidden], .attachment-heading h2[hidden] { display: none; }
+.attachment-heading { display: flex; align-items: center; gap: 8px; }
+.attachment-heading h2 { margin: 0; color: var(--muted); font-size: 12px; font-weight: 600; }
 .attachment-count { color: var(--muted); font-size: 12px; }
 .attachment-list { list-style: none; margin: 0; padding: 0; }
 .attachment-list li { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); min-width: 0; }
 .attachment-list li:last-child { border-bottom: 0; }
-.attachment-file-icon, .attachment-drop-icon { display: grid; place-items: center; color: var(--muted); flex-shrink: 0; }
+.attachment-file-icon { display: grid; place-items: center; color: var(--muted); flex-shrink: 0; }
 .file-attachments svg { width: 18px; height: 18px; }
 .attachment-info { display: grid; gap: 3px; flex: 1; min-width: 0; }
 .attachment-name { font: inherit; font-size: 14px; color: var(--accent); background: none; border: 0; padding: 0; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
-.attachment-info > span, .attachment-empty, .attachment-status { color: var(--muted); font-size: 12px; }
-.attachment-empty { margin: 0 0 12px; }
+.attachment-info > span, .attachment-status { color: var(--muted); font-size: 12px; }
 .attachment-list .icon-button { flex-shrink: 0; width: 36px; height: 36px; }
-.attachment-drop { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px; margin-top: 12px; border: 1px dashed var(--line); border-radius: 9px; background: var(--accent-soft); }
-.attachment-drop > div { flex: 1; min-width: 150px; display: grid; gap: 4px; }
-.attachment-drop strong { font-size: 13px; font-weight: 600; }
-.attachment-drop div > span { color: var(--muted); font-size: 12px; }
-.attachment-drop.drag-over { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
-.file-attachments[data-busy="true"] .attachment-drop { opacity: .7; }
+.attachment-choose.icon-button { flex-shrink: 0; width: 36px; height: 36px; padding: 8px; color: var(--muted); border: 0; background: transparent; }
+.attachment-choose svg { width: 16px; height: 16px; }
+.attachment-choose:hover { color: var(--accent); background: var(--accent-soft); }
+.attachment-choose:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.markdown-editor { position: relative; }
+.markdown-editor > .attachment-choose { position: absolute; top: 3px; right: 6px; }
+.markdown-editor .editor-tabs { min-height: 42px; padding-right: 48px; }
+.attachment-drag-over { outline: 2px dashed var(--accent); outline-offset: 2px; border-radius: 9px; background: var(--accent-soft); }
+.markdown-editor.attachment-drag-over textarea { background: var(--accent-soft); }
 .attachment-status { margin: 8px 0 0; }
 .attachment-status:empty { display: none; }
 .attachment-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--danger, #b4374f); font-size: 13px; margin-top: 10px; overflow-wrap: anywhere; }
-.attachment-error[hidden], .attachment-empty[hidden] { display: none; }
+.attachment-error[hidden] { display: none; }
 .attachment-confirm { width: 100%; display: grid; gap: 8px; font-size: 13px; overflow-wrap: anywhere; }
 .attachment-confirm > div { display: flex; gap: 8px; }
-#map-details .file-attachments { padding: 12px; margin: 16px 0; }
-#map-details .attachment-drop { padding: 12px; }
-@media (max-width: 480px) { .file-attachments { padding: 14px; } .attachment-drop { gap: 8px; padding: 12px; } .attachment-drop-icon { display: none; } .attachment-drop > .button { width: 100%; justify-content: center; min-height: 40px; } }
+#map-details .file-attachments { margin: 12px 0; }
+@media (pointer: coarse) {
+  .attachment-choose.icon-button { width: 44px; height: 44px; }
+  .markdown-editor > .attachment-choose { top: 0; right: 2px; }
+  .markdown-editor .editor-tabs { min-height: 44px; }
+}
 /* The map inspector has its own generic button styles and less horizontal room. */
 #map-details .attachment-name { padding: 0; background: transparent; border: 0; border-radius: 0; }
 #map-details .attachment-list li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 36px 36px; gap: 8px; }
@@ -37,7 +43,7 @@
 #map-details .attachment-list [data-download].icon-button { grid-column: 3; }
 #map-details .attachment-list .attachment-remove { grid-column: 4; }
 #map-details .attachment-confirm { grid-column: 1 / -1; }
-#map-details .attachment-heading h2 { font-size: 15px; margin: 0; }
+#map-details .attachment-heading h2 { font-size: 12px; margin: 0; }
 @media (max-width: 480px) {
   /* A tall, opaque sheet gives touch users room to read and manage files. */
   #map-inspector:has(.file-attachments) { position: fixed; top: max(80px, 12vh); bottom: max(12px, env(safe-area-inset-bottom)); left: 12px; right: 12px; width: auto; max-width: none; z-index: 20; background: var(--solid); }

@@ -5,17 +5,25 @@ const HeyBossAttachments = (() => {
   const icon = name => HeyBossUI.icon(name);
   const size = n => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`;
   const api = (context, operation, requestID) => HeyBossArtifacts.rpc(context, {action:"attachment", operation}, ["list","download"].includes(operation.command), requestID);
-  function mount(root, context) {
+  function mount(root, context, editor = null) {
     if (!root) return;
     let entries = [], busy = false, pending = null, queue = [], generation = 0;
     root.classList.add("file-attachments");
-    root.innerHTML = `<div class="attachment-heading"><h2>Attachments</h2><span class="attachment-count"></span></div><ul class="attachment-list" aria-label="Attached files"></ul><p class="attachment-empty" hidden>No files attached yet.</p>${context.readonly ? "" : `<div class="attachment-drop"><span class="attachment-drop-icon" aria-hidden="true">${icon("docs")}</span><div><strong>Drop files here</strong><span>Any file type · up to 10 MB per file</span></div><button class="button small" type="button" data-choose>${icon("plus")}Choose files</button><input type="file" multiple hidden aria-label="Attach files"></div>`}<p class="attachment-status" role="status" aria-live="polite">Loading attachments…</p><div class="attachment-error" role="alert" hidden></div>`;
+    root.innerHTML = `<div class="attachment-heading"><h2 hidden>Attachments</h2><span class="attachment-count"></span>${context.readonly ? "" : `<button class="icon-button attachment-choose" type="button" data-choose aria-label="Attach files" title="Attach files or drop them on the input · up to 10 MB each">${icon("paperclip")}</button>`}</div><ul class="attachment-list" aria-label="Attached files"></ul>${context.readonly ? "" : '<input type="file" multiple hidden aria-label="Attach files">'}<p class="attachment-status" role="status" aria-live="polite">Loading attachments…</p><div class="attachment-error" role="alert" hidden></div>`;
     const $ = selector => root.querySelector(selector);
-    const status = message => { if (root.isConnected) $(".attachment-status").textContent = message; };
+    const choose = $("[data-choose]"), drop = editor || root;
+    if (choose && editor) editor.append(choose);
+    if (choose && !editor) choose.title = "Attach files · up to 10 MB each";
+    const visibility = () => {
+      $(".attachment-heading").hidden = !entries.length && !root.contains(choose);
+      root.hidden = !entries.length && !root.contains(choose) && !$(".attachment-status").textContent && $(".attachment-error").hidden;
+    };
+    const status = message => { if (root.isConnected) { $(".attachment-status").textContent = message; visibility(); } };
     const error = (message, retry) => {
       if (!root.isConnected) return;
       const box = $(".attachment-error");box.hidden = false;
       box.innerHTML = `<span>${esc(message)}</span>${retry ? '<button class="button small" type="button">Retry</button>' : ""}`;
+      visibility();
       if (retry) box.querySelector("button").onclick = () => {box.hidden = true;retry();};
     };
     const lock = value => {
@@ -23,14 +31,16 @@ const HeyBossAttachments = (() => {
       root.dataset.busy = String(value);
       root.querySelectorAll("button").forEach(button => button.disabled = value);
       $("input") && ($("input").disabled = value);
-      $(".attachment-drop")?.classList.remove("drag-over");
+      if (choose) choose.disabled = value;
+      drop.classList.remove("attachment-drag-over");
     };
     const render = () => {
       if (!root.isConnected) return;
       $(".attachment-count").textContent = entries.length ? String(entries.length) : "";
-      $(".attachment-empty").hidden = !!entries.length;
+      $(".attachment-heading h2").hidden = !entries.length;
       $(".attachment-list").innerHTML = entries.map(file => `<li data-file="${esc(file.id)}"><span class="attachment-file-icon" aria-hidden="true">${icon("docs")}</span><div class="attachment-info"><button class="attachment-name" type="button" data-download="${esc(file.id)}" title="Download ${esc(file.name)}">${esc(file.name)}</button><span>${size(file.size)}</span></div><button class="icon-button" type="button" data-download="${esc(file.id)}" aria-label="Download ${esc(file.name)}" title="Download">${icon("download")}</button>${context.readonly ? "" : `<button class="icon-button attachment-remove" type="button" data-remove="${esc(file.id)}" aria-label="Remove ${esc(file.name)}" title="Remove">${icon("x")}</button>`}</li>`).join("");
       if (busy) root.querySelectorAll("button").forEach(button => button.disabled = true);
+      visibility();
     };
     async function refresh() {
       const ticket = ++generation;
@@ -65,14 +75,15 @@ const HeyBossAttachments = (() => {
       } finally {lock(false);}
     }
     if (!context.readonly) {
-      const input = $("input"),drop = $(".attachment-drop");
-      $("[data-choose]").onclick = () => input.click();
+      const input = $("input");
+      choose.onclick = () => input.click();
       input.onchange = () => {queue.push(...input.files);input.value="";uploads();};
       let depth=0;
-      drop.addEventListener("dragenter", e => {if(!e.dataTransfer.types.includes("Files"))return;e.preventDefault();depth++;if(!busy)drop.classList.add("drag-over");});
-      drop.addEventListener("dragover", e => {e.preventDefault();e.dataTransfer.dropEffect=busy?"none":"copy";});
-      drop.addEventListener("dragleave", () => {if(--depth<=0){depth=0;drop.classList.remove("drag-over");}});
-      drop.addEventListener("drop", e => {e.preventDefault();depth=0;drop.classList.remove("drag-over");if(busy)return;queue.push(...e.dataTransfer.files);uploads();});
+      const files = e => e.dataTransfer?.types.includes("Files");
+      drop.addEventListener("dragenter", e => {if(!files(e))return;e.preventDefault();depth++;if(!busy)drop.classList.add("attachment-drag-over");});
+      drop.addEventListener("dragover", e => {if(!files(e))return;e.preventDefault();e.dataTransfer.dropEffect=busy?"none":"copy";});
+      drop.addEventListener("dragleave", e => {if(!files(e))return;if(--depth<=0){depth=0;drop.classList.remove("attachment-drag-over");}});
+      drop.addEventListener("drop", e => {if(!files(e))return;e.preventDefault();depth=0;drop.classList.remove("attachment-drag-over");if(busy)return;queue.push(...e.dataTransfer.files);uploads();});
     }
     root.addEventListener("click", async event => {
       const download = event.target.closest("[data-download]");
@@ -92,13 +103,13 @@ const HeyBossAttachments = (() => {
         row.innerHTML = `<div class="attachment-confirm"><span>Remove ${esc(name)}?</span><div><button class="button small danger" type="button" data-confirm-remove="${esc(remove.dataset.remove)}">Remove</button><button class="button small" type="button" data-cancel-remove>Keep file</button></div></div>`;
         row.querySelector("[data-cancel-remove]").focus();
       }
-      if (event.target.closest("[data-cancel-remove]")) {render();$("[data-choose]")?.focus();}
+      if (event.target.closest("[data-cancel-remove]")) {render();choose?.focus();}
       const confirm = event.target.closest("[data-confirm-remove]");
       if (confirm && !busy) {
         const id = confirm.dataset.confirmRemove,requestID = confirm.dataset.requestId ||= crypto.randomUUID();
         lock(true);status("Removing file…");
         try {await api(context,{command:"remove",id},requestID);entries=entries.filter(f=>f.id!==id);render();status("File removed.");}
-        catch(e) {status("");error(e.message);}finally{lock(false);$("[data-choose]")?.focus();}
+        catch(e) {status("");error(e.message);}finally{lock(false);choose?.focus();}
       }
     });
     refresh();
