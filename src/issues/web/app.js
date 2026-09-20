@@ -723,7 +723,9 @@ async function refresh(quiet = true) {
     !model.csrf ||
     document.hidden ||
     $("#editor-dialog").open ||
-    $("#confirm-dialog").open
+    $("#confirm-dialog").open ||
+    $("#transfer-dialog").open ||
+    !!$(".issue-overflow[open]")
   )
     return;
   model.polling = true;
@@ -841,6 +843,19 @@ async function resolveComment(button) {
   }
 }
 function renderDetail(value) {
+  if (value.moved_to) {
+    saveComment();
+    const destination = value.moved_to;
+    const oldKey = draftKey("comment", model.project.id, value.issue.number);
+    const draft = storage.get(oldKey);
+    if (draft && !storage.get(draftKey("comment", destination.project.id, destination.number))) {
+      storage.set(draftKey("comment", destination.project.id, destination.number), draft);
+      storage.remove(oldKey);
+    }
+    navigate({project: destination.project.id, issue: destination.number, state: "open", owner: "all", label: "", search: ""}, true);
+    toast("This issue moved to " + destination.project.name);
+    return;
+  }
   model.detail = value;
   model.orderVersion = value.order_version ?? model.orderVersion;
   const i = value.issue;
@@ -878,6 +893,10 @@ function renderDetail(value) {
   }
   HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || []});
   IssueSubtasks.rendered();
+  if (!deleted) {
+    $(".detail-heading-actions").insertAdjacentHTML("beforeend", `<details class="issue-overflow"><summary class="icon-button" aria-label="More issue actions" title="More issue actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-transfer>${icon("folder")}Move to project…</button></div></details>`);
+    $("[data-transfer]").onclick = openTransfer;
+  }
   $("#history-toggle").onclick = loadHistory;
   if ($("#pr-form"))
     $("#pr-form").onsubmit = (event) => {
@@ -1083,6 +1102,7 @@ async function historyPage(reset = false) {
       deleted: "deleted this issue",
       restored: "restored this issue",
       reordered: "changed this issue’s order",
+      transferred: "moved this issue from another project",
       subtask_added: "added a subtask",
       subtask_removed: "unlinked a subtask",
       parent_added: "added a parent issue",
@@ -1362,6 +1382,82 @@ $("#conflict-replace").onclick = () => {
   saveEditor();
   $("#editor-form").requestSubmit();
 };
+let transferContext = null;
+async function openTransfer() {
+  const issue = model.detail.issue;
+  const context = transferContext = {project: model.project.id, number: issue.number, version: issue.version, host: model.route.host};
+  $(".issue-overflow").open = false;
+  $("#transfer-source").textContent = `${model.project.name} · #${issue.number}`;
+  $("#transfer-project").innerHTML = '<option value="">Loading projects…</option>';
+  $("#transfer-project").disabled = true;
+  $("#transfer-submit").disabled = true;
+  $("#transfer-error").hidden = true;
+  $("#transfer-dialog").showModal();
+  try {
+    const result = await api({action: "projects", include_hidden: false}, context.project, null, context.host);
+    if (transferContext !== context || !$("#transfer-dialog").open) return;
+    const projects = result.projects.filter(p => p.id !== context.project && !p.hidden_at);
+    const names = new Map();
+    projects.forEach(p => names.set(p.name, (names.get(p.name) || 0) + 1));
+    $("#transfer-project").innerHTML = '<option value="">Choose a project…</option>' + projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${names.get(p.name) > 1 ? ` — ${esc(p.id)}` : ""}</option>`).join("");
+    $("#transfer-project").disabled = !projects.length;
+    if (!projects.length) throw new Error("Create another project before moving this issue.");
+    $("#transfer-project").focus();
+  } catch (error) {
+    if (transferContext !== context || !$("#transfer-dialog").open) return;
+    $("#transfer-error").textContent = error.message;
+    $("#transfer-error").hidden = false;
+  }
+}
+$("#transfer-project").onchange = () => { $("#transfer-submit").disabled = !$("#transfer-project").value; };
+$$('[data-transfer-cancel]').forEach(button => button.onclick = () => $("#transfer-dialog").close());
+$("#transfer-dialog").addEventListener("close", () => { transferContext = null; $(".issue-overflow summary")?.focus(); });
+$("#transfer-dialog").addEventListener("cancel", event => {
+  if ($("#transfer-submit").dataset.saving) event.preventDefault();
+});
+$("#transfer-form").onsubmit = async event => {
+  event.preventDefault();
+  const context = transferContext, target = $("#transfer-project").value;
+  if (!context || !target || $("#transfer-submit").dataset.saving) return;
+  if (model.project.id !== context.project || model.route.issue !== context.number || model.route.host !== context.host) {
+    $("#transfer-dialog").close(); return;
+  }
+  const submit = $("#transfer-submit");
+  submit.dataset.saving = "true"; submit.disabled = true;
+  submit.textContent = "Moving…";
+  $("#transfer-project").disabled = true;
+  $$('[data-transfer-cancel]').forEach(button => button.disabled = true);
+  $("#transfer-error").hidden = true;
+  saveComment();
+  try {
+    const result = await mutate({action: "transfer", number: context.number, destination: target, if_version: context.version}, context.project, context.host);
+    const oldKey = draftKey("comment", context.project, context.number, context.host);
+    const draft = storage.get(oldKey);
+    if (draft) storage.set(draftKey("comment", result.project.id, result.issue.number, context.host), draft);
+    storage.remove(oldKey);
+    detailCache.clear(); model.signature = "";
+    $("#transfer-dialog").close();
+    if (model.project.id === context.project && model.route.issue === context.number && model.route.host === context.host) {
+      model.detail = null;
+      navigate({project: result.project.id, issue: result.issue.number, state: result.issue.state, owner: "all", label: "", search: ""});
+    }
+    toast(`Moved to ${result.project.name} · #${result.issue.number}`);
+  } catch (error) {
+    $("#transfer-error").textContent = error.message;
+    $("#transfer-error").hidden = false;
+  } finally {
+    delete submit.dataset.saving; submit.disabled = !$("#transfer-project").value;
+    submit.innerHTML = `Move issue${icon("arrow-right")}`;
+    $("#transfer-project").disabled = false;
+    $$('[data-transfer-cancel]').forEach(button => button.disabled = false);
+  }
+};
+document.addEventListener("click", event => {
+  if (!event.target.closest(".issue-overflow")) $$(".issue-overflow[open]").forEach(menu => menu.open = false);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !$("dialog[open]")) $$(".issue-overflow[open]").forEach(menu => { menu.open = false; $("summary", menu).focus(); });
+});
 function confirmDialog(title, message, submit, input = false) {
   return new Promise((resolve) => {
     confirmResolve = resolve;

@@ -484,6 +484,18 @@
         </div>
       </form>
     </dialog>
+    <dialog id="transfer-dialog" aria-labelledby="transfer-title" aria-describedby="transfer-description">
+      <form id="transfer-form">
+        <div class="dialog-heading"><div><span class="dialog-eyebrow" id="transfer-source"></span><h2 id="transfer-title">Move to project</h2></div><button type="button" class="icon-button" data-transfer-cancel aria-label="Close move dialog"><span data-icon="x"></span></button></div>
+        <div class="dialog-content">
+          <p id="transfer-description">The issue will receive a new number at the bottom of the destination project. Its description, labels, comments, and activity move with it. Existing issue links will open its new location.</p>
+          <label class="field-label" for="transfer-project">Destination project</label>
+          <select id="transfer-project" class="text-input" required><option value="">Choose a project…</option></select>
+          <p id="transfer-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-footer"><button type="button" class="button" data-transfer-cancel>Cancel</button><button type="submit" class="button primary" id="transfer-submit" disabled>Move issue<span data-icon="arrow-right"></span></button></div>
+      </form>
+    </dialog>
     <dialog id="confirm-dialog" aria-labelledby="confirm-title">
       <form id="confirm-form">
         <div class="dialog-heading">
