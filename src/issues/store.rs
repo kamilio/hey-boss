@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "chief.rs"]
+pub(super) mod chief;
 #[path = "claim_recovery.rs"]
 mod claim_recovery;
 #[path = "../mindmap/store.rs"]
@@ -28,6 +30,12 @@ const SCHEMA_VERSION: i64 = 12;
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "project_settings",
+        "chief_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    ("project_settings", "chief_prompt", "TEXT"),
     ("issues", "draft", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "plan", "TEXT"),
     (
@@ -576,6 +584,9 @@ impl Store {
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_row_local' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::fleet::INDEXES)?; }
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs' AND type='table')", [], |r|r.get::<_,bool>(0))? {
+            db.execute_batch(super::chief::SCHEMA)?;
+        }
         Ok(Self { db })
     }
 

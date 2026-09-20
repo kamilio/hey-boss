@@ -317,6 +317,8 @@ impl Worker {
         let stopped = stop.clone();
         let handle = thread::spawn(move || {
             let mut handles: Vec<(String, thread::JoinHandle<()>)> = vec![];
+            let mut chiefs: Vec<thread::JoinHandle<()>> = vec![];
+            let mut last_chief = Instant::now() - Duration::from_secs(5);
             let mut abandoned = Vec::new();
             let mut last_recovery = Instant::now();
             while !stopped.load(Ordering::Relaxed) {
@@ -336,6 +338,7 @@ impl Worker {
                     }
                 }
                 handles = active;
+                chiefs.retain_mut(|handle| !handle.is_finished());
                 abandoned.retain(|id| {
                     if let Err(e) = finalize_abandoned(&mut store, &machine, id) {
                         eprintln!("Worker recovery: {e}");
@@ -357,6 +360,7 @@ impl Worker {
                         eprintln!("Worker upgrade status: {e}");
                     }
                     if handles.is_empty()
+                        && chiefs.is_empty()
                         && abandoned.is_empty()
                         && worker_id
                             .as_deref()
@@ -379,6 +383,20 @@ impl Worker {
                         eprintln!("Worker recovery: {e}");
                     }
                     last_recovery = Instant::now();
+                }
+                if last_chief.elapsed() >= Duration::from_secs(5) {
+                    match store.reserve_chief(&machine, worker_id.as_deref()) {
+                        Ok(Some(job)) => {
+                            let path = path.clone();
+                            let stop = stopped.clone();
+                            chiefs.push(thread::spawn(move || {
+                                super::chief::execute(path, job, stop)
+                            }));
+                        }
+                        Ok(None) => {}
+                        Err(error) => eprintln!("Chief scheduler: {error}"),
+                    }
+                    last_chief = Instant::now();
                 }
                 match store.worker_reserve(&machine, worker_id.as_deref()) {
                     Ok(Some(job)) => {
@@ -407,6 +425,9 @@ impl Worker {
                 {
                     eprintln!("Worker recovery: {e}");
                 }
+            }
+            for handle in chiefs {
+                let _ = handle.join();
             }
         });
         Ok(Self {
@@ -465,7 +486,7 @@ pub fn serve() -> Result<()> {
 fn alive(pid: u32, start: &str) -> bool {
     crate::agents::process_identity(pid).as_deref() == Some(start)
 }
-fn stop_group(pid: u32, start: &str) -> Result<()> {
+pub(super) fn stop_group(pid: u32, start: &str) -> Result<()> {
     if !alive(pid, start) {
         return Ok(());
     }

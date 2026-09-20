@@ -379,6 +379,13 @@ enum SettingsAction {
         boss_name: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
+        /// Enable an hourly organizing agent outside worker concurrency.
+        #[arg(long, conflicts_with = "no_chief")]
+        chief: bool,
+        #[arg(long)]
+        no_chief: bool,
+        #[arg(long)]
+        chief_prompt: Option<String>,
         #[arg(long, conflicts_with = "no_worktree")]
         worktree: bool,
         #[arg(long)]
@@ -477,6 +484,9 @@ impl Options {
                 SettingsAction::Set {
                     boss_name,
                     prompt,
+                    chief,
+                    no_chief,
+                    chief_prompt,
                     prs_enabled,
                     no_prs,
                     worktree,
@@ -486,6 +496,9 @@ impl Options {
                     plan_template,
                 } => {
                     if boss_name.is_none()
+                        && !chief
+                        && !no_chief
+                        && chief_prompt.is_none()
                         && prompt.is_none()
                         && !worktree
                         && !no_worktree
@@ -496,10 +509,18 @@ impl Options {
                         && plan_template.is_none()
                     {
                         return Err(Error::invalid(
-                            "Specify --prompt, --worktree, --no-worktree, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
+                            "Specify --prompt, --chief, --no-chief, --chief-prompt, --worktree, --no-worktree, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
                         ));
                     }
                     Operation::ConfigureProject {
+                        chief_enabled: if *chief {
+                            Some(true)
+                        } else if *no_chief {
+                            Some(false)
+                        } else {
+                            None
+                        },
+                        chief_prompt: chief_prompt.clone(),
                         drafts_enabled: if *drafts_enabled {
                             Some(true)
                         } else if *no_drafts {
@@ -930,9 +951,11 @@ fn print_text(value: &Value) {
     }
     if value.get("prs_enabled").is_some() {
         println!(
-            "Worktrees enabled: {}\nPRs enabled: {}\nShared prompt: {}",
+            "Worktrees enabled: {}\nPRs enabled: {}\nChief enabled: {}\nChief prompt: {}\nShared prompt: {}",
             value["worktree_enabled"],
             value["prs_enabled"],
+            value["chief_enabled"],
+            markdown(&value["chief_prompt"]),
             markdown(&value["prompt"])
         );
     }

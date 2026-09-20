@@ -36,6 +36,11 @@ pub struct Options {
     /// Override project settings to use the existing checkout.
     #[arg(long, conflicts_with = "worktree")]
     no_worktree: bool,
+    /// Enable the per-project hourly organizing agent, outside issue concurrency.
+    #[arg(long, conflicts_with = "no_chief")]
+    chief: bool,
+    #[arg(long, conflicts_with = "chief")]
+    no_chief: bool,
     /// Seconds allowed for Codex to claim its reserved issue.
     #[arg(long)]
     claim_timeout: Option<u32>,
@@ -246,6 +251,30 @@ pub fn run(o: &Options) -> Result<()> {
         c.reservation_seconds = seconds;
     }
     c.enabled = true;
+    if o.chief || o.no_chief {
+        if c.projects.is_empty() {
+            return Err(Error::invalid(
+                "Select a project with --project before enabling or disabling its Chief",
+            ));
+        }
+        for project in &c.projects {
+            store.execute(&request(
+                Operation::ConfigureProject {
+                    chief_enabled: Some(o.chief),
+                    chief_prompt: None,
+                    prompt: None,
+                    boss_name: None,
+                    prs_enabled: None,
+                    worktree_enabled: None,
+                    prompt_overrides: None,
+                    drafts_enabled: None,
+                    plan_template: None,
+                    if_version: None,
+                },
+                Some(project.clone()),
+            ))?;
+        }
+    }
     issues::worker::serve_instance_with_history(
         c,
         o.id.as_deref(),
@@ -291,6 +320,8 @@ fn remote_arguments(o: &Options) -> Vec<String> {
         (o.no_prs, "--no-prs"),
         (o.worktree, "--worktree"),
         (o.no_worktree, "--no-worktree"),
+        (o.chief, "--chief"),
+        (o.no_chief, "--no-chief"),
         (o.json, "--json"),
     ] {
         if enabled {

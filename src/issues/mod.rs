@@ -1,5 +1,6 @@
 //! Durable project issues. SQLite transactions arbitrate ownership; Markdown is text.
 mod discovery;
+use store::chief;
 mod fleet;
 mod global_settings;
 pub mod identity;
@@ -138,6 +139,10 @@ pub enum Operation {
     ProjectSettings,
     ConfigureProject {
         prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chief_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chief_prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boss_name: Option<String>,
         prs_enabled: Option<bool>,
