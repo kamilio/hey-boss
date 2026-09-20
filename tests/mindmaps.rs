@@ -1672,6 +1672,173 @@ fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
 }
 
 #[test]
+fn issue_initial_labels_are_atomic_and_preserve_cross_project_resources() {
+    let f = Fixture::new();
+    f.issue(
+        "Platform",
+        &[
+            "create",
+            "--title",
+            "Technical title",
+            "--body",
+            "Live body",
+            "--label",
+            "ready",
+        ],
+    );
+    f.issue("Platform", &["claim", "1"]);
+    f.issue("Platform", &["subtask", "create", "1", "--title", "Child"]);
+    f.issue(
+        "Platform",
+        &["pr", "add", "1", "https://github.com/example/repo/pull/36"],
+    );
+    f.issue("Platform", &["close", "1"]);
+    let resource = f.issue("Platform", &["view", "1"]);
+    let children = f.issue("Platform", &["subtask", "list", "1", "--all"]);
+    let root = f.run("Atlas", &["add", "Root", "--id", "root"]);
+    let args = [
+        "issue",
+        "1",
+        "--issue-project",
+        "Platform",
+        "--id",
+        "api",
+        "--under",
+        "root",
+        "--title",
+        "Simple API",
+        "--if-version",
+        "1",
+        "--request-id",
+        "initial-label",
+    ];
+    let saved = f.run("Atlas", &args);
+    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["node"]["display_label"], "Simple API");
+    assert_eq!(saved["node"]["parent_id"], root["node"]["id"]);
+    assert_eq!(f.run("Atlas", &args), saved);
+    let view = f.run("Atlas", &["view", "api"]);
+    assert_eq!(view["node"]["title"], "Simple API");
+    assert_eq!(view["node"]["original_title"], "Technical title");
+    assert_eq!(view["node"]["body"], "Live body");
+    assert_eq!(view["node"]["state"], "closed");
+    assert_eq!(view["node"]["labels"], json!(["ready"]));
+    assert!(
+        f.run("Atlas", &["links", "api"])["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link["automatic"] == true)
+    );
+    let no_op = f.run(
+        "Atlas",
+        &[
+            "issue",
+            "1",
+            "--issue-project",
+            "Platform",
+            "--title",
+            "Simple API",
+            "--if-version",
+            "2",
+        ],
+    );
+    assert_eq!(no_op["changed"], false);
+    assert_eq!(no_op["version"], 2);
+    assert_eq!(no_op["node"]["updated_at"], saved["node"]["updated_at"]);
+    f.fail(
+        "Atlas",
+        &[
+            "issue",
+            "1",
+            "--issue-project",
+            "Platform",
+            "--title",
+            "Stale",
+            "--if-version",
+            "1",
+        ],
+        4,
+    );
+    f.fail(
+        "Atlas",
+        &[
+            "issue",
+            "1",
+            "--issue-project",
+            "Platform",
+            "--title",
+            "Do not save",
+            "--id",
+            "other",
+        ],
+        4,
+    );
+    assert_eq!(f.run("Atlas", &["show"])["version"], 2);
+    let changed = f.run(
+        "Atlas",
+        &[
+            "issue",
+            "1",
+            "--issue-project",
+            "Platform",
+            "--title",
+            "New label",
+            "--under",
+            "root",
+            "--id",
+            "api",
+            "--if-version",
+            "2",
+        ],
+    );
+    assert_eq!(changed["version"], 3);
+    assert_eq!(changed["node"]["id"], saved["node"]["id"]);
+    assert_eq!(f.run("Atlas", &args), saved);
+    let before_conflict = f.run("Atlas", &["show"]);
+    f.fail(
+        "Atlas",
+        &[
+            "issue",
+            "1",
+            "--issue-project",
+            "Platform",
+            "--title",
+            "Do not save",
+            "--under",
+            "api",
+        ],
+        4,
+    );
+    f.fail("Atlas", &["issue", "1", "--issue-project", "Platform"], 4);
+    assert_eq!(f.run("Atlas", &["show"]), before_conflict);
+    assert_eq!(f.issue("Platform", &["view", "1"]), resource);
+    assert_eq!(
+        f.issue("Platform", &["subtask", "list", "1", "--all"]),
+        children
+    );
+    f.issue("Atlas", &["create", "--title", "Local issue"]);
+    let before = f.run("Atlas", &["show"]);
+    f.fail("Atlas", &["issue", "1", "--title", &"x".repeat(513)], 2);
+    f.fail("Atlas", &["issue", "1", "--title", ""], 2);
+    f.fail(
+        "Atlas",
+        &["issue", "1", "--title", "Local label", "--under", "missing"],
+        3,
+    );
+    assert_eq!(f.run("Atlas", &["show"]), before);
+    let local = f.run(
+        "Atlas",
+        &["issue", "1", "--title", "Local label", "--if-version", "3"],
+    );
+    assert_eq!(local["version"], 4);
+    assert_eq!(
+        f.run("Atlas", &["view", "issue:1"])["node"]["title"],
+        "Local label"
+    );
+}
+
+#[test]
 fn issue_map_labels_preserve_live_resources_versions_and_retries() {
     let f = Fixture::new();
     f.issue(

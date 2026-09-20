@@ -141,6 +141,8 @@ pub enum Operation {
     },
     Add {
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_label: Option<String>,
         body: String,
         kind: String,
         reference: Option<String>,
@@ -213,6 +215,7 @@ impl Operation {
             }
             Self::Add {
                 title,
+                display_label,
                 body,
                 kind,
                 alias,
@@ -230,6 +233,14 @@ impl Operation {
                     512
                 };
                 crate::issues::identifier(title, "node title", title_limit)?;
+                if let Some(label) = display_label {
+                    if kind != "issue" {
+                        return Err(Error::invalid(
+                            "Initial display labels require an issue node",
+                        ));
+                    }
+                    crate::issues::identifier(label, "node title", 512)?;
+                }
                 validate_body(body)?;
                 if let Some(alias) = alias {
                     validate_alias(alias)?;
