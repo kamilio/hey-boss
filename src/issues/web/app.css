@@ -2594,12 +2594,19 @@ button.avatar.self:hover {
 .draft-choice.selected { border-color:var(--accent); background:var(--accent-soft); }
 .draft-choice.unavailable { cursor:default; }
 .draft-choice:focus-within { outline:2px solid var(--accent); outline-offset:3px; }
+#editor-form { display:flex; flex-direction:column; max-height:calc(100dvh - 48px); }
+#editor-form .dialog-heading, #editor-form .dialog-footer { flex-shrink:0; }
+#editor-form .dialog-content { min-height:0; overflow-y:auto; }
 @media (max-width:480px) {
   .draft-notice { display:grid; grid-template-columns:18px minmax(0,1fr); gap:10px; padding:16px; }
   .draft-notice-icon { padding-top:2px; }
   .draft-notice .button { grid-column:2; justify-self:start; }
   .draft-choice { padding:12px; gap:10px; }
   #editor-draft-control > .draft-badge { display:none; }
+  #editor-form .dialog-footer { flex-wrap:wrap; padding:12px 16px; }
+  #editor-form .dialog-footer > div { flex:1 1 100%; justify-content:flex-end; flex-wrap:wrap; }
+  #editor-form .dialog-footer .button { min-height:40px; }
+  .sidebar .side-section { flex-basis:100%; }
 }
 @media (max-width:480px) {
  .workflow-branches { grid-template-columns:1fr; }
