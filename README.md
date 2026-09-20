@@ -81,6 +81,10 @@ and redeploys changed source builds. Open **Agents** (`/agents`) for a project
 view of each task and the device where it runs. Open a task for its live Codex
 conversation: the original request, saved replies, and expandable tool activity.
 Conversations open at the latest activity; load earlier messages above it.
+Choose **Take over** in a live conversation to stop that agent and assign its issue
+to Boss. After it stops, **Copy command** gives you a terminal command to resume
+the saved session, including SSH and the checkout directory for remote devices.
+The same action is available on paired devices. Other agents keep working.
 Live updates preserve your reading position. Completed conversations remain under each project's history;
 disconnected tasks show their last known state. **Manage devices** keeps
 pause/resume/stop/restart controls out of the task overview. `/workers` remains

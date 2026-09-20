@@ -27,6 +27,8 @@
           <a id="back" class="back-link" href="/agents"><span data-icon="arrow-left"></span>Agents</a>
           <div class="session-heading"><div><p id="session-context" class="session-context"></p><h1 id="session-title">Loading conversation…</h1></div><div id="session-state"></div></div>
           <div class="session-subheading"><p id="session-status" role="status"></p><a id="session-issue" class="project-issues"></a></div>
+          <div class="session-actions"><button id="takeover-open" class="button" type="button" hidden>Take over</button><p id="takeover-note" class="device-note" role="status" hidden></p></div>
+          <section id="resume-panel" class="resume-panel" aria-label="Resume your agent" hidden><h2>You’re in charge</h2><p id="resume-note">The agent has stopped and the issue is assigned to you. Run this command in your terminal to continue the saved session.</p><div class="resume-command"><code id="resume-command"></code><button id="resume-copy" class="button" type="button">Copy command</button></div><p id="copy-status" role="status"></p></section>
         </header>
         <div class="conversation-wrap">
           <div class="conversation-intro"><span data-icon="spark"></span><span>The conversation behind the work</span></div>
@@ -39,5 +41,6 @@
       </div>
       <footer class="page-footer"><span data-icon="spark"></span><span>Good work, in good company.</span><button id="refresh" class="button small" type="button"><span data-icon="refresh"></span>Refresh</button></footer>
     </main>
+    <dialog id="takeover-dialog" class="takeover-dialog" aria-labelledby="takeover-title"><h2 id="takeover-title">Take over this task?</h2><p>Stop this agent and assign its issue to you. You can continue its saved session in your terminal.</p><p id="takeover-task" class="takeover-task"></p><div class="takeover-dialog-actions"><button id="takeover-cancel" class="button" type="button">Keep agent working</button><button id="takeover-confirm" class="button primary" type="button">Take over</button></div></dialog>
   </body>
 </html>

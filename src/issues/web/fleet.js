@@ -38,7 +38,7 @@ function projectView(data, now = Date.now()) {
 }
 function agentState(entry) {
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
-  return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
+  return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
 }
 if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState};
 if (typeof document !== 'undefined') (() => {
@@ -51,6 +51,15 @@ if (typeof document !== 'undefined') (() => {
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=true, selected;
   const seen = new Set();
+  let takeoverBusy=false, takeoverTarget;
+  const takeovers=new Map();
+  const takeoverKey=entry=>entry.machine.host+':'+entry.run.id;
+  function savedTakeover(entry) {
+    const key=takeoverKey(entry);
+    if(!takeovers.has(key)){try{const saved=JSON.parse(sessionStorage.getItem('takeover:'+key));if(saved)takeovers.set(key,saved);}catch{}}
+    return takeovers.get(key);
+  }
+  function saveTakeover(entry,value) {const key=takeoverKey(entry);takeovers.set(key,value);try{sessionStorage.setItem('takeover:'+key,JSON.stringify(value));}catch{}}
   HeyBossUI.icons();
   const picker = new HeyBossUI.ProjectPicker({onSelect(project){location.href=base+'#'+new URLSearchParams({project});}});
   function context() {
@@ -116,7 +125,7 @@ if (typeof document !== 'undefined') (() => {
   function renderDetail(data) {
     selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>e.machine.host===route().get('host')&&e.run.id===route().get('run'));
     $('back').href=base+(route().get('project')?'#'+new URLSearchParams({project:route().get('project')}):'');
-    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent='This agent is no longer in recent activity.';return;}
+    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent='This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
     $('session-title').textContent=run.title||'Preparing your task';
@@ -124,6 +133,7 @@ if (typeof document !== 'undefined') (() => {
     $('session-state').replaceChildren(stateBadge(selected));
     $('session-issue').href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
     $('session-status').textContent=!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
+    renderTakeover();
     if(!loaded&&!loading)loadConversation();
   }
   function render(data) {last=data;if(detail)renderDetail(data);else renderOverview(data);}
@@ -132,6 +142,30 @@ if (typeof document !== 'undefined') (() => {
     if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not connect. Try again.');return data;
   }
   function fail(error) {$('error').textContent=error.message;$('error').hidden=false;}
+  function renderTakeover() {
+    const state=savedTakeover(selected), button=$('takeover-open');
+    button.hidden=Boolean(state?.stopped)||(runEnded()&&!state?.pending);
+    button.disabled=takeoverBusy||!selected.online;
+    button.textContent=state?.pending?'Check takeover':'Take over';
+    $('takeover-note').hidden=!state?.pending;
+    $('takeover-note').textContent=state?.error||(!selected.online?'Reconnect this device to finish taking over.':state?.assigned?'Stopping the agent. Your issue is assigned to you; the resume command will appear when it stops.':'Waiting for the device to confirm takeover…');
+    $('resume-panel').hidden=!state?.stopped;
+    if(state?.stopped){$('resume-command').textContent=state.resume_command||'';$('resume-copy').hidden=!state.resume_command;$('resume-command').hidden=!state.resume_command;$('resume-note').textContent=state.resume_command?'The agent has stopped and the issue is assigned to you. Run this command in your terminal to continue the saved session.':'The agent has stopped and the issue is assigned to you. It did not save a resumable session.';}
+  }
+  const runEnded=()=>selected.run.finished_at!=null;
+  async function takeOver(entry) {
+    if(takeoverBusy)return;
+    takeoverBusy=true;const token=generation;
+    saveTakeover(entry,{...savedTakeover(entry),pending:true,error:null});
+    if(selected)renderTakeover();
+    try{
+      const response=await fetch('/api/fleet/takeover',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({host:entry.machine.host,run:entry.run.id})});
+      const result=await response.json();
+      if(!response.ok||result.ok===false)throw Error(result.error?.message||result.error||'Could not take over. Refresh and try again.');
+      saveTakeover(entry,{pending:!result.stopped,assigned:true,stopped:result.stopped,resume_command:result.resume_command});
+      if(token===generation&&!disposed){$('error').hidden=true;await refresh();}
+    }catch(e){saveTakeover(entry,{...savedTakeover(entry),pending:true,error:e.message});if(token===generation&&!disposed)fail(e);}finally{takeoverBusy=false;if(selected&&token===generation&&!disposed)renderTakeover();}
+  }
   async function refresh() {
     if(refreshing)return;refreshing=true;
     try{render(await read('/api/fleet/status'));$('error').hidden=true;}catch(e){fail(e);if(last)render(last);}finally{refreshing=false;}
@@ -175,6 +209,16 @@ if (typeof document !== 'undefined') (() => {
   }
   $('overview-page').hidden=detail;$('session-page').hidden=!detail;
   if(detail){document.body.classList.add('conversation-page');$('load-earlier').onclick=()=>{follow=false;loadConversation(true);};$('jump-live').onclick=()=>{follow=true;$('conversation-end').scrollIntoView({behavior:'smooth',block:'end'});$('jump-live').hidden=true;};addEventListener('scroll',()=>{follow=$('conversation-end').getBoundingClientRect().bottom<=innerHeight+160;$('jump-live').hidden=follow||!seen.size;},{passive:true});}
+  $('takeover-open').onclick=()=>{
+    if(!selected)return;
+    if(savedTakeover(selected)?.pending){takeOver(selected);return;}
+    takeoverTarget=selected;
+    $('takeover-task').textContent='Issue #'+selected.run.number+' · '+(selected.run.title||'Preparing your task')+' · '+(selected.machine.hostname||selected.machine.host);
+    $('takeover-dialog').showModal();$('takeover-cancel').focus();
+  };
+  $('takeover-cancel').onclick=()=>$('takeover-dialog').close();
+  $('takeover-confirm').onclick=()=>{const entry=takeoverTarget;$('takeover-dialog').close();if(entry)takeOver(entry);};
+  $('resume-copy').onclick=async()=>{const command=$('resume-command').textContent;try{await navigator.clipboard.writeText(command);$('copy-status').textContent='Command copied.';}catch{$('copy-status').textContent='Select the command and copy it with your keyboard.';const range=document.createRange();range.selectNodeContents($('resume-command'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}};
   $('refresh').onclick=async()=>{await refresh();if(detail)await loadConversation();};
   $('device-list').onclick=async event=>{
     const b=event.target.closest('button[data-signal]');if(!b)return;
@@ -182,7 +226,7 @@ if (typeof document !== 'undefined') (() => {
     b.disabled=true;
     try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:crypto.randomUUID()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
   };
-  addEventListener('hashchange',()=>{if(detail){generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('hashchange',()=>{if(detail){$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{
@@ -191,6 +235,6 @@ if (typeof document !== 'undefined') (() => {
     await refresh();
     if(!mobile){const events=new EventSource('/api/fleet/events');events.addEventListener('connected',()=>refresh());events.onmessage=()=>refresh();events.onerror=()=>{$('connection').classList.add('offline');$('connection').querySelector('span').textContent='Reconnecting…';};events.onopen=()=>{$('connection').classList.remove('offline');$('connection').querySelector('span').textContent='Connected';};}
   }catch(e){fail(e);}})();
-  setInterval(()=>{if(!document.hidden){refresh();if(detail)loadConversation();}},3000);
+  setInterval(()=>{if(!document.hidden&&!disposed){refresh();if(detail){loadConversation();const state=selected&&savedTakeover(selected);if(selected?.online&&state?.pending&&!state.error)takeOver(selected);}}},3000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();if(detail)loadConversation();}});
 })();
