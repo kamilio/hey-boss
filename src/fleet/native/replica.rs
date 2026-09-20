@@ -139,6 +139,10 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         m.entry("drafts_enabled").or_insert(json!(1));
         m.entry("plan_template")
             .or_insert(json!("plans/{timestamp}-{number}.md"));
+        m.entry("worktree_enabled").or_insert(json!(0));
+        m.entry("prompt_overrides").or_insert(json!("{}"));
+        m.entry("chief_enabled").or_insert(json!(0));
+        m.entry("chief_prompt").or_insert(Value::Null);
     }
     if table == "issue_pull_requests" {
         row.as_object_mut()
@@ -1578,6 +1582,91 @@ mod tests {
             assert_eq!(pr["added_by"], "human:fixture");
             assert_eq!(pr["created_at"], 123);
         }
+    }
+
+    #[test]
+    fn legacy_project_settings_replay_uses_migration_defaults() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name) VALUES('named:Native fleet','Instructions',0,1,'Boss')", []).unwrap();
+        let expected = rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()[0].clone();
+        let mut legacy = expected.clone();
+        for column in [
+            "drafts_enabled",
+            "plan_template",
+            "worktree_enabled",
+            "prompt_overrides",
+            "chief_enabled",
+            "chief_prompt",
+        ] {
+            legacy.as_object_mut().unwrap().remove(column);
+        }
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        let pull = json!({"changes":[{"seq":100,"table_name":"project_settings","before_json":null,"after_json":legacy.to_string()}],"cursor":100,"allocations":[],"ranges":[]});
+        apply_pull(&agent.db, "agent", &pull, &[]).unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT * FROM project_settings", &[]).unwrap()[0],
+            expected
+        );
+        assert_eq!(state_get(&agent.db, "cursor", json!(0)).unwrap(), 100);
+    }
+
+    #[test]
+    fn project_settings_snapshot_preserves_explicit_additive_fields() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt) VALUES('named:Native fleet','Shared instructions',1,7,'Boss',0,'custom/{number}.md',1,'{\"main\":\"Ship {{number}}\"}',1,'Review the release')", []).unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT * FROM project_settings", &[]).unwrap(),
+            rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_project_settings_reject_missing_required_and_unknown_fields() {
+        let f = Fixture::new();
+        let legacy = json!({"project_id":"named:Native fleet","prompt":"Instructions","prs_enabled":0,"version":1,"boss_name":"Boss"});
+        put_row(&f.db, "project_settings", &legacy).unwrap();
+        let original = rows(&f.db, "SELECT * FROM project_settings", &[]).unwrap();
+        for required in [
+            "project_id",
+            "prompt",
+            "prs_enabled",
+            "version",
+            "boss_name",
+        ] {
+            let mut incomplete = legacy.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            assert!(
+                put_row(&f.db, "project_settings", &incomplete)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Schema mismatch for project_settings"),
+                "{required}"
+            );
+        }
+        let mut unknown = legacy;
+        unknown["future_setting"] = json!(true);
+        assert!(
+            put_row(&f.db, "project_settings", &unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("Schema mismatch for project_settings")
+        );
+        assert_eq!(
+            rows(&f.db, "SELECT * FROM project_settings", &[]).unwrap(),
+            original
+        );
     }
 
     #[test]
