@@ -73,6 +73,9 @@ pub struct Settings {
     pub tags: Vec<String>,
     pub projects: Vec<String>,
     pub directory: String,
+    /// Explicit checkouts keyed by project; empty for legacy/discovered workers.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub directories: std::collections::BTreeMap<String, String>,
     pub prompt: Option<String>,
     pub prs_enabled: Option<bool>,
     pub worktree_enabled: Option<bool>,
@@ -89,6 +92,7 @@ impl Default for Settings {
             tags: vec![],
             projects: vec![],
             directory: String::new(),
+            directories: Default::default(),
             prompt: None,
             prs_enabled: None,
             worktree_enabled: None,
@@ -139,6 +143,29 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
         return Err(Error::invalid(
             "A checkout directory requires one project; leave it empty to discover directories for multiple projects",
         ));
+    }
+    if !c.directory.is_empty() && !c.directories.is_empty() {
+        return Err(Error::invalid(
+            "Use either a single checkout or per-project checkouts",
+        ));
+    }
+    for (project, path) in &c.directories {
+        if !c.projects.contains(project) {
+            return Err(Error::invalid(
+                "Each checkout must belong to a selected project",
+            ));
+        }
+        if !Path::new(path).is_absolute() || !Path::new(path).is_dir() {
+            return Err(Error::invalid(
+                "Choose an existing absolute checkout directory",
+            ));
+        }
+        let actual = identity::project(Path::new(path), &identity::machine()?)?;
+        if !project.starts_with("named:") && actual.id != *project {
+            return Err(Error::invalid(
+                "A worker checkout belongs to a different project",
+            ));
+        }
     }
     if c.enabled {
         codex_binary()?;
@@ -1265,6 +1292,14 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         );
     }
     println!("Projects: {}", v["config"]["projects"]);
+    if let Some(directories) = v["config"]["directories"].as_object() {
+        for (project, path) in directories {
+            println!(
+                "Checkout: {project} · {}",
+                path.as_str().unwrap_or_default()
+            );
+        }
+    }
     if matches!(v["fleet"]["role"].as_str(), Some("companion" | "agent")) {
         println!(
             "Fleet replica · {} local changes waiting to synchronize · workers can continue reserved work offline",
