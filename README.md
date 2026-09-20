@@ -262,6 +262,22 @@ and PR behavior. The stable assignee remains `human:boss`. The CLI equivalents a
 `--host HOST` to address a remote issue store. Settings are stored in SQLite,
 with version checks and request IDs for safe retries.
 
+## Chief
+
+Enable a project's **Chief** in Project settings or with `hey-boss worker --chief`.
+It is disabled by default. While a worker monitors that project, Chief runs one
+organizing pass each hour, outside issue concurrency. Its separate prompt covers
+issues, PR readiness, and mindmap maintenance; workers handle code changes.
+Chief finishes each pass without a goal and resumes the same saved Codex thread,
+including after worker restarts. A missing thread starts a replacement; ordinary
+failures retain the conversation and retry on the next hourly pass.
+
+`hey-boss issue settings set --chief --chief-prompt 'Review issues and PRs, then stop.'`
+sets the project prompt. Use `--no-chief` to disable it; an active pass is stopped.
+Workers on the same machine share one Chief reservation per project. Separate
+authoritative issue stores keep their own Chief configuration and conversation.
+Stopping a worker stops its owned Chief too. Passes have a thirty-minute limit.
+
 ## Upgrading every machine
 
 Run `hey-boss upgrade` on the Mac to update its CLI, desktop app, canonical agent

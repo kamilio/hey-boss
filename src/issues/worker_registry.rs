@@ -37,6 +37,8 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 struct ProjectSettingsRow {
+    chief_enabled: bool,
+    chief_prompt: Option<String>,
     prompt: String,
     prs: bool,
     version: i64,
@@ -47,15 +49,18 @@ struct ProjectSettingsRow {
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
+            chief_enabled: r.get(7)?, chief_prompt: r.get(8)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
             drafts_enabled: r.get(3)?, plan_template: r.get(4)?,
             worktree_enabled: r.get(5)?, overrides: r.get(6)?,
         }),
     ).optional()?;
     let ProjectSettingsRow {
+        chief_enabled,
+        chief_prompt,
         prompt,
         prs,
         version,
@@ -64,6 +69,8 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
+        chief_enabled: false,
+        chief_prompt: None,
         prompt: worker::DEFAULT_PROMPT.into(),
         prs: false,
         version: 0,
@@ -76,7 +83,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -143,6 +150,53 @@ fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> 
             defaults["prompt_overrides"].clone(),
         )?),
     })
+}
+
+impl Store {
+    pub(crate) fn chief_candidates(
+        &self,
+        worker_id: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.db.prepare("SELECT config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start)")?;
+        let settings = stmt
+            .query_map([worker_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut projects_stmt = self.db.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL ORDER BY p.id")?;
+        let projects = projects_stmt
+            .query_map([], |r| {
+                Ok(Project {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut result = Vec::new();
+        for text in settings {
+            let config: Settings = serde_json::from_str(&text)?;
+            for project in &projects {
+                if !config.projects.is_empty() && !config.projects.contains(&project.id) {
+                    continue;
+                }
+                if result.iter().any(|(id, _, _)| id == &project.id) {
+                    continue;
+                }
+                let cwd = if config.directory.is_empty() {
+                    directory(&self.db, project)?
+                } else {
+                    config.directory.clone()
+                };
+                if cwd.is_empty() {
+                    continue;
+                }
+                let prompt = project_settings(&self.db, project)?["chief_prompt"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                result.push((project.id.clone(), cwd, prompt));
+            }
+        }
+        Ok(result)
+    }
 }
 const ELIGIBLE:&str="i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
  AND (json_array_length(?1)=0 OR i.project_id IN(SELECT value FROM json_each(?1)))
@@ -379,6 +433,8 @@ pub(super) fn execute(
         Operation::ProjectSettings => project_settings(db, p),
         Operation::ConfigureProject {
             prompt,
+            chief_enabled,
+            chief_prompt,
             boss_name,
             prs_enabled,
             worktree_enabled,
@@ -419,6 +475,25 @@ pub(super) fn execute(
                 crate::issues::global_settings::configure(db, name, None)?;
             }
             db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,plan_template=excluded.plan_template,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,plan_template,worktree_enabled,serde_json::to_string(&prompt_overrides)?])?;
+            let chief_prompt = chief_prompt
+                .as_deref()
+                .unwrap_or(defaults["chief_prompt"].as_str().unwrap());
+            if chief_prompt.trim().is_empty()
+                || chief_prompt.len() > 32000
+                || chief_prompt.trim_start().starts_with("/goal")
+            {
+                return Err(Error::invalid(
+                    "Chief prompt must contain 1–32000 bytes and cannot start with /goal",
+                ));
+            }
+            db.execute(
+                "UPDATE project_settings SET chief_enabled=?2,chief_prompt=?3 WHERE project_id=?1",
+                params![
+                    p.id,
+                    chief_enabled.unwrap_or(defaults["chief_enabled"] == true),
+                    chief_prompt
+                ],
+            )?;
             project_settings(db, p)
         }
         Operation::PullRequests { number }
