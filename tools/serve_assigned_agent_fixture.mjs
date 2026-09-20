@@ -1,0 +1,24 @@
+// Isolated assignment navigation fixture; no real workers or fleet services.
+import {mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {spawn,spawnSync} from 'node:child_process';
+import {createServer} from 'node:net';
+import {resolve} from 'node:path';
+const root=resolve('output/playwright/issue68/runtime'), binary=resolve('target/debug/hey-boss');
+mkdirSync(root,{recursive:true});
+const env={...process.env,HEY_BOSS_ISSUE_DB:root+'/issues.db',HEY_BOSS_FLEET_STATE:root,CODEX_HOME:root+'/codex',HEY_BOSS_INBOX_SOCKET:root+'/inbox.sock'};
+for(const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_AGENT_ID'])delete env[key];
+const session='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+env.HEY_BOSS_AGENT_ID='human:qa';
+const cli=args=>{const r=spawnSync(binary,['issue','--project','Assignment QA',...args],{env,encoding:'utf8'});if(r.status)throw Error(r.stderr);};
+for(const title of ['Keep conversations intact across device reconnects','Review the finished design','Ready for the next agent','Manual assignment without recorded history'])cli(['create','--title',title]);
+cli(['claim','1','--agent','codex:'+session]);cli(['assign-to-boss','2']);cli(['claim','4','--agent','codex:missing']);
+const path=root+'/codex/sessions/2026/09/20/rollout-fixture-'+session+'.jsonl';mkdirSync(resolve(path,'..'),{recursive:true});
+writeFileSync(path,[['user','Please preserve my conversation.'],['assistant','The correct assigned session is open.']].map(([role,text])=>JSON.stringify({type:'response_item',payload:{type:'message',role,content:[{type:'output_text',text}]}})+'\n').join(''));
+const sql="INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,session_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES('assigned-run','named:Assignment QA',1,'{\"issue\":{\"title\":\"Keep conversations intact across device reconnects\"}}','worker:assigned',?,'completed',1,'fixture','local',2,2,3)";
+const db=spawnSync(binary,['fleet','database','--path',env.HEY_BOSS_ISSUE_DB],{input:JSON.stringify({sql,args:[session]})+'\n',encoding:'utf8'});if(db.status||!JSON.parse(db.stdout).ok)throw Error(db.stderr||db.stdout);
+const run={id:'assigned-run',project_id:'named:Assignment QA',project_name:'Assignment QA',number:1,title:'Keep conversations intact across device reconnects',session_id:session,actor_id:'worker:assigned',state:'completed',started_at:2,finished_at:3};
+const snapshot=()=>({ok:true,machines:[{host:'local',hostname:'This MacBook',state:'connected',heartbeat:Date.now()/1000,workers:[{id:'fixture',pid:1,runs:[run,{...run,id:'wrong-owner',session_id:'other',started_at:100}]}]},{host:'devbox',hostname:'Devbox',state:'disconnected',heartbeat:0,workers:[{id:'remote',runs:[{...run,id:'remote-run',number:5}]}]}],signals:[],conflicts:[]});
+const sockets=new Set();let web;
+const server=createServer(client=>{sockets.add(client);client.on('close',()=>sockets.delete(client));let input='';client.on('data',chunk=>{input+=chunk;if(!input.includes('\n'))return;const request=JSON.parse(input);if(request.kind==='subscribe'){client.write('event: connected\ndata: {}\n\n');return;}client.end(JSON.stringify(request.kind==='status'?snapshot():{ok:false,error:'Read-only fixture'}));});});
+server.listen(root+'/fleet.sock',()=>{web=spawn(binary,['issue','web','--port','59668','--no-discovery','--project','Assignment QA','--json'],{env,stdio:['ignore','inherit','inherit']});});
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{web?.kill();for(const socket of sockets)socket.destroy();server.close(()=>{rmSync(root,{recursive:true,force:true});process.exit(0);});});

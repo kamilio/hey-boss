@@ -40,6 +40,15 @@ function agentState(entry) {
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
   return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
 }
+// Assignment links resolve once, then use the normal device/run conversation URL.
+function assignedAgentEntry(data, query) {
+  const agent = query.get('agent'), project = query.get('project'), number = Number(query.get('issue'));
+  if (!agent || agent.startsWith('human:') || !project || !Number.isSafeInteger(number) || number <= 0) return;
+  return projectView(data).flatMap(p => [...p.active, ...p.history])
+    .filter(e => e.run.project_id === project && e.run.number === number &&
+      (e.run.actor_id === agent || (agent.startsWith('codex:') && e.run.session_id === agent.slice(6))))
+    .sort((a,b) => (b.run.started_at || 0) - (a.run.started_at || 0))[0];
+}
 function deviceView(data, project, now = Date.now()) {
   return (data.machines || []).map(machine => {
     const workers = (machine.workers || []).filter(w => !project || !w.config?.projects?.length || w.config.projects.includes(project));
@@ -50,7 +59,7 @@ function deviceView(data, project, now = Date.now()) {
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView, assignedAgentEntry};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -163,10 +172,15 @@ if (typeof document !== 'undefined') (() => {
     $('device-settings').hidden=mobile||!controls.length;
   }
   function renderDetail(data) {
+    const assignment = route().get('agent');
+    if (assignment) {
+      const entry = assignedAgentEntry(data, route());
+      if (entry) history.replaceState(null, '', link(entry));
+    }
     const resource=HeyBossRoutes.resolve();
     selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&e.machine.host===resource.host&&e.run.id===resource.id);
     $('back').href=base+(route().get('project')?'#'+new URLSearchParams({project:route().get('project')}):'');
-    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent='This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
+    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
     $('session-title').textContent=run.title||'Preparing your task';
