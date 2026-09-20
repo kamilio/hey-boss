@@ -18,3 +18,15 @@ const artifact=readFileSync(new URL('artifacts.html',destination),'utf8');
 const start=artifact.indexOf('<main id="artifact-main"');
 const end=artifact.indexOf('</main>',start)+7;
 writeFileSync(new URL('resource.html',destination),artifact.slice(0,start)+'<main id="resource-main"><p id="resource-status" role="status">Loading project resource…</p><div id="resource-content"></div><section id="resource-artifacts"></section></main>'+artifact.slice(end));
+
+const agentDestination=new URL('./public/agent-web/',import.meta.url);
+mkdirSync(agentDestination,{recursive:true});
+for(const name of ['fleet.html','fleet.js','fleet.css']){
+ let value=readFileSync(new URL(name,source));
+ if(name==='fleet.html')value=Buffer.from(value.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replace(/<!--[^]*?-->/g,''))
+  .replace('<html lang="en">','<html lang="en" data-agent-mobile="true">')
+  .replace(/<script src="\/quick-issue.js" defer><\/script>/g,'')
+  .replace(/(src|href)="\/(components.js|components.css|icon.png)"/g,'$1="/artifact-web/$2"')
+  .replace(/(src|href)="\/(fleet.js|fleet.css)"/g,'$1="/agent-web/$2"'));
+ writeFileSync(new URL(name,agentDestination),value);
+}
