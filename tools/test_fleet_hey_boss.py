@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('fleet', ROOT / 'tools/fleet_hey_boss.py')
+spec = importlib.util.spec_from_file_location('fleet', ROOT / 'tools/test_fleet_reference.py')
 fleet = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet)
 BINARY = pathlib.Path(os.environ.get('HEY_BOSS_TEST_BINARY', ROOT / 'target/debug/hey-boss')).resolve()
@@ -653,7 +653,7 @@ class FleetTests(unittest.TestCase):
         code = "import importlib.util,sys,time; spec=importlib.util.spec_from_file_location('fleet',sys.argv[1]); f=importlib.util.module_from_spec(spec); spec.loader.exec_module(f); f.worker_status=lambda: []; f.apply_signal=lambda db,m: (time.sleep(2), {'id':m['id'],'state':'acknowledged'})[1]; f.companion_stdio()"
         environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.agent_path), 'HEY_BOSS_FLEET_STATE': str(self.root / 'async-state'), 'HEY_BOSS_FLEET_BINARY': str(BINARY)}
         environment.pop('HEY_BOSS_ISSUE_HOST', None)
-        process = subprocess.Popen([sys.executable, '-c', code, str(ROOT / 'tools/fleet_hey_boss.py')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        process = subprocess.Popen([sys.executable, '-c', code, str(ROOT / 'tools/test_fleet_reference.py')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
         try:
             self.assertTrue(select.select([process.stdout], [], [], 10)[0])
             self.assertEqual(json.loads(process.stdout.readline())['kind'], 'hello')
