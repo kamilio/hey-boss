@@ -1,4 +1,5 @@
 import express from 'express';
+import {agentRoutes} from './agents.mjs';
 import webpush from 'web-push';
 import {mkdirSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
@@ -12,6 +13,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  const change=()=>{for(const res of listeners)res.write('data: '+JSON.stringify({revision:store.revision(),connected:Date.now()-bridgeSeen<30000})+'\n\n');};
  const auth=(req,res,next)=>{const secret=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('hb_session='))?.slice(11);req.device=secret?store.device(secret):null;if(!req.device)return res.status(401).json({error:'Pair this device to continue'});next();};
  const bridge=(req,res,next)=>{if(!equal(req.headers.authorization,'Bearer '+hubToken))return res.status(401).json({error:'Invalid bridge credentials'});bridgeSeen=Date.now();next();};
+ const closeAgents=agentRoutes(app,{auth,bridge,store,now});
  app.get('/healthz',(req,res)=>res.json({ok:true}));
  app.post('/api/bridge/pair-code',bridge,(req,res)=>res.json({code:store.pairing(),expiresIn:300}));
  app.post('/api/pair',(req,res)=>{
@@ -30,6 +32,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.post('/api/bridge/issues/:id/result',bridge,(req,res)=>{store.finishIssue(req.params.id,req.body);change();res.json({ok:true});});
  app.get('/project-resource',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/resource.html',import.meta.url))));
  app.get('/artifacts',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/artifacts.html',import.meta.url))));
+ app.use('/agent-web',auth,express.static(fileURLToPath(new URL('../dist/agent-web/',import.meta.url))));
  app.use('/artifact-web',auth,express.static(fileURLToPath(new URL('../dist/artifact-web/',import.meta.url))));
  app.get('/api/artifact-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects(),connected:store.issueConnected()}));
  app.post('/api/artifact-requests',auth,(req,res)=>res.status(202).json({request:store.artifactRequest(req.device.id,req.body)}));
@@ -102,7 +105,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
    }
   }finally{pumping=false;}
  };
- app.locals.pump=pump;app.locals.close=()=>{for(const res of listeners)res.end();};return app;
+ app.locals.pump=pump;app.locals.close=()=>{closeAgents();for(const res of listeners)res.end();};return app;
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
  const directory=process.env.DATA_DIR??'.data';mkdirSync(directory,{recursive:true});const store=new HubStore(directory+'/hub.db');
