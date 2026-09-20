@@ -72,14 +72,24 @@ pub(super) fn history(
     number: i64,
     limit: u32,
     offset: u32,
+    before: Option<i64>,
 ) -> Result<Value> {
-    get_issue(db, &project.id, number, true)?;
-    let mut query = db.prepare("SELECT id,author,level,comment,created_at FROM issue_status_updates WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at DESC,id DESC LIMIT ?3 OFFSET ?4")?;
-    let mut updates = query.query_map(params![project.id,number,limit+1,offset], |r| Ok(json!({"id":r.get::<_,String>(0)?,"author":r.get::<_,String>(1)?,"level":r.get::<_,String>(2)?,"comment":r.get::<_,String>(3)?,"created_at":r.get::<_,i64>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let issue = get_issue(db, &project.id, number, true)?;
+    // New progress must not shift offsets in a history the reader already opened.
+    // Status timestamps are monotonic, so this bound preserves the reading snapshot.
+    let snapshot_at = before.unwrap_or_else(|| {
+        issue
+            .status
+            .as_ref()
+            .and_then(|status| status["created_at"].as_i64())
+            .unwrap_or(0)
+    });
+    let mut query = db.prepare("SELECT id,author,level,comment,created_at FROM issue_status_updates WHERE project_id=?1 AND issue_number=?2 AND created_at<=?3 ORDER BY created_at DESC,id DESC LIMIT ?4 OFFSET ?5")?;
+    let mut updates = query.query_map(params![project.id,number,snapshot_at,limit+1,offset], |r| Ok(json!({"id":r.get::<_,String>(0)?,"author":r.get::<_,String>(1)?,"level":r.get::<_,String>(2)?,"comment":r.get::<_,String>(3)?,"created_at":r.get::<_,i64>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more = updates.len() > limit as usize;
     updates.truncate(limit as usize);
     Ok(
-        json!({"ok":true,"project":project,"updates":updates,"next_offset":if more {Some(offset+limit)} else {None}}),
+        json!({"ok":true,"project":project,"updates":updates,"snapshot_at":snapshot_at,"next_offset":if more {Some(offset+limit)} else {None}}),
     )
 }
 

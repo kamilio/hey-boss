@@ -929,7 +929,7 @@ let updateIssueProgress;
 function mountIssueProgress(issue) {
   const root = $(".issue-progress-card");
   const project = model.project.id, host = model.route.host;
-  updateIssueProgress = root && HeyBossStatus.mount(root, issue, actorName, offset => api({action:"status_history", number:issue.number, limit:20, offset}, project, null, host));
+  updateIssueProgress = root && HeyBossStatus.mount(root, issue, actorName, (offset, before) => api({action:"status_history", number:issue.number, limit:20, offset, before}, project, null, host));
 }
 function renderDetail(value) {
   if (value.moved_to) {

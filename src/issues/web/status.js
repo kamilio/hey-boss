@@ -19,7 +19,7 @@ window.HeyBossStatus = (() => {
     return `<section class="issue-progress-card" aria-label="Issue progress"><div class="progress-current">${current(issue, name)}</div>${issue.status ? `<details class="progress-history"><summary>${HeyBossUI.icon("clock")}Status history</summary><div class="progress-history-content"><p class="progress-history-note">Progress updates, newest first. Comments keep lasting findings.</p><ol class="progress-history-list" tabindex="0" aria-label="Status updates"></ol><p class="progress-history-error" role="alert" hidden></p><div class="progress-history-actions"><button class="progress-history-refresh" type="button" hidden>Refresh history</button><button class="progress-history-more" type="button" hidden>Show older updates</button></div></div></details>` : ""}</section>`;
   }
   function mount(root, issue, name, read) {
-    let latest = issue, offset = 0, generation = 0, loaded = false, busy = false;
+    let latest = issue, offset = 0, snapshotAt = null, generation = 0, loaded = false, busy = false;
     const details = root.querySelector("details"), list = root.querySelector("ol");
     const more = root.querySelector(".progress-history-more"), refresh = root.querySelector(".progress-history-refresh"), error = root.querySelector(".progress-history-error");
     async function load(reset = false) {
@@ -30,7 +30,7 @@ window.HeyBossStatus = (() => {
       list.setAttribute("aria-busy", "true");
       if (!loaded) list.innerHTML = '<li class="progress-history-loading" role="status">Loading updates…</li>';
       try {
-        const result = await read(reset ? 0 : offset);
+        const result = await read(reset ? 0 : offset, reset ? null : snapshotAt);
         if (!root.isConnected || ticket !== generation) return;
         const html = result.updates.map(s => `<li><div class="progress-history-heading">${badge(s)}${HeyBossUI.date(s.created_at)}</div><p>${esc(s.comment)}</p><span class="progress-history-author" title="${esc(s.author)}">${esc(name(s.author))}</span></li>`).join("");
         if (reset || !loaded) {
@@ -43,7 +43,8 @@ window.HeyBossStatus = (() => {
           if (firstOlder) list.scrollTop += firstOlder.getBoundingClientRect().top - list.getBoundingClientRect().top;
         }
         if (focusList) list.focus({preventScroll:true});
-        loaded = true;offset = result.next_offset;more.hidden = offset == null;refresh.hidden = true;
+        loaded = true;offset = result.next_offset;snapshotAt = result.snapshot_at ?? null;more.hidden = offset == null;
+        refresh.hidden = !(latest.status?.created_at > snapshotAt);refresh.textContent = "Refresh history";
       } catch (e) {
         if (!root.isConnected || ticket !== generation) return;
         if (!loaded) list.replaceChildren();

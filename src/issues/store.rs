@@ -1018,7 +1018,8 @@ impl Store {
                 number,
                 limit,
                 offset,
-            } => status::history(&tx, &project, *number, *limit, *offset)?,
+                before,
+            } => status::history(&tx, &project, *number, *limit, *offset, *before)?,
             Operation::StatusView { number } => status::current(&tx, &project, *number)?,
             Operation::View { number } => {
                 let issue = get_issue(&tx, &project.id, *number, true)?;

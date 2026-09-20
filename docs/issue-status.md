@@ -30,7 +30,8 @@ the full message, author and update time. Status history starts collapsed and
 loads only when opened, in pages of 20, newest first. The web and paired-device
 viewers are read-only; use the CLI to publish. Status refreshes in an open desktop
 issue without replacing a comment draft or its selection. An expanded history is
-a reading snapshot; **Refresh history** loads newer updates.
+a reading snapshot; new updates cannot shift or repeat its older pages.
+**Refresh history** starts a new snapshot with the latest updates.
 The paired-device viewer checks for a fresh status every 15 seconds while visible,
 using a small response that does not transfer the issue description or history.
 

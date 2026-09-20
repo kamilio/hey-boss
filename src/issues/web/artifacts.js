@@ -445,7 +445,7 @@ const HeyBossArtifacts = (() => {
       document.title=resource.title+" · Hey Boss";
       $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p>${issue?HeyBossStatus.card(resource,author):""}<article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article><section id="resource-attachments"></section>`;
       if(issue){
-        const attach=()=>HeyBossStatus.mount($(".issue-progress-card"),resource,author,offset=>rpc(context,{action:"status_history",number:Number(issue),limit:20,offset},true));
+        const attach=()=>HeyBossStatus.mount($(".issue-progress-card"),resource,author,(offset,before)=>rpc(context,{action:"status_history",number:Number(issue),limit:20,offset,before},true));
         let update=attach(),refreshing=false;
         resourceStatusTimer=setInterval(async()=>{
           if(document.hidden||refreshing)return;
