@@ -4,6 +4,7 @@ import {mkdtempSync,writeFileSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
+import {get} from 'node:http';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const binary=resolve(process.argv[2]), expected=process.argv[3];
@@ -80,7 +81,14 @@ createInterface({input:process.stdin}).on('line',line=>{
     child.stdout.on('data',chunk=>{line+=chunk;if(line.includes('\n')){clearTimeout(timer);yes(JSON.parse(line.split('\n')[0]));}});
     child.on('error',no);child.on('exit',()=>{clearTimeout(timer);no(Error('Web verification exited'));});
   });
-  const html=await(await fetch(info.url)).text();assert(html.includes('id="project-pr-handoff-help"'));
+  const html=await new Promise((yes,no)=>{
+    const request=get(info.url,response=>{
+      if(response.statusCode!==200){response.resume();no(Error('Installed web response failed'));return;}
+      let text='';response.setEncoding('utf8');response.on('data',chunk=>text+=chunk);response.on('end',()=>yes(text));response.on('error',no);
+    });
+    request.on('error',no);request.setTimeout(10000,()=>request.destroy(Error('Installed web request timed out')));
+  });
+  assert(html.includes('id="project-pr-handoff-help"'));
   await stop();
   console.log(JSON.stringify({status:'passed',version,open_boss_handoff:true,pickup_excluded:true,links_and_history_preserved:true,explicit_agent_handoff:true,non_pr_closure:true,installed_ui:true}));
 }finally{await stop();rmSync(root,{recursive:true,force:true});}
