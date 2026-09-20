@@ -771,12 +771,20 @@ impl Options {
                     .read()?
                     .ok_or_else(|| Error::invalid("comment requires --body or --file"))?,
             },
-            Action::Status { number, level, comment } => Operation::Status {
+            Action::Status {
+                number,
+                level,
+                comment,
+            } => Operation::Status {
                 number: *number,
                 level: *level,
                 comment: comment.clone(),
             },
-            Action::StatusHistory { number, limit, offset } => Operation::StatusHistory {
+            Action::StatusHistory {
+                number,
+                limit,
+                offset,
+            } => Operation::StatusHistory {
                 number: *number,
                 limit: *limit,
                 offset: *offset,
@@ -1255,7 +1263,13 @@ pub(crate) fn print_text(value: &Value) {
             println!("No status updates yet.");
         }
         for update in updates {
-            println!("{} · {} · {}\n{}", line(&update["level"]), line(&update["author"]), status_datetime(&update["created_at"]), line(&update["comment"]));
+            println!(
+                "{} · {} · {}\n{}",
+                line(&update["level"]),
+                line(&update["author"]),
+                status_datetime(&update["created_at"]),
+                line(&update["comment"])
+            );
         }
         if let Some(offset) = value["next_offset"].as_u64() {
             println!("More updates: use --offset {offset}");
@@ -1289,7 +1303,12 @@ fn status_datetime(value: &Value) -> String {
         if libc::localtime_r(&seconds, time.as_mut_ptr()).is_null() {
             return "Unknown time".into();
         }
-        let size = libc::strftime(text.as_mut_ptr().cast(), text.len(), c"%Y-%m-%d %H:%M %Z".as_ptr(), time.as_ptr());
+        let size = libc::strftime(
+            text.as_mut_ptr().cast(),
+            text.len(),
+            c"%Y-%m-%d %H:%M %Z".as_ptr(),
+            time.as_ptr(),
+        );
         String::from_utf8_lossy(&text[..size]).into_owned()
     }
 }
@@ -1323,7 +1342,11 @@ fn print_issue_line(issue: &Value) {
         }
     );
     if let Some(status) = issue["status"].as_object() {
-        println!("  Status [{}]: {}", line(&status["level"]), line(&status["comment"]));
+        println!(
+            "  Status [{}]: {}",
+            line(&status["level"]),
+            line(&status["comment"])
+        );
     }
     if let Some(number) = issue["parent"]["number"].as_i64() {
         println!(
