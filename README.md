@@ -286,6 +286,14 @@ same ID and settings before picking up more issues. Workers started before this
 handoff feature need a one-time restart. Unreachable hosts do not prevent the other machines from updating;
 rerun the command after reconnecting to retry them.
 
+If worker startup reports `no such column: i.draft`, the issue database is
+missing draft columns expected by that build. This is a schema mismatch, so
+restarting alone is not a reliable fix. Run `hey-boss upgrade` on the supervisor
+to update it and registered companions, then restart any workers that predate
+automatic upgrade handoff. Current builds repair missing columns before worker
+pickup, even when the database already reports the latest schema version;
+issues and their history are preserved.
+
 ## Move GitHub issues into a project
 
 `hey-boss issue drain-github` imports issues from the checkout's GitHub repository

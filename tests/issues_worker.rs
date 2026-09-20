@@ -1486,3 +1486,57 @@ fn worker_does_not_reserve_drafts_and_picks_up_after_undrafting() {
     assert_eq!(result.status.code(), Some(4));
     worker.stop();
 }
+
+#[test]
+fn worker_startup_repairs_missing_draft_schema_before_pickup() {
+    for version in [10, 12] {
+        let f = Fixture::new(&format!("repair-draft-schema-{version}"));
+        fs::write(f.root.join("mode.txt"), "completed").unwrap();
+        f.setup(&[]);
+        f.cli(&["comment", "1", "--body", "Preserved history"]);
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        db.execute_batch(
+            "ALTER TABLE issues DROP COLUMN draft;
+            ALTER TABLE issues DROP COLUMN plan;
+            ALTER TABLE project_settings DROP COLUMN drafts_enabled;
+            ALTER TABLE project_settings DROP COLUMN plan_template;",
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", version).unwrap();
+
+        let mut worker = f.worker();
+        // Read SQLite directly: a status CLI would repair the store itself and
+        // could conceal a worker that queried i.draft before migrating.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(
+                worker.0.try_wait().unwrap().is_none(),
+                "Worker exited before pickup (schema {version})"
+            );
+            let completed: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE issue_number=1 AND state='completed' AND finished_at IS NOT NULL)",
+                [], |row| row.get(0),
+            ).unwrap();
+            if completed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Worker did not complete pickup (schema {version})"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            12
+        );
+        let issue = f.cli(&["view", "1"]);
+        assert_eq!(issue["issue"]["state"], "closed");
+        assert_eq!(issue["issue"]["draft"], false);
+        assert!(issue["issue"]["plan"].is_null());
+        assert_eq!(issue["comments"][0]["body"], "Preserved history");
+        worker.stop();
+    }
+}
