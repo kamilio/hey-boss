@@ -55,7 +55,7 @@ async page => {
     checks.push(`${kind}-upload-download-confirm-remove`);
   }
   await page.goto(origin+routes.issue);await wait();
-  const drop=async(name,data='Dragged attachment')=>panel().locator('.attachment-drop').evaluate((el,{name,data})=>{const dt=new DataTransfer();dt.items.add(new File([data],name,{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));},{name,data});
+  const drop=async(name,data='Dragged attachment')=>page.locator('#comment-form .markdown-editor').evaluate((el,{name,data})=>{const dt=new DataTransfer();dt.items.add(new File([data],name,{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));},{name,data});
   await drop(draggedName);await panel().getByRole('button',{name:draggedName,exact:true}).waitFor();checks.push('drag-and-drop');
   const retryIDs=[];let reject=true;
   await page.route('**/api/action',async route=>{

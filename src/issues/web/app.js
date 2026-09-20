@@ -966,7 +966,7 @@ function renderDetail(value) {
     $("#comment-write").onclick = () => preview("comment", false);
     $("#comment-preview").onclick = () => preview("comment", true);
   }
-  HeyBossAttachments.mount(document.querySelector("#issue-attachments"), {project:model.project.id,target:{kind:"issue",id:String(i.number)},host:model.route.host,csrf:model.csrf,readonly:deleted});
+  HeyBossAttachments.mount(document.querySelector("#issue-attachments"), {project:model.project.id,target:{kind:"issue",id:String(i.number)},host:model.route.host,csrf:model.csrf,readonly:deleted}, document.querySelector("#comment-form .markdown-editor"));
   HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || []});
   IssueSubtasks.rendered();
   if (!deleted) {
