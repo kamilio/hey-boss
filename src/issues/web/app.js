@@ -269,19 +269,18 @@ function routeHash(route) {
   return "#" + p.toString();
 }
 function parseRoute() {
+  const resource = HeyBossRoutes.resolve();
   const params = new URLSearchParams(location.hash.slice(1));
   const project = HeyBossUI.projectId(model.project.id);
   return {
     project,
     host: params.get("host") || model.defaultHost || "",
-    view: params.get("view") === "inbox" ? "inbox" : "issues",
-    notice: params.get("notice") || "",
+    view: ["notice", "inbox"].includes(resource?.entity) ? "inbox" : "issues",
+    notice: resource?.entity === "notice" ? resource.id : "",
     inbox_state: params.get("inbox_state") === "archive" ? "archive" : "unread",
     inbox_project: params.get("inbox_project") || "",
     inbox_search: params.get("inbox_search") || "",
-    issue: /^[1-9]\d*$/.test(params.get("issue") || "")
-      ? Number(params.get("issue"))
-      : null,
+    issue: resource?.entity === "issue" ? Number(resource.id) : null,
     state: ["open", "closed", "deleted"].includes(params.get("state"))
       ? params.get("state")
       : "open",

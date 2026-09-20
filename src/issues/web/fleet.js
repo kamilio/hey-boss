@@ -123,7 +123,8 @@ if (typeof document !== 'undefined') (() => {
     $('conflict-list').replaceChildren(...conflicts.map(c=>element('li','',c.reason)));
   }
   function renderDetail(data) {
-    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>e.machine.host===route().get('host')&&e.run.id===route().get('run'));
+    const resource=HeyBossRoutes.resolve();
+    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&e.machine.host===resource.host&&e.run.id===resource.id);
     $('back').href=base+(route().get('project')?'#'+new URLSearchParams({project:route().get('project')}):'');
     if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent='This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
