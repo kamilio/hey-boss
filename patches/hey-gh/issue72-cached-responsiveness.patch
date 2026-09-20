@@ -1,0 +1,672 @@
+--- a/src/report.rs
++++ b/src/report.rs
+@@ -1,7 +1,44 @@
+ use crate::{Client, Error, Freshness, Result, client::validate_repository, now_ms};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
+-use std::collections::{HashMap, HashSet};
++use std::{
++    collections::{HashMap, HashSet},
++    sync::{
++        Arc,
++        atomic::{AtomicBool, Ordering},
++    },
++};
++
++// Nested PR/CI reads share this flag: contention makes the entire cached
++// observation read-only, preventing stale writes over an active refresh.
++tokio::task_local! { static PUBLICATION_READ_ONLY: Arc<AtomicBool>; }
++
++fn publication_scope() -> Arc<AtomicBool> {
++    PUBLICATION_READ_ONLY
++        .try_with(Arc::clone)
++        .unwrap_or_default()
++}
++
++fn can_publish() -> bool {
++    !PUBLICATION_READ_ONLY.with(|flag| flag.load(Ordering::Relaxed))
++}
++
++async fn acquire_report_lock(
++    lock: Arc<tokio::sync::Mutex<()>>,
++    freshness: Freshness,
++) -> Option<tokio::sync::OwnedMutexGuard<()>> {
++    if matches!(freshness, Freshness::CachedOnly) {
++        match lock.try_lock_owned() {
++            Ok(guard) => Some(guard),
++            Err(_) => {
++                PUBLICATION_READ_ONLY.with(|flag| flag.store(true, Ordering::Relaxed));
++                None
++            }
++        }
++    } else {
++        Some(lock.lock_owned().await)
++    }
++}
+ 
+ tokio::task_local! { static VALIDATIONS: std::cell::RefCell<Vec<ResourceValidation>>; }
+ 
+@@ -237,31 +274,47 @@
+     ) -> Result<CiObservation> {
+         validate_repository(repository)?;
+         let lock = self.report_lock(&format!("{repository}#{number}:ci"));
+-        tokio::time::timeout(self.report_timeout(),async {
+-            let _guard=lock.lock().await;
+-            VALIDATIONS.scope(std::cell::RefCell::new(Vec::new()),async {
++        PUBLICATION_READ_ONLY.scope(publication_scope(), tokio::time::timeout(self.report_timeout(), async {
++            let _guard = acquire_report_lock(lock, freshness).await;
++            VALIDATIONS.scope(std::cell::RefCell::new(Vec::new()), async {
+                 for attempt in 0..2 {
+-                    let policy=if attempt==0 {freshness} else {Freshness::Revalidate};
+-                    let pr=self.pull_request(repository,number,policy).await?;
+-                    let head=sha(&pr.data,"head")?;
+-                    let merge=pr.data["merge_commit_sha"].as_str().filter(|s|valid_sha(s));
+-                    let data=self.ci_report(repository,&head,merge,policy).await?;
+-                    let final_pr=if matches!(policy,Freshness::CachedOnly) {pr.clone()} else {self.pull_request(repository,number,Freshness::Revalidate).await?};
+-                    if pr.data["head"]["sha"]!=final_pr.data["head"]["sha"] || pr.data["base"]["sha"]!=final_pr.data["base"]["sha"] || pr.data["merge_commit_sha"]!=final_pr.data["merge_commit_sha"] {continue;}
+-                    let complete=data.errors.is_empty();
+-                    let suffix=format!("{}/{repository}/{number}",self.hostname());
+-                    let mut observations=vec![(format!("metadata://{suffix}"),json!({"conflicts":conflicts(&final_pr.data),"pull_request":final_pr.data}))];
+-                    if complete { observations.push((format!("ci://{suffix}"),serde_json::to_value(&data).map_err(|e|Error::Invalid(e.to_string()))?)); }
+-                    let cursor=self.observe_many(&observations).await?;
+-                    self.publish_individual_pr_status(repository, number, &[("ci", source_error_message(&data.errors))]).await?;
+-                    let validations=VALIDATIONS.with(|r|r.borrow().clone());
+-                    let observed_at_ms=now_ms();
+-                    let oldest_validation_at_ms=validations.iter().map(|r|r.validated_at_ms).min().unwrap_or(observed_at_ms);
+-                    return Ok(CiObservation {data,complete,cursor:complete.then_some(cursor),observed_at_ms,oldest_validation_at_ms,validations});
++                    let policy = if attempt == 0 || matches!(freshness, Freshness::CachedOnly) {
++                        freshness
++                    } else {
++                        Freshness::Revalidate
++                    };
++                    let pr = self.pull_request(repository, number, policy).await?;
++                    let head = sha(&pr.data, "head")?;
++                    let merge = pr.data["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
++                    let data = self.ci_report(repository, &head, merge, policy).await?;
++                    let final_policy = if matches!(policy, Freshness::CachedOnly) { policy } else { Freshness::Revalidate };
++                    let final_pr = self.pull_request(repository, number, final_policy).await?;
++                    if pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
++                        || pr.data["base"]["sha"] != final_pr.data["base"]["sha"]
++                        || pr.data["merge_commit_sha"] != final_pr.data["merge_commit_sha"] {
++                        continue;
++                    }
++                    let complete = data.errors.is_empty();
++                    let suffix = format!("{}/{repository}/{number}", self.hostname());
++                    let mut observations = vec![(format!("metadata://{suffix}"), json!({"conflicts":conflicts(&final_pr.data),"pull_request":final_pr.data}))];
++                    if complete {
++                        observations.push((format!("ci://{suffix}"), serde_json::to_value(&data).map_err(|e| Error::Invalid(e.to_string()))?));
++                    }
++                    let cursor = if can_publish() {
++                        let cursor = self.observe_many(&observations).await?;
++                        self.publish_individual_pr_status(repository, number, &[("ci", source_error_message(&data.errors))]).await?;
++                        complete.then_some(cursor)
++                    } else {
++                        None
++                    };
++                    let validations = VALIDATIONS.with(|r| r.borrow().clone());
++                    let observed_at_ms = now_ms();
++                    let oldest_validation_at_ms = validations.iter().map(|r| r.validated_at_ms).min().unwrap_or(observed_at_ms);
++                    return Ok(CiObservation { data, complete, cursor, observed_at_ms, oldest_validation_at_ms, validations });
+                 }
+                 Err(Error::Invalid("PR head changed repeatedly while collecting CI".into()))
+             }).await
+-        }).await.map_err(|_|Error::Deadline)?
++        })).await.map_err(|_| Error::Deadline)?
+     }
+     pub async fn pull_request(
+         &self,
+@@ -336,24 +389,30 @@
+     ) -> Result<Report> {
+         validate_repository(repository)?;
+         let lock = self.report_lock(&format!("{repository}#{number}"));
+-        tokio::time::timeout(self.report_timeout(), async {
+-            let _guard = lock.lock().await;
+-            VALIDATIONS
+-                .scope(std::cell::RefCell::new(Vec::new()), async {
+-                    let mut report = self.build_report(repository, number, freshness).await?;
+-                    report.validations = VALIDATIONS.with(|records| records.borrow().clone());
+-                    report.oldest_validation_at_ms = report
+-                        .validations
+-                        .iter()
+-                        .map(|v| v.validated_at_ms)
+-                        .min()
+-                        .unwrap_or(report.observed_at_ms);
+-                    Ok(report)
+-                })
+-                .await
+-        })
+-        .await
+-        .map_err(|_| Error::Deadline)?
++        PUBLICATION_READ_ONLY
++            .scope(
++                publication_scope(),
++                tokio::time::timeout(self.report_timeout(), async {
++                    let _guard = acquire_report_lock(lock, freshness).await;
++                    VALIDATIONS
++                        .scope(std::cell::RefCell::new(Vec::new()), async {
++                            let mut report =
++                                self.build_report(repository, number, freshness).await?;
++                            report.validations =
++                                VALIDATIONS.with(|records| records.borrow().clone());
++                            report.oldest_validation_at_ms = report
++                                .validations
++                                .iter()
++                                .map(|v| v.validated_at_ms)
++                                .min()
++                                .unwrap_or(report.observed_at_ms);
++                            Ok(report)
++                        })
++                        .await
++                }),
++            )
++            .await
++            .map_err(|_| Error::Deadline)?
+     }
+ 
+     async fn build_report(
+@@ -369,7 +428,7 @@
+                 .pull_request(
+                     repository,
+                     number,
+-                    if attempt == 0 {
++                    if attempt == 0 || matches!(freshness, Freshness::CachedOnly) {
+                         freshness
+                     } else {
+                         Freshness::Revalidate
+@@ -440,12 +499,17 @@
+                 "review_threads",
+                 &mut errors,
+             );
+-            let final_pr = if matches!(freshness, Freshness::CachedOnly) {
+-                pr.clone()
+-            } else {
+-                self.pull_request(repository, number, Freshness::Revalidate)
+-                    .await?
+-            };
++            let final_pr = self
++                .pull_request(
++                    repository,
++                    number,
++                    if matches!(freshness, Freshness::CachedOnly) {
++                        freshness
++                    } else {
++                        Freshness::Revalidate
++                    },
++                )
++                .await?;
+             if final_pr.data["head"]["sha"].as_str() != Some(&head)
+                 || final_pr.data["base"]["sha"] != base_sha
+                 || final_pr.data["merge_commit_sha"]
+@@ -532,17 +596,21 @@
+                     serde_json::to_value(&report).map_err(|e| Error::Invalid(e.to_string()))?,
+                 ));
+             }
+-            let head = self.observe_many(&observations).await?;
+-            self.publish_individual_pr_status(
+-                repository,
+-                number,
+-                &[
+-                    ("ci", source_error_message(&report.ci.errors)),
+-                    ("details", source_error_message(&report.errors)),
+-                ],
+-            )
+-            .await?;
+-            let cursor = complete.then_some(head);
++            let cursor = if can_publish() {
++                let head = self.observe_many(&observations).await?;
++                self.publish_individual_pr_status(
++                    repository,
++                    number,
++                    &[
++                        ("ci", source_error_message(&report.ci.errors)),
++                        ("details", source_error_message(&report.errors)),
++                    ],
++                )
++                .await?;
++                complete.then_some(head)
++            } else {
++                None
++            };
+             return Ok(Report {
+                 data: report,
+                 observed_at_ms: now_ms(),
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -317,11 +317,20 @@
+             refresh,
+             cached_only,
+         } => {
+-            let report = api
++            match api
+                 .ci_for_pr(&repository, number, policy(refresh, cached_only))
+-                .await?;
+-            complete = report.complete;
+-            serde_json::to_value(report)?
++                .await
++            {
++                Ok(report) => {
++                    complete = report.complete;
++                    serde_json::to_value(report)?
++                }
++                Err(hey_gh::Error::CacheMiss) if cached_only => {
++                    complete = false;
++                    unavailable_cached_pr(&repository, number)
++                }
++                Err(error) => return Err(error.into()),
++            }
+         }
+         Command::Mine {
+             repository,
+@@ -508,7 +517,13 @@
+         let number = options
+             .legacy_number
+             .ok_or("expected NUMBER after OWNER/REPO; use -R to filter the dashboard")?;
+-        let report = api.pr_report(&repository, number, freshness).await?;
++        let report = match api.pr_report(&repository, number, freshness).await {
++            Ok(report) => report,
++            Err(hey_gh::Error::CacheMiss) if options.cached_only => {
++                return Ok((unavailable_cached_pr(&repository, number), false));
++            }
++            Err(error) => return Err(error.into()),
++        };
+         return Ok((serde_json::to_value(&report)?, report.complete));
+     }
+     let mut limit = 1000;
+@@ -526,10 +541,22 @@
+                 if fields.is_some() {
+                     return Err("pr checks returns the complete CI report; use pr view --json ci,statusCheckRollup for field selection".into());
+                 }
+-                let report = api.ci_for_pr(&repository, number, freshness).await?;
++                let report = match api.ci_for_pr(&repository, number, freshness).await {
++                    Ok(report) => report,
++                    Err(hey_gh::Error::CacheMiss) if options.cached_only => {
++                        return Ok((unavailable_cached_pr(&repository, number), false));
++                    }
++                    Err(error) => return Err(error.into()),
++                };
+                 return Ok((serde_json::to_value(&report)?, report.complete));
+             }
+-            let report = api.pr_report(&repository, number, freshness).await?;
++            let report = match api.pr_report(&repository, number, freshness).await {
++                Ok(report) => report,
++                Err(hey_gh::Error::CacheMiss) if options.cached_only => {
++                    return Ok((unavailable_cached_pr(&repository, number), false));
++                }
++                Err(error) => return Err(error.into()),
++            };
+             let mut value = view_json(&report);
+             if let Some(fields) = fields {
+                 let mut projected: serde_json::Map<_, _> = fields
+@@ -538,6 +565,9 @@
+                     .collect();
+                 projected.insert("complete".into(), serde_json::json!(report.complete));
+                 projected.insert("sourceErrors".into(), value["sourceErrors"].take());
++                for field in ["observedAtMs", "oldestValidationAtMs", "validations"] {
++                    projected.insert(field.into(), value[field].take());
++                }
+                 value = Value::Object(projected);
+             }
+             return Ok((value, report.complete));
+@@ -602,6 +632,15 @@
+     Ok((value, complete))
+ }
+ 
++fn unavailable_cached_pr(repository: &str, number: u64) -> Value {
++    serde_json::json!({
++        "number": number, "repository": {"nameWithOwner": repository},
++        "complete": false, "available": false, "code": "cache_miss",
++        "sourceErrors": {"sources": [{"source": "metadata", "message": "no cached response available"}]},
++        "oldestValidationAtMs": null, "validations": [], "cursor": null
++    })
++}
++
+ fn view_json(report: &hey_gh::Report) -> Value {
+     let data = &report.data;
+     let pr = &data.pull_request;
+@@ -613,7 +652,7 @@
+         "conflicts":data.conflicts,"mergeable":match data.conflicts.as_str() {"clean"=>"MERGEABLE","conflicting"=>"CONFLICTING",_=>"UNKNOWN"},
+         "ci":data.ci,"comments":data.comments,"reviewComments":data.review_comments,"reviews":data.reviews,"reviewThreads":data.review_threads,"reviewStatus":data.review_status,
+         "complete":report.complete,"sourceErrors":{"sources":data.errors,"ci":data.ci.errors},
+-        "oldestValidationAtMs":report.oldest_validation_at_ms,"validations":report.validations,
++        "observedAtMs":report.observed_at_ms,"oldestValidationAtMs":report.oldest_validation_at_ms,"validations":report.validations,
+         "reviewDecision":null,"mergeStateStatus":null,"requiredChecks":null,
+         "raw":data.pull_request
+     });
+--- a/src/api.rs
++++ b/src/api.rs
+@@ -863,11 +863,14 @@
+             Error::Stopped => "stopped",
+             _ => "upstream",
+         };
+-        let mut response = (
+-            status,
+-            Json(json!({"error":self.0.to_string(),"code":code})),
+-        )
+-            .into_response();
++        let mut envelope = json!({"error":self.0.to_string(),"code":code});
++        if matches!(self.0, Error::CacheMiss) {
++            envelope["complete"] = json!(false);
++            envelope["available"] = json!(false);
++            envelope["oldest_validation_at_ms"] = Value::Null;
++            envelope["validations"] = json!([]);
++        }
++        let mut response = (status, Json(envelope)).into_response();
+         if let Some(retry) = retry {
+             response.headers_mut().insert(
+                 header::RETRY_AFTER,
+--- a/tests/github.rs
++++ b/tests/github.rs
+@@ -128,6 +128,24 @@
+     if path == "/slow" {
+         mock.release.notified().await;
+     }
++    if mode == "issue72-stall-metadata" && path == "/repos/acme/demo/pulls/7" {
++        mock.release.notified().await;
++    }
++    if mode == "issue72-partial-auth-stall"
++        && path == "/graphql"
++        && body["query"]
++            .as_str()
++            .is_some_and(|q| q.contains("MyOpenPullRequests"))
++    {
++        return reply(
++            200,
++            json!({"data":{"viewer":{"pullRequests":{"nodes":[{"number":7}]}}},"errors":[{"type":"FORBIDDEN","message":"quora-internal IP allow list denied"}]}),
++            &[],
++        );
++    }
++    if mode == "issue72-partial-auth-stall" && path.contains("/check-runs") {
++        mock.release.notified().await;
++    }
+     if path == "/conditional-paced" {
+         let reset = (std::time::SystemTime::now()
+             .duration_since(std::time::UNIX_EPOCH)
+@@ -1709,6 +1727,9 @@
+     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+     assert_eq!(view["number"], 7);
+     assert!(view["ci"]["summary"].is_object());
++    assert!(view["observedAtMs"].is_number());
++    assert!(view["oldestValidationAtMs"].is_number());
++    assert!(!view["validations"].as_array().unwrap().is_empty());
+     api.stop().await;
+     task.abort();
+ }
+@@ -2627,3 +2648,259 @@
+     assert!(row["headCiState"].is_null());
+     assert_eq!(row["complete"], true);
+ }
++
++async fn issue72_wait_for_call(h: &Harness, start: usize, needle: &str) {
++    tokio::time::timeout(Duration::from_secs(2), async {
++        loop {
++            if h.calls()[start..]
++                .iter()
++                .any(|call| call.path.contains(needle))
++            {
++                break;
++            }
++            tokio::time::sleep(Duration::from_millis(5)).await;
++        }
++    })
++    .await
++    .expect("background request did not start");
++}
++
++#[tokio::test]
++async fn issue72_cached_reports_return_during_stalled_refresh_without_publication() {
++    for ci_only in [false, true] {
++        let h = Harness::new().await;
++        h.mode("account");
++        let c = h.client();
++        c.refresh_pr_status(Freshness::Revalidate, false)
++            .await
++            .unwrap();
++        let baseline = c
++            .pr_report("acme/demo", 7, Freshness::CachedOnly)
++            .await
++            .unwrap();
++        let before = c.bootstrap().await.unwrap();
++        let calls = h.calls().len();
++        h.mode("issue72-stall-metadata");
++        let background = c.clone();
++        let task = tokio::spawn(async move {
++            if ci_only {
++                background
++                    .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
++                    .await
++                    .map(|_| ())
++            } else {
++                background
++                    .pr_report("acme/demo", 7, Freshness::Revalidate)
++                    .await
++                    .map(|_| ())
++            }
++        });
++        issue72_wait_for_call(&h, calls, "/pulls/7").await;
++        let stalled_calls = h.calls().len();
++        let reports = tokio::time::timeout(Duration::from_millis(500), async {
++            let pr = c
++                .pr_report("acme/demo", 7, Freshness::CachedOnly)
++                .await
++                .unwrap();
++            let ci = c
++                .ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
++                .await
++                .unwrap();
++            (pr, ci)
++        })
++        .await
++        .expect("cached read waited for upstream refresh");
++        assert!(reports.0.complete && reports.1.complete);
++        assert_eq!(reports.0.data.pull_request["head"]["sha"], HEAD);
++        assert_eq!(reports.1.data.head_sha, HEAD);
++        for validations in [&reports.0.validations, &reports.1.validations] {
++            assert!(!validations.is_empty());
++            assert!(
++                validations
++                    .iter()
++                    .all(|v| matches!(v.source, Source::Cache))
++            );
++        }
++        assert_eq!(
++            reports.0.oldest_validation_at_ms,
++            baseline.oldest_validation_at_ms
++        );
++        assert!(reports.0.oldest_validation_at_ms <= reports.0.observed_at_ms);
++        issue72_assert_cached_cli(&c, true).await;
++        assert_eq!(h.calls().len(), stalled_calls);
++        assert_eq!(c.bootstrap().await.unwrap().cursor, before.cursor);
++        task.abort();
++        h.mock.release.notify_waiters();
++    }
++}
++
++#[tokio::test]
++async fn issue72_cached_reads_keep_missing_reviews_and_ci_explicit_during_partial_auth_failure() {
++    let h = Harness::new().await;
++    h.mode("account");
++    let c = h.client();
++    c.refresh_pr_status(Freshness::Revalidate, false)
++        .await
++        .unwrap();
++    rusqlite::Connection::open(h.config().cache_path)
++        .unwrap()
++        .execute(
++            "DELETE FROM cache WHERE key LIKE '%graphql%' OR key LIKE '%check-runs%'",
++            [],
++        )
++        .unwrap();
++    h.mode("issue72-partial-auth-stall");
++    let calls = h.calls().len();
++    let background = c.clone();
++    let task = tokio::spawn(async move {
++        background
++            .refresh_pr_status(Freshness::Revalidate, true)
++            .await
++    });
++    issue72_wait_for_call(&h, calls, "/check-runs").await;
++    assert!(h.calls()[calls..].iter().any(|c| {
++        c.body["query"]
++            .as_str()
++            .is_some_and(|q| q.contains("MyOpenPullRequests"))
++    }));
++    let stalled_calls = h.calls().len();
++    let (pr, ci) = tokio::time::timeout(Duration::from_millis(500), async {
++        (
++            c.pr_report("acme/demo", 7, Freshness::CachedOnly)
++                .await
++                .unwrap(),
++            c.ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
++                .await
++                .unwrap(),
++        )
++    })
++    .await
++    .expect("partial authorization failure blocked cached reads");
++    assert!(!pr.complete && !ci.complete);
++    assert!(pr.data.errors.iter().any(|e| e.source == "review_threads"));
++    assert!(!ci.data.errors.is_empty());
++    assert_ne!(ci.data.summary.state, "success");
++    assert!(ci.data.summary.unknown > 0);
++    issue72_assert_cached_cli(&c, false).await;
++    assert_eq!(h.calls().len(), stalled_calls);
++    task.abort();
++    h.mock.release.notify_waiters();
++}
++
++#[tokio::test]
++async fn issue72_cold_cached_cli_returns_unavailable_json_without_requests() {
++    let h = Harness::new().await;
++    let api = hey_gh::api::Api::new(h.client()).await.unwrap();
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let base = format!("http://{}/", listener.local_addr().unwrap());
++    let router = api.router();
++    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
++    for path in ["v1/prs/acme/demo/7", "v1/prs/acme/demo/7/ci"] {
++        let response = reqwest::Client::new()
++            .get(format!("{base}{path}?cached_only=true"))
++            .send()
++            .await
++            .unwrap();
++        assert_eq!(response.status(), StatusCode::NOT_FOUND);
++        let value: Value = response.json().await.unwrap();
++        assert_eq!(value["complete"], false);
++        assert_eq!(value["available"], false);
++        assert_eq!(value["code"], "cache_miss");
++    }
++    for arguments in [
++        vec!["pr", "view", "7", "-R", "acme/demo", "--cached-only"],
++        vec!["pr", "checks", "7", "-R", "acme/demo", "--cached-only"],
++        vec!["pr", "acme/demo", "7", "--cached-only"],
++        vec!["ci", "acme/demo", "7", "--cached-only"],
++    ] {
++        let output = tokio::time::timeout(
++            Duration::from_secs(2),
++            tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++                .args(["--server", &base])
++                .args(arguments)
++                .output(),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++        assert_eq!(output.status.code(), Some(1));
++        let value: Value =
++            serde_json::from_slice(&output.stdout).expect("missing unavailable envelope");
++        assert_eq!(value["complete"], false);
++        assert_eq!(value["available"], false);
++        assert_eq!(value["code"], "cache_miss");
++        assert_eq!(value["number"], 7);
++        assert_eq!(value["oldestValidationAtMs"], Value::Null);
++        assert!(
++            !value["sourceErrors"]["sources"]
++                .as_array()
++                .unwrap()
++                .is_empty()
++        );
++    }
++    assert!(h.calls().is_empty());
++    api.stop().await;
++    task.abort();
++}
++
++async fn issue72_assert_cached_cli(c: &Client, complete: bool) {
++    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let base = format!("http://{}/", listener.local_addr().unwrap());
++    let router = api.router();
++    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
++    for action in ["view", "checks"] {
++        let output = tokio::time::timeout(
++            Duration::from_secs(2),
++            tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++                .args([
++                    "--server",
++                    &base,
++                    "pr",
++                    action,
++                    "7",
++                    "-R",
++                    "acme/demo",
++                    "--cached-only",
++                ])
++                .output(),
++        )
++        .await
++        .expect("cached CLI stalled")
++        .unwrap();
++        assert_eq!(
++            output.status.success(),
++            complete,
++            "{}",
++            String::from_utf8_lossy(&output.stderr)
++        );
++        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
++        assert_eq!(value["complete"], complete);
++        let oldest = if action == "view" {
++            "oldestValidationAtMs"
++        } else {
++            "oldest_validation_at_ms"
++        };
++        assert!(value[oldest].as_u64().unwrap() > 0);
++        assert!(!value["validations"].as_array().unwrap().is_empty());
++        if action == "view" {
++            assert_eq!(value["headRefOid"], HEAD);
++            assert!(value["observedAtMs"].as_u64().unwrap() >= value[oldest].as_u64().unwrap());
++            if !complete {
++                assert!(
++                    !value["sourceErrors"]["sources"]
++                        .as_array()
++                        .unwrap()
++                        .is_empty()
++                );
++            }
++        } else {
++            assert_eq!(value["data"]["head_sha"], HEAD);
++            if !complete {
++                assert!(!value["data"]["errors"].as_array().unwrap().is_empty());
++            }
++        }
++    }
++    api.stop().await;
++    task.abort();
++}
+--- a/skills/hey-gh/SKILL.md
++++ b/skills/hey-gh/SKILL.md
+@@ -58,7 +58,15 @@
+ cursor without a successfully parsed response. A complete individual PR read
+ also publishes a replacement for an already tracked PR, clearing its recovered
+ CI/detail errors. CI-only recovery preserves independent detail failures.
+-Cached-only recovery validates cached evidence, not freshness or merge readiness.
++Cached PR/CI reads never wait for an active upstream refresh or make GitHub
++requests, including on head-change retries. During lock contention they read
++available evidence without publishing source snapshots or recovery replacements;
++no observation cursor is supplied. Missing metadata returns unavailable JSON
++(`complete=false`, `available=false`, `code=cache_miss`) and CLI exit 1.
++Missing review/CI sources remain explicit errors. Source validation times identify
++older evidence; `observedAtMs` is the read time, not a fresh GitHub validation.
++PR view projections retain validation times and source errors. Cached-only
++recovery validates cached evidence, not freshness or merge readiness.
+ 
+ Rust uses `ApiClient::pr_status`; HTTP uses `GET /v1/pr-status`; napi-rs Node
+ bindings use `api.prStatus({ cursor, waitSeconds: 30 })`. These share the daemon.
