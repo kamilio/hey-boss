@@ -434,6 +434,13 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     let path = request.url().split('?').next().unwrap_or("/").to_owned();
+    if request.method() == &Method::Get && path == "/routes.js" {
+        return Ok((
+            200,
+            "text/javascript; charset=utf-8",
+            crate::routes::javascript().into_bytes(),
+        ));
+    }
     if request.method() == &Method::Get {
         let asset: Option<(&str, &[u8])> = match path.as_str() {
             "/" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),

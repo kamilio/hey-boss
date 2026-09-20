@@ -230,7 +230,7 @@
     restoreFocus($("#outline"), outlineFocus);
   }
   function reveal() {
-    const target = route().get("node"); if (!target || !graph) return;
+    const resource = HeyBossRoutes.resolve(); const target = resource?.entity === "node" ? resource.id : null; if (!target || !graph) return;
     const nodes = allNodes(); let node = nodes.get(target);
     while (node) { collapsed.delete(node.id); node = nodes.get(node.parent_id); }
     if (viewMode === "map") {

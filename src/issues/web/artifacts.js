@@ -399,7 +399,7 @@ const HeyBossArtifacts = (() => {
       context={project:project.id,csrf:boot.csrf,host:params.get("host")};for(const input of [$("#artifact-new"),$("#artifact-search"),$("#artifact-archived")])input.disabled=false;picker.update(boot.projects,project);doc=null;commentsOpen=null;
       $("#nav-artifacts").setAttribute("aria-current","page");
       if(mobile){$("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;$("#nav-mindmaps").hidden=true;}
-      const idDoc=params.get("artifact");
+      const resource=HeyBossRoutes.resolve();const idDoc=resource?.entity==="artifact"?resource.id:"";
       if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;reading();status("");}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
       else if(params.get("new")==="1")editor();
       else {mode("library");document.title="Artifacts · Hey Boss";await library();}
@@ -431,7 +431,7 @@ const HeyBossArtifacts = (() => {
       resourcePicker.update(boot.projects,project);
       $("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;$("#nav-mindmaps").hidden=true;
       const context={project:project.id};
-      const issue=params.get("issue"),node=params.get("node");
+      const resolved=HeyBossRoutes.resolve();const issue=resolved?.entity==="issue"?resolved.id:null,node=resolved?.entity==="node"?resolved.id:null;
       const result=await rpc(context,issue?{action:"view",number:Number(issue)}:{action:"mindmap",operation:{command:"view",node,body_mode:"full"}},true);
       if(ticket!==resourceGeneration)return;
       const resource=issue?result.issue:result.nodes.find(n=>n.id===node)||result.nodes[0];

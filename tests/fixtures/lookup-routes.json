@@ -1,0 +1,18 @@
+[
+ {"url":"http://127.0.0.1:4781/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&inbox_state=unread&issue=114&state=open&owner=all","entity":"issue","id":"114","project":"github.com/poe-platform/poe-code","host":""},
+ {"url":"https://hey-boss-mobile-kamil.fly.dev/artifacts#project=named%3ADesign+%26+QA&artifact=a-123&issue=19&node=n-19","entity":"artifact","id":"a-123","project":"named:Design & QA","host":""},
+ {"url":"http://localhost/mm?focus=1#project=named%3AMap&node=n-123&issue=3","entity":"node","id":"n-123","project":"named:Map","host":""},
+ {"url":"http://localhost/#view=inbox&notice=notice-123&issue=3","entity":"notice","id":"notice-123","project":"","host":""},
+ {"url":"http://localhost/#notice=notice-123&issue=3","entity":"issue","id":"3","project":"","host":""},
+ {"url":"https://example.invalid/?task=notification-123#issues","entity":"notice","id":"notification-123","project":"","host":""},
+ {"url":"http://localhost/agents/session#project=named%3ADesign&host=devbox&run=run-123","entity":"agent","id":"run-123","project":"named:Design","host":"devbox"},
+ {"url":"http://localhost/#project=named%3AA&project=named%3AB&issue=1&issue=2&host=devbox","entity":"issue","id":"1","project":"named:A","host":"devbox"},
+ {"url":"https://example.invalid/project-resource#project=named%3AMobile&node=n-456","entity":"node","id":"n-456","project":"named:Mobile","host":""},
+ {"url":"https://example.invalid/project-resource#project=named%3AMobile&issue=4&node=n-456","entity":"issue","id":"4","project":"named:Mobile","host":""},
+ {"url":"http://localhost/#view=inbox&issue=3","entity":"inbox","id":"","project":"","host":""},
+ {"url":"http://localhost/#project=named%3AA","entity":"issues","id":"","project":"named:A","host":""},
+ {"url":"http://localhost/artifacts","entity":"artifacts","id":"","project":"","host":""},
+ {"url":"http://localhost/mm","entity":"mindmap","id":"","project":"","host":""},
+ {"url":"http://localhost/agents","entity":"agents","id":"","project":"","host":""},
+ {"url":"http://localhost/workers#issue=1","entity":"agents","id":"","project":"","host":""}
+]
