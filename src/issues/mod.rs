@@ -151,6 +151,9 @@ pub enum BatchAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Attachment {
+        operation: crate::attachments::Operation,
+    },
     Batch {
         edits: Vec<BatchEdit>,
         #[serde(default)]
@@ -377,6 +380,9 @@ pub enum Operation {
 }
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::Attachment { operation } = self {
+            return operation.writes();
+        }
         if let Self::Artifact { operation } = self {
             return operation.writes();
         }
@@ -408,7 +414,8 @@ impl Operation {
     }
     pub fn number(&self) -> Option<i64> {
         match self {
-            Self::Artifact { .. }
+            Self::Attachment { .. }
+            | Self::Artifact { .. }
             | Self::Batch { .. }
             | Self::Mindmap { .. }
             | Self::Projects { .. }

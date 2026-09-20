@@ -257,6 +257,7 @@ fn validate(r: &Request) -> Result<()> {
         Operation::ResolveComment { comment_id, .. } if *comment_id <= 0 => {
             return Err(Error::invalid("Comment ID must be positive"));
         }
+        Operation::Attachment { operation } => operation.validate()?,
         Operation::Artifact { operation } => operation.validate()?,
         Operation::Mindmap { operation } => {
             operation.validate()?;
@@ -465,6 +466,7 @@ fn resolve_project(
 
 pub struct Store {
     db: Connection,
+    attachment_root: std::path::PathBuf,
 }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -613,7 +615,11 @@ impl Store {
             db.execute_batch(super::chief::SCHEMA)?;
         }
         agent_launches::migrate(&db)?;
-        Ok(Self { db })
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
+        Ok(Self {
+            db,
+            attachment_root: path.with_extension("attachments"),
+        })
     }
 
     /// Resolve notification headings through the same project registry as issues.
@@ -647,6 +653,13 @@ impl Store {
         if let Operation::ReadPlan { plan } = &r.operation {
             return super::planning::read_plan(plan);
         }
+        let payload = if let Operation::Attachment { operation } = &r.operation {
+            serde_json::to_string(
+                &json!({"action":"attachment","operation":operation.fingerprint()?}),
+            )?
+        } else {
+            serde_json::to_string(&r.operation)?
+        };
         let write = r.operation.writes();
         // Existing-project reads use a WAL snapshot and do not compete with
         // worker reservations, event writes, or replica synchronization.
@@ -678,7 +691,6 @@ impl Store {
         identifier(&project.id, "project ID", 8192)?;
         identifier(&project.name, "project name", 1024)?;
         let actor = r.actor.as_ref();
-        let payload = serde_json::to_string(&r.operation)?;
         if let (Some(key), Some(actor)) = (&r.request_id, actor) {
             let previous: Option<(String, String)> = tx.query_row(
                 "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
@@ -688,6 +700,12 @@ impl Store {
                     return Err(Error::conflict(
                         "Request ID was already used for a different operation",
                     ));
+                }
+                if let Operation::Attachment {
+                    operation: crate::attachments::Operation::Remove { id },
+                } = &r.operation
+                {
+                    crate::attachments::delete_file(&self.attachment_root.join(id))?;
                 }
                 return Ok(serde_json::from_str(&response)?);
             }
@@ -704,7 +722,17 @@ impl Store {
             tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
+        let mut attachment_files = crate::attachments::DiskChange::default();
         let mut result = match &r.operation {
+            Operation::Attachment { operation } => crate::attachments::execute(
+                &tx,
+                &self.attachment_root,
+                &project,
+                operation,
+                actor.map(|a| a.id.as_str()).unwrap_or(""),
+                now,
+                &mut attachment_files,
+            )?,
             Operation::Batch { edits, dry_run } => {
                 batch::execute(&tx, &project, actor, edits, *dry_run, now)?
             }
@@ -1041,7 +1069,7 @@ impl Store {
         }
         if !matches!(
             r.operation,
-            Operation::Artifact { .. } | Operation::Batch { .. }
+            Operation::Attachment { .. } | Operation::Artifact { .. } | Operation::Batch { .. }
         ) {
             subtasks::enrich(&tx, &response_project.id, &mut result)?;
         }
@@ -1056,7 +1084,7 @@ impl Store {
         if (r.operation.number().is_some()
             || matches!(
                 r.operation,
-                Operation::Create { .. } | Operation::Batch { .. }
+                Operation::Create { .. } | Operation::Batch { .. } | Operation::Attachment { .. }
             ))
             && result["changed"] == true
         {
@@ -1078,6 +1106,10 @@ impl Store {
             tx.rollback()?;
         } else {
             tx.commit()?;
+            attachment_files.new = None;
+            if let Some(path) = attachment_files.removed.take() {
+                crate::attachments::delete_file(&path)?;
+            }
         }
         if matches!(&r.operation, Operation::ControlWorker { command, .. } if command == "stop_worker" || command == "stop")
         {
