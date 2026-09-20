@@ -638,6 +638,7 @@ hey-boss health disable
 hey-boss health add-root /path/to/workspaces
 hey-boss health remove-root /path/to/workspaces
 hey-boss health configure --worktrees false
+hey-boss health configure --caches false
 hey-boss health remove-worktree /absolute/path/to/checkout
 hey-boss health hosts --json
 hey-boss health --host devbox status
@@ -685,14 +686,30 @@ never automatic targets.** A disconnected or idle agent is not proof of abandonm
 
 The worktree cleaner discovers repositories directly inside `~/Workspace` and
 `~/.codex/worktrees` (or `$CODEX_HOME/worktrees`), plus configured roots. It only
-removes linked checkouts at least 14 days old with no active process, agent or
+removes linked checkouts that are merged or at least 7 days old with a verified
+named branch retaining their commits. A merged checkout must have been inactive
+for at least an hour. All removals require no active process, agent or
 open file, no modified/untracked/ignored files, no locks, in-progress Git
-operations or populated submodules, and a HEAD merged into the locally recorded remote
-default branch. It rechecks before `git worktree remove`, never uses `--force`,
+operations or populated submodules. Merge status uses the locally recorded remote
+default branch; detached unmerged commits are preserved. It rechecks before `git worktree remove`, never uses `--force`,
 and keeps branches. Missing registrations and primary checkouts are preserved.
 Ignored files such as `.env` or build directories also prevent automatic removal.
 Empty, uninitialized submodule directories do not block cleanup; submodule
 contents and symlinked submodule paths remain protected.
+
+The **Caches** tab lists known disposable candidates and preservation reasons.
+Cleanup covers Chrome/Chrome Beta cache subdirectories, npm/pip/uv download
+caches, macOS Chrome signing copies, and stale hey-boss health test fixtures in
+the OS user temp directory. Signing copies must be inactive for an hour; other
+candidates for a day. It checks ownership, recent changes throughout each tree,
+open files, and stable identities across repeated observations, then rechecks
+before removal. Symlinked roots, incomplete inspections and oversized trees are
+preserved; symlinks inside caches are never followed. Browser profiles, history,
+cookies, bookmarks, offline storage and arbitrary project artifacts are not
+cleanup targets. Use the cache checkbox or `configure --caches false` to disable.
+The footer and CLI report measured **net free-space change** on the home volume.
+This includes concurrent writes and shared APFS blocks, rather than summing
+directory sizes that can substantially overstate reclaimed space.
 
 Scheduling is opt-in. The macOS job runs at standard priority with `nice 10`, not
 launchd's background tier: that tier is throttled whenever builds or tests run, which

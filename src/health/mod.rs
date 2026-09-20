@@ -1,4 +1,5 @@
 //! Local machine maintenance. Unknown processes and uncertain worktrees are preserved.
+mod caches;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -31,6 +32,7 @@ pub struct Config {
     pub automatic: bool,
     pub harvest_processes: bool,
     pub clean_worktrees: bool,
+    pub clean_caches: bool,
     pub interval_seconds: u64,
     pub process_min_age_seconds: u64,
     pub browser_min_age_seconds: u64,
@@ -61,11 +63,12 @@ impl Default for Config {
             automatic: false,
             harvest_processes: true,
             clean_worktrees: true,
+            clean_caches: true,
             interval_seconds: 300,
             process_min_age_seconds: 3600,
             browser_min_age_seconds: 600,
             observation_seconds: 300,
-            worktree_min_age_days: 14,
+            worktree_min_age_days: 7,
             workspace_roots,
         }
     }
@@ -136,6 +139,13 @@ pub struct Snapshot {
     pub worktrees: Vec<Item>,
     pub harvested_processes: usize,
     pub removed_worktrees: usize,
+    #[serde(default)]
+    pub caches: Vec<Item>,
+    #[serde(default)]
+    pub removed_caches: usize,
+    /// Net volume free-space change, including concurrent filesystem activity.
+    #[serde(default)]
+    pub disk_available_change_bytes: Option<i64>,
     pub errors: Vec<String>,
     #[serde(default)]
     pub activity: Vec<Activity>,
@@ -177,6 +187,8 @@ pub struct Observation {
 pub struct State {
     pub processes: BTreeMap<String, Observation>,
     pub worktrees: BTreeMap<String, Observation>,
+    #[serde(default)]
+    pub caches: BTreeMap<String, Observation>,
     pub snapshot: Snapshot,
 }
 
@@ -358,6 +370,7 @@ impl Store {
         if state.snapshot.running {
             state.processes.clear();
             state.worktrees.clear();
+            state.caches.clear();
             snapshot.record(
                 "error",
                 "Previous check was interrupted; quiet observations reset before retrying",
@@ -368,7 +381,7 @@ impl Store {
             if apply {
                 "Cleanup check started"
             } else {
-                "Inspection started; no processes or worktrees will be removed"
+                "Inspection started; no processes, worktrees, or caches will be removed"
             },
         );
         snapshot.record(
@@ -381,6 +394,7 @@ impl Store {
             Err(e) => {
                 state.processes.clear();
                 state.worktrees.clear();
+                state.caches.clear();
                 snapshot.errors.push(format!("Process inventory: {e}"));
                 snapshot.record(
                     "error",
@@ -435,6 +449,37 @@ impl Store {
         for item in snapshot.worktrees.clone() {
             snapshot.record("worktree", format!("{} — {}", item.name, item.detail));
         }
+        snapshot.phase = "Inspecting disposable caches".into();
+        self.checkpoint(&mut state, &snapshot)?;
+        match caches::clean(&config, &mut state.caches, apply && config.clean_caches) {
+            Ok((items, count)) => {
+                snapshot.caches = items;
+                snapshot.removed_caches = count;
+            }
+            Err(error) => {
+                state.caches.clear();
+                snapshot.errors.push(format!("Cache cleaner: {error}"));
+            }
+        }
+        for item in snapshot.caches.clone() {
+            snapshot.record("cache", format!("{} — {}", item.name, item.detail));
+        }
+        if apply {
+            let after = system::disk_available_bytes();
+            snapshot.disk_available_change_bytes = snapshot
+                .metrics
+                .disk_available_bytes
+                .zip(after)
+                .map(|(before, after)| {
+                    (i128::from(after) - i128::from(before))
+                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                        as i64
+                });
+            snapshot.metrics.disk_available_bytes = after;
+            if let Some(change) = snapshot.disk_available_change_bytes {
+                snapshot.record("disk", format!("Net available disk-space change: {change:+} bytes (includes concurrent writes and APFS shared blocks)"));
+            }
+        }
         for error in snapshot.errors.clone() {
             snapshot.record("error", error);
         }
@@ -448,7 +493,7 @@ impl Store {
             "Finished with inspection errors"
         }
         .into();
-        snapshot.record("scan", format!("Finished: {} worktrees checked; {} processes stopped; {} worktrees removed; {} errors.", snapshot.worktrees.len(), snapshot.harvested_processes, snapshot.removed_worktrees, snapshot.errors.len()));
+        snapshot.record("scan", format!("Finished: {} worktrees checked; {} processes stopped; {} worktrees removed; {} caches removed; {} errors.", snapshot.worktrees.len(), snapshot.harvested_processes, snapshot.removed_worktrees, snapshot.removed_caches, snapshot.errors.len()));
         self.checkpoint(&mut state, &snapshot)?;
         snapshot.refresh_process_inventory();
         Ok(snapshot)
@@ -621,8 +666,24 @@ mod tests {
         fields.remove("activity");
         fields.remove("running");
         fields.remove("phase");
+        fields.remove("caches");
+        fields.remove("removed_caches");
+        fields.remove("disk_available_change_bytes");
         let restored: Snapshot = serde_json::from_value(old).unwrap();
         assert!(restored.activity.is_empty() && !restored.running);
+        assert!(
+            restored.caches.is_empty()
+                && restored.removed_caches == 0
+                && restored.disk_available_change_bytes.is_none()
+        );
+        let old: State = serde_json::from_value(
+            serde_json::json!({"processes": {}, "worktrees": {}, "snapshot": restored}),
+        )
+        .unwrap();
+        assert!(old.caches.is_empty());
+        let config: Config =
+            serde_json::from_value(serde_json::json!({"automatic": true})).unwrap();
+        assert!(config.clean_caches && config.worktree_min_age_days == 7);
     }
     #[test]
     fn status_recognizes_an_interrupted_check() {
