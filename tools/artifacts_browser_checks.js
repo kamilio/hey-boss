@@ -22,6 +22,7 @@ async page => {
   const {project,id,origin}=await page.evaluate(()=>{const p=new URLSearchParams(location.hash.slice(1));return {project:p.get('project'),id:p.get('artifact'),origin:location.origin};});
   check(!!id,'Created document has stable URL');
   await page.evaluate(()=>{const text=document.querySelector('#artifact-reading strong').firstChild,range=document.createRange();range.selectNodeContents(text);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);document.querySelector('#artifact-reading').dispatchEvent(new Event('pointerup'));});
+  await page.getByRole('button',{name:'Comment on selection',exact:true}).click();
   check(await page.locator('#artifact-quote').innerText()==='selected','Unicode context anchors comment to rendered text');
   await page.getByRole('textbox',{name:'Add a comment',exact:true}).fill('Anchored discussion');
   await page.getByRole('button',{name:'Comment',exact:true}).click();

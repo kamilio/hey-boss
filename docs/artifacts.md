@@ -15,7 +15,9 @@ open only when needed. Unused reference and discussion sections stay out of view
 Attachment pickers search available documents and disable Attach when nothing
 matches. Cancel or Escape closes the picker without changing any references.
 
-Select text in the reading surface before commenting to quote that selection, or
+Select text and choose **Comment on selection** to quote a passage. Selecting or
+copying text keeps the reading layout in place. Comments stay closed until opened;
+the selection action brings the composer into view on a phone. You can also
 comment on the whole document. Threads support replies, resolving and reopening.
 Resolved threads collapse subtly. Edits preserve every discussion; unmatched
 selection quotes appear as outdated. Quotes retain nearby text to distinguish
@@ -25,7 +27,9 @@ their original content and request identity until delivery can be confirmed.
 
 The editor switches between **Preview** and **Write** without losing draft text.
 Its controls remain reachable while scrolling. Ordinary drafts grow with their
-text; large files use a bounded writing area. Opening Comments on a small screen
+text; large files use a bounded writing area with a plain editor that renders
+only visible lines. Undo/redo, selections and browser drafts retain the complete
+document. Its local bundle loads only when a large draft is opened. Opening Comments on a small screen
 brings the conversation into view, and closing it returns to document controls.
 Large documents become readable while the rest loads. Posting comments and
 resolving discussions keep the unchanged reading surface in place.
@@ -34,6 +38,8 @@ saved and error states. Save publishes the draft. Revision checks reject stale
 edits. Load the latest revision for comparison, merge it into your draft, then
 explicitly select that revision before saving. Interrupted saves retain the
 original request ID and content so retrying does not create another document.
+**⌘S / Ctrl+S** saves from the editor. Back from a new attached document returns
+to its referring issue or map topic. Failed reads offer **Try again**.
 Import and Export use UTF-8 Markdown; comments and relationships remain in the
 project store, rather than the exported file.
 
