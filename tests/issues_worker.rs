@@ -640,7 +640,8 @@ fn approval_hold_is_not_retried_automatically_even_after_delay() {
     let db = rusqlite::Connection::open(&f.db).unwrap();
     db.execute("UPDATE worker_runs SET finished_at=0", [])
         .unwrap();
-    assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
+    let status = f.cli(&["worker", "status"]);
+    assert_eq!(status["eligible"], 0, "{status}");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.control("retry", &id);
     f.wait(|s| s["active"] == 1 && s["runs"][0]["state"] == "running");
