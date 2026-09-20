@@ -79,8 +79,13 @@
       <form id="quick-issue-form">
         <div class="quick-issue-entry">
           <span data-icon="issue"></span>
-          <input id="quick-issue-title" aria-label="Issue title" placeholder="Issue title… @project to switch" autocomplete="off" maxlength="1024" />
+          <input id="quick-issue-title" aria-label="Issue title" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="quick-issue-projects" aria-describedby="quick-issue-context" placeholder="Issue title… @project to switch" autocomplete="off" maxlength="1024" />
           <button id="quick-issue-close" type="button" class="icon-button" aria-label="Close quick add"><span data-icon="x"></span></button>
+        </div>
+        <div id="quick-issue-project-picker" hidden>
+          <div class="quick-issue-project-heading">Switch project <span>Choose where this issue belongs</span></div>
+          <div id="quick-issue-projects" role="listbox" aria-label="Projects"></div>
+          <p id="quick-issue-project-status" role="status"></p>
         </div>
         <p id="quick-issue-error" role="alert" hidden></p>
         <div class="quick-issue-footer">
