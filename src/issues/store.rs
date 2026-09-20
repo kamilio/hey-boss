@@ -20,6 +20,8 @@ mod workers;
 
 #[path = "artifacts.rs"]
 mod artifacts;
+#[path = "transfer.rs"]
+mod transfer;
 
 const APPLICATION_ID: i64 = 0x48424953;
 const SCHEMA_VERSION: i64 = 12;
@@ -559,10 +561,11 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_deferred_subtasks' AND type='table')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history')", [], |r| r.get::<_, i64>(0))? < 4 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect')", [], |r| r.get::<_, i64>(0))? < 5 {
             db.execute_batch(mindmap::INDEXES)?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
+            db.execute_batch(transfer::INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
         // Normalize it without terminating workers that are still draining.
@@ -707,7 +710,7 @@ impl Store {
                     coalesce(sum(i.deleted_at IS NOT NULL),0),
                     coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL),0),
                     p.activity_at,p.hidden_at,p.created_at
-                    FROM projects p LEFT JOIN issues i ON i.project_id=p.id
+                    FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
                     WHERE ?1 OR p.hidden_at IS NULL GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
@@ -762,7 +765,7 @@ impl Store {
                 };
                 let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
                 let mut stmt = tx.prepare(&format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) FROM issues WHERE project_id=?1
-                    AND ((?2='deleted' AND deleted_at IS NOT NULL) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
+                    AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
                     AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
                     AND (?5 IS NULL OR instr(lower(title),lower(?5))>0 OR instr(lower(body),lower(?5))>0)
                     AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
@@ -852,6 +855,14 @@ impl Store {
             }
             Operation::View { number } => {
                 let issue = get_issue(&tx, &project.id, *number, true)?;
+                if issue.deleted_at.is_some()
+                    && let Some(destination) = transfer::destination(&tx, &project.id, *number)?
+                {
+                    tx.commit()?;
+                    return Ok(
+                        json!({"ok":true,"project":project,"issue":issue,"moved_to":destination}),
+                    );
+                }
                 let mut stmt = tx.prepare("SELECT id,author,body,created_at FROM comments WHERE project_id=?1 AND issue_number=?2 ORDER BY id DESC LIMIT 21")?;
                 let mut comments = stmt.query_map(params![project.id, number], |row|
                     Ok(json!({"id":row.get::<_,i64>(0)?,"author":row.get::<_,String>(1)?,"body":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?})))?
@@ -938,6 +949,19 @@ impl Store {
             | Operation::RemoveSubtask { .. } => {
                 subtasks::execute(&tx, &project, &r.operation, actor, now)?
             }
+            Operation::Transfer {
+                number,
+                destination,
+                if_version,
+            } => transfer::execute(
+                &tx,
+                &project,
+                actor.unwrap(),
+                *number,
+                destination,
+                *if_version,
+                now,
+            )?,
             Operation::Create { .. } => {
                 let issue = create_issue(&tx, &project, actor.unwrap(), &r.operation, now)?;
                 json!({"ok":true,"project":project,"issue":issue,"changed":true})
@@ -949,10 +973,16 @@ impl Store {
         let settings = super::global_settings::read(&tx)?;
         result["boss"] =
             json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
+        let response_project = if matches!(r.operation, Operation::Transfer { .. }) {
+            serde_json::from_value::<Project>(result["project"].clone())?
+        } else {
+            project.clone()
+        };
         if let Some(issue) = result.get_mut("issue")
             && let Some(number) = issue["number"].as_i64()
         {
-            issue["pull_requests"] = json!(registry::pull_requests(&tx, &project.id, number)?);
+            issue["pull_requests"] =
+                json!(registry::pull_requests(&tx, &response_project.id, number)?);
             if issue["assignee"] == "human:boss" {
                 issue["assignee_name"] = settings["boss_name"].clone();
             }
@@ -969,7 +999,7 @@ impl Store {
             }
         }
         if !matches!(r.operation, Operation::Artifact { .. }) {
-            subtasks::enrich(&tx, &project.id, &mut result)?;
+            subtasks::enrich(&tx, &response_project.id, &mut result)?;
         }
         if matches!(r.operation, Operation::Claim { .. }) {
             result["instructions"] = json!(registry::claim_instructions(
@@ -1164,6 +1194,11 @@ fn mutate(
             Operation::Delete { .. } | Operation::Restore { .. }
         ),
     )?;
+    if issue.deleted_at.is_some() && transfer::destination(db, &project.id, number)?.is_some() {
+        return Err(Error::conflict(
+            "This issue moved to another project; open its destination to make changes",
+        ));
+    }
     let before = serde_json::to_value(&issue)?;
     let mut action = "";
     let mut data = json!({});

@@ -199,6 +199,14 @@ enum Action {
         #[arg(long, default_value_t = 0)]
         offset: u32,
     },
+    /// Move an inactive issue to an existing project, preserving its history.
+    Transfer {
+        number: i64,
+        #[arg(long)]
+        destination: String,
+        #[arg(long)]
+        if_version: i64,
+    },
     /// Move an issue before/after another issue; omit both to move to the end.
     Move {
         number: i64,
@@ -568,6 +576,15 @@ impl Options {
                 after: *after,
                 if_order_version: *if_order_version,
             },
+            Action::Transfer {
+                number,
+                destination,
+                if_version,
+            } => Operation::Transfer {
+                number: *number,
+                destination: destination.clone(),
+                if_version: *if_version,
+            },
             Action::View { number } => Operation::View { number: *number },
             Action::History {
                 number,
@@ -877,6 +894,16 @@ fn markdown(value: &Value) -> String {
         .collect()
 }
 fn print_text(value: &Value) {
+    if let Some(destination) = value.get("moved_to") {
+        println!(
+            "Issue moved to {} ({}) #{}. Open it with --project {}.",
+            destination["project"]["name"].as_str().unwrap_or(""),
+            destination["project"]["id"].as_str().unwrap_or(""),
+            destination["number"],
+            destination["project"]["id"].as_str().unwrap_or("")
+        );
+        return;
+    }
     let project = &value["project"];
     if value["scope"] != "global" {
         println!("{} ({})", line(&project["name"]), line(&project["id"]));
