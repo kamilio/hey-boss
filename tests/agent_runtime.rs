@@ -161,6 +161,32 @@ fn malformed_protocol_never_counts_as_completion() {
 }
 
 #[test]
+fn embedding_can_supply_the_owned_agents_explicit_identity() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut session = AgentSession::launch(Launch {
+            provider,
+            binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+            cwd: root,
+            resume: None,
+            env: BTreeMap::from([
+                ("HEY_BOSS_FIXTURE_PROVIDER".into(), provider.name().into()),
+                ("HEY_BOSS_AGENT_ID".into(), "fixture:owned".into()),
+            ]),
+            output_schema: None,
+        })
+        .unwrap();
+        session.prompt("owned identity", None).unwrap();
+        let Event::TurnCompleted { output, .. } =
+            until(&mut session, |e| matches!(e, Event::TurnCompleted { .. }))
+        else {
+            unreachable!()
+        };
+        assert_eq!(output, "fixture:owned");
+    }
+}
+
+#[test]
 #[ignore = "requires installed, authenticated Codex, Claude and Pi CLIs; makes small model requests"]
 fn real_agents_complete_and_resume_the_exact_conversation() {
     let root = std::env::temp_dir().join(format!("hey-boss-real-agents-{}", std::process::id()));
