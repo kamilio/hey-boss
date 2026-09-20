@@ -12,6 +12,7 @@ let streaming = false;
 let turnNumber = 0;
 let goalTurns = 0;
 let output = '';
+let preflight;
 if (provider === 'pi') {
   file = args.includes('--session') ? args[args.indexOf('--session') + 1] : join(mkdtempSync(join(tmpdir(), 'hey-boss-pi-fixture-')), session + '.jsonl');
   writeFileSync(file, JSON.stringify({ type: 'session', id: session }) + '\n');
@@ -109,8 +110,19 @@ for await (const chunk of process.stdin) {
     }
   } else {
     if (r.type === 'extension_ui_response') {
+      if (preflight) {
+        const {id, reject} = preflight; preflight = undefined;
+        send({id,type:'response',command:'prompt',success:!reject,error:reject?'preflight rejected':undefined});
+        if (!reject) { output = 'preflight accepted'; complete(); }
+        continue;
+      }
       if (r.cancelled !== true) throw new Error('expected explicit input cancellation');
       output = 'input cancelled'; complete(); continue;
+    }
+    if (r.type === 'prompt' && r.message.startsWith('preflight')) {
+      preflight = {id:r.id,reject:r.message === 'preflight reject'};
+      send({type:'extension_ui_request',id:'preflight-input',method:'select',title:'Preflight',options:['one','two']});
+      continue;
     }
     let data;
     if (r.type === 'get_state') data = {sessionId:session,sessionFile:file,isStreaming:streaming};

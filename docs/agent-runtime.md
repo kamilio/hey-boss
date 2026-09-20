@@ -12,7 +12,7 @@ executable discovery now use the shared implementation.
 | Activity | item events | SDK messages and partial stream events | message/tool RPC events |
 | Completion | turn/completed | parent result, accounting for tracked delegated tasks | agent_settled, after retries and queued work |
 | Steering | expected-turn direct input | queued next user turn | before next model call |
-| Interrupt | turn/interrupt | SDK interrupt; stop when queued input exists | clear_queue then abort |
+| Interrupt | turn/interrupt | SDK interrupt; stop when queued input exists | clear_queue then abort; stop for pending dialogs |
 | Tool approvals | command/file/network and turn-scoped permissions | can_use_tool; original input, no permanent grant | no native permission broker |
 | Human input | unsupported requests exposed as Input | unsupported controls exposed as Input | extension select/confirm/input/editor, including cancellation |
 | Native goal | get/set saved native goal | none | none |
@@ -46,6 +46,17 @@ extension choices and repeat responses cannot grant access. Raw provider events
 remain available through `Other`; integrations must not interpret them as approval
 or task completion. Child environments remove inherited agent/session identity.
 No permission bypass flags are added.
+
+Pi extensions can request input during prompt preflight, before the prompt RPC
+acknowledgment. `prompt` returns the owned guard in that case with
+`State.awaiting_prompt_ack = true`; drain and explicitly answer/cancel the Input
+events. This is pending preflight, not accepted model execution. The eventual
+acknowledgment is still correlated and validated; rejection completes the turn
+as Failed. Steering is rejected until acknowledgment arrives. Unanswered input
+does not expire the acknowledgment wait; after an answer, the normal deadline
+applies again. Interrupting a pending Pi dialog stops the owned process group,
+because an extension dialog may have no abort signal. Resume the saved exact
+session explicitly when its file exists.
 
 Executable lookup preserves Codex's existing search paths and adds equivalent
 Claude/Pi lookup. `HEY_BOSS_CODEX`, `HEY_BOSS_CLAUDE` and `HEY_BOSS_PI` require

@@ -189,6 +189,9 @@ pub struct State {
     pub capabilities: Capabilities,
     pub stopped: bool,
     pub outcome_uncertain: bool,
+    /// Pi may request extension input before acknowledging prompt preflight.
+    #[serde(default)]
+    pub awaiting_prompt_ack: bool,
 }
 
 pub struct AgentSession {
@@ -208,6 +211,7 @@ pub struct AgentSession {
     uncertain: bool,
     output_schema: Option<Value>,
     queued_turns: VecDeque<(String, String)>,
+    prompt_ack: Option<(String, Instant)>,
     tasks: BTreeSet<String>,
 }
 impl AgentSession {
@@ -304,6 +308,7 @@ impl AgentSession {
             uncertain: false,
             output_schema: launch.output_schema,
             queued_turns: VecDeque::new(),
+            prompt_ack: None,
             tasks: BTreeSet::new(),
         };
         match client.provider {
@@ -345,6 +350,7 @@ impl AgentSession {
             }
         }
         self.normalize_pending()?;
+        self.check_prompt_ack()?;
         if !self.stopped && self.provider == Provider::Pi {
             self.refresh_pi()?;
             self.normalize_pending()?;
@@ -361,8 +367,12 @@ impl AgentSession {
             capabilities: self.capabilities(),
             stopped: self.stopped,
             outcome_uncertain: self.uncertain,
+            awaiting_prompt_ack: self.prompt_ack.is_some(),
         }
     }
+    /// Return the owned turn guard. Pi can request preflight input before its
+    /// acknowledgment: drain Input events while state.awaiting_prompt_ack is
+    /// true. A late rejection completes the turn as Failed, never successful.
     pub fn prompt(&mut self, text: &str, schema: Option<&Value>) -> io::Result<String> {
         self.ready()?;
         validate_text(text)?;
@@ -423,6 +433,11 @@ impl AgentSession {
                 "Active turn changed; refresh controls before sending",
             ));
         }
+        if self.prompt_ack.is_some() {
+            return Err(io::Error::other(
+                "Prompt is waiting for provider acknowledgment",
+            ));
+        }
         match self.provider {
             Provider::Codex => {
                 let result = self.rpc("turn/steer", json!({"threadId":self.session.as_ref().unwrap().id,"expectedTurnId":expected_turn,"input":[{"type":"text","text":text}]}))?;
@@ -472,6 +487,12 @@ impl AgentSession {
                 }
             }
             Provider::Pi => {
+                if self.prompt_ack.is_some() || !self.requests.is_empty() {
+                    // Extension dialogs without an abort signal can hold
+                    // preflight/tool hooks indefinitely. Stop the owned group
+                    // rather than answering input or claiming native abort.
+                    return self.stop();
+                }
                 // Pi abort otherwise continues queued steering/follow-up prompts.
                 self.rpc("clear_queue", json!({}))?;
                 self.rpc("abort", json!({}))?;
@@ -503,6 +524,9 @@ impl AgentSession {
         let reply = protocol::input_response(self.provider, value, answer)?;
         self.send(&reply)?;
         self.requests.remove(id);
+        if let Some((_, deadline)) = &mut self.prompt_ack {
+            *deadline = Instant::now() + Duration::from_secs(45);
+        }
         Ok(())
     }
     pub fn goal(&mut self) -> io::Result<Value> {
@@ -545,6 +569,7 @@ impl AgentSession {
     }
     pub fn receive(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
         self.normalize_pending()?;
+        self.check_prompt_ack()?;
         if let Some(event) = self.events.pop_front() {
             return Ok(Some(event));
         }
@@ -565,6 +590,7 @@ impl AgentSession {
         self.process.stop()?;
         self.stopped = true;
         self.queued_turns.clear();
+        self.prompt_ack = None;
         self.tasks.clear();
         self.finish(
             TurnStatus::Interrupted,
@@ -644,7 +670,18 @@ impl AgentSession {
             if let Some(result) = protocol::response(self.provider, &id, &value) {
                 return result;
             }
+            let preflight_input = self.provider == Provider::Pi
+                && method == "prompt"
+                && value["type"] == "extension_ui_request"
+                && matches!(
+                    value["method"].as_str(),
+                    Some("select" | "confirm" | "input" | "editor")
+                );
             self.queue(value)?;
+            if preflight_input {
+                self.prompt_ack = Some((id, Instant::now() + Duration::from_secs(45)));
+                return Ok(Value::Null);
+            }
         }
     }
     fn queue(&mut self, value: Value) -> io::Result<()> {
@@ -660,6 +697,20 @@ impl AgentSession {
     fn normalize_pending(&mut self) -> io::Result<()> {
         while let Some(value) = self.pending.pop_front() {
             self.normalize(value)?;
+        }
+        Ok(())
+    }
+    fn check_prompt_ack(&mut self) -> io::Result<()> {
+        if self
+            .prompt_ack
+            .as_ref()
+            .is_some_and(|(_, deadline)| Instant::now() >= *deadline)
+            && self.requests.is_empty()
+        {
+            self.uncertain = true;
+            return Err(io::Error::other(
+                "Agent timed out acknowledging prompt after extension input; inspect state before retrying",
+            ));
         }
         Ok(())
     }

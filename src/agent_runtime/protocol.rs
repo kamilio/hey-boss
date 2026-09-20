@@ -181,6 +181,18 @@ impl AgentSession {
                 "Agent event queue exceeded limit; drain events before issuing more controls",
             ));
         }
+        if let Some((id, _)) = &self.prompt_ack
+            && let Some(result) = response(self.provider, id, &value)
+        {
+            self.prompt_ack = None;
+            return match result {
+                Ok(_) => {
+                    self.events.push_back(Event::Other(value));
+                    Ok(())
+                }
+                Err(error) => self.finish(TurnStatus::Failed, error.to_string(), None, Value::Null),
+            };
+        }
         match self.provider {
             Provider::Codex => self.codex(value),
             Provider::Claude => self.claude(value),
