@@ -297,7 +297,7 @@
     >
       <form id="project-settings-form">
         <div class="dialog-heading">
-          <h2 id="project-settings-title">Project instructions</h2>
+          <h2 id="project-settings-title">Project settings</h2>
           <button
             class="icon-button"
             id="project-settings-close"
@@ -307,49 +307,45 @@
             <span data-icon="x"></span>
           </button>
         </div>
-        <div class="worker-form-body">
-          <p id="project-settings-name" class="field-help"></p>
-          <label class="field-label" for="project-prompt">Instructions</label
-          ><textarea
-            class="text-input"
-            id="project-prompt"
-            rows="4"
-            required
-            maxlength="32000"
-          ></textarea>
-          <p class="field-help">
-            {{issue_command}} retrieves the issue. {{commit_instruction}} fills
-            in the commit or PR instruction. {{create_issue_command poe-code}}
-            creates an issue in poe-code; replace the title and Markdown
-            placeholders in the command.
-          </p>
-          <label class="worker-goal"
-            ><input type="checkbox" id="project-prs" /><span
-              ><strong>PRs enabled</strong
-              ><small
-                >Open pull requests and attach their links to the issue.</small
-              ></span
-            ></label
-          >
-          <label class="field-help"><input type="checkbox" id="project-drafts" /> Drafts enabled</label>
-          <label class="field-label" for="project-plan-template">Plan file template</label>
-          <input id="project-plan-template" />
-          <p class="field-help">Repository-relative path. Use {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
-          <div class="worker-preview-block">
-            <strong
-              >Preview
-              <span id="project-goal-indicator" class="goal-indicator" hidden
-                >/goal</span
-              ></strong
-            >
-            <p id="project-instructions-preview" aria-live="polite"></p>
+        <div class="project-settings-body">
+          <div class="settings-editor">
+            <p id="project-settings-name" class="settings-project-name"></p>
+            <section class="settings-section" aria-labelledby="settings-base-title">
+              <h3 id="settings-base-title">Shared instructions</h3>
+              <p class="field-help">Start every issue with these instructions. The selected branches below are added automatically.</p>
+              <label class="field-label" for="project-prompt">Base prompt</label>
+              <textarea class="text-input" id="project-prompt" rows="3" required maxlength="32000"></textarea>
+              <p class="field-help">{{issue_command}} retrieves the issue. Use {{number}} for its number. Start with /goal to enable a goal. {{create_issue_command poe-code}} creates an issue in poe-code.</p>
+            </section>
+<section class="settings-section" aria-labelledby="settings-workspace-title">
+ <div class="settings-section-heading"><div><h3 id="settings-workspace-title">Workspace</h3><p class="field-help">Choose where agents make changes.</p></div>
+ <label class="workflow-toggle"><input type="checkbox" id="project-worktree" /><span>Use worktrees</span></label></div>
+ <div class="workflow-branches"><div class="workflow-branch" data-branch="worktree"><div class="branch-heading"><label for="project-prompt-worktree"><small>If worktrees are enabled</small><strong>Dedicated worktree</strong></label><span class="branch-state">Inactive</span></div>
+  <textarea class="text-input workflow-prompt" id="project-prompt-worktree" rows="3" maxlength="32000" aria-describedby="project-source-worktree"></textarea>
+  <div class="branch-footer"><span id="project-source-worktree">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="worktree">Use default</button></div></div><div class="workflow-branch" data-branch="checkout"><div class="branch-heading"><label for="project-prompt-checkout"><small>Otherwise</small><strong>Existing checkout</strong></label><span class="branch-state">Inactive</span></div>
+  <textarea class="text-input workflow-prompt" id="project-prompt-checkout" rows="3" maxlength="32000" aria-describedby="project-source-checkout"></textarea>
+  <div class="branch-footer"><span id="project-source-checkout">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="checkout">Use default</button></div></div></div></section><section class="settings-section" aria-labelledby="settings-delivery-title">
+ <div class="settings-section-heading"><div><h3 id="settings-delivery-title">Delivery</h3><p class="field-help">Choose how agents publish their changes.</p></div>
+ <label class="workflow-toggle"><input type="checkbox" id="project-prs" /><span>Use pull requests</span></label></div>
+ <div class="workflow-branches"><div class="workflow-branch" data-branch="prs"><div class="branch-heading"><label for="project-prompt-prs"><small>If pull requests are enabled</small><strong>Open pull requests</strong></label><span class="branch-state">Inactive</span></div>
+  <textarea class="text-input workflow-prompt" id="project-prompt-prs" rows="3" maxlength="32000" aria-describedby="project-source-prs"></textarea>
+  <div class="branch-footer"><span id="project-source-prs">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="prs">Use default</button></div></div><div class="workflow-branch" data-branch="main"><div class="branch-heading"><label for="project-prompt-main"><small>Otherwise</small><strong>Push to main</strong></label><span class="branch-state">Inactive</span></div>
+  <textarea class="text-input workflow-prompt" id="project-prompt-main" rows="3" maxlength="32000" aria-describedby="project-source-main"></textarea>
+  <div class="branch-footer"><span id="project-source-main">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="main">Use default</button></div></div></div></section>
+            <details class="settings-section planning-settings"><summary>Drafts &amp; planning</summary>
+              <label class="workflow-toggle"><input type="checkbox" id="project-drafts" /><span>Enable drafts</span></label>
+              <label class="field-label" for="project-plan-template">Plan file template</label>
+              <input class="text-input" id="project-plan-template" />
+              <p class="field-help">Repository-relative path. Use {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
+            </details>
           </div>
-          <p
-            id="project-settings-error"
-            class="form-error"
-            role="alert"
-            hidden
-          ></p>
+          <aside class="settings-preview" aria-labelledby="settings-preview-title">
+            <div class="preview-heading"><span class="preview-eyebrow">ASSEMBLED PROMPT</span><h3 id="settings-preview-title">What the agent receives <span id="project-goal-indicator" class="goal-indicator" hidden>/goal</span></h3>
+            <p class="field-help">Shared instructions + active workspace + active delivery. Updates as you edit.</p>
+            <div id="project-preview-choices" class="preview-choices"></div></div>
+            <p id="project-instructions-preview" aria-live="polite"></p>
+          </aside>
+          <p id="project-settings-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-footer">
           <span id="project-settings-state" role="status"></span>

@@ -271,7 +271,7 @@ and latest Codex activity. `--json` emits status snapshots. Ctrl+C stops that
 worker and reaps its Codex processes before releasing claims.
 
 Standalone workers start from the CLI in the project directory. Managed fleet
-workers also accept controls from the Workers web view. **Instructions** edits the project's
+workers also accept controls from the Workers web view. **Project settings** edits the project's
 inherited prompt and PR toggle and previews the exact resulting instructions.
 
 Pickup is an atomic reservation, leaving the issue **unassigned**. Codex must
@@ -297,22 +297,32 @@ claims still block pickup; completed attempts start a fresh session if reopened.
 A resume failure retains the saved session ID for retry rather than discarding
 the conversation. Approval requests still block for explicit manual retry.
 
-The default prompt is exactly two dynamic sentences:
+The full prompt combines three parts, separated by blank lines:
 
-```text
-Claim and implement `{{issue_command}}`.
+1. Shared instructions: `Claim and implement {{issue_command}}.` (the command is wrapped in backticks).
+2. Workspace: dedicated Git worktree when enabled; existing checkout otherwise.
+3. Delivery: open and attach pull requests when enabled; commit and push to main otherwise (commit only without a remote).
 
-{{commit_instruction}}
-```
+**Project settings** shows both branches of each choice and the assembled prompt
+on the right (below the editor on small screens). Included branches are marked.
+Each branch inherits a code default; entering text creates a project override,
+and **Use default** clears it. Changing an inactive branch does not change the
+assembled prompt until that branch is selected. Settings apply to future jobs;
+reserved jobs retain their captured configuration.
 
-`{{issue_command}}` retrieves the reserved issue. Without a Git remote the
-second sentence is “Commit your changes.” With a remote and PRs disabled it is
-“Commit your changes and push to main.” With PRs enabled it asks for a branch,
-pull request, and attachment using `hey-boss issue pr add NUMBER '<pr-url>'`. No hidden instruction block is appended. You may replace
-the whole prompt; additional variables are `{{title}}`, `{{body}}`,
-`{{number}}`, and `{{project}}`. Prefix the prompt with `/goal` to use a native Codex goal. No toggle is needed;
-the complete prompt after the prefix is preserved. A bare `/goal` uses the default
-two sentences. Issue commands use the worker’s current project automatically.
+Worktree and PR settings are off by default.
+`worker --worktree` / `--no-worktree` and `--prs` / `--no-prs` override project
+choices for that worker, including restored worker IDs. Worktree mode instructs
+the agent to create and use a worktree before editing; the worker itself stays
+in its configured checkout.
+
+Template variables include `{{issue_command}}`, `{{title}}`, `{{body}}`,
+`{{number}}`, and `{{project}}`, in shared and branch prompts. The retired
+`{{commit_instruction}}` variable is removed from old saved shared prompts;
+delivery instructions are always assembled from the selected branch.
+Prefix shared instructions with `/goal` to use a native Codex goal. A bare
+`/goal` uses the default shared instructions plus selected workspace and delivery.
+Issue commands use the worker’s current project automatically.
 
 To report a problem to another project, use
 `{{create_issue_command poe-code}}` in the instructions:
@@ -328,14 +338,16 @@ Use an unambiguous project name or a full project ID; names with spaces are
 quoted automatically. `{{create_issue_command}}` without a target creates in
 the current worker project. These commands use the same authoritative issue DB.
 
-**Instructions** edits the inherited prompt and the visible **PRs enabled**
-toggle (off by default). Worker prompt and PR overrides are optional.
+**Project settings** edits shared instructions, worktree and PR choices, and all four branch prompts.
+Worker overrides are optional; omitted values inherit project settings.
 
 ```sh
 hey-boss issue settings show
 hey-boss issue settings set --prs-enabled
 hey-boss issue settings set --no-prs
-hey-boss issue settings set --prompt 'Implement {{issue_command}}. {{commit_instruction}}'
+hey-boss issue settings set --worktree
+hey-boss issue settings set --no-worktree
+hey-boss issue settings set --prompt 'Implement {{issue_command}}.'
 hey-boss issue pr add 1 https://github.com/org/repo/pull/123
 hey-boss issue pr add 1 https://github.com/org/repo/pull/124
 hey-boss issue pr list 1

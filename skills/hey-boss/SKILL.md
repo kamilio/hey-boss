@@ -124,16 +124,17 @@ PRs are disabled by default; project settings or `worker --prs` enable them.
 Attach one or more with `hey-boss issue pr add NUMBER URL`; list/remove through
 `issue pr list/remove`. They remain visible in CLI and UI.
 Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
-A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The editable prompt is
-
-```text
-Claim and implement `{{issue_command}}`.
-
-{{commit_instruction}}
-```
-
-The project Instructions UI previews the exact two sentences: without a remote commit only; with a
-remote push main, or open/attach PRs when enabled. No hidden block is appended.
+A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The shared prompt defaults to `Claim and implement` followed by the backtick-wrapped
+`{{issue_command}}`. Project settings assembles shared instructions + selected
+workspace branch + selected delivery branch and previews the exact result.
+Worktree and PR modes default off. Each branch has a code default and an optional
+project override; **Use default** clears an override. `worker --worktree` /
+`--no-worktree` and `--prs` / `--no-prs` override project choices. Worktree mode
+instructs the agent to create a dedicated Git worktree before editing.
+Without PRs, delivery commits and pushes main when a remote exists (commit only
+otherwise); PR mode opens and attaches every PR. `{{commit_instruction}}` is
+retired and stripped from legacy shared templates. A bare `/goal` uses default
+shared instructions plus selected branches.
 Use `{{create_issue_command poe-code}}` in custom instructions to expand a create
 command targeting poe-code explicitly, including title/Markdown placeholders.
 Replace those with the report. Full project IDs and names with spaces work;

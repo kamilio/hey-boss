@@ -90,8 +90,9 @@ same-field edits are retained as conflicts rather than overwriting work.
 `hey-boss fleet status` shows the fleet without opening a browser.
 Standalone workers still use their local queue. `worker --host HOST --directory
 /remote/checkout` runs a worker and its Codex agents on that host.
-**Instructions** in the web app edits the project prompt, its exact preview, and
-PR behavior. Tags can be assigned directly in issue sidebars.
+**Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,
+with a live assembled preview. Each branch inherits a code default or uses a
+project override. `worker --worktree` / `--no-worktree` override the project choice. Tags can be assigned directly in issue sidebars.
 See [automatic workers](docs/issues.md#automatic-codex-workers).
 
 The macOS menu-bar menu includes **Issues…**, which opens the interface in your

@@ -1,4 +1,6 @@
 "use strict";
+const workflowPromptKeys = ["worktree", "checkout", "prs", "main"];
+let projectPromptDefaults = {};
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
   projectSettingsFocus = null,
@@ -10,6 +12,8 @@ let projectSettingsVersion = 0,
 function projectSettingsDraft() {
   return {
     prompt: $("#project-prompt").value,
+    worktree_enabled: $("#project-worktree").checked,
+    prompt_overrides: Object.fromEntries(workflowPromptKeys.map(key => [key, $("#project-prompt-" + key).value.trim() ? $("#project-prompt-" + key).value : null])),
     prs_enabled: $("#project-prs").checked,
     drafts_enabled: $("#project-drafts").checked,
     plan_template: $("#project-plan-template").value,
@@ -19,6 +23,7 @@ function projectSettingsChanged() {
   const changed =
     JSON.stringify(projectSettingsDraft()) !==
     JSON.stringify(projectSettingsOriginal);
+  updateWorkflowBranches();
   $("#project-settings-state").textContent = changed ? "Unsaved changes" : "";
   $("#project-settings-form button[type=submit]").disabled =
     projectSettingsSaving || !projectSettingsOriginal || !changed;
@@ -39,8 +44,7 @@ $("#project-settings-trigger").onclick = async () => {
   $("#project-settings-name").textContent = model.project.name;
   $("#project-settings-error").hidden = true;
   $("#project-settings-state").textContent = "Loading…";
-  $("#project-prompt").disabled = true;
-  $("#project-prs").disabled = true;
+  setProjectSettingsDisabled(true);
   $("#project-instructions-preview").textContent = "Loading…";
   $("#project-goal-indicator").hidden = true;
   $("#project-settings-form button[type=submit]").disabled = true;
@@ -54,11 +58,17 @@ $("#project-settings-trigger").onclick = async () => {
     projectSettingsVersion = value.version;
     $("#project-prompt").value = value.prompt;
     $("#project-prs").checked = value.prs_enabled;
+    $("#project-worktree").checked = value.worktree_enabled;
+    projectPromptDefaults = value.prompt_defaults;
+    for (const key of workflowPromptKeys) {
+      const input = $("#project-prompt-" + key);
+      input.value = value.prompt_overrides[key] ?? "";
+      input.placeholder = projectPromptDefaults[key];
+    }
     $("#project-drafts").checked = value.drafts_enabled;
     $("#project-plan-template").value = value.plan_template;
     projectSettingsOriginal = projectSettingsDraft();
-    $("#project-prompt").disabled = false;
-    $("#project-prs").disabled = false;
+    setProjectSettingsDisabled(false);
     projectSettingsChanged();
     previewProjectInstructions();
   } catch (error) {
@@ -78,6 +88,7 @@ $("#project-settings-form").onsubmit = async (event) => {
   event.preventDefault();
   if (projectSettingsSaving || !projectSettingsOriginal) return;
   projectSettingsSaving = true;
+  setProjectSettingsDisabled(true);
   projectSettingsChanged();
   $("#project-settings-state").textContent = "Saving…";
   try {
@@ -104,6 +115,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     $("#project-settings-error").hidden = false;
   } finally {
     projectSettingsSaving = false;
+    if (projectSettingsOriginal) setProjectSettingsDisabled(false);
     projectSettingsChanged();
   }
 };
@@ -122,6 +134,8 @@ function previewProjectInstructions() {
             projects: [project],
             prompt: draft.prompt,
             prs_enabled: draft.prs_enabled,
+            worktree_enabled: draft.worktree_enabled,
+            prompt_overrides: draft.prompt_overrides,
           },
           number: null,
         },
@@ -135,6 +149,7 @@ function previewProjectInstructions() {
         return;
       $("#project-instructions-preview").textContent = value.prompt;
       $("#project-goal-indicator").hidden = !value.use_goal;
+      $("#project-settings-error").hidden = true;
     } catch (error) {
       if (
         sequence !== projectPreviewSequence ||
@@ -149,7 +164,7 @@ function previewProjectInstructions() {
     }
   }, 150);
 }
-for (const selector of ["#project-prompt", "#project-prs"]) {
+for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", ...workflowPromptKeys.map(key => "#project-prompt-" + key)]) {
   $(selector).addEventListener("input", () => {
     projectSettingsChanged();
     previewProjectInstructions();
@@ -158,3 +173,26 @@ for (const selector of ["#project-prompt", "#project-prs"]) {
 
 $("#project-drafts").onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
+
+function setProjectSettingsDisabled(disabled) {
+  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt]")) input.disabled = disabled;
+}
+function updateWorkflowBranches() {
+  const active = [$("#project-worktree").checked ? "worktree" : "checkout", $("#project-prs").checked ? "prs" : "main"];
+  for (const key of workflowPromptKeys) {
+    const branch = document.querySelector(`[data-branch="${key}"]`);
+    branch.classList.toggle("active", active.includes(key));
+    branch.querySelector(".branch-state").textContent = active.includes(key) ? "Included" : "Inactive";
+    const custom = !!$("#project-prompt-" + key).value.trim();
+    $("#project-source-" + key).textContent = custom ? "Project override" : "Built-in default";
+    branch.querySelector("[data-reset-prompt]").hidden = !custom;
+  }
+  $("#project-preview-choices").textContent = `${active[0] === "worktree" ? "Dedicated worktree" : "Existing checkout"} · ${active[1] === "prs" ? "Pull requests" : "Push to main"}`;
+}
+for (const button of document.querySelectorAll("[data-reset-prompt]")) {
+  button.onclick = () => {
+    $("#project-prompt-" + button.dataset.resetPrompt).value = "";
+    projectSettingsChanged();
+    previewProjectInstructions();
+  };
+}
