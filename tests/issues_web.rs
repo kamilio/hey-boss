@@ -1030,6 +1030,51 @@ fn unavailable_inbox_does_not_block_the_issue_service() {
 }
 
 #[test]
+fn inbox_clear_is_protected_and_forwards_only_valid_snapshots() {
+    use std::os::unix::net::UnixListener;
+    let web = Web::start();
+    let listener = UnixListener::bind(web.root.join("inbox.sock")).unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut data = Vec::new();
+        stream.read_to_end(&mut data).unwrap();
+        let request: Value = serde_json::from_slice(&data).unwrap();
+        stream
+            .write_all(br#"{"status":"ok","result":"{\"cleared\":2,\"changed\":true}"}"#)
+            .unwrap();
+        request
+    });
+    let send = |body: Value, csrf: bool| {
+        let mut headers = vec![("Content-Type", "application/json")];
+        if csrf {
+            headers.push(("X-Hey-Boss-CSRF", web.token.as_str()));
+        }
+        web.http(
+            "POST",
+            "/api/inbox",
+            &headers,
+            serde_json::to_string(&body).unwrap().as_bytes(),
+        )
+    };
+    assert_eq!(
+        send(json!({"action":"clear","task_ids":["one"]}), false).status,
+        403
+    );
+    for ids in [json!([]), json!([""]), json!(["one", "one"])] {
+        assert_eq!(
+            send(json!({"action":"clear","task_ids":ids}), true).status,
+            400
+        );
+    }
+    let result = send(json!({"action":"clear","task_ids":["one","two"]}), true);
+    assert_eq!(result.status, 200);
+    assert_eq!(result.json()["cleared"], 2);
+    let forwarded = worker.join().unwrap();
+    assert_eq!(forwarded["command"], "inbox_clear");
+    assert_eq!(forwarded["task_ids"], json!(["one", "two"]));
+}
+
+#[test]
 fn every_page_uses_the_issues_design_library_and_shell() {
     let web = Web::start();
     for path in ["/", "/mm", "/workers"] {

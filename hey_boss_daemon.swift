@@ -78,6 +78,7 @@ struct Request: Decodable {
     let link_url: String?
     let link_label: String?
     let task_id: String?
+    let task_ids: [String]?
     let document_name: String?
     let attachment: DocumentAttachment?
     let comments_enabled: Bool?
@@ -325,6 +326,20 @@ final class Database {
             catch { reportFailure(StorageError(description: "Skipped damaged history record: \(error)")) }
         }
     }
+    func status(_ id: String) throws -> String {
+        let stmt = try statement("SELECT status FROM dialogs WHERE id=?")
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        guard sqlite3_bind_text(stmt,1,id,-1,transient) == SQLITE_OK else { throw failure() }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let raw = sqlite3_column_text(stmt,0) else { throw StorageError(description:"Unknown task ID") }
+        return String(cString:raw)
+    }
+    func pendingCount() throws -> Int {
+        let stmt = try statement("SELECT count(*) FROM dialogs WHERE status='pending'")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw failure() }
+        return Int(sqlite3_column_int64(stmt,0))
+    }
     func inboxRows() throws -> [[String: Any]] {
         // Project list metadata and bounded 128px icon snapshots, never document/attachment bodies.
         let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'severity',json_extract(body,'$.severity'),'icon',json_extract(body,'$.icon'),'iconData',json_extract(body,'$.iconData'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
@@ -419,6 +434,23 @@ final class MobileHub {
         guard [200,409].contains(status), let resolved = json["task"] as? [String: Any] else { throw StorageError(description: json["error"] as? String ?? "Mobile service rejected the answer") }
         return resolved
     }
+    func clear(_ rows: [Record]) throws {
+        // Bound response size and network work even for a large native history.
+        for start in stride(from:0,to:rows.count,by:100) {
+            let batch = Array(rows[start..<min(start+100,rows.count)])
+            let ids = batch.map { $0.taskID }
+            let body: [String:Any] = ["taskIDs":ids]
+            var (status,json) = try call("/api/bridge/tasks/clear",method:"POST",body:body)
+            if status == 404 {
+                for row in batch { _ = try publish(row) }
+                (status,json) = try call("/api/bridge/tasks/clear",method:"POST",body:body)
+            }
+            guard status == 200, let tasks = json["tasks"] as? [[String:Any]], tasks.count == ids.count,
+                  Set(tasks.compactMap { $0["taskID"] as? String }) == Set(ids) else { throw StorageError(description:json["error"] as? String ?? "Mobile service could not clear Inbox; refresh and retry") }
+            // Apply each acknowledged batch before another network call can fail.
+            for task in tasks { try store.applyMobile(task) }
+        }
+    }
     func sync() {
         do {
             try publishPresence()
@@ -466,7 +498,7 @@ final class Store {
     var remove: (String) -> Void = { _ in }
     var removeMany: ([String]) -> Void = { _ in }
     var pendingChanged: (Int) -> Void = { _ in }
-    func refreshPendingCount() { if let pending = try? database.pending() { pendingChanged(pending.count) } }
+    func refreshPendingCount() { if let count = try? database.pendingCount() { pendingChanged(count) } }
     init(_ path: String) throws { database = try Database(path) }
     func restore() {
         defer { refreshPendingCount() }
@@ -543,6 +575,23 @@ final class Store {
     }
     func processInbox(_ request: Request, _ reply: Reply) throws {
         if request.command == "inbox_list" { try inboxReply(reply,rows:database.inboxRows()); return }
+        if request.command == "inbox_clear" {
+            guard let ids = request.task_ids, !ids.isEmpty, ids.count <= 10000,
+                  Set(ids).count == ids.count, ids.allSatisfy({ !$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256 && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }) else { throw StorageError(description:"Select 1–10000 unique notice IDs") }
+            // Validate the complete snapshot before changing any records.
+            let pending = try ids.filter { try database.status($0) == "pending" }
+            // Decode only a bounded batch of documents at a time.
+            defer { refreshPendingCount() }
+            for start in stride(from:0,to:pending.count,by:100) {
+                let batch = Array(pending[start..<min(start+100,pending.count)])
+                if let mobile { try mobile.clear(batch.map { try database.get($0) }) }
+                else { try dismissRecords(batch) }
+            }
+            let cleared = try pending.filter { try database.status($0) != "pending" }.count
+            let data = try JSONSerialization.data(withJSONObject:["cleared":cleared,"changed":cleared>0])
+            reply.send(["task_id":"inbox","status":"ok","result":String(decoding:data,as:UTF8.self)])
+            return
+        }
         guard let id = request.task_id, !id.isEmpty, id.utf8.count <= 256 else { throw StorageError(description:"Task ID is required") }
         var row = try database.get(id)
         let before = try JSONEncoder().encode(row)

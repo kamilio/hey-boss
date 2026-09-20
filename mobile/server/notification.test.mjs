@@ -6,6 +6,42 @@ import {HubStore} from './store.mjs';
 import {createApp} from './index.mjs';
 import {markdownText,preview,pushContent} from './markdown-text.mjs';
 
+test('clear preserves winners and history, cancels requests, and leaves new arrivals pending',()=>{
+ const store=new HubStore();
+ for(const [id,kind,commentsEnabled] of [['update','update',false],['alert','alert',false],['approval','approval',false],['prompt','prompt',false],['review','update',true],['winner','approval',false],['arrival','alert',false]])store.upsert({taskID:id,kind,commentsEnabled,title:id,question:'Body',description:'Summary',options:['Approve']});
+ store.resolve('winner','Approve','mac');const winner=store.get('winner');
+ assert.throws(()=>store.clear(['update','missing']),/no longer available/);assert.equal(store.get('update').status,'pending');
+ for(const ids of [[],['update','update'],[''],Array(10001).fill('update')])assert.throws(()=>store.clear(ids));
+ assert.equal(store.clear(['update','alert','approval','prompt','review','winner']),5);
+ for(const id of ['update','alert'])assert.equal(store.get(id).status,'ok');
+ for(const id of ['approval','prompt','review']){assert.equal(store.get(id).status,'cancelled');assert.equal(store.get(id).result,null);}
+ assert.deepEqual(store.get('winner'),winner);assert.equal(store.get('arrival').status,'pending');
+ assert.equal(store.clear(['update','review','winner']),0);assert.equal(store.outcomes().length,6);assert.equal(store.list().length,7);store.close();
+});
+
+test('clear endpoint requires authentication, same origin and an explicit snapshot',async t=>{
+ const store=new HubStore(),app=createApp({store,hubToken:'x'.repeat(64),origin:'http://127.0.0.1',secure:false});
+ const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>{app.locals.close();server.close();store.close();});
+ store.upsert({taskID:'notice',kind:'alert',title:'Ready',question:'Ready',description:'',options:[]});
+ const base='http://127.0.0.1:'+server.address().port,headers={Cookie:'hb_session='+store.pair(store.pairing()).secret,'Content-Type':'application/json'};
+ const post=(headers,body)=>fetch(base+'/api/tasks/clear',{method:'POST',headers,body:JSON.stringify(body)});
+ assert.equal((await post({},{})).status,401);assert.equal((await post({...headers,Origin:'https://evil.invalid'},{taskIDs:['notice']})).status,403);
+ assert.equal((await post(headers,{})).status,400);assert.equal(store.get('notice').status,'pending');
+ const response=await post(headers,{taskIDs:['notice']});assert.equal(response.status,200);assert.equal((await response.json()).cleared,1);
+ store.upsert({taskID:'winner',kind:'approval',title:'Ship?',question:'Ship?',description:'',options:['Approve']});store.resolve('winner','Approve','phone');
+ store.upsert({taskID:'bridge-notice',kind:'alert',title:'Ready',question:'Ready',description:'',options:[]});
+ const bridgePost=headers=>fetch(base+'/api/bridge/tasks/clear',{method:'POST',headers,body:JSON.stringify({taskIDs:['bridge-notice','winner']})});
+ assert.equal((await bridgePost({})).status,401);
+ const bridge=await bridgePost({Authorization:'Bearer '+'x'.repeat(64),'Content-Type':'application/json'});assert.equal(bridge.status,200);
+ const result=await bridge.json();assert.equal(result.cleared,1);assert.equal(result.tasks[0].handledBy,'mac');assert.equal(result.tasks[1].result,'Approve');
+});
+
+test('Inbox summaries include every unread notice beyond the Activity limit',()=>{
+ const store=new HubStore();for(let i=0;i<305;i++)store.upsert({taskID:'notice-'+i,kind:'alert',title:'Ready',question:'Ready',description:'',options:[]});
+ assert.equal(store.summaries().length,305);assert.equal(store.clear(store.summaries().map(t=>t.taskID)),305);
+ assert.equal(store.summaries().length,300);assert.equal(store.list().length,300);store.close();
+});
+
 test('push previews preserve readable Markdown structure without raw syntax',()=>{
  assert.equal(markdownText('# Ready\n\n**Migration** is _complete_. [Review PR](https://example.com) and `ship()`.'),'Ready\n\nMigration is complete. Review PR and ship().');
  assert.equal(markdownText('- [x] Build\n- [ ] Review'),'• ✓ Build\n• ☐ Review');
