@@ -1,0 +1,577 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -4,6 +4,7 @@
+ use std::{net::SocketAddr, path::PathBuf, time::Duration};
+ 
+ mod logging;
++mod read_deadline;
+ mod skill_install;
+ 
+ #[derive(Parser)]
+@@ -20,6 +21,10 @@
+     repo: Option<String>,
+     #[arg(long, global = true)]
+     cursor: Option<String>,
++    /// Total single-PR read budget in seconds, including selector resolution.
++    /// Returns cached evidence or unavailable JSON with exit 1 at the deadline.
++    #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..=3600))]
++    timeout: Option<u64>,
+ }
+ 
+ #[derive(Subcommand)]
+@@ -135,7 +140,7 @@
+     Status,
+ }
+ 
+-#[derive(ClapArgs, Default)]
++#[derive(ClapArgs, Default, Clone)]
+ struct PrArgs {
+     /// Compatibility: hey-gh pr OWNER/REPO NUMBER.
+     legacy_repository: Option<String>,
+@@ -154,7 +159,7 @@
+     wait: u64,
+ }
+ 
+-#[derive(Subcommand)]
++#[derive(Subcommand, Clone)]
+ enum PrAction {
+     /// List your open PRs across repositories (or restrict with -R).
+     List {
+@@ -203,6 +208,12 @@
+ }
+ 
+ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
++    let deadline = args
++        .timeout
++        .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
++    if args.timeout.is_some() {
++        read_deadline::validate(args.command.as_ref(), args.cursor.as_deref())?;
++    }
+     if let Some(Command::Logs {
+         tail,
+         path,
+@@ -304,6 +315,20 @@
+         return Ok(());
+     }
+     let api = ApiClient::new(url::Url::parse(&args.server)?)?;
++    if let Some(deadline) = deadline {
++        let (value, complete) = read_deadline::read(
++            &api,
++            args.command.expect("validated read command"),
++            args.repo,
++            deadline,
++        )
++        .await?;
++        println!("{}", serde_json::to_string_pretty(&value)?);
++        if !complete {
++            return Err("incomplete report; source errors are included in the JSON output".into());
++        }
++        return Ok(());
++    }
+     let mut complete = true;
+     let value: Value = match args.command.unwrap_or(Command::Pr(PrArgs::default())) {
+         Command::Pr(options) => {
+--- a/src/read_deadline.rs
++++ b/src/read_deadline.rs
+@@ -0,0 +1,159 @@
++//! Caller-owned total read budgets. Dropping an HTTP caller leaves the daemon's
++//! handler and shared scheduler running; no watch or cursor is changed here.
++use super::{Command, PrAction, policy, resolve_pr, run_pr};
++use hey_gh::{ApiClient, Freshness};
++use serde_json::{Value, json};
++use tokio::time::Instant;
++
++type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
++
++pub(super) fn validate(command: Option<&Command>, cursor: Option<&str>) -> Result<()> {
++    let single_pr = match command {
++        Some(Command::Pr(options)) => {
++            options.wait == 0
++                && (matches!(
++                    options.action,
++                    Some(PrAction::View { .. } | PrAction::Checks { .. })
++                ) || (options.legacy_repository.is_some() && options.legacy_number.is_some()))
++        }
++        Some(Command::Ci { .. } | Command::RequiredChecks { .. }) => true,
++        _ => false,
++    };
++    if !single_pr || cursor.is_some() {
++        return Err("--timeout applies to single PR view/checks, ci, and required-checks reads; --wait controls cursor long polling".into());
++    }
++    Ok(())
++}
++
++pub(super) async fn read(
++    api: &ApiClient,
++    command: Command,
++    repo: Option<String>,
++    deadline: Instant,
++) -> Result<(Value, bool)> {
++    let mut cached = None;
++    let mut identity = json!({"repository": repo});
++    // One timer includes local git/branch discovery, cache transport, upstream
++    // waiting, JSON conversion, and projections. Never start a fallback request
++    // after the caller budget is exhausted.
++    let result = tokio::time::timeout_at(deadline, async {
++        match command {
++            Command::Pr(mut options) => {
++                if let Some(repository) = &options.legacy_repository {
++                    identity = json!({"repository":repository,"number":options.legacy_number});
++                } else {
++                    let selector = match &options.action {
++                        Some(PrAction::View { selector } | PrAction::Checks { selector }) => {
++                            selector.clone()
++                        }
++                        _ => unreachable!("validated single PR"),
++                    };
++                    identity["selector"] = json!(selector);
++                    let (repository, number) = resolve_pr(api, repo, selector).await?;
++                    identity = json!({"repository":repository,"number":number});
++                    match &mut options.action {
++                        Some(PrAction::View { selector } | PrAction::Checks { selector }) => {
++                            *selector = Some(number.to_string())
++                        }
++                        _ => unreachable!("validated single PR"),
++                    }
++                }
++                let selected_repo = if options.legacy_repository.is_some() {
++                    None
++                } else {
++                    identity["repository"].as_str().map(str::to_owned)
++                };
++                let mut cache_options = options.clone();
++                cache_options.refresh = false;
++                cache_options.cached_only = true;
++                let cached_result = run_pr(api, cache_options, selected_repo.clone(), None).await?;
++                if options.cached_only {
++                    return Ok(cached_result);
++                }
++                if cached_result.0["available"] != false {
++                    cached = Some(cached_result.0);
++                }
++                run_pr(api, options, selected_repo, None).await
++            }
++            Command::Ci {
++                repository,
++                number,
++                refresh,
++                cached_only,
++            } => {
++                identity = json!({"repository":repository,"number":number});
++                match api
++                    .ci_for_pr(&repository, number, Freshness::CachedOnly)
++                    .await
++                {
++                    Ok(report) => {
++                        let complete = report.complete;
++                        let value = serde_json::to_value(report)?;
++                        if cached_only {
++                            return Ok((value, complete));
++                        }
++                        cached = Some(value);
++                    }
++                    Err(hey_gh::Error::CacheMiss) => {
++                        if cached_only {
++                            return Ok((super::unavailable_cached_pr(&repository, number), false));
++                        }
++                    }
++                    Err(error) => return Err(error.into()),
++                }
++                let report = api
++                    .ci_for_pr(&repository, number, policy(refresh, false))
++                    .await?;
++                let complete = report.complete;
++                Ok((serde_json::to_value(report)?, complete))
++            }
++            Command::RequiredChecks {
++                repository,
++                number,
++                refresh,
++                cached_only,
++            } => {
++                identity = json!({"repository":repository,"number":number});
++                // Policy does not expose source validation times and its cached
++                // reads can wait on refresh locks. Do not invent policy freshness
++                // or reuse an unvalidated satisfaction result on expiry.
++                let report = api
++                    .required_checks_for_pr(&repository, number, policy(refresh, cached_only))
++                    .await?;
++                let complete = report.errors.is_empty();
++                Ok((serde_json::to_value(report)?, complete))
++            }
++            _ => unreachable!("validated read command"),
++        }
++    })
++    .await;
++    match result {
++        Ok(result) => result,
++        Err(_) => {
++            let available = cached.is_some();
++            let mut value = cached.unwrap_or_else(|| {
++                json!({
++                    "available": false, "state": "unknown", "validations": [],
++                    "oldestValidationAtMs": null, "observedAtMs": null,
++                    "repository": identity["repository"], "number": identity["number"],
++                    "selector": identity["selector"],
++                })
++            });
++            value["complete"] = json!(false);
++            value["available"] = json!(available);
++            value["code"] = json!("deadline");
++            value["deadlineExceeded"] = json!(true);
++            value["pendingSources"] = json!(["upstream_read"]);
++            // A fallback is evidence, not an observation-feed replacement. Do not
++            // hand a consumer a cursor for a timed-out read.
++            value["cursor"] = Value::Null;
++            if !value["sourceErrors"].is_object() {
++                value["sourceErrors"] = json!({});
++            }
++            value["sourceErrors"]["deadline"] = json!([{
++                "source":"upstream_read", "message":"caller deadline exceeded; upstream evidence remains pending"
++            }]);
++            Ok((value, false))
++        }
++    }
++}
+--- a/tests/github.rs
++++ b/tests/github.rs
+@@ -131,6 +131,16 @@
+     if mode == "issue72-stall-metadata" && path == "/repos/acme/demo/pulls/7" {
+         mock.release.notified().await;
+     }
++    if mode == "issue73-backoff" && path == "/repos/acme/demo/pulls/7" {
++        return reply(
++            429,
++            json!({"message":"secondary rate limit"}),
++            &[("retry-after", "60")],
++        );
++    }
++    if mode == "issue73-stall-list" && path == "/repos/acme/demo/pulls" {
++        mock.release.notified().await;
++    }
+     if mode == "issue72-partial-auth-stall"
+         && path == "/graphql"
+         && body["query"]
+@@ -2904,3 +2914,286 @@
+     api.stop().await;
+     task.abort();
+ }
++
++#[tokio::test]
++async fn issue73_deadline_returns_cached_evidence_without_stopping_shared_work() {
++    for command in [
++        vec!["pr", "view", "7", "-R", "acme/demo"],
++        vec!["pr", "checks", "7", "-R", "acme/demo"],
++        vec!["pr", "acme/demo", "7"],
++        vec!["ci", "acme/demo", "7"],
++        vec![
++            "pr",
++            "view",
++            "7",
++            "-R",
++            "acme/demo",
++            "--refresh",
++            "--json",
++            "headRefOid",
++        ],
++        vec!["required-checks", "acme/demo", "7"],
++    ] {
++        let h = Harness::new().await;
++        let c = h.client();
++        c.pr_report("acme/demo", 7, Freshness::Revalidate)
++            .await
++            .unwrap();
++        // Make ordinary reads need validation while retaining known old evidence.
++        rusqlite::Connection::open(&h.config().cache_path)
++            .unwrap()
++            .execute(
++                "UPDATE cache SET response = json_set(response, '$.validated_at_ms', 1)",
++                [],
++            )
++            .unwrap();
++        let baseline = c
++            .pr_report("acme/demo", 7, Freshness::CachedOnly)
++            .await
++            .unwrap();
++        let before = c.bootstrap().await.unwrap();
++        h.mode("issue72-stall-metadata");
++        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let base = format!("http://{}/", listener.local_addr().unwrap());
++        let router = api.router();
++        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
++        let start = std::time::Instant::now();
++        let output = tokio::time::timeout(
++            Duration::from_secs(2),
++            tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++                .args(["--server", &base])
++                .args(&command)
++                .args(["--timeout", "1"])
++                .output(),
++        )
++        .await
++        .expect("total deadline exceeded")
++        .unwrap();
++        assert!(start.elapsed() >= Duration::from_millis(900));
++        assert!(!output.status.success());
++        let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
++            panic!(
++                "{error}: stderr={} command={command:?}",
++                String::from_utf8_lossy(&output.stderr)
++            )
++        });
++        assert_eq!(value["code"], "deadline", "{value}");
++        assert_eq!(value["complete"], false);
++        assert_eq!(value["pendingSources"], json!(["upstream_read"]));
++        assert_eq!(value["cursor"], Value::Null);
++        if command[0] == "required-checks" {
++            assert_eq!(value["available"], false);
++            assert_eq!(value["state"], "unknown");
++        } else {
++            assert_eq!(value["available"], true);
++            let oldest = if command[1] == "view" {
++                "oldestValidationAtMs"
++            } else {
++                "oldest_validation_at_ms"
++            };
++            assert_eq!(value[oldest], baseline.oldest_validation_at_ms);
++            assert!(!value["validations"].as_array().unwrap().is_empty());
++        }
++        assert!(
++            c.status().outstanding_requests > 0,
++            "caller canceled daemon work"
++        );
++        assert_eq!(c.bootstrap().await.unwrap().cursor, before.cursor);
++        h.mock.release.notify_waiters();
++        until(|| c.status().outstanding_requests == 0).await;
++        h.mode("");
++        // A timed-out read must not leave its report lock permanently held.
++        tokio::time::timeout(
++            Duration::from_secs(2),
++            c.pr_report("acme/demo", 7, Freshness::Revalidate),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++        api.stop().await;
++        task.abort();
++    }
++}
++
++#[tokio::test]
++async fn issue73_deadline_bounds_cold_cache_branch_resolution_and_backoff() {
++    for (mode, command) in [
++        (
++            "issue72-stall-metadata",
++            vec!["pr", "view", "7", "-R", "acme/demo"],
++        ),
++        ("issue73-backoff", vec!["required-checks", "acme/demo", "7"]),
++        (
++            "issue73-stall-list",
++            vec!["pr", "view", "feature", "-R", "acme/demo"],
++        ),
++    ] {
++        let h = Harness::new().await;
++        h.mode(mode);
++        let mut config = h.config();
++        config.queue_timeout = Duration::from_secs(120);
++        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
++        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let base = format!("http://{}/", listener.local_addr().unwrap());
++        let router = api.router();
++        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
++        let output = tokio::time::timeout(
++            Duration::from_secs(2),
++            tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++                .args(["--server", &base])
++                .args(&command)
++                .args(["--timeout", "1"])
++                .output(),
++        )
++        .await
++        .expect("cold read exceeded deadline")
++        .unwrap();
++        assert!(!output.status.success());
++        let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
++            panic!(
++                "{error}: stderr={} mode={mode}",
++                String::from_utf8_lossy(&output.stderr)
++            )
++        });
++        assert_eq!(value["code"], "deadline", "{value}");
++        assert_eq!(value["available"], false);
++        assert_eq!(value["complete"], false);
++        assert_eq!(value["validations"], json!([]));
++        assert_eq!(value["oldestValidationAtMs"], Value::Null);
++        if mode == "issue73-backoff" {
++            assert!(c.status().outstanding_requests > 0);
++            assert_eq!(
++                h.calls()
++                    .iter()
++                    .filter(|call| call.path.ends_with("/pulls/7"))
++                    .count(),
++                1
++            );
++        }
++        h.mock.release.notify_waiters();
++        api.stop().await;
++        task.abort();
++    }
++}
++
++#[tokio::test]
++async fn issue73_fast_success_cached_contention_and_option_validation() {
++    let h = Harness::new().await;
++    let c = h.client();
++    c.pr_report("acme/demo", 7, Freshness::Revalidate)
++        .await
++        .unwrap();
++    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let base = format!("http://{}/", listener.local_addr().unwrap());
++    let router = api.router();
++    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
++    for action in ["view", "checks"] {
++        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++            .args([
++                "--server",
++                &base,
++                "pr",
++                action,
++                "7",
++                "-R",
++                "acme/demo",
++                "--timeout",
++                "1",
++            ])
++            .output()
++            .await
++            .unwrap();
++        assert!(
++            output.status.success(),
++            "{}",
++            String::from_utf8_lossy(&output.stderr)
++        );
++        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
++        assert_eq!(value["complete"], true);
++        assert!(value["deadlineExceeded"].is_null());
++    }
++    h.mode("issue72-stall-metadata");
++    let before_calls = h.calls().len();
++    let background = c.clone();
++    let refresh = tokio::spawn(async move {
++        background
++            .pr_report("acme/demo", 7, Freshness::Revalidate)
++            .await
++    });
++    issue72_wait_for_call(&h, before_calls, "/pulls/7").await;
++    let calls = h.calls().len();
++    for action in ["view", "checks"] {
++        let output = tokio::time::timeout(
++            Duration::from_millis(500),
++            tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++                .args([
++                    "--server",
++                    &base,
++                    "pr",
++                    action,
++                    "7",
++                    "-R",
++                    "acme/demo",
++                    "--cached-only",
++                    "--timeout",
++                    "1",
++                ])
++                .output(),
++        )
++        .await
++        .expect("cached-only behavior became slow")
++        .unwrap();
++        assert!(output.status.success());
++        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
++        assert_eq!(value["complete"], true);
++        assert!(value["deadlineExceeded"].is_null());
++    }
++    assert_eq!(h.calls().len(), calls);
++    let cursor = c.bootstrap().await.unwrap().cursor;
++    let sdk = hey_gh::ApiClient::new(base.parse().unwrap()).unwrap();
++    assert!(
++        sdk.changes(Some(&cursor), 100, Duration::ZERO)
++            .await
++            .unwrap()
++            .changes
++            .is_empty()
++    );
++    for command in [
++        vec!["pr", "list", "--timeout", "1"],
++        vec!["pr", "view", "7", "--timeout", "0"],
++        vec!["pr", "checks", "7", "--timeout", "3601"],
++        vec!["pr", "view", "7", "--timeout", "1", "--wait", "1"],
++        vec!["pr", "view", "7", "--timeout", "1", "--cursor", "invalid"],
++    ] {
++        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++            .args(["--server", &base])
++            .args(command)
++            .output()
++            .await
++            .unwrap();
++        assert!(!output.status.success());
++        assert!(output.stdout.is_empty());
++        assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
++    }
++    for command in [
++        vec!["pr", "view", "--help"],
++        vec!["pr", "checks", "--help"],
++        vec!["required-checks", "--help"],
++        vec!["ci", "--help"],
++    ] {
++        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
++            .args(command)
++            .output()
++            .await
++            .unwrap();
++        assert!(output.status.success());
++        assert!(String::from_utf8_lossy(&output.stdout).contains("--timeout"));
++    }
++    refresh.abort();
++    h.mock.release.notify_waiters();
++    api.stop().await;
++    task.abort();
++}
+--- a/skills/hey-gh/SKILL.md
++++ b/skills/hey-gh/SKILL.md
+@@ -16,6 +16,9 @@
+ hey-gh pr view 123 -R OWNER/REPO             # Comments, reviews, conflicts, CI
+ hey-gh pr checks 123 -R OWNER/REPO           # Detailed head and test-merge CI
+ hey-gh required-checks OWNER/REPO 123        # Separate required-check policy
++hey-gh pr view 123 -R OWNER/REPO --timeout 15 # Total caller read deadline
++hey-gh pr checks 123 -R OWNER/REPO --timeout 15
++hey-gh required-checks OWNER/REPO 123 --timeout 15
+ hey-gh pr --cursor 'CURSOR'                 # Changes + next cursor
+ hey-gh pr changes --cursor 'CURSOR' --wait 30 # Long poll
+ hey-gh pr --cached-only                     # Zero GitHub requests
+@@ -68,6 +71,23 @@
+ PR view projections retain validation times and source errors. Cached-only
+ recovery validates cached evidence, not freshness or merge readiness.
+ 
++Single-PR `pr view`, `pr checks`, legacy PR reads, `ci`, and `required-checks`
++accept `--timeout SECONDS` (1..3600). This opt-in total CLI budget includes PR
++selector/branch resolution and cache transport; `--wait` still controls cursor
++long polling and cannot be combined with it. Successful reads retain their
++existing output. A caller deadline emits parseable JSON and exit 1 with
++`code=deadline`, `deadlineExceeded=true`, `complete=false`, and explicit
++`pendingSources`/`sourceErrors`. Parse stdout even on exit 1.
++PR/CI reads capture cached evidence before waiting for validation. Deadline
++fallback retains that evidence's original head, validation times, and independent
++source errors; `available=true` means evidence exists, not that it is current.
++Cold cache, unresolved selectors, or required-check policy deadline results are
++structured unavailable (`available=false`, `state=unknown`, no validations).
++Policy expiry never synthesizes satisfied/not_required or merge readiness.
++Fallbacks have `cursor=null`; preserve saved feed cursors and resume them normally.
++The deadline cancels only the CLI's wait, not the daemon's handler, shared GitHub
++work, background watches, or registrations. No request starts after expiry.
++
+ Rust uses `ApiClient::pr_status`; HTTP uses `GET /v1/pr-status`; napi-rs Node
+ bindings use `api.prStatus({ cursor, waitSeconds: 30 })`. These share the daemon.
+ `hey-gh` implements a read-only subset of `gh pr` with an extended JSON envelope.
