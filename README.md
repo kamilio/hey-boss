@@ -735,7 +735,12 @@ from any application; the menu bar also has **Quick add issue…**. Enter a titl
 and press Enter to create it; Escape preserves the draft for the next opening.
 The header's plus button works on touch screens.
 
-Include `@poe-code` anywhere in the title to select a known project. Names match
+Type `@` anywhere in the title to select a known project. Browse suggestions
+with ↑/↓, then Enter, Tab, or a click selects a
+project without creating the issue. Escape dismisses suggestions first; press it
+again to close quick add. Suggestions also match project IDs and safely quote
+names with spaces or use full IDs for ambiguous names. Mentions such as
+`@poe-code` resolve
 without case sensitivity; use `@"Design Team"` for spaces, or a full project ID
 such as `@github.com/kamilio/poe-code` when names are ambiguous. Mentions are removed
 from the submitted title. Repeated mentions must identify the same project.
