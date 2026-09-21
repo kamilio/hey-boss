@@ -8,6 +8,31 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn native_quick_issue_creates_atomically_at_top_and_retries_once() {
+    let f = Fixture::new();
+    let first = f.create()["issue"]["number"].as_i64().unwrap();
+    let args = [
+        "create",
+        "--title",
+        "Native quick issue",
+        "--at-top",
+        "--request-id",
+        "native-retry",
+    ];
+    let created = f.run("human:boss", &args);
+    assert_eq!(
+        f.run("human:boss", &args)["issue"]["number"],
+        created["issue"]["number"]
+    );
+    f.run("human:boss", &["create", "--title", "Bottom"]);
+    let list = f.run("human:boss", &["list"]);
+    assert_eq!(list["issues"][0]["number"], created["issue"]["number"]);
+    assert_eq!(list["issues"][1]["number"], first);
+    assert_eq!(list["issues"].as_array().unwrap().len(), 3);
+    assert_eq!(created["issue"]["created_by"], "human:boss");
+}
 struct Fixture {
     root: PathBuf,
     cwd: PathBuf,

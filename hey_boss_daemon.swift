@@ -246,8 +246,9 @@ final class Reply {
     }
 }
 
-struct StorageError: Error, CustomStringConvertible {
+struct StorageError: Error, CustomStringConvertible, LocalizedError {
     let description: String
+    var errorDescription: String? { description }
 }
 
 func readScannerOutput(_ handle: FileHandle) throws -> Data {
@@ -3622,8 +3623,397 @@ final class AgentControlPanel: NSStackView {
     }
 }
 
+struct QuickIssueProject: Codable, Equatable {
+    let id: String
+    let name: String
+}
+
+/// Shared semantics with web Quick Add: whole @tokens, quoted names, escaped
+/// literal @, exact IDs before names, and only one destination per issue.
+enum QuickIssueText {
+    struct Mention { let start: Int; let end: Int; let name: String; let closed: Bool }
+    static func fold(_ value: String) -> String { value.precomposedStringWithCanonicalMapping.lowercased() }
+    static func token(_ c: Character) -> Bool {
+        c.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "_:/.-".unicodeScalars.contains($0) }
+    }
+    static func preceding(_ c: Character) -> Bool { token(c) && c != ":" && c != "/" || c == "+" || c == "@" }
+    static func mentions(_ text: String) -> [Mention] {
+        let chars = Array(text); var result: [Mention] = []; var i = 0
+        while i < chars.count {
+            if chars[i] == "\\", i + 1 < chars.count, chars[i + 1] == "@" { i += 2; continue }
+            guard chars[i] == "@", i == 0 || !preceding(chars[i - 1]) else { i += 1; continue }
+            let start = i; i += 1; var name = ""; var closed = true
+            if i < chars.count, chars[i] == "\"" || chars[i] == "'" {
+                let quote = chars[i]; i += 1
+                while i < chars.count, chars[i] != quote {
+                    if chars[i] == "\\", i + 1 < chars.count, chars[i + 1] == quote || chars[i + 1] == "\\" { i += 1 }
+                    name.append(chars[i]); i += 1
+                }
+                closed = i < chars.count
+                if closed { i += 1 }
+            } else {
+                while i < chars.count, token(chars[i]) { name.append(chars[i]); i += 1 }
+                while name.last == "." { name.removeLast(); i -= 1 }
+            }
+            result.append(Mention(start: start, end: i, name: name, closed: closed))
+        }
+        return result
+    }
+    static func parse(_ text: String, projects: [QuickIssueProject], current: QuickIssueProject?) throws -> (title: String, project: QuickIssueProject) {
+        let chars = Array(text); var selected: QuickIssueProject?; var title = ""; var start = 0
+        for mention in mentions(text) {
+            guard mention.closed else { throw StorageError(description: "Close the quote around the project name.") }
+            guard !mention.name.isEmpty else { throw StorageError(description: "Enter a project after @, or use \\@ for literal text.") }
+            if mention.end < chars.count, token(chars[mention.end]), chars[mention.end] != "." {
+                throw StorageError(description: "Separate the project mention from the title.")
+            }
+            let exact = projects.filter { $0.id == mention.name }
+            let matches = exact.isEmpty ? projects.filter { fold($0.name) == fold(mention.name) || fold($0.id) == fold(mention.name) } : exact
+            guard let project = matches.first else { throw StorageError(description: "Unknown project @\(mention.name). Use a known name or full project ID.") }
+            guard matches.count == 1 else { throw StorageError(description: "Project @\(mention.name) is ambiguous. Use its full project ID.") }
+            guard selected == nil || selected?.id == project.id else { throw StorageError(description: "Use mentions for only one project per issue.") }
+            selected = project; title += String(chars[start..<mention.start]); start = mention.end
+        }
+        title += String(chars[start...]); title = title.replacingOccurrences(of: "\\@", with: "@")
+        title = title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard !title.isEmpty else { throw StorageError(description: "Enter an issue title.") }
+        guard title.utf8.count <= 512 else { throw StorageError(description: "Keep the title within 512 bytes.") }
+        guard let project = selected ?? current else { throw StorageError(description: "Choose a project with @project.") }
+        return (title, project)
+    }
+    static func suggestions(_ projects: [QuickIssueProject], query: String) -> [QuickIssueProject] {
+        let q = fold(query)
+        func rank(_ p: QuickIssueProject) -> Int { fold(p.name) == q ? 0 : fold(p.name).hasPrefix(q) ? 1 : fold(p.id).hasPrefix(q) ? 2 : 3 }
+        return Array(projects.filter { fold($0.name).contains(q) || fold($0.id).contains(q) }.sorted {
+            rank($0) != rank($1) ? rank($0) < rank($1) : $0.name == $1.name ? $0.id < $1.id : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }.prefix(8))
+    }
+    static func completion(_ project: QuickIssueProject, projects: [QuickIssueProject]) -> String {
+        let matches = projects.filter { fold($0.name) == fold(project.name) || fold($0.id) == fold(project.name) }
+        let name = matches.count == 1 && matches[0].id == project.id ? project.name : project.id
+        return "@" + (name.allSatisfy(token) && !name.hasSuffix(".") ? name : "\"" + name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"")
+    }
+}
+
+final class QuickIssuePanel: NSPanel {
+    var toggleBottom: (() -> Void)?
+    var submitIssue: (() -> Void)?
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
+           event.keyCode == 36 || event.keyCode == 76 {
+            if (firstResponder as? NSTextView)?.hasMarkedText() != true, !event.isARepeat { submitIssue?() }
+            return true
+        }
+        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
+           let editor = firstResponder as? NSTextView {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "a": editor.selectAll(nil); return true
+            case "c": editor.copy(nil); return true
+            case "v": if editor.isEditable { editor.paste(nil) }; return true
+            case "x": if editor.isEditable { editor.cut(nil) }; return true
+            case "z": if editor.isEditable { editor.undoManager?.undo() }; return true
+            default: break
+            }
+        }
+        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "b" {
+            if (firstResponder as? NSTextView)?.hasMarkedText() != true, !event.isARepeat { toggleBottom?() }; return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown && performKeyEquivalent(with: event) { return }
+        super.sendEvent(event)
+    }
+}
+
+/// AppKit-only Spotlight panel. All store access goes through the installed Rust
+/// CLI, so durable replicas and request-ID retries follow ordinary issue rules.
+final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    let window = QuickIssuePanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 142), styleMask: [.borderless], backing: .buffered, defer: false)
+    let input = NSTextField()
+    let context = NSTextField(labelWithString: "Loading projects…")
+    let error = NSTextField(wrappingLabelWithString: "")
+    let bottom = NSButton(title: "Add to bottom", target: nil, action: nil)
+    let submit = NSButton(title: "Create", target: nil, action: nil)
+    let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close quick add")!, target: nil, action: nil)
+    let table = NSTableView()
+    let picker = NSScrollView()
+    let heading = NSTextField(labelWithString: "Switch project")
+    let hint = NSTextField(labelWithString: "↑↓ to browse · Enter or Tab to select")
+    let canvas = NSView()
+    let footer = NSView()
+    let icon = NSImageView()
+    let confirmation = NSTextField(labelWithString: "Issue created")
+    let progress = NSProgressIndicator()
+    let submitHint = NSTextField(labelWithString: "⌘↵")
+    var projects: [QuickIssueProject] = []
+    var current: QuickIssueProject?
+    var matches: [QuickIssueProject] = []
+    var mention: QuickIssueText.Mention?
+    var ready = false
+    var saving = false
+    var succeeded = false
+    var pending: (key: [String], id: String)?
+    var generation = 0
+    let present: Bool
+    let preferences: UserDefaults
+    var cli: String?
+    var runner: (([String], @escaping (Result<Data, Error>) -> Void) -> Void)?
+    private var selectionObserver: NSObjectProtocol?
+    init(present: Bool = true, preferences: UserDefaults = .standard) {
+        self.present = present; self.preferences = preferences
+        super.init()
+        window.title = "Quick add issue · Hey Boss"; window.delegate = self
+        window.isReleasedWhenClosed = false; window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.backgroundColor = .clear; window.isOpaque = false; window.hasShadow = true
+        // Reuse the notification surface, including its outer layer clipping:
+        // clipping only a blur view leaves the window's backing corners visible.
+        let material = Surface(frame: window.contentLayoutRect)
+        window.contentView = material
+        canvas.frame = material.content.bounds; canvas.autoresizingMask = [.width, .height]; material.content.addSubview(canvas)
+        icon.image = NSImage(systemSymbolName: "circle.dashed", accessibilityDescription: "Issue"); icon.contentTintColor = .controlAccentColor
+        input.isBordered = false; input.drawsBackground = false; input.focusRingType = .none
+        input.font = .systemFont(ofSize: 22); input.placeholderString = "Issue title… @project to switch"; input.delegate = self
+        input.setAccessibilityLabel("Issue title"); input.lineBreakMode = .byTruncatingTail
+        closeButton.bezelStyle = .circular; closeButton.controlSize = .small; closeButton.imageScaling = .scaleProportionallyDown
+        closeButton.target = self; closeButton.action = #selector(dismiss)
+        closeButton.toolTip = "Close quick add (Esc)"
+        context.font = .systemFont(ofSize: 12); context.textColor = .secondaryLabelColor; context.lineBreakMode = .byTruncatingMiddle
+        context.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bottom.setButtonType(.pushOnPushOff); bottom.bezelStyle = .rounded; bottom.controlSize = .regular
+        bottom.font = .systemFont(ofSize: 12); bottom.toolTip = "Toggle add to bottom (⌘⇧B)"
+        bottom.setAccessibilityLabel("Add issue to bottom of queue")
+        submit.bezelStyle = .rounded; submit.controlSize = .large; submit.bezelColor = .controlAccentColor
+        submit.font = .systemFont(ofSize: 13, weight: .semibold); submit.target = self; submit.action = #selector(create); submit.isEnabled = false
+        submit.toolTip = "Create issue (⌘Enter)"
+        submitHint.font = .systemFont(ofSize: 11); submitHint.textColor = .tertiaryLabelColor
+        confirmation.font = .systemFont(ofSize: 22, weight: .medium); confirmation.isHidden = true
+        progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
+        progress.setAccessibilityLabel("Quick Add is loading")
+        error.font = .systemFont(ofSize: 12); error.textColor = .systemRed; error.maximumNumberOfLines = 3
+        heading.font = .systemFont(ofSize: 12, weight: .semibold); heading.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11); hint.textColor = .tertiaryLabelColor
+        let column = NSTableColumn(identifier: .init("project")); table.addTableColumn(column); table.headerView = nil
+        table.rowHeight = 60; table.intercellSpacing = NSSize(width: 0, height: 4); table.backgroundColor = .clear
+        table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(chooseProject)
+        table.setAccessibilityLabel("Matching projects"); table.selectionHighlightStyle = .regular
+        picker.documentView = table; picker.hasVerticalScroller = true; picker.drawsBackground = false
+        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, footer] { canvas.addSubview(view) }
+        for view in [progress, context, bottom, submitHint, submit] { footer.addSubview(view) }
+        window.submitIssue = { [weak self] in self?.create() }
+        window.toggleBottom = { [weak self] in guard let self, !self.saving else { return }; self.bottom.state = self.bottom.state == .on ? .off : .on }
+        selectionObserver = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification, object: nil, queue: .main) { [weak self] notice in
+            guard let self, let editor = notice.object as? NSTextView, editor === self.input.currentEditor() else { return }
+            self.updatePicker()
+        }
+        layout()
+    }
+    deinit { if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) } }
+    func layout() {
+        let width = window.frame.width
+        let expanded = !matches.isEmpty || mention != nil
+        let rows = min(matches.count, 5)
+        let listHeight = expanded ? CGFloat(rows) * 64 : 0
+        let errorHeight: CGFloat = error.stringValue.isEmpty ? 0 : 56
+        let height = 142 + (expanded ? listHeight + 68 : 0) + errorHeight
+        var frame = window.frame; frame.origin.y += frame.height - height; frame.size.height = height
+        window.setFrame(frame, display: present)
+        canvas.layoutSubtreeIfNeeded()
+        input.frame = NSRect(x: 60, y: height - 68, width: width - 118, height: 34)
+        confirmation.frame = input.frame
+        icon.frame = NSRect(x: 24, y: height - 61, width: 24, height: 24)
+        closeButton.frame = NSRect(x: width - 44, y: height - 60, width: 24, height: 24)
+        heading.isHidden = !expanded; picker.isHidden = !expanded; hint.isHidden = !expanded
+        heading.frame = NSRect(x: 24, y: height - 102, width: width - 48, height: 18)
+        picker.frame = NSRect(x: 20, y: height - 110 - listHeight, width: width - 40, height: listHeight)
+        table.tableColumns[0].width = width - 40
+        hint.frame = NSRect(x: 24, y: 68 + errorHeight, width: width - 48, height: 18)
+        error.isHidden = errorHeight == 0; error.frame = NSRect(x: 24, y: 60, width: width - 48, height: errorHeight)
+        footer.frame = NSRect(x: 0, y: 0, width: width, height: 60)
+        let busy = saving || (!ready && error.stringValue.isEmpty)
+        progress.frame = NSRect(x: 24, y: 23, width: 16, height: 16)
+        let contextX: CGFloat = busy ? 48 : 24
+        context.frame = NSRect(x: contextX, y: 22, width: succeeded ? width - contextX - 24 : width - contextX - 310, height: 17)
+        bottom.frame = NSRect(x: width - 302, y: 14, width: 132, height: 32)
+        submitHint.frame = NSRect(x: width - 157, y: 23, width: 32, height: 16)
+        submit.frame = NSRect(x: width - 120, y: 12, width: 96, height: 36)
+    }
+    func open(cli: String?) {
+        self.cli = cli
+        if window.isVisible {
+            if succeeded { generation += 1; succeeded = false; changed() }
+            window.makeKeyAndOrderFront(nil); if !saving { window.makeFirstResponder(input) }; return
+        }
+        generation += 1; let sequence = generation
+        ready = false; succeeded = false; error.stringValue = ""; context.stringValue = "Loading projects…"; matches = []; mention = nil; updateEnabled(); layout()
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        if let bounds = screen?.visibleFrame {
+            let width = min(680, bounds.width - 48); window.setContentSize(NSSize(width: width, height: window.frame.height)); layout()
+            window.setFrameOrigin(NSPoint(x: bounds.midX - width / 2, y: bounds.maxY - bounds.height * 0.28 - window.frame.height))
+        }
+        if present { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(input) }
+        request(["projects", "--all", "--json"]) { [weak self] result in
+            guard let self, sequence == self.generation else { return }
+            do {
+                let data = try result.get()
+                struct Bootstrap: Decodable { let projects: [QuickIssueProject] }
+                self.projects = try JSONDecoder().decode(Bootstrap.self, from: data).projects
+                self.current = self.projects.first { $0.id == self.preferences.string(forKey: "quickIssueProject") }
+                // No implicit project from the daemon's working directory: the
+                // first native issue requires an explicit @project destination.
+                self.ready = true; self.changed()
+            } catch { self.context.stringValue = "Unable to load projects · close and retry"; self.fail(error.localizedDescription) }
+        }
+    }
+    func updateEnabled() {
+        input.isEnabled = !saving && !succeeded; bottom.isEnabled = !saving; closeButton.isEnabled = !saving
+        input.isHidden = succeeded; confirmation.isHidden = !succeeded
+        bottom.isHidden = succeeded; submit.isHidden = succeeded; submitHint.isHidden = succeeded
+        submit.title = saving ? "Creating…" : "Create"
+        icon.image = NSImage(systemSymbolName: succeeded ? "checkmark.circle.fill" : "circle.dashed", accessibilityDescription: succeeded ? "Issue created" : "Issue")
+        icon.contentTintColor = succeeded ? .systemGreen : .controlAccentColor
+        if saving || (!ready && error.stringValue.isEmpty) { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        submit.isEnabled = ready && !saving && !succeeded && !input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    func fail(_ message: String) {
+        error.stringValue = message
+        if ready { context.stringValue = "Draft preserved · retry safely" }
+        updateEnabled(); layout()
+    }
+    func changed() {
+        succeeded = false
+        error.stringValue = ""; updateEnabled()
+        if ready {
+            if let value = try? QuickIssueText.parse(input.stringValue, projects: projects, current: current) { context.stringValue = "Create in \(value.project.name)" }
+            else { context.stringValue = current.map { "Create in \($0.name) · @project to switch" } ?? "@project to choose a project" }
+        }
+        updatePicker()
+    }
+    func controlTextDidChange(_ obj: Notification) { changed() }
+    func updatePicker() {
+        matches = []; mention = nil
+        if ready && !saving, let editor = input.currentEditor() as? NSTextView, !editor.hasMarkedText(), editor.selectedRange().length == 0 {
+            let ns = input.stringValue as NSString
+            let caret = ns.substring(to: min(editor.selectedRange().location, ns.length)).count
+            if let active = QuickIssueText.mentions(input.stringValue).first(where: {
+                let quote = Array(input.stringValue)[$0.start + 1..<$0.end].first
+                return caret > $0.start && caret <= $0.end && !((quote == "\"" || quote == "'") && $0.closed && caret == $0.end)
+            }) {
+                mention = active
+                let chars = Array(input.stringValue)
+                var query = String(chars[(active.start + 1)..<min(caret, active.end)])
+                if query.first == "\"" || query.first == "'" { query.removeFirst() }
+                matches = QuickIssueText.suggestions(projects, query: query)
+                hint.stringValue = matches.isEmpty ? "No matching projects · try a name or full ID" : "↑↓ to browse · Enter or Tab to select"
+            }
+        }
+        table.reloadData(); if !matches.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }; layout()
+    }
+    func numberOfRows(in tableView: NSTableView) -> Int { matches.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard matches.indices.contains(row) else { return nil }
+        let project = matches[row]; let view = NSTableCellView()
+        let symbol = NSTextField(labelWithString: "@"); symbol.font = .systemFont(ofSize: 22, weight: .medium); symbol.textColor = .controlAccentColor
+        let name = NSTextField(labelWithString: project.name + (project.id == current?.id ? "   · Current" : "")); name.font = .systemFont(ofSize: 13, weight: .semibold)
+        let id = NSTextField(labelWithString: project.id); id.font = .systemFont(ofSize: 11); id.textColor = .secondaryLabelColor
+        for label in [name, id] { label.lineBreakMode = .byTruncatingMiddle }
+        symbol.frame = NSRect(x: 12, y: 15, width: 28, height: 28)
+        name.frame = NSRect(x: 52, y: 32, width: window.frame.width - 112, height: 18)
+        id.frame = NSRect(x: 52, y: 12, width: window.frame.width - 112, height: 16)
+        for label in [symbol, name, id] { view.addSubview(label) }; view.textField = name; return view
+    }
+    @objc func chooseProject() {
+        guard let mention, matches.indices.contains(table.selectedRow), !saving else { return }
+        let project = matches[table.selectedRow]; let chars = Array(input.stringValue)
+        let suffix = String(chars[mention.end...]); let completion = QuickIssueText.completion(project, projects: projects)
+        let space = suffix.isEmpty || suffix.first.map(QuickIssueText.token) == true ? " " : ""
+        let prefix = String(chars[..<mention.start]) + completion + space
+        input.stringValue = prefix + suffix; window.makeFirstResponder(input)
+        (input.currentEditor() as? NSTextView)?.setSelectedRange(NSRange(location: prefix.utf16.count + (suffix.first?.isWhitespace == true ? 1 : 0), length: 0))
+        changed()
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
+        guard !textView.hasMarkedText() else { return false }
+        if NSApp.currentEvent?.isARepeat == true && command == #selector(NSResponder.insertNewline(_:)) { return true }
+        if command == #selector(NSResponder.cancelOperation(_:)) {
+            if mention != nil { matches = []; mention = nil; layout() } else { dismiss() }; return true
+        }
+        if command == #selector(NSResponder.moveDown(_:)) || command == #selector(NSResponder.moveUp(_:)), !matches.isEmpty {
+            let delta = command == #selector(NSResponder.moveDown(_:)) ? 1 : -1
+            let row = (max(0, table.selectedRow) + delta + matches.count) % matches.count
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false); table.scrollRowToVisible(row); return true
+        }
+        if command == #selector(NSResponder.insertNewline(_:)) { if !matches.isEmpty { chooseProject() } else { create() }; return true }
+        if command == #selector(NSResponder.insertTab(_:)), !matches.isEmpty { chooseProject(); return true }
+        return false
+    }
+    @objc func dismiss() { guard !saving else { return }; generation += 1; window.orderOut(nil) }
+    func windowDidResignKey(_ notification: Notification) { if !saving { dismiss() } }
+    @objc func create() {
+        guard ready, !saving, !succeeded, (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        do {
+            let parsed = try QuickIssueText.parse(input.stringValue, projects: projects, current: current)
+            var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.id, "--title", parsed.title]
+            if bottom.state != .on { args.append("--at-top") }
+            if pending?.key != args { pending = (args, UUID().uuidString) }
+            let requestID = pending!.id; saving = true; error.stringValue = ""; context.stringValue = "Creating in \(parsed.project.name)…"
+            matches = []; mention = nil; updateEnabled(); layout()
+            request(args + ["--request-id", requestID]) { [weak self] result in
+                guard let self else { return }
+                self.saving = false
+                do {
+                    let data = try result.get()
+                    guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the issue. Retry safely with the same draft.") }
+                    self.current = parsed.project; self.preferences.set(parsed.project.id, forKey: "quickIssueProject")
+                    self.pending = nil; self.input.stringValue = ""; self.bottom.state = .off
+                    self.succeeded = true
+                    self.context.stringValue = "Created #\(number) in \(parsed.project.name)"; self.updateEnabled(); self.layout()
+                    self.window.makeFirstResponder(nil)
+                    NSAccessibility.post(element: self.confirmation, notification: .announcementRequested, userInfo: [.announcement: self.context.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+                    // Brief confirmation remains native; no browser is launched.
+                    let sequence = self.generation
+                    if self.present { DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+                        guard let self, sequence == self.generation, self.succeeded, !self.saving else { return }; self.dismiss()
+                    } }
+                } catch { self.fail(error.localizedDescription) }
+            }
+        } catch { fail(error.localizedDescription) }
+    }
+    func request(_ args: [String], completion: @escaping (Result<Data, Error>) -> Void) {
+        if let runner { runner(args, completion); return }
+        let candidates = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { completion(.failure(StorageError(description: "Install the updated hey-boss CLI."))); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process(); process.executableURL = URL(fileURLWithPath: path); process.arguments = ["issue"] + args
+            // Home-directory reads do not register a phantom project.
+            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+            var env = ProcessInfo.processInfo.environment
+            // A desktop action belongs to Boss and this device, not an agent's
+            // inherited worker session or an accidentally configured SSH host.
+            for key in ["HEY_BOSS_ISSUE_HOST", "HEY_BOSS_ISSUE_PROJECT", "HEY_BOSS_AGENT_ID", "CODEX_THREAD_ID"] { env.removeValue(forKey: key) }
+            process.environment = env
+            let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+            defer { try? pipe.fileHandleForReading.close() }
+            do {
+                try process.run()
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) { if process.isRunning { process.terminate(); DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } } } }
+                let data = try readScannerOutput(pipe.fileHandleForReading); process.waitUntilExit()
+                guard process.terminationStatus == 0 else {
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    let detail = (json?["error"] as? [String: Any])?["message"] as? String
+                    throw StorageError(description: detail ?? "Could not create the issue. Your draft is preserved; retry safely.")
+                }
+                onMain { completion(.success(data)) }
+            } catch { if process.isRunning { process.terminate() }; onMain { completion(.failure(error)) } }
+        }
+    }
+}
+
 /// A registered hotkey works in other apps without monitoring their keystrokes
-/// or requiring Accessibility permissions. Control+Option+Space avoids Spotlight.
+/// or requiring Accessibility permissions. ⌘⌃⌥⇧I opens native Quick Add.
 final class QuickIssueShortcut {
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
@@ -3641,8 +4031,8 @@ final class QuickIssueShortcut {
             return noErr
         }, 1, &event, context, &handler)
         guard installed == noErr else { return }
-        let status = RegisterEventHotKey(UInt32(kVK_Space), UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x48425149, id: 1), GetApplicationEventTarget(), 0, &hotKey)
-        if status != noErr { NSLog("Hey Boss quick-add shortcut unavailable (%d); use the menu or browser shortcut.", status) }
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_I), UInt32(cmdKey | controlKey | optionKey | shiftKey), EventHotKeyID(signature: 0x48425149, id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        if status != noErr { NSLog("Hey Boss quick-add shortcut unavailable (%d); use the menu.", status) }
     }
     deinit {
         if let hotKey { UnregisterEventHotKey(hotKey) }
@@ -3803,7 +4193,8 @@ final class NativeMindmapViewer: NSObject, WKNavigationDelegate {
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate {
     lazy var issuesShortcut = IssuesShortcut { [weak self] in self?.showIssues() }
     lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in self?.showQuickIssue() }
-    @objc func showQuickIssue() { issuesLauncher.open(cli: cli, page: .quickIssue) }
+    lazy var quickIssue = NativeQuickIssue(present: present)
+    @objc func showQuickIssue() { quickIssue.open(cli: cli) }
     var openInbox: (() -> Void)?
     @objc func showInbox() { if let openInbox { openInbox() } else { issuesLauncher.open(cli:cli,page:.inbox) } }
     var openIssues: (() -> Void)?
@@ -4008,8 +4399,8 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         let menu = statusMenu
         activityMenuItem.isEnabled = false
-        let quickAdd = NSMenuItem(title: "Quick add issue…", action: #selector(showQuickIssue), keyEquivalent: " ")
-        quickAdd.keyEquivalentModifierMask = [.control, .option]
+        let quickAdd = NSMenuItem(title: "Quick add issue…", action: #selector(showQuickIssue), keyEquivalent: "i")
+        quickAdd.keyEquivalentModifierMask = [.command, .control, .option, .shift]
         quickAdd.target = self
         menu.addItem(quickAdd)
         menu.addItem(activityMenuItem)

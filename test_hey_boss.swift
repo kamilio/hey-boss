@@ -13,6 +13,15 @@ func audit() {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ISSUES_SHORTCUT_ONLY"] == "1" { auditIssuesShortcut(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_NATIVE_QUICK_ISSUE_PREVIEW"] == "1" {
+        let prefs = UserDefaults(suiteName: "hey-boss-issue66-preview")!
+        defer { prefs.removePersistentDomain(forName: "hey-boss-issue66-preview") }
+        let ui = NativeQuickIssue(preferences: prefs)
+        let shortcut = QuickIssueShortcut { ui.open(cli: nil) }
+        ui.open(cli: nil)
+        withExtendedLifetime((ui, shortcut)) { app.run() }
+        return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MINDMAP_ONLY"] == "1" { auditNativeMindmap(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
@@ -213,15 +222,13 @@ func auditIssuesShortcut() {
 
 func auditQuickIssue() {
     let overview = AgentsOverview(present: false, cli: nil)
-    var opened: [URL] = []
-    overview.issuesLauncher.probe = { $0(true) }
-    overview.issuesLauncher.openURL = { opened.append($0); return true }
+    overview.quickIssue.runner = { _, completion in completion(.success(Data("{\"projects\":[]}".utf8))) }
     overview.showQuickIssue()
-    precondition(opened.last?.fragment == "quick-issue=1")
+    precondition(overview.quickIssue.ready)
     let item = overview.statusMenu.items.first { $0.action == #selector(AgentsOverview.showQuickIssue) }!
-    precondition(item.keyEquivalent == " " && item.keyEquivalentModifierMask == [.control, .option])
+    precondition(item.keyEquivalent == "i" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
-    precondition(opened.count == 2)
+    auditNativeQuickIssue()
     var calls = 0
     let shortcut = QuickIssueShortcut { calls += 1 }
     withExtendedLifetime(shortcut) {
@@ -237,6 +244,121 @@ func auditQuickIssue() {
         precondition(calls == 1, "Other hotkeys must not open quick add")
     }
     print("Passed: quick-add menu, launch destination, global shortcut callback and unrelated hotkeys")
+}
+
+func auditNativeQuickIssue() {
+    let projects = [QuickIssueProject(id: "github.com/kamilio/hey-boss", name: "hey-boss"), QuickIssueProject(id: "github.com/poe-platform/poe-code", name: "poe-code"), QuickIssueProject(id: "named:Design Team", name: "Design Team"), QuickIssueProject(id: "named:café", name: "café")]
+    for (text, expected, destination) in [
+        ("Fix reconnect", "Fix reconnect", 0), ("Fix @POE-CODE reconnect", "Fix reconnect", 1),
+        ("@github.com/poe-platform/poe-code Fix", "Fix", 1), ("Fix @\"Design Team\" reconnect", "Fix reconnect", 2),
+        ("Fix @'Design Team' reconnect", "Fix reconnect", 2), ("Fix @café reconnect", "Fix reconnect", 3),
+        ("Email boss@poe-code.com", "Email boss@poe-code.com", 0), ("Document \\@poe-code syntax", "Document @poe-code syntax", 0),
+        ("Fix @poe-code. Now", "Fix . Now", 1), ("Fix (@poe-code), reconnect", "Fix (), reconnect", 1),
+        ("Fix @poe-code and @poe-code", "Fix and", 1)
+    ] {
+        let value = try! QuickIssueText.parse(text, projects: projects, current: projects[0])
+        precondition(value.title == expected && value.project == projects[destination], text)
+    }
+    for text in ["@missing Fix", "@poe-code-extra Fix", "@poe-code @hey-boss Fix", "@\"Design Team Fix", "@ Fix", "@poe-code", "   ", "Fix @'Design Team'x"] {
+        precondition((try? QuickIssueText.parse(text, projects: projects, current: projects[0])) == nil, text)
+    }
+    let duplicates = projects + [QuickIssueProject(id: "named:other", name: "poe-code")]
+    precondition((try? QuickIssueText.parse("Fix @poe-code", projects: duplicates, current: projects[0])) == nil)
+    precondition(QuickIssueText.completion(projects[1], projects: duplicates) == "@github.com/poe-platform/poe-code")
+    precondition(QuickIssueText.suggestions(projects, query: "PO") == [projects[1]])
+    precondition(QuickIssueText.suggestions(projects, query: "cafe\u{301}") == [projects[3]])
+    precondition((try? QuickIssueText.parse("Fix", projects: projects, current: nil)) == nil)
+    precondition((try? QuickIssueText.parse(String(repeating: "é", count: 513), projects: projects, current: projects[0])) == nil)
+    let suite = "hey-boss-native-quick-issue-\(UUID().uuidString)"; let prefs = UserDefaults(suiteName: suite)!
+    defer { prefs.removePersistentDomain(forName: suite) }
+    let ui = NativeQuickIssue(present: false, preferences: prefs)
+    var requests: [[String]] = []; var reply: ((Result<Data, Error>) -> Void)?
+    let bootstrap = try! JSONEncoder().encode(["projects": projects])
+    ui.runner = { args, completion in
+        requests.append(args)
+        if args.first == "projects" { completion(.success(bootstrap)) } else { reply = completion }
+    }
+    ui.open(cli: nil); precondition(ui.ready && ui.current == nil)
+    precondition(ui.canvas.bounds.width == ui.window.frame.width && ui.canvas.bounds.height == ui.window.frame.height, "Glass content must fill the quick-add panel")
+    ui.input.stringValue = "Fix @poe-code reconnect"; ui.changed()
+    precondition(ui.window.makeFirstResponder(ui.input))
+    let editor = ui.input.currentEditor() as! NSTextView
+    editor.setSelectedRange(NSRange(location: 13, length: 0)); ui.updatePicker()
+    precondition(ui.matches == [projects[1]], "Test Command+Enter while project suggestions and the field editor are active")
+    let repeatedReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: true, keyCode: 36)!
+    precondition(ui.window.performKeyEquivalent(with: repeatedReturn) && requests.count == 1, "Held Command+Enter must not submit")
+    let commandReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+    editor.setMarkedText("語", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+    precondition(editor.hasMarkedText())
+    ui.window.sendEvent(commandReturn)
+    precondition(requests.count == 1, "Command+Enter must not submit during input-method composition")
+    editor.unmarkText(); ui.input.stringValue = "Fix @poe-code reconnect"
+    editor.setSelectedRange(NSRange(location: 13, length: 0)); ui.changed()
+    ui.window.sendEvent(commandReturn)
+    precondition(ui.saving && !ui.input.isEnabled && !ui.closeButton.isEnabled && !ui.bottom.isEnabled)
+    precondition(ui.submit.title == "Creating…" && !ui.progress.isHidden)
+    precondition(ui.window.contentView is Surface && !ui.window.isOpaque && ui.window.backgroundColor == .clear, "Use the clipped Liquid Glass surface")
+    let firstRequest = requests.last!; precondition(firstRequest.contains("--at-top") && firstRequest.contains("human:boss") && firstRequest.contains(projects[1].id))
+    ui.create(); precondition(requests.count == 2, "Duplicate Enter while saving")
+    precondition(ui.window.performKeyEquivalent(with: commandReturn) && requests.count == 2, "Duplicate Command+Enter while saving")
+    ui.dismiss(); precondition(ui.saving, "Cannot close an in-flight mutation")
+    reply?(.failure(StorageError(description: "Disconnected")))
+    precondition(!ui.saving && ui.input.stringValue == "Fix @poe-code reconnect" && ui.error.stringValue == "Disconnected")
+    precondition(ui.submit.title == "Create" && ui.context.stringValue.contains("retry"), "Failure restores a clear retry state")
+    let keypadReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\u{3}", charactersIgnoringModifiers: "\u{3}", isARepeat: false, keyCode: 76)!
+    precondition(ui.window.performKeyEquivalent(with: keypadReturn), "Command+keypad Enter submits too")
+    precondition(requests.last == firstRequest, "Retry reuses the mutation ID")
+    reply?(.success(Data("{\"issue\":{\"number\":7}}".utf8)))
+    precondition(ui.input.stringValue.isEmpty && ui.pending == nil && ui.current == projects[1] && ui.bottom.state == .off)
+    precondition(prefs.string(forKey: "quickIssueProject") == projects[1].id && ui.context.stringValue.contains("#7"))
+    precondition(ui.succeeded && ui.input.isHidden && !ui.confirmation.isHidden && ui.submit.isHidden && ui.bottom.isHidden)
+    precondition(ui.window.performKeyEquivalent(with: commandReturn) && requests.count == 3, "Success cannot resubmit")
+    ui.input.stringValue = "Preserved draft"; ui.bottom.state = .on; ui.dismiss(); ui.open(cli: nil)
+    precondition(ui.input.stringValue == "Preserved draft" && ui.bottom.state == .on && ui.current == projects[1])
+    ui.create(); precondition(!requests.last!.contains("--at-top"))
+    reply?(.failure(StorageError(description: "Retry later")))
+    let previous = requests.last!; ui.input.stringValue = "Edited draft"; ui.changed(); ui.create()
+    precondition(requests.last!.last != previous.last, "Changed draft gets a fresh request ID")
+    reply?(.success(Data("{\"ok\":true}".utf8)))
+    precondition(ui.error.stringValue.contains("confirm") && ui.input.stringValue == "Edited draft", "Malformed response preserves draft and request ID")
+    ui.input.stringValue = ""; ui.error.stringValue = ""; ui.changed()
+    // Render real AppKit controls, not a mock. Screenshots are opt-in and the
+    // caller owns cleanup; normal audits leave no visual artifacts behind.
+    if let output = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_SCREENSHOTS"] {
+        try! FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
+        ui.window.orderFront(nil)
+        for dark in [false, true] {
+            ui.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            for state in ["empty", "loading", "projects", "error", "long", "saving", "success"] {
+                ui.error.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
+                ui.saving = state == "saving"; ui.succeeded = state == "success"; ui.ready = state != "loading"
+                ui.input.stringValue = state == "empty" ? "" : "Fix reconnect @po"
+                if state == "loading" { ui.input.stringValue = ""; ui.context.stringValue = "Loading projects…" }
+                if state == "saving" { ui.input.stringValue = "Fix reconnect"; ui.context.stringValue = "Creating in poe-code…" }
+                if state == "success" { ui.input.stringValue = ""; ui.context.stringValue = "Created #7 in poe-code" }
+                if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.stringValue).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
+                if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.stringValue = "Fix reconnect @missing" }
+                if state == "long" { ui.input.stringValue = String(repeating: "Very long issue title ", count: 30) }
+                ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
+                for row in ui.matches.indices { _ = ui.table.view(atColumn: 0, row: row, makeIfNecessary: true) }
+                ui.window.displayIfNeeded()
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+                let path = URL(fileURLWithPath: output).appendingPathComponent("\(dark ? "dark" : "light")-\(state).png")
+                // Capture the actual window: cacheDisplay omits the controls
+                // hosted inside NSGlassEffectView and disrupts its backing view.
+                let capture = Process(); capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                capture.arguments = ["-x", "-o", "-l", String(ui.window.windowNumber), path.path]
+                try! capture.run(); capture.waitUntilExit()
+                precondition(capture.terminationStatus == 0, "Window screenshots require Screen Recording access")
+                let bitmap = NSBitmapImageRep(data: try! Data(contentsOf: path))!
+                for (x, y) in [(0, 0), (bitmap.pixelsWide - 1, 0), (0, bitmap.pixelsHigh - 1), (bitmap.pixelsWide - 1, bitmap.pixelsHigh - 1)] {
+                    precondition(bitmap.colorAt(x: x, y: y)!.alphaComponent == 0, "Panel corners must remain transparent")
+                }
+            }
+        }
+    }
+    ui.window.close()
+    print("Passed: native quick-add parsing, Unicode, project matching, Boss identity, queue placement, in-flight guard, draft retention and idempotent retry")
 }
 
 func auditInbox(root: URL, sample: Record) {
