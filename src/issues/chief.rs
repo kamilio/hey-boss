@@ -129,7 +129,7 @@ pub(in crate::issues) fn execute(path: PathBuf, job: Job, stop: Arc<AtomicBool>)
         outcome
     });
     if let Err(error) = result {
-        eprintln!("Chief {}: {error}", job.project);
+        crate::worker_tui::diagnostics::report(format_args!("Chief {}: {error}", job.project));
     }
 }
 

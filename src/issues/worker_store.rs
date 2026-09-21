@@ -390,7 +390,9 @@ impl Store {
         match result {
             // Progress is observational: a busy logger must not kill Codex.
             Err(error) if error.code == "database_busy" => {
-                eprintln!("Worker progress database busy; skipped an activity update");
+                crate::worker_tui::diagnostics::report(format_args!(
+                    "Worker progress database busy; skipped an activity update"
+                ));
                 Ok(())
             }
             result => result,

@@ -14,6 +14,26 @@ fn snapshot() -> serde_json::Value {
 }
 
 #[test]
+fn background_diagnostics_render_without_disabling_worker_controls() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["fleet"]["controller_connection"]["state"] = json!("local");
+    app.apply(value);
+    app.diagnostic = Some("Worker recovery: fixture failure\u{1b}[2J".into());
+    let rendered = screen(&app);
+    assert!(rendered.contains("Worker recovery: fixture failure"));
+    assert!(rendered.contains("Active agents"));
+    assert!(!rendered.contains('\u{1b}'));
+    app.confirm(true);
+    assert!(app.confirmation.is_some());
+    app.apply(snapshot());
+    assert!(
+        app.diagnostic.is_some(),
+        "Refresh lost the worker diagnostic"
+    );
+}
+
+#[test]
 fn worker_header_keeps_project_and_checkout_visible_while_draining() {
     let mut app = Dashboard::default();
     let mut value = snapshot();
@@ -187,6 +207,7 @@ fn live_timers_advance_but_finished_attempts_keep_their_duration() {
     let mut value = snapshot();
     value["runs"][0]["started_at"] = json!(1000);
     value["runs"][0]["reservation_expires"] = json!(75_000);
+    value["runs"][0]["state"] = json!("awaiting_claim");
     value["runs"][1]["started_at"] = json!(1000);
     value["runs"][1]["finished_at"] = json!(61_000);
     app.apply(value);

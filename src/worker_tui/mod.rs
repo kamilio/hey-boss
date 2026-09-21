@@ -1,5 +1,6 @@
 //! Worker dashboard components. Rendering never performs IO or controls workers.
 pub mod backend;
+pub mod diagnostics;
 pub mod runtime;
 mod terminal_name;
 pub mod ui;
@@ -29,6 +30,7 @@ pub struct Dashboard {
     pub help: bool,
     pub pending: bool,
     pub error: Option<String>,
+    pub diagnostic: Option<String>,
     pub confirmation: Option<Confirmation>,
     pub detail_scroll: u16,
     /// Current wall-clock milliseconds, supplied by the application for live timers.
