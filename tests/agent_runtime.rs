@@ -177,6 +177,24 @@ fn broken_rpc_input_marks_delivery_uncertain_and_prevents_replay() {
 }
 
 #[test]
+fn oversized_requests_rejected_before_delivery_remain_recoverable() {
+    let mut session = launch(Provider::Codex, None);
+    let schema = serde_json::json!({"description":"x".repeat(8 * 1024 * 1024)});
+    assert!(session.prompt("must not dispatch", Some(&schema)).is_err());
+    assert!(
+        !session.state().outcome_uncertain,
+        "Locally rejected request was treated as partially delivered"
+    );
+    session.prompt("valid corrected request", None).unwrap();
+    let Event::TurnCompleted { status, .. } = until(&mut session, |event| {
+        matches!(event, Event::TurnCompleted { .. })
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(status, TurnStatus::Completed);
+}
+
+#[test]
 fn inspecting_a_burst_preserves_events_and_terminal_state() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let mut session = launch(provider, None);
