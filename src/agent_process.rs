@@ -78,8 +78,11 @@ impl Process {
             return Err(io::Error::other("Agent is stopped"));
         }
         let mut bytes = serde_json::to_vec(value)?;
-        if bytes.len() > RECORD_BYTES {
-            return Err(io::Error::other("Agent request exceeded 8 MiB"));
+        if bytes.len() >= RECORD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent request exceeded 8 MiB including its newline",
+            ));
         }
         bytes.push(b'\n');
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -199,6 +202,30 @@ mod tests {
     }
 
     #[test]
+    fn jsonl_record_limit_includes_the_newline_in_both_directions() {
+        let mut command = Command::new("/bin/cat");
+        let mut process = Process::spawn(&mut command).unwrap();
+        let maximum = Value::String("x".repeat(RECORD_BYTES - 3));
+        process.send(&maximum).unwrap();
+        assert_eq!(
+            process.receive(Duration::from_secs(3)).unwrap(),
+            Some(maximum)
+        );
+        let oversized = Value::String("x".repeat(RECORD_BYTES - 2));
+        assert!(
+            process.send(&oversized).is_err(),
+            "Request exceeded the round-trip record limit"
+        );
+        assert!(
+            process
+                .receive(Duration::from_millis(20))
+                .unwrap()
+                .is_none(),
+            "Rejected request was delivered"
+        );
+    }
+
+    #[test]
     fn stopping_releases_a_reader_blocked_by_backpressure() {
         let mut command = Command::new("/bin/sh");
         command.args([
@@ -221,6 +248,51 @@ mod tests {
         assert!(
             process.receive(Duration::ZERO).is_err(),
             "Stopped transport returned stale output"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual transport endurance check; launches 1000 owned process groups"]
+    fn retained_stopped_sessions_keep_resource_usage_bounded() {
+        let descriptors = || std::fs::read_dir("/dev/fd").unwrap().count();
+        let baseline = descriptors();
+        let started = Instant::now();
+        let mut retained = Vec::new();
+        for n in 0..1000 {
+            let mut command = Command::new("/bin/sh");
+            command.args([
+                "-c",
+                "i=0; while [ $i -lt 100 ]; do printf '{}\\n'; i=$((i+1)); done; sleep 30",
+            ]);
+            let mut process = Process::spawn(&mut command).unwrap();
+            // Wait for real output, then retain the stopped transport rather
+            // than relying on Drop to free its pipes and blocked reader.
+            process.receive(Duration::from_secs(2)).unwrap().unwrap();
+            process.stop().unwrap();
+            retained.push(process);
+            if (n + 1) % 100 == 0 {
+                eprintln!(
+                    "Retained {} stopped sessions; open descriptors {}",
+                    n + 1,
+                    descriptors()
+                );
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while retained.iter().any(|process| !process.reader.is_finished())
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(retained.iter().all(|process| process.reader.is_finished()));
+        let final_count = descriptors();
+        assert!(
+            final_count <= baseline + 2,
+            "Descriptors grew from {baseline} to {final_count}"
+        );
+        eprintln!(
+            "PASS 1000 retained sessions in {:?}; descriptors {baseline} -> {final_count}",
+            started.elapsed()
         );
     }
 }

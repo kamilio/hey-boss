@@ -723,8 +723,10 @@ impl AgentSession {
         self.attach(id, state["sessionFile"].as_str().map(PathBuf::from))
     }
     fn send(&mut self, value: &Value) -> io::Result<()> {
-        self.process.send(value).inspect_err(|_| {
-            self.uncertain = true;
+        self.process.send(value).inspect_err(|error| {
+            if error.kind() != io::ErrorKind::InvalidInput {
+                self.uncertain = true;
+            }
         })
     }
     fn rpc(&mut self, method: &str, params: Value) -> io::Result<Value> {
