@@ -206,6 +206,9 @@ enum Action {
         /// Literal substring in the title or body.
         #[arg(long)]
         search: Option<String>,
+        /// Retrieve every matching issue in queue order, without pagination.
+        #[arg(long, conflicts_with_all = ["limit", "offset"])]
+        all: bool,
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
         #[arg(long, default_value_t = 0)]
@@ -664,6 +667,7 @@ impl Options {
                 assignee,
                 labels,
                 search,
+                all,
                 limit,
                 offset,
             } => Operation::List {
@@ -681,7 +685,7 @@ impl Options {
                 search: search.clone(),
                 limit: *limit,
                 offset: *offset,
-                all: false,
+                all: *all,
             },
             Action::Move {
                 number,
