@@ -41,7 +41,9 @@ const snapshot = {
 };
 await writeFile(fixture, `#!/usr/bin/env node\nimport { existsSync } from 'node:fs';\nif (existsSync(${JSON.stringify(path.join(temporary, "offline"))})) { console.error('Synthetic queue offline'); process.exit(1); }\nconsole.log(${JSON.stringify(JSON.stringify(snapshot))});\n`, { mode: 0o700 });
 const wrapper = path.join(temporary, "terminal.sh");
-await writeFile(wrapper, '#!/bin/sh\nbefore=$(stty -g)\n"$@" <&0 &\nchild=$!\ntrap \'kill -TERM "$child" 2>/dev/null; wait "$child"; stty "$before"; exit 143\' TERM INT HUP\nwait "$child"\ncode=$?\n[ "$(stty -g)" = "$before" ] || exit 99\nprintf "TERMINAL_RESTORED\\n"\nexit "$code"\n', { mode: 0o700 });
+// Keep the dashboard in the foreground: dash redirects asynchronous jobs'
+// stdin to /dev/null before <&0, while macOS sh happens to preserve the TTY.
+await writeFile(wrapper, '#!/bin/sh\nbefore=$(stty -g)\n"$@"\ncode=$?\n[ "$(stty -g)" = "$before" ] || exit 99\nprintf "TERMINAL_RESTORED\\n"\nexit "$code"\n', { mode: 0o700 });
 const wait = (session, pattern) => session.waitFor(pattern, { scope: "screen", timeout: 12000 });
 async function capture(session, name) {
   await session.waitForQuiet(100);
@@ -107,6 +109,7 @@ try {
 } catch (error) {
   for (const session of pilot.sessions()) {
     if (session.exitCode === null) await capture(session, "failure");
+    else console.error((await session.history({ last: 8 })).join("\n"));
   }
   throw error;
 } finally {
