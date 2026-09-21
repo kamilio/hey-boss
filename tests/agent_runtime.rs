@@ -623,6 +623,38 @@ fn malformed_protocol_never_counts_as_completion() {
 }
 
 #[test]
+fn malformed_terminal_fields_never_manufacture_success() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let mut session = launch(provider, None);
+        session.prompt("malformed terminal", None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match session.receive(Duration::from_millis(50)) {
+                Err(_) => break,
+                Ok(Some(Event::TurnCompleted { .. })) => {
+                    panic!("{provider:?} accepted malformed completion")
+                }
+                _ => assert!(Instant::now() < deadline),
+            }
+        }
+        assert!(session.state().outcome_uncertain);
+    }
+}
+
+#[test]
+fn deferred_pi_work_is_not_reported_as_success_or_protocol_corruption() {
+    let mut session = launch(Provider::Pi, None);
+    session.prompt("deferred assistant", None).unwrap();
+    let Event::TurnCompleted { status, .. } = until(&mut session, |event| {
+        matches!(event, Event::TurnCompleted { .. })
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(status, TurnStatus::Failed);
+    assert!(!session.state().outcome_uncertain);
+}
+
+#[test]
 fn embedding_can_supply_the_owned_agents_explicit_identity() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

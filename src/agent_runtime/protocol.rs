@@ -299,6 +299,9 @@ impl AgentSession {
             return Ok(());
         }
         let method = value["method"].as_str().unwrap_or("");
+        if method.starts_with("turn/") || method.starts_with("item/") {
+            required(params, "threadId")?;
+        }
         if value.get("id").is_some() && !method.is_empty() {
             if value["id"].as_i64().is_none()
                 && !value["id"].as_str().is_some_and(|id| !id.is_empty())
@@ -482,13 +485,17 @@ impl AgentSession {
                 self.events.push_back(Event::RequestCancelled { id });
             }
             Some("result") => {
+                required(&value, "session_id")?;
+                let is_error = value["is_error"]
+                    .as_bool()
+                    .ok_or_else(|| io::Error::other("Claude completion omitted its error flag"))?;
                 if !self.tasks.is_empty() {
                     self.events.push_back(Event::Other(value));
                     return Ok(());
                 }
                 let status = if self.interrupted {
                     TurnStatus::Interrupted
-                } else if value["is_error"] == true || value["subtype"] != "success" {
+                } else if is_error || value["subtype"] != "success" {
                     TurnStatus::Failed
                 } else {
                     TurnStatus::Completed
@@ -521,8 +528,13 @@ impl AgentSession {
                 self.output = text(&value["message"]["content"]);
                 self.status = match value["message"]["stopReason"].as_str() {
                     Some("aborted") => TurnStatus::Interrupted,
-                    Some("error") => TurnStatus::Failed,
-                    _ => TurnStatus::Completed,
+                    Some("error" | "pending" | "deferred") => TurnStatus::Failed,
+                    Some("stop" | "length" | "toolUse") => TurnStatus::Completed,
+                    _ => {
+                        return Err(io::Error::other(
+                            "Pi assistant message omitted a valid stop reason",
+                        ));
+                    }
                 };
                 self.events.push_back(Event::Message {
                     role: "assistant".into(),
