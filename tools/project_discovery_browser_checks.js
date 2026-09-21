@@ -26,6 +26,15 @@ async page => {
   check(!registry.projects.some(p => p.id === temporary), 'Legacy empty temporary project omitted');
   check(registry.projects.some(p => p.id === saved), 'Temporary project with saved work retained');
   check(registry.projects.filter(p => p.id === repository).length === 1, 'One canonical repository entry');
+  if (paired) {
+    // Production's supervisor refreshes this inventory; the isolated fixture
+    // needs the projects created above before its Agent bootstrap can list them.
+    const response = await page.request.post(base + '/api/bridge/issue-projects', {
+      headers:{Authorization:'Bearer ' + 'synthetic-project-picker-fixture-'.repeat(3)},
+      data:{projects:registry.projects.filter(p => !p.hidden_at)},
+    });
+    check(response.ok(), 'Paired fixture inventory updated');
+  }
   await page.route('**/api/inbox*', route => route.fulfill({json:{ok:true,tasks:[]}}));
   for (const route of [paired ? '/issues' : '/', '/mm', '/artifacts', '/agents']) {
     for (const [width,height] of [[320,568],[390,844],[844,390],[1440,1000]]) {
@@ -34,9 +43,11 @@ async page => {
         await page.emulateMedia({colorScheme});
         await page.goto(base + route + '#project=' + encodeURIComponent(repository));
         await page.waitForFunction(() => document.querySelector('#project-name')?.textContent === 'hey-boss');
+        if (await page.locator('#project-menu').isVisible()) await page.keyboard.press('Escape');
         await page.locator('#project-trigger').click();
         await page.locator('#project-search').fill('hey-boss');
         const options = page.locator('.project-option');
+        await options.first().waitFor();
         check(await options.count() === 1, `${route} ${width} ${colorScheme}: one hey-boss entry`);
         check(await options.getAttribute('data-project') === repository, `${route} ${width} ${colorScheme}: correct repository`);
         const menu = await page.locator('#project-menu').boundingBox();
@@ -50,6 +61,7 @@ async page => {
         check(await page.locator('#project-menu').isHidden(), `${route} ${width} ${colorScheme}: keyboard selection works`);
         await page.locator('#project-trigger').click();
         await page.locator('#project-search').fill('saved-browser-fixture');
+        await page.locator('.project-option').first().waitFor();
         check(await page.locator('.project-option').count() === 1, `${route} ${width} ${colorScheme}: saved work can be found`);
         await page.keyboard.press('Escape');
         check(await page.locator('#project-trigger').evaluate(el => el === document.activeElement), `${route} ${width} ${colorScheme}: focus restored`);
