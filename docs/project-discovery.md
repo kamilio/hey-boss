@@ -7,14 +7,15 @@ submissions use names. Git origins and local paths remain compatibility storage
 IDs, not separate destinations with the same name.
 
 The registry rejects duplicate names even when another process writes directly.
-Collisions are recorded once per incoming identity and shown in the project list
-response and an expandable warning on web pages. Paired devices also deduplicate
-their inventory and accept names as issue destinations.
+Name reuse is silent: it creates neither another project nor a warning record.
+Upgrades discard old warnings about aliases that never became projects. Paired
+devices also deduplicate their inventory and accept names as issue destinations.
 
 On upgrade, existing duplicate names choose one stable destination, preferring
 saved undeleted issues, then artifacts and mindmap data, then the oldest entry.
 The picker shows that destination once. Other legacy rows and all their saved
-data remain accessible through their full IDs; the warning links to that history.
+data remain accessible through their full IDs. The CLI and registry response
+retain legacy history warnings; web pages show only the selected destination.
 They are not silently merged, renumbered or deleted. Use the project name for new
 work. Hidden destinations stay hidden when another identity is discovered.
 

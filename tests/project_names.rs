@@ -68,13 +68,19 @@ fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() 
     let value = registry(&mut store, &other);
     assert_eq!(value["project"]["id"], first.id);
     assert_eq!(value["projects"].as_array().unwrap().len(), 1);
-    assert_eq!(value["project_warnings"].as_array().unwrap().len(), 2);
-    // Repeated polling must not grow a warning queue.
+    assert!(value["project_warnings"].as_array().unwrap().is_empty());
+    // Normal name reuse must not create a warning queue.
     assert_eq!(
         registry(&mut store, &other)["project_warnings"],
         value["project_warnings"]
     );
     let db = Connection::open(&f.0).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM project_name_collisions", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert_eq!(
         db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
             .unwrap(),
@@ -87,6 +93,25 @@ fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() 
         )
         .is_err()
     );
+}
+
+#[test]
+fn upgrade_discards_reuse_warnings_without_touching_saved_history() {
+    let f = Fixture::new();
+    let mut store = f.store();
+    let first = project("github.com/first/poe2", "poe2");
+    store.notification_project(&first, None).unwrap();
+    drop(store);
+    let db = Connection::open(&f.0).unwrap();
+    db.execute(
+        "INSERT INTO project_name_collisions VALUES('github.com/other/poe2','poe2',?1,0)",
+        [&first.id],
+    )
+    .unwrap();
+    drop(db);
+    let value = registry(&mut f.store(), &first);
+    assert!(value["project_warnings"].as_array().unwrap().is_empty());
+    assert_eq!(value["projects"].as_array().unwrap().len(), 1);
 }
 
 #[test]

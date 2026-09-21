@@ -113,10 +113,9 @@ export class HubStore{
  setIssueProjects(projects){
   if(!Array.isArray(projects)||projects.length>10000||projects.some(p=>typeof p.id!=='string'||!p.id.trim()||Buffer.byteLength(p.id)>8192||typeof p.name!=='string'||!p.name.trim()||Buffer.byteLength(p.name)>1024))throw new HubError(400,'Invalid project registry');
   const names=new Map();
-  for(const {id,name,name_collisions=[]} of projects){
-   const key=name.toLowerCase(),existing=names.get(key);
-   if(existing){existing.name_collisions.push({name:existing.name,project_id:existing.id,rejected_id:id,legacy:false});continue;}
-   names.set(key,{id,name,name_collisions:Array.isArray(name_collisions)?name_collisions.filter(w=>w&&typeof w.rejected_id==='string'&&typeof w.name==='string'&&typeof w.project_id==='string').map(w=>({name:w.name,project_id:w.project_id,rejected_id:w.rejected_id,legacy:w.legacy===true})):[]});
+  for(const {id,name} of projects){
+   const key=name.toLowerCase();
+   if(!names.has(key))names.set(key,{id,name});
   }
   this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_projects',?)").run(JSON.stringify([...names.values()]));
   this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_bridge_seen',?)").run(String(Date.now()));

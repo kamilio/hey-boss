@@ -7,6 +7,15 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         [],
         |r| r.get::<_, bool>(0),
     )? {
+        // Old clients recorded every harmless name reuse. Keep legacy history
+        // identities for compatibility; new aliases stay silent.
+        if db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_name_collisions WHERE legacy=0)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            db.execute("DELETE FROM project_name_collisions WHERE legacy=0", [])?;
+        }
         return Ok(());
     }
     db.execute_batch("BEGIN IMMEDIATE;
@@ -41,34 +50,6 @@ pub(super) fn by_name(db: &Connection, name: &str) -> Result<Option<Project>> {
 
 pub(super) fn canonical(db: &Connection, project: Project) -> Result<Project> {
     Ok(by_name(db, &project.name)?.unwrap_or(project))
-}
-
-pub(super) fn record(db: &Connection, incoming: &Project, resolved: &Project) -> Result<()> {
-    if incoming.id != resolved.id && incoming.name.eq_ignore_ascii_case(&resolved.name) {
-        db.execute("INSERT OR IGNORE INTO project_name_collisions(rejected_id,name,project_id,legacy) VALUES(?1,?2,?3,EXISTS(SELECT 1 FROM projects WHERE id=?1))", params![incoming.id,resolved.name,resolved.id])?;
-    }
-    Ok(())
-}
-
-pub(super) fn record_override(
-    db: &Connection,
-    value: Option<&str>,
-    resolved: &Project,
-) -> Result<()> {
-    if let Some(value) =
-        value.filter(|v| v.contains('/') || v.starts_with("named:") || v.starts_with("local:"))
-    {
-        let name = value.rsplit('/').next().unwrap_or(value);
-        record(
-            db,
-            &Project {
-                id: value.into(),
-                name: name.strip_prefix("named:").unwrap_or(name).into(),
-            },
-            resolved,
-        )?;
-    }
-    Ok(())
 }
 
 pub(super) fn warnings(db: &Connection) -> Result<Value> {

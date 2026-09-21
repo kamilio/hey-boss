@@ -4,7 +4,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 import {createApp} from '../mobile/server/index.mjs';
 import {HubStore} from '../mobile/server/store.mjs';
-const output=resolve('output/playwright/issue92');mkdirSync(output,{recursive:true});
+const output=resolve('output/playwright/issue107');mkdirSync(output,{recursive:true});
 const root=mkdtempSync(output+'/runtime-'),binary=resolve(process.argv[2]||'target/debug/hey-boss');
 const env={...process.env,HEY_BOSS_ISSUE_DB:root+'/issues.db',HEY_BOSS_FLEET_STATE:root,HEY_BOSS_INBOX_SOCKET:root+'/inbox.sock',HEY_BOSS_AGENT_ID:'human:qa'};
 for(const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','CODEX_THREAD_ID'])delete env[key];
