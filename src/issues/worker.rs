@@ -892,6 +892,7 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
                 "cancelled" => "cancelled",
                 "claim_timeout" => "claim_timeout",
                 "blocked" => "blocked",
+                "startup_failed" => "startup_failed",
                 _ => "failed",
             }
             .into(),
@@ -1076,9 +1077,33 @@ fn run_codex(
 ) -> Result<(String, String)> {
     validate_config(&job.config, &job.project)?;
     Codex::check(store, job, stop)?;
-    let mut c = Codex::spawn(path, job)?;
-    store.worker_process(&job.id, c.process.pid())?;
-    store.worker_event(&job.id, "Launching Codex", None)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut delay = Duration::from_secs(1);
+    let mut c = loop {
+        Codex::check(store, job, stop)?;
+        let mut c = Codex::spawn(path, job)?;
+        store.worker_process(&job.id, c.process.pid())?;
+        store.worker_event(&job.id, "Launching Codex", None)?;
+        match c.rpc("initialize",json!({"clientInfo":{"name":"hey_boss_worker","title":"Hey Boss issue worker","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),store,job,stop) {
+            Ok(_) => break c,
+            Err(error) if error.message.contains("failed to initialize sqlite state runtime") => {
+                // No model turn has started. Keep the reservation and the saved
+                // session, rather than spending the issue's agent retry budget.
+                drop(c);
+                if Instant::now() >= deadline {
+                    return Err(Error::new("startup_failed", error.message));
+                }
+                store.worker_event(&job.id, &format!("Codex state is temporarily unavailable; retrying startup: {}", error.message), None)?;
+                let retry_at = (Instant::now() + delay).min(deadline);
+                while Instant::now() < retry_at {
+                    Codex::check(store, job, stop)?;
+                    thread::sleep(Duration::from_millis(100));
+                }
+                delay = (delay * 2).min(Duration::from_secs(8));
+            }
+            Err(error) => return Err(error),
+        }
+    };
     let outcome = run_thread(&mut c, store, job, stop);
     if let Err(error) = &outcome {
         let state = if matches!(error.code.as_str(), "cancelled" | "claim_timeout") {
@@ -1098,7 +1123,6 @@ fn run_thread(
     job: &mut Job,
     stop: &AtomicBool,
 ) -> Result<(String, String)> {
-    c.rpc("initialize",json!({"clientInfo":{"name":"hey_boss_worker","title":"Hey Boss issue worker","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),store,job,stop)?;
     c.send(json!({"method":"initialized","params":{}}))?;
     let (method, params) = if let Some(session) = &job.resume_session {
         store.worker_event(&job.id, &format!("Resuming Codex session {session}"), None)?;

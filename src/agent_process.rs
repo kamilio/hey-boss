@@ -4,18 +4,21 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     os::{fd::AsRawFd, unix::process::CommandExt},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
 const RECORD_BYTES: usize = 8 * 1024 * 1024;
+const STDERR_BYTES: usize = 4096;
 
 pub(crate) struct Process {
     child: Child,
     input: Option<ChildStdin>,
     inbox: Option<mpsc::Receiver<io::Result<Value>>>,
     stopped: bool,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<()>,
     #[cfg(test)]
     reader: thread::JoinHandle<()>,
 }
@@ -25,7 +28,7 @@ impl Process {
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = command.spawn()?;
         let input = child.stdin.take().expect("piped stdin");
         let output = child.stdout.take().expect("piped stdout");
@@ -38,6 +41,25 @@ impl Process {
             return Err(error);
         }
         let (send, inbox) = mpsc::sync_channel(16);
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let captured = stderr.clone();
+        let mut errors = child.stderr.take().expect("piped stderr");
+        let stderr_reader = thread::spawn(move || {
+            let mut chunk = [0; STDERR_BYTES];
+            loop {
+                match errors.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut tail = captured.lock().unwrap();
+                        let discard = (tail.len() + n).saturating_sub(STDERR_BYTES);
+                        tail.drain(..discard);
+                        tail.extend_from_slice(&chunk[..n]);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
         let _reader = thread::spawn(move || {
             let mut reader = BufReader::new(output);
             loop {
@@ -66,6 +88,8 @@ impl Process {
             input: Some(input),
             inbox: Some(inbox),
             stopped: false,
+            stderr,
+            stderr_reader,
             #[cfg(test)]
             reader: _reader,
         })
@@ -119,9 +143,22 @@ impl Process {
         match inbox.recv_timeout(timeout) {
             Ok(value) => value.map(Some),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
-                "Agent disconnected before reporting completion",
-            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // stdout can reach EOF just before the stderr reader gets its
+                // final chunk. Bound this wait even if a descendant keeps it open.
+                let deadline = Instant::now() + Duration::from_millis(100);
+                while !self.stderr_reader.is_finished() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let bytes = self.stderr.lock().unwrap();
+                let detail = String::from_utf8_lossy(&bytes);
+                let detail = detail.trim();
+                Err(io::Error::other(if detail.is_empty() {
+                    "Agent disconnected before reporting completion".to_owned()
+                } else {
+                    format!("Agent disconnected before reporting completion: {detail}")
+                }))
+            }
         }
     }
     pub(crate) fn stop(&mut self) -> io::Result<()> {
@@ -179,6 +216,35 @@ fn group_has_no_live_processes(group: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_process_reports_bounded_stderr() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'failed to initialize sqlite state runtime: database is locked\\n' >&2; exit 1",
+        ]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        let error = process.receive(Duration::from_secs(3)).unwrap_err();
+        assert!(error.to_string().contains("database is locked"), "{error}");
+    }
+
+    #[test]
+    fn stderr_flood_is_drained_and_only_the_tail_is_retained() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "dd if=/dev/zero bs=65536 count=4 2>/dev/null | cat >&2; printf 'startup failure marker' >&2; exit 1"]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        let error = process
+            .receive(Duration::from_secs(3))
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with("startup failure marker"), "{error}");
+        assert!(
+            error.len() <= 4200,
+            "Unbounded stderr: {} bytes",
+            error.len()
+        );
+    }
 
     fn descriptor_identity(fd: i32) -> Option<(libc::dev_t, libc::ino_t)> {
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
