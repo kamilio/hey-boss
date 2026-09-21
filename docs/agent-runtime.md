@@ -12,7 +12,7 @@ executable discovery now use the shared implementation.
 | Activity | item events | SDK messages and partial stream events | message/tool RPC events |
 | Completion | turn/completed | parent result, accounting for tracked delegated tasks | agent_settled, after retries and queued work |
 | Steering | expected-turn direct input | queued next user turn | before next model call |
-| Interrupt | turn/interrupt | SDK interrupt; stop when queued input exists | clear_queue then abort; stop for pending dialogs |
+| Interrupt | turn/interrupt plus confirmed termination of thread shell sessions | SDK interrupt; stop when queued input exists | clear_queue then abort; stop for pending dialogs |
 | Tool approvals | command/file/network and turn-scoped permissions | can_use_tool; original input, no permanent grant | no native permission broker |
 | Human input | unsupported requests exposed as Input | unsupported controls exposed as Input | extension select/confirm/input/editor, including cancellation |
 | Native goal | get/set saved native goal | none | none |
@@ -26,6 +26,12 @@ turn guards. Pi internal tool-loop turns are not client turns. The caller receiv
 the delivery mode. Native goals are explicitly Codex-only; callers can implement
 continuation independently of native provider support.
 
+Claude completion events carry `next_turn` when a queued successor exists.
+Consumers must use that event guard rather than current live state: inspection
+may already have buffered several completions before the UI delivers them.
+Consecutive queued text deltas merge into fragments up to 32 KiB, preserving
+UTF-8 and tool/message boundaries. Do not assume one event per native packet.
+
 Persist the entire `SessionRef`: provider, ID, and Pi's exact session file. Pi
 resume verifies the file header and ID before spawning. All adapters reject a
 provider mismatch or a server that resumes a different ID. None falls back to
@@ -38,6 +44,8 @@ observation even after disconnect. Controls require the active turn guard;
 Codex additionally enforces that guard at the server. This API only controls its
 owned children, never arbitrary discovered terminal sessions. The existing
 configured-socket Codex control API keeps its original ownership protections.
+Pi's observed idle state rejects steering even when its settled event is delayed;
+interrupting that already-idle turn does not relabel its normal completion.
 
 Approvals and input requests remain pending until an explicit response. Boolean
 approval accepts only supported request-scoped decisions, and Codex permissions
@@ -46,6 +54,9 @@ extension choices and repeat responses cannot grant access. Raw provider events
 remain available through `Other`; integrations must not interpret them as approval
 or task completion. Child environments remove inherited agent/session identity.
 No permission bypass flags are added.
+Duplicate callback IDs, invalid Codex callback identities, and missing approval
+ownership disable controls. Invalid caller choices and explicit RPC rejections
+remain recoverable because they do not imply ambiguous delivery.
 
 Pi extensions can request input during prompt preflight, before the prompt RPC
 acknowledgment. `prompt` returns the owned guard in that case with
@@ -61,12 +72,19 @@ session explicitly when its file exists.
 Executable lookup preserves Codex's existing search paths and adds equivalent
 Claude/Pi lookup. `HEY_BOSS_CODEX`, `HEY_BOSS_CLAUDE` and `HEY_BOSS_PI` require
 absolute executable paths. Launch accepts an explicit binary and environment for
-embedding and isolated tests. Transport uses LF-delimited JSONL, bounded records
+embedding and isolated tests. PATH lookup resolves relative entries before the
+child changes directory, preserving executable symlinks and their bin-directory
+context. Successful PATH lookup skips fallback directory scans.
+Transport uses LF-delimited JSONL, bounded records
 and queues, nonblocking writes with a deadline, and correlated acknowledgments.
 Disconnect, malformed records and uncertain acknowledgments never imply success.
+The 8 MiB record limit includes its newline in both directions. Oversized requests
+rejected before any write can be corrected; failed writes disable replay. Buffered
+confirmed completion remains observable on disconnect, while new controls fail.
 After an uncertain action, review the last state and saved session before stopping
 and resuming; do not automatically replay the action. Stop/drop terminate and reap
-the owned process group, including tools surviving their parent.
+the owned process group, including tools surviving their parent. Stop releases
+input/output pipes and backpressured readers even if the caller retains the object.
 
 ## Verification
 
@@ -97,7 +115,7 @@ It verifies successful completion, exact session reuse and preserved conversatio
 content. It passed locally with Codex 0.155.1, Claude Code 2.1.278 and Pi 0.84.4;
 use the installed CLI versions reported by the test environment when reproducing.
 
-The opt-in live control suite uses the real authenticated Claude and Pi CLIs,
+The opt-in live control suite uses the real authenticated Codex, Claude and Pi CLIs,
 timed foreground shell tools and scratch-only files. Pi loads a small local
 extension through a transparent executable wrapper; its dialogs and replies
 travel through the actual Pi RPC implementation, not a protocol fixture.
@@ -106,7 +124,7 @@ travel through the actual Pi RPC implementation, not a protocol fixture.
 cargo test --locked --test agent_live_controls -- --ignored --nocapture --test-threads=1
 ```
 
-It passed with Claude Code 2.1.278 and Pi 0.84.4. Both providers were checked for
+It passed with Codex 0.155.1, Claude Code 2.1.278 and Pi 0.84.4. All providers were checked for
 steering, stale guards, active-tool interruption, recovery, lack of delayed tool
 effects beyond the original tool deadline, and cancellation of queued steering.
 Claude additionally passed explicit Write approval denial/allowance and rejection
@@ -114,6 +132,25 @@ of unknown/repeated decision IDs. Pi passed select/confirm/input/editor response
 invalid and repeated input rejection, dialog cancellation, acknowledgment after
 preflight input, and owned-process interruption of a pending dialog. Pi still has
 no native tool permission broker.
+
+Codex native turn interruption alone left a foreground unified-exec shell alive
+in the live deadline check. The adapter now lists and terminates the owned
+thread's terminal handles and requires confirmation before returning success.
+It does not guess operating-system PIDs. Codex stop/drop have separate live checks.
+
+Additional manual checks use real goals and sustained idle connections:
+
+```sh
+cargo test --locked --test agent_goals real_managed_goals_verify_tool_effects -- --ignored --nocapture
+cargo test --locked --test agent_soak -- --ignored --nocapture
+cargo test --locked --lib retained_stopped_sessions_keep_resource_usage_bounded -- --ignored --nocapture
+```
+
+The goal check writes and reads a scratch proof file with each provider. The
+one-hour connection soak makes only six model requests and checks session identity,
+idle activity, transport inspection, memory samples, and replies after the hour.
+The 1,000-session transport soak retains stopped objects and checks reader cleanup
+and descriptor counts; it passed locally with descriptors unchanged at four.
 
 ## Provider-neutral goals
 
@@ -124,6 +161,8 @@ report completes or blocks the goal. Ordinary turn completion sends a continuati
 in the same session; failed/interrupted turns block it. Approvals/input still go
 to the embedding application's explicit decision handler. This controller does
 not also activate Codex's automatic native goals, avoiding duplicate continuation.
+Queued successor guards preserve the goal's scope even when several completed
+turns are buffered. Pi deferred/pending assistant work is not successful completion.
 
 `pause` records paused intent before interrupting, so late events cannot reactivate
 it. `start` explicitly re-enables a paused/blocked goal; complete goals reject
