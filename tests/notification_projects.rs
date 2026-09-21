@@ -144,12 +144,21 @@ fn notifications_hide_empty_temporary_projects_and_register_custom_projects() {
     // A temporary checkout with saved user work must still remain discoverable.
     let created = f
         .command(&f.cwd)
-        .args(["issue", "create", "--title", "Saved work", "--json"])
+        .args([
+            "issue",
+            "create",
+            "--title",
+            "Saved work",
+            "--agent",
+            "human:test",
+            "--json",
+        ])
         .output()
         .unwrap();
     assert!(
         created.status.success(),
-        "{}",
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&created.stdout),
         String::from_utf8_lossy(&created.stderr)
     );
     assert!(
