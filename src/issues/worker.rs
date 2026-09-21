@@ -1868,6 +1868,7 @@ mod tests {
         assert_eq!(
             text,
             with_workflow("hey-boss issue view <number>. Keep issue view 123 literal.")
+                .replace("issue comment 7", "issue comment <number>")
         );
     }
     #[test]
