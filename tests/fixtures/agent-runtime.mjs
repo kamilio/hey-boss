@@ -19,6 +19,7 @@ let turnNumber = 0;
 let goalTurns = 0;
 let output = '';
 let preflight;
+let nativeTool;
 if (provider === 'pi') {
   file = args.includes('--session') ? args[args.indexOf('--session') + 1] : join(mkdtempSync(join(tmpdir(), 'hey-boss-pi-fixture-')), session + '.jsonl');
   writeFileSync(file, JSON.stringify({ type: 'session', id: session }) + '\n');
@@ -85,6 +86,9 @@ function prompt(text) {
     send({type:'system',subtype:'task_updated',task_id:'task-1',patch:{status:'killed'}});
     complete(); return;
   }
+  if (text === 'hold native tool' && provider === 'codex') {
+    nativeTool = spawn('/bin/sh', ['-c', 'sleep 0.6; printf BAD > native-finished'], {cwd:process.env.HEY_BOSS_FIXTURE_EFFECTS,stdio:'ignore'});
+  }
   if (text.startsWith('hold')) return;
   if (text === 'missing session acknowledgement') return;
   if (text.startsWith('queued goal')) { output = JSON.stringify({status:'completed',summary:'Initial turn verified'}); setTimeout(() => complete(), 300); return; }
@@ -147,6 +151,15 @@ for await (const chunk of process.stdin) {
       continue;
     }
     if (r.method === 'thread/read') result = {thread:{id:session,status:{type:streaming?'active':'idle'},canAcceptDirectInput:streaming}};
+    if (r.method === 'thread/backgroundTerminals/list') {
+      if (p.threadId !== session) throw new Error('Cannot list another session tools');
+      result = {data:nativeTool ? [{itemId:'native-item',processId:'native-tool'}] : [],nextCursor:null};
+    }
+    if (r.method === 'thread/backgroundTerminals/terminate') {
+      if (p.threadId !== session || p.processId !== 'native-tool' || !nativeTool) throw new Error('Cannot terminate an unowned tool');
+      nativeTool.kill(); nativeTool = undefined;
+      result = {terminated:true};
+    }
     send({id:r.id,result});
     if (r.method === 'turn/start') prompt(p.input[0].text);
     if (r.method === 'turn/interrupt') complete(true);

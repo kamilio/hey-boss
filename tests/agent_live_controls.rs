@@ -1,8 +1,6 @@
 //! Opt-in control checks against authenticated, installed CLIs. All file/tool
 //! effects are confined to a fresh scratch directory.
-use hey_boss::agent_runtime::{
-    AgentSession, Event, Launch, Provider, SteeringDelivery, TurnStatus,
-};
+use hey_boss::agent_runtime::{AgentSession, Event, Launch, Provider, TurnStatus};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -85,14 +83,7 @@ fn controls(provider: Provider, root: &Path, binary: Option<PathBuf>) {
     running_tool(&mut agent, root, "steer-started");
     assert!(agent.steer("stale-turn", "wrong instruction").is_err());
     let delivery = agent.steer(&turn, "After the current tool finishes, write steering.txt containing exactly STEERED. Then reply STEERED_DONE. Use the file write tool; do not run more bash commands.").unwrap();
-    assert_eq!(
-        delivery,
-        if provider == Provider::Claude {
-            SteeringDelivery::NextTurn
-        } else {
-            SteeringDelivery::BeforeNextModelCall
-        }
-    );
+    assert_eq!(delivery, provider.capabilities().steering);
     let (_, status, output) = completed(&mut agent, true);
     assert_eq!(status, TurnStatus::Completed);
     let output = if provider == Provider::Claude {
@@ -154,8 +145,9 @@ fn controls(provider: Provider, root: &Path, binary: Option<PathBuf>) {
         provider.name()
     );
 
-    let turn = agent.prompt("Use the bash tool to run exactly: printf started > queue-started; sleep 30. Run in the foreground. Do not use other tools.", None).unwrap();
+    let turn = agent.prompt("Use the bash tool to run exactly: printf started > queue-started; sleep 30; printf BAD > queue-finished. Run in the foreground. Do not use other tools.", None).unwrap();
     running_tool(&mut agent, root, "queue-started");
+    let started = Instant::now();
     agent
         .steer(
             &turn,
@@ -167,10 +159,58 @@ fn controls(provider: Provider, root: &Path, binary: Option<PathBuf>) {
     assert!(!root.join("queued.txt").exists());
     assert!(agent.state().turn.is_none());
     agent.stop().unwrap();
+    while started.elapsed() < Duration::from_secs(32) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !root.join("queue-finished").exists(),
+        "Owned foreground tool survived queue cancellation"
+    );
+    assert!(
+        !root.join("queued.txt").exists(),
+        "Queued instruction restarted after shutdown"
+    );
     eprintln!(
         "PASS {} interrupt discards queued steering",
         provider.name()
     );
+}
+
+#[test]
+#[ignore = "real authenticated Codex CLI; invokes models and scratch-only tools"]
+fn real_codex_steering_and_interruption() {
+    let root = scratch(Provider::Codex);
+    controls(Provider::Codex, &root, None);
+}
+
+#[test]
+#[ignore = "real authenticated Codex CLI; invokes models and scratch-only tools"]
+fn real_codex_stop_and_drop_cancel_foreground_tools() {
+    for stop in [true, false] {
+        let root = scratch(Provider::Codex);
+        let mut agent = launch(Provider::Codex, &root, None);
+        agent.prompt("Use the bash tool to run exactly: printf started > shutdown-started; sleep 10; printf BAD > shutdown-finished. Run in the foreground. Do not use other tools.", None).unwrap();
+        running_tool(&mut agent, &root, "shutdown-started");
+        let started = Instant::now();
+        if stop {
+            agent.stop().unwrap();
+            while started.elapsed() < Duration::from_secs(12) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(agent.state().stopped);
+        } else {
+            drop(agent);
+            while started.elapsed() < Duration::from_secs(12) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        assert!(
+            !root.join("shutdown-finished").exists(),
+            "Codex tool survived {}",
+            if stop { "stop" } else { "drop" }
+        );
+        eprintln!("PASS Codex owned tool shutdown with stop={stop}");
+    }
 }
 
 #[test]
