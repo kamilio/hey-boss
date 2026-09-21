@@ -323,9 +323,9 @@
             <p id="project-settings-name" class="settings-project-name"></p>
             <section class="settings-section" aria-labelledby="settings-base-title">
               <h3 id="settings-base-title">Shared instructions</h3>
-              <p class="field-help">Start every issue with these instructions. The selected branches below are added automatically.</p>
+              <p class="field-help" id="project-prompt-live-help">Saving prompt edits also updates running agents that use these instructions, including connected devices. They keep their progress and session. The selected branches below are added automatically.</p>
               <label class="field-label" for="project-prompt">Base prompt</label>
-              <textarea class="text-input" id="project-prompt" rows="3" required maxlength="32000"></textarea>
+              <textarea class="text-input" id="project-prompt" rows="3" required maxlength="32000" aria-describedby="project-prompt-live-help"></textarea>
               <p class="field-help">{{issue_command}} retrieves the issue. Use {{number}} for its number. Start with /goal to enable a goal. {{create_issue_command poe-code}} creates an issue in poe-code.</p>
             </section>
 <section class="settings-section" aria-labelledby="settings-workspace-title">

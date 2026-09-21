@@ -104,6 +104,8 @@ $("#project-settings-form").onsubmit = async (event) => {
   $("#project-settings-state").textContent = "Saving…";
   try {
     const draft = projectSettingsDraft();
+    const promptsChanged = draft.prompt !== projectSettingsOriginal.prompt ||
+      JSON.stringify(draft.prompt_overrides) !== JSON.stringify(projectSettingsOriginal.prompt_overrides);
     const value = await mutate(
       {
         action: "configure_project",
@@ -120,7 +122,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     detailCache.clear();
     await renderRoute();
     updateHeader();
-    toast("Settings saved");
+    toast(promptsChanged ? "Settings saved. Instruction updates queued for running agents." : "Settings saved");
   } catch (error) {
     projectPreviewFailed = false;
     $("#project-settings-error").textContent = error.message;
