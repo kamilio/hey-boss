@@ -94,6 +94,16 @@ async page => {
   const across = await page.evaluate(() => model.creation.number);
   await focused(across, 'Cross-project Quick Add focuses the destination issue');
   await move(across, 'ArrowDown');
+  await page.locator('#new-issue').click();
+  await page.locator('#editor-subject').fill('Preserved editor draft');
+  await page.keyboard.press('Meta+Shift+K');
+  await page.locator('#quick-issue-title').fill('Quick Add above the editor @"' + project.replace(/^named:/, '') + '"');
+  await page.locator('#quick-issue-submit').click();
+  await page.waitForFunction(() => !document.querySelector('#quick-issue-dialog').open);
+  check(await page.locator('#editor-dialog').evaluate(el => el.open) && await page.locator('#editor-subject').inputValue() === 'Preserved editor draft', 'Nested Quick Add preserves the underlying editor draft');
+  check(await page.locator('#editor-subject').evaluate(el => el === document.activeElement), 'Nested Quick Add returns focus to the underlying editor');
+  check(await page.evaluate(project => model.project.id === project && model.route.project === project, destination.id), 'Nested cross-project Quick Add preserves the editor project context');
+  await page.locator('#editor-cancel').click();
   check(errors.length === 0, 'No JavaScript runtime errors: ' + errors.join('; '));
   return {passed:checks.length, checks};
 }
