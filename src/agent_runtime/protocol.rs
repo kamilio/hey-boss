@@ -46,39 +46,47 @@ pub(super) fn request(provider: Provider, id: &str, method: &str, mut params: Va
         }
     }
 }
-pub(super) fn response(provider: Provider, id: &str, value: &Value) -> Option<io::Result<Value>> {
+pub(super) enum Response {
+    Accepted(Value),
+    Rejected(io::Error),
+    Invalid(io::Error),
+}
+pub(super) fn response(provider: Provider, id: &str, value: &Value) -> Option<Response> {
     match provider {
         Provider::Codex if value["id"].as_str() == Some(id) && value.get("method").is_none() => {
             Some(if let Some(error) = value.get("error") {
-                Err(io::Error::other(format!("Codex rejected request: {error}")))
+                Response::Rejected(io::Error::other(format!("Codex rejected request: {error}")))
             } else {
                 value
                     .get("result")
                     .cloned()
-                    .ok_or_else(|| io::Error::other("Codex response missing result"))
+                    .map(Response::Accepted)
+                    .unwrap_or_else(|| {
+                        Response::Invalid(io::Error::other("Codex response missing result"))
+                    })
             })
         }
         Provider::Claude
             if value["type"] == "control_response"
                 && value["response"]["request_id"].as_str() == Some(id) =>
         {
-            Some(if value["response"]["subtype"] == "success" {
-                Ok(value["response"]["response"].clone())
-            } else {
-                Err(io::Error::other(format!(
+            Some(match value["response"]["subtype"].as_str() {
+                Some("success") => Response::Accepted(value["response"]["response"].clone()),
+                Some("error") => Response::Rejected(io::Error::other(format!(
                     "Claude rejected request: {}",
                     value["response"]["error"]
-                )))
+                ))),
+                _ => Response::Invalid(io::Error::other("Claude response missing valid subtype")),
             })
         }
         Provider::Pi if value["type"] == "response" && value["id"].as_str() == Some(id) => {
-            Some(if value["success"] == true {
-                Ok(value["data"].clone())
-            } else {
-                Err(io::Error::other(format!(
+            Some(match value["success"].as_bool() {
+                Some(true) => Response::Accepted(value["data"].clone()),
+                Some(false) => Response::Rejected(io::Error::other(format!(
                     "Pi rejected request: {}",
                     value["error"]
-                )))
+                ))),
+                None => Response::Invalid(io::Error::other("Pi response missing success flag")),
             })
         }
         _ => None,
@@ -192,11 +200,14 @@ impl AgentSession {
         {
             self.prompt_ack = None;
             return match result {
-                Ok(_) => {
+                Response::Accepted(_) => {
                     self.events.push_back(Event::Other(value));
                     Ok(())
                 }
-                Err(error) => self.finish(TurnStatus::Failed, error.to_string(), None, Value::Null),
+                Response::Rejected(error) => {
+                    self.finish(TurnStatus::Failed, error.to_string(), None, Value::Null)
+                }
+                Response::Invalid(error) => Err(error),
             };
         }
         match self.provider {

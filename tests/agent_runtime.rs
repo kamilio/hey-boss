@@ -214,6 +214,76 @@ fn stopping_does_not_reactivate_a_buffered_turn_start() {
 }
 
 #[test]
+fn malformed_prompt_acknowledgements_prevent_duplicate_work() {
+    for prompt in ["missing turn acknowledgement", "malformed acknowledgement"] {
+        let mut session = launch(Provider::Codex, None);
+        assert!(session.prompt(prompt, None).is_err());
+        assert!(
+            session.state().outcome_uncertain,
+            "Malformed acknowledgement allowed replay: {prompt}"
+        );
+        assert!(
+            session
+                .prompt("retry must not duplicate work", None)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn malformed_native_control_and_state_replies_disable_controls() {
+    let mut claude = launch(Provider::Claude, None);
+    claude.prompt("hold malformed interrupt", None).unwrap();
+    until(&mut claude, |event| {
+        matches!(event, Event::TextDelta { .. })
+    });
+    assert!(claude.interrupt().is_err());
+    assert!(claude.state().outcome_uncertain);
+    let mut pi = launch(Provider::Pi, None);
+    assert!(pi.prompt("malformed prompt acknowledgement", None).is_err());
+    assert!(pi.state().outcome_uncertain);
+    let mut pi = launch(Provider::Pi, None);
+    pi.prompt("missing session acknowledgement", None).unwrap();
+    until(&mut pi, |event| matches!(event, Event::TextDelta { .. }));
+    assert!(pi.inspect().is_err());
+    assert!(pi.state().outcome_uncertain);
+}
+
+#[test]
+fn explicitly_rejected_steering_remains_recoverable() {
+    for provider in [Provider::Codex, Provider::Pi] {
+        let mut session = launch(provider, None);
+        let turn = session.prompt("hold", None).unwrap();
+        assert!(session.steer(&turn, "reject steering").is_err());
+        assert!(!session.state().outcome_uncertain);
+        session.steer(&turn, "valid instruction").unwrap();
+    }
+}
+
+#[test]
+fn rejected_interrupt_does_not_relabel_normal_completion() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let mut session = launch(provider, None);
+        session.prompt("hold rejected interrupt", None).unwrap();
+        until(&mut session, |event| {
+            matches!(event, Event::TextDelta { .. })
+        });
+        assert!(session.interrupt().is_err());
+        assert!(!session.state().outcome_uncertain);
+        let Event::TurnCompleted { status, .. } = until(&mut session, |event| {
+            matches!(event, Event::TurnCompleted { .. })
+        }) else {
+            unreachable!()
+        };
+        assert_eq!(
+            status,
+            TurnStatus::Completed,
+            "{provider:?} relabeled a rejected interrupt"
+        );
+    }
+}
+
+#[test]
 fn cross_provider_resume_is_rejected_before_spawning() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let result = AgentSession::launch(Launch {
