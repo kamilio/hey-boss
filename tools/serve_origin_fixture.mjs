@@ -1,0 +1,35 @@
+// Isolated creation provenance and historical conversation fixture.
+import {mkdirSync,writeFileSync,rmSync,copyFileSync} from 'node:fs';
+import {spawn,spawnSync} from 'node:child_process';
+import {createServer} from 'node:net';
+import {resolve} from 'node:path';
+const root=resolve('output/playwright/issue75/runtime'),binary=root+'/hey-boss';
+mkdirSync(root,{recursive:true});copyFileSync(resolve('target/debug/hey-boss'),binary);
+const env={...process.env,HEY_BOSS_ISSUE_DB:root+'/issues.db',HEY_BOSS_FLEET_STATE:root,CODEX_HOME:root+'/codex',HEY_BOSS_INBOX_SOCKET:root+'/inbox.sock'};
+for(const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_AGENT_ID','CODEX_THREAD_ID'])delete env[key];
+const session='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',standalone='11111111-2222-3333-4444-555555555555';
+const cli=(args,extra={})=>{const r=spawnSync(binary,args,{env:{...env,...extra},encoding:'utf8'});if(r.status)throw Error(r.stderr||r.stdout);return JSON.parse(r.stdout);};
+const issue=(args,extra={})=>cli(['issue','--project','Origin QA','--json',...args],extra);
+const boss={'HEY_BOSS_AGENT_ID':'human:boss'};
+issue(['create','--title','Improve reconnect diagnostics','--body','Investigate why connections drop after sleep.'],boss);
+const actor=issue(['whoami'],{CODEX_THREAD_ID:session}).agent;
+const database=(sql,args=[])=>{const r=spawnSync(binary,['fleet','database','--path',env.HEY_BOSS_ISSUE_DB],{input:JSON.stringify({sql,args})+'\n',encoding:'utf8'});if(r.status||!JSON.parse(r.stdout).ok)throw Error(r.stderr||r.stdout);};
+database("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,session_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('historical-origin','named:Origin QA',1,?,'worker:source',?,'running',1,'fixture',?,1,1)",[JSON.stringify({issue:{title:'Improve reconnect diagnostics'}}),session,actor.machine]);
+function transcript(id){const path=root+'/codex/sessions/2026/09/20/rollout-fixture-'+id+'.jsonl';mkdirSync(resolve(path,'..'),{recursive:true});
+const first=JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Investigate reconnect failures and record any follow-up work.'}]}})+'\n';
+const call=JSON.stringify({type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'create-follow-up',arguments:'hey-boss issue create --title "Retain the creating session"'}})+'\n';
+writeFileSync(path,first+call);return {path,offset:first.length};}
+const trace=transcript(session);transcript(standalone);
+issue(['create','--title','Retain the creating session','--body','A follow-up discovered during reconnect investigation.'],{CODEX_THREAD_ID:session});
+const artifact=cli(['artifact','--project','Origin QA','--json','create','--title','Reconnect investigation','--body','# Findings\n\nKeep the source conversation connected to this investigation.'],{CODEX_THREAD_ID:session});
+issue(['create','--title','Created outside a worker','--body','This session still has saved creation context.'],{CODEX_THREAD_ID:standalone});
+issue(['create','--title','Older issue with no recorded origin'],boss);database("UPDATE issues SET origin=NULL WHERE number=4");
+issue(['create','--title','Follow-up from a disconnected device'],{CODEX_THREAD_ID:session});
+database("UPDATE issues SET origin=json_set(origin,'$.host','devbox-host','$.run.id','remote-origin') WHERE number=5");
+database("UPDATE worker_runs SET finished_at=2,state='completed'");
+writeFileSync(trace.path,JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Investigate reconnect failures and record any follow-up work.'}]}})+'\n'+JSON.stringify({type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'create-follow-up',arguments:'hey-boss issue create --title "Retain the creating session"'}})+'\n'+JSON.stringify({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'The follow-up issue and investigation artifact are saved.'}]}})+'\n');
+const snapshot=()=>({ok:true,machines:[{host:'local',hostname:actor.host,state:'connected',heartbeat:Date.now()/1000,workers:[]},{host:'devbox',hostname:'devbox-host',state:'disconnected',heartbeat:0,workers:[]}],signals:[],conflicts:[]});
+const sockets=new Set();let web;
+const server=createServer(client=>{sockets.add(client);client.on('close',()=>sockets.delete(client));let input='';client.on('data',chunk=>{input+=chunk;if(!input.includes('\n'))return;const request=JSON.parse(input);if(request.kind==='subscribe'){client.write('event: connected\ndata: {}\n\n');return;}client.end(JSON.stringify(request.kind==='status'?snapshot():{ok:false,error:'Read-only fixture'}));});});
+server.listen(root+'/fleet.sock',()=>{web=spawn(binary,['issue','web','--port','59675','--no-discovery','--project','Origin QA','--json'],{env,stdio:['ignore','inherit','inherit']});console.log(JSON.stringify({artifact:artifact.artifact.id,invocation:trace.offset}));});
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{web?.kill();for(const socket of sockets)socket.destroy();server.close(()=>{rmSync(root,{recursive:true,force:true});process.exit(0);});});

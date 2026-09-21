@@ -1,0 +1,14 @@
+.origin-card{border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 20px;min-width:0;background:var(--surface)}
+.origin-card h2{font-size:12px;font-weight:600;letter-spacing:.04em;margin:0 0 12px;color:var(--muted)}
+.origin-card p{margin:4px 0;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.origin-author strong{font-weight:600}.origin-device,.origin-note{color:var(--muted)}
+.origin-task,.origin-conversation{display:flex;align-items:center;gap:8px;font-size:13px;line-height:1.5;min-height:44px;overflow-wrap:anywhere}
+.origin-conversation{font-weight:600}.origin-conversation span{margin-left:auto}
+.origin-context{font-size:12px;color:var(--muted);margin-top:8px}.origin-context summary{cursor:pointer;min-height:32px;display:list-item;align-content:center}
+.origin-context dl{margin:12px 0 0}.origin-context dt{font-weight:600;margin-top:8px}.origin-context dd{margin:3px 0;overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:11px;line-height:1.6}
+.artifact-content>.origin-card{margin:28px 0 0;max-width:680px}
+.chat-message.is-origin{border:1px solid var(--accent);border-radius:16px;padding:12px 16px;box-shadow:inset 0 0 0 1px var(--accent);scroll-margin-top:120px}
+.origin-invocation-label{font-size:12px;font-weight:600;color:var(--accent);margin-bottom:8px}
+.session-resources{max-width:760px;margin:0 auto 28px;border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:4px 16px;font-size:13px}
+.session-resources summary{cursor:pointer;min-height:44px;align-content:center;color:var(--muted)}
+.session-resources ul{list-style:none;padding:0;margin:0 0 12px}.session-resources li{display:flex;align-items:baseline;gap:12px;border-top:1px solid var(--line);padding:10px 0;overflow-wrap:anywhere}.session-resources a{flex:1;min-width:0;min-height:44px;align-content:center}.resource-kind{color:var(--muted);font-size:12px;min-width:64px}
