@@ -94,7 +94,7 @@ pub(crate) fn referenced(db: &Connection, host: &str, run: &str) -> Result<Optio
 }
 
 pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
-    let saved = db.query_row("SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.started_at,r.finished_at,r.actor_id FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",[run],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,Option<String>>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"started_at":r.get::<_,i64>(7)?,"finished_at":r.get::<_,Option<i64>>(8)?,"actor_id":r.get::<_,String>(9)?}))).optional()?;
+    let saved = db.query_row("SELECT r.id,r.project_id,p.name,r.issue_number,CASE WHEN json_valid(r.job) THEN json_extract(r.job,'$.issue.title') END,r.session_id,r.state,r.started_at,r.finished_at,r.actor_id FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",[run],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,Option<String>>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"started_at":r.get::<_,i64>(7)?,"finished_at":r.get::<_,Option<i64>>(8)?,"actor_id":r.get::<_,String>(9)?}))).optional()?;
     if saved.is_some() {
         return Ok(saved);
     }
