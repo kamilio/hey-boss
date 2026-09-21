@@ -121,6 +121,20 @@ function prompt(text) {
     return;
   }
   if (text === 'malformed') { process.stdout.write('{invalid JSON}\n'); return; }
+  if (text === 'malformed terminal') {
+    if (provider === 'codex') send({method:'turn/completed',params:{turn:{id:turn,status:'completed'}}});
+    else if (provider === 'claude') send({type:'result',session_id:session,subtype:'success',result:'unverified'});
+    else {
+      send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'unverified'}],stopReason:'invalid'}});
+      send({type:'agent_settled'});
+    }
+    return;
+  }
+  if (text === 'deferred assistant' && provider === 'pi') {
+    send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'waiting for external work'}],stopReason:'deferred'}});
+    send({type:'agent_settled'});
+    return;
+  }
 
   if (text === 'approval') {
     if (provider === 'codex') send({id:'foreign',method:'item/commandExecution/requestApproval',params:{threadId:'other-session',turnId:turn}});
