@@ -1,5 +1,6 @@
 pub mod agent_control;
 pub mod agent_conversations;
+pub mod agent_guidance;
 pub(crate) mod agent_process;
 pub mod agent_runtime;
 pub mod agents;

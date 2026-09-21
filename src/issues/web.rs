@@ -444,6 +444,20 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     if request.method() == &Method::Get {
+        if path == "/llms.txt" {
+            return Ok((
+                200,
+                "text/plain; charset=utf-8",
+                crate::agent_guidance::GUIDE.as_bytes().to_vec(),
+            ));
+        }
+        if path == "/agent-guide.js" {
+            return Ok((
+                200,
+                "text/javascript; charset=utf-8",
+                crate::agent_guidance::SCRIPT.as_bytes().to_vec(),
+            ));
+        }
         let asset: Option<(&str, &[u8])> = match path.as_str() {
             "/" | "/issues" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
             "/artifacts" => Some((
@@ -616,7 +630,11 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                         "<html lang=\"en\" class=\"mindmap-focus\">",
                     );
                 }
-                return Ok((200, kind, html.into_bytes()));
+                return Ok((
+                    200,
+                    kind,
+                    crate::agent_guidance::decorate(&html).into_bytes(),
+                ));
             }
             return Ok((200, kind, data.to_vec()));
         }

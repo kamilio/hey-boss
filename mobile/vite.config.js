@@ -1,6 +1,8 @@
 import {defineConfig} from 'vite';
 import {fileURLToPath} from 'node:url';
+import {agentGuidancePlugin} from './agent-guidance.mjs';
 export default defineConfig({
+ plugins:[agentGuidancePlugin()],
  server:{proxy:{'/api':'http://127.0.0.1:8787'}},build:{sourcemap:false},
  // Entity decoding has a DOM-specific browser export. Workers need its pure
  // lookup-table implementation; keep the smaller browser export for the page.
