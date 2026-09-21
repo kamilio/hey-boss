@@ -715,6 +715,9 @@ before removal. Symlinked roots, incomplete inspections and oversized trees are
 preserved; symlinks inside caches are never followed.
 The recognized user-owned Chrome signing-copy container may include its copied
 root-owned executable; all directories must still belong to the current user.
+Creating another hard link to a shared signing-copy file does not reset its age
+or quiet observation; directory activity and file identity, mode, size and
+modification time remain checked.
 Browser profiles, history, cookies, bookmarks, offline storage and arbitrary project artifacts are not
 cleanup targets. Use the cache checkbox or `configure --caches false` to disable.
 The footer and CLI report measured **net free-space change** on the home volume.
