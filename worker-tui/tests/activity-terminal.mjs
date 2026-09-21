@@ -115,7 +115,13 @@ try {
   for (const session of pilot.sessions()) {
     if (session.exitCode === null) {
       await session.type("q").catch(() => {});
-      await session.waitForExit({ timeout: 3000 }).catch(() => {});
+      await session.waitForExit({ timeout: 3000 }).catch(() => {
+        // Kill the PTY process group if its application cannot quit; killing
+        // only the wrapper PID can strand its child on a closed terminal.
+        try { process.kill(-session.pid, "SIGKILL"); } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+      });
     }
   }
   await pilot.close();
