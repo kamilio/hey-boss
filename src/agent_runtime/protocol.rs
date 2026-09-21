@@ -266,14 +266,16 @@ impl AgentSession {
             return Ok(());
         };
         self.requests.clear();
+        let next = self.queued_turns.pop_front();
         self.events.push_back(Event::TurnCompleted {
             id,
+            next_turn: next.as_ref().map(|(id, _)| id.clone()),
             status,
             output,
             structured_output,
             usage,
         });
-        if let Some((id, text)) = self.queued_turns.pop_front() {
+        if let Some((id, text)) = next {
             self.output.clear();
             self.turn = Some(id.clone());
             self.send(&json!({"type":"user","session_id":self.session.as_ref().map(|s|s.id.as_str()).unwrap_or(""),"message":{"role":"user","content":text},"parent_tool_use_id":null}))?;

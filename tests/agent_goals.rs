@@ -122,3 +122,58 @@ fn queued_claude_instructions_must_finish_before_the_goal_completes() {
     assert_eq!(goal.turns_completed(), 2);
     assert_eq!(goal.summary(), Some("Queued instruction verified"));
 }
+
+#[test]
+fn buffered_claude_completions_preserve_queued_goal_scope() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut agent = AgentSession::launch(Launch {
+        provider: Provider::Claude,
+        binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+        cwd: root,
+        resume: None,
+        env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), "claude".into())]),
+        output_schema: None,
+    })
+    .unwrap();
+    let mut goal = ManagedGoal::new("queued goal").unwrap();
+    let turn = goal.start(&mut agent).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline);
+        if let Some(event) = agent.receive(Duration::from_millis(50)).unwrap() {
+            goal.observe(&mut agent, &event).unwrap();
+            if matches!(event, hey_boss::agent_runtime::Event::TextDelta { .. }) {
+                break;
+            }
+        }
+    }
+    agent
+        .steer(
+            &turn,
+            r#"{"status":"completed","summary":"Queued instruction verified"}"#,
+        )
+        .unwrap();
+    // A UI may inspect all arrived events before delivering them to the goal.
+    while agent.inspect().unwrap().turn.is_some() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut buffered = Vec::new();
+    while let Some(event) = agent.receive(Duration::ZERO).unwrap() {
+        buffered.push(event);
+    }
+    for event in buffered {
+        let initial_completion = matches!(&event, hey_boss::agent_runtime::Event::TurnCompleted { id, .. } if id == &turn);
+        goal.observe(&mut agent, &event).unwrap();
+        if initial_completion {
+            assert_eq!(
+                goal.status(),
+                GoalStatus::Active,
+                "An earlier report discarded queued instructions"
+            );
+        }
+    }
+    assert_eq!(goal.status(), GoalStatus::Complete);
+    assert_eq!(goal.turns_completed(), 2);
+    assert_eq!(goal.summary(), Some("Queued instruction verified"));
+}

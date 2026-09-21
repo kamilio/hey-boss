@@ -160,6 +160,7 @@ impl ManagedGoal {
             }
             Event::TurnCompleted {
                 id,
+                next_turn,
                 status,
                 output,
                 structured_output,
@@ -175,7 +176,7 @@ impl ManagedGoal {
                 }
                 // Claude steering creates another client turn. An earlier
                 // report cannot finish the goal while queued instructions run.
-                if let Some(turn) = &agent.turn {
+                if let Some(turn) = next_turn {
                     self.turn = Some(turn.clone());
                     return Ok(());
                 }

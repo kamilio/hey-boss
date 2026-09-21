@@ -172,6 +172,10 @@ pub enum Event {
     },
     TurnCompleted {
         id: String,
+        /// Client-owned queued successor, independent of how far inspection
+        /// has already advanced the live session before this event is consumed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_turn: Option<String>,
         status: TurnStatus,
         output: String,
         structured_output: Option<Value>,
