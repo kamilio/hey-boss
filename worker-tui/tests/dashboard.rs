@@ -60,7 +60,7 @@ fn worker_header_keeps_project_and_checkout_visible_while_draining() {
             screen.contains("/work/demo-checkout"),
             "Checkout missing at width {width}"
         );
-        assert!(screen.contains("Finishing work before update"));
+        assert!(screen.contains("Emergency update drain"));
     }
 }
 
@@ -421,7 +421,8 @@ fn busy_and_finishing_states_use_plain_language() {
     assert!(screen(&app).contains("Finishing work before pause"));
     value["workers"][0]["upgrading"] = json!(true);
     app.apply(value);
-    assert!(screen(&app).contains("Finishing work before update"));
+    assert!(screen(&app).contains("Emergency update drain"));
+    assert!(!screen(&app).contains("Finishing work before update"));
     assert!(!screen(&app).contains("draining"));
 }
 
