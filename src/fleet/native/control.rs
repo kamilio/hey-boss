@@ -433,6 +433,10 @@ fn set_intent(saved: &mut Value, id: &Value, intent: &str) {
     }
 }
 
+pub(super) fn revision(node: &str, workers: &Value) -> String {
+    hash(&json!({"controller":node,"workers":workers}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,7 +462,4 @@ mod tests {
             "running"
         );
     }
-}
-pub(super) fn revision(node: &str, workers: &Value) -> String {
-    hash(&json!({"controller":node,"workers":workers}))
 }

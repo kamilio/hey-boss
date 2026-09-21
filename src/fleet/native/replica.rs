@@ -1471,7 +1471,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert_eq!(agent.db.query_row("SELECT legacy FROM project_name_collisions WHERE rejected_id='github.com/other/Native fleet'", [], |r| r.get::<_,bool>(0)).unwrap(), true);
+        assert!(agent.db.query_row("SELECT legacy FROM project_name_collisions WHERE rejected_id='github.com/other/Native fleet'", [], |r| r.get::<_,bool>(0)).unwrap());
     }
 
     struct Fixture {
