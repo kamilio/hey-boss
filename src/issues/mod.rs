@@ -5,6 +5,7 @@ mod fleet;
 mod global_settings;
 pub mod identity;
 pub mod planning;
+pub(crate) mod provenance;
 pub mod remote;
 mod store;
 pub mod web;
@@ -118,6 +119,27 @@ pub struct Actor {
     pub process_start: Option<String>,
     pub cwd: PathBuf,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<Invocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_run: Option<CreationRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreationRun {
+    pub id: String,
+    pub project_id: String,
+    pub number: i64,
+    pub title: Option<String>,
+    pub started_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Invocation {
+    pub offset: u64,
+    pub call_id: Option<String>,
 }
 
 /// A guarded triage entry. The owner guard must be present, including null.

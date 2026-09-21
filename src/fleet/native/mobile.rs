@@ -27,6 +27,8 @@ impl Mobile {
             process_start: None,
             cwd: self.ctx.home.clone(),
             source: "phone".into(),
+            invocation: None,
+            creation_run: None,
         });
         let request = Request {
             version: 1,
@@ -237,7 +239,7 @@ impl Mobile {
                 }
                 super::local_request(
                     &self.ctx,
-                    json!({"kind":if request["action"]=="takeover" {"takeover"} else {"conversation"},"host":request["host"],"run":request["run"],"cursor":request.get("cursor").cloned().unwrap_or(json!(0))}),
+                    json!({"kind":if request["action"]=="takeover" {"takeover"} else {"conversation"},"host":request["host"],"run":request["run"],"cursor":request.get("cursor").cloned().unwrap_or(json!(0)),"before":request["before"],"latest":request["latest"],"at":request["at"]}),
                 )
             })();
             let outcome = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));

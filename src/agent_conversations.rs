@@ -17,6 +17,8 @@ pub struct Window {
     pub before: Option<u64>,
     #[serde(default)]
     pub latest: bool,
+    #[serde(default)]
+    pub at: Option<u64>,
 }
 
 const PAGE_BYTES: u64 = 1024 * 1024;
@@ -107,7 +109,10 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
     let status = overview()?;
     let machine = status["machines"]
         .as_array()
-        .and_then(|ms| ms.iter().find(|m| m["host"] == host))
+        .and_then(|ms| {
+            ms.iter()
+                .find(|m| m["host"] == host || m["hostname"] == host)
+        })
         .ok_or_else(|| Error::invalid("This device is no longer available"))?;
     let known = machine["workers"]
         .as_array()
@@ -115,11 +120,24 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
         .flatten()
         .flat_map(|w| w["runs"].as_array().into_iter().flatten())
         .any(|r| r["id"] == run);
-    if !known {
+    let referenced = crate::issues::provenance::referenced(
+        &database(&crate::issues::database_path()?)?,
+        host,
+        run,
+    )?
+    .is_some();
+    if !known && !referenced {
         return Err(Error::invalid("This agent is no longer available"));
     }
+    let host = machine["host"].as_str().unwrap_or("");
     if host == "local" {
-        return local_window(run, window);
+        let mut result = local_window(run, window)?;
+        crate::issues::provenance::enrich_conversation(
+            &database(&crate::issues::database_path()?)?,
+            run,
+            &mut result,
+        )?;
+        return Ok(result);
     }
     if machine["state"] != "connected" {
         return Err(Error::new(
@@ -136,13 +154,19 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
     command
         .env("SFT_NO_BROWSER", "1")
         .env("SSH_ASKPASS_REQUIRE", "never");
-    transport(
+    let mut result = transport(
         command,
         &serde_json::to_vec(
-            &json!({"run":run,"cursor":window.cursor,"before":window.before,"latest":window.latest}),
+            &json!({"run":run,"cursor":window.cursor,"before":window.before,"latest":window.latest,"at":window.at}),
         )?,
         Duration::from_secs(12),
-    )
+    )?;
+    crate::issues::provenance::enrich_conversation(
+        &database(&crate::issues::database_path()?)?,
+        run,
+        &mut result,
+    )?;
+    Ok(result)
 }
 
 pub fn local_window(run: &str, window: &Window) -> Result<Value> {
@@ -202,6 +226,58 @@ fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
     paths.insert(key, path.clone());
     Some(path)
 }
+
+/// Best-effort bounded metadata capture on the caller's device, before SSH.
+/// Tool text and arguments are deliberately excluded from persisted origins.
+pub(crate) fn invocation(session: &str) -> Option<crate::issues::Invocation> {
+    if !valid_session(session) {
+        return None;
+    }
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))?;
+    invocation_at(&rollout(&home, session)?)
+}
+fn invocation_at(path: &Path) -> Option<crate::issues::Invocation> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let base = size.saturating_sub(ENTRY_BYTES);
+    file.seek(SeekFrom::Start(base)).ok()?;
+    let mut reader = BufReader::new(file);
+    if base > 0 {
+        let mut partial = Vec::new();
+        reader.read_until(b'\n', &mut partial).ok()?;
+    }
+    let mut found = None;
+    loop {
+        let offset = reader.stream_position().ok()?;
+        let mut line = Vec::new();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            break;
+        }
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        if record["type"] == "response_item"
+            && matches!(
+                record["payload"]["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            )
+        {
+            found = Some(crate::issues::Invocation {
+                offset,
+                call_id: record["payload"]["call_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 256)
+                    .map(str::to_owned),
+            });
+        }
+    }
+    found
+}
 #[cfg(test)]
 fn page(db: &Connection, home: &Path, run: &str, cursor: u64) -> Result<Value> {
     window_page(
@@ -214,13 +290,26 @@ fn page(db: &Connection, home: &Path, run: &str, cursor: u64) -> Result<Value> {
         },
     )
 }
-fn window_page(db: &Connection, home: &Path, run: &str, window: &Window) -> Result<Value> {
+pub(crate) fn window_page(
+    db: &Connection,
+    home: &Path,
+    run: &str,
+    window: &Window,
+) -> Result<Value> {
     let cursor = window.cursor;
-    let saved:Option<Option<String>>=db.query_row("SELECT r.session_id FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",[run],|r|r.get(0)).optional()?;
+    let metadata = crate::issues::provenance::saved_run(db, run)?;
+    let saved: Option<Option<String>> = if run.starts_with("session:") {
+        metadata
+            .as_ref()
+            .map(|r| r["session_id"].as_str().map(str::to_owned))
+    } else {
+        db.query_row("SELECT r.session_id FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",[run],|r|r.get(0)).optional()?
+    };
     let session =
         saved.ok_or_else(|| Error::invalid("This conversation is no longer available"))?;
     let mut result =
         json!({"ok":true,"messages":[],"cursor":cursor,"has_more":false,"availability":"waiting"});
+    result["run"] = json!(metadata);
     let Some(session) = session else {
         return Ok(result);
     };
@@ -241,8 +330,16 @@ fn window_page(db: &Connection, home: &Path, run: &str, window: &Window) -> Resu
         return Err(Error::invalid("Conversation changed. Reload its history."));
     }
     let mut reader = BufReader::new(file);
-    let historical = window.latest || window.before.is_some();
-    let (start, boundary) = if historical {
+    let historical = window.latest || window.before.is_some() || window.at.is_some();
+    let (start, boundary) = if let Some(at) = window.at {
+        if at > size {
+            return Err(Error::invalid(
+                "The saved invocation is outside this conversation",
+            ));
+        }
+        let (start, _) = recent_range(&mut reader, at, None)?;
+        (start, size.min(at.saturating_add(PAGE_BYTES / 2)))
+    } else if historical {
         recent_range(&mut reader, size, window.before)?
     } else {
         (cursor, size)
@@ -286,7 +383,7 @@ fn window_page(db: &Connection, home: &Path, run: &str, window: &Window) -> Resu
     let end = reader.stream_position()?;
     result["messages"] = json!(messages);
     result["cursor"] = json!(end);
-    result["has_more"] = json!(!historical && end < size && complete);
+    result["has_more"] = json!((!historical || window.at.is_some()) && end < size && complete);
     if historical {
         result["older_cursor"] = json!(start);
         result["has_earlier"] = json!(start > 0);
@@ -595,7 +692,7 @@ mod tests {
             );
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let db = Connection::open_in_memory().unwrap();
-            db.execute_batch("CREATE TABLE projects(id TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas',NULL); CREATE TABLE worker_runs(id TEXT,project_id TEXT,session_id TEXT); INSERT INTO worker_runs VALUES('run','Atlas','aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');").unwrap();
+            db.execute_batch("CREATE TABLE projects(id TEXT,name TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas','Atlas',NULL); CREATE TABLE worker_runs(id TEXT,project_id TEXT,session_id TEXT,issue_number INTEGER,job TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,actor_id TEXT); INSERT INTO worker_runs VALUES('run','Atlas','aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',1,'{}','completed',1,2,'codex:fixture');").unwrap();
             Self { root, db, path }
         }
         fn page(&self, cursor: u64) -> Result<Value> {
@@ -761,6 +858,52 @@ mod tests {
         let p=item(&json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":"Public summary"}],"encrypted_content":"private ciphertext"}}),0).unwrap();
         assert_eq!(p["text"], "Public summary");
         assert!(!p.to_string().contains("ciphertext"));
+    }
+    #[test]
+    fn invocation_metadata_and_anchored_history_use_exact_record_offsets() {
+        let f = Fixture::new();
+        let before = (0..100)
+            .map(|_| Fixture::line("assistant", &"old context ".repeat(3000)))
+            .collect::<String>();
+        let call=json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"create-call","arguments":"hey-boss issue create"}}).to_string()+"\n";
+        let after = (0..100)
+            .map(|_| Fixture::line("assistant", &"new context ".repeat(3000)))
+            .collect::<String>();
+        std::fs::write(&f.path, before.clone() + &call + &after + "{\"type\":").unwrap();
+        let invocation = invocation_at(&f.path).unwrap();
+        assert_eq!(invocation.offset, before.len() as u64);
+        assert_eq!(invocation.call_id.as_deref(), Some("create-call"));
+        let page = window_page(
+            &f.db,
+            &f.root,
+            "run",
+            &Window {
+                at: Some(invocation.offset),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            page["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == invocation.offset.to_string())
+        );
+        assert!(page["has_earlier"].as_bool().unwrap());
+        assert!(page["has_more"].as_bool().unwrap());
+        assert!(
+            window_page(
+                &f.db,
+                &f.root,
+                "run",
+                &Window {
+                    at: Some(u64::MAX),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
     }
     #[test]
     fn compact_overview_filters_hidden_projects_without_mutating_input() {

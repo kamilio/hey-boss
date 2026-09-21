@@ -934,6 +934,8 @@ pub(crate) fn preview(
             process_start: None,
             cwd: config.cwd.clone().into(),
             source: String::new(),
+            invocation: None,
+            creation_run: None,
         },
         owner_pid: 0,
         owner_start: String::new(),

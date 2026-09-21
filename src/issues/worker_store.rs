@@ -563,6 +563,8 @@ mod tests {
                 process_start: None,
                 cwd: root.clone(),
                 source: "test".into(),
+                invocation: None,
+                creation_run: None,
             };
             let project = Project {
                 id: "named:Handoff".into(),

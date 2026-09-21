@@ -142,6 +142,8 @@ mod tests {
                 process_start: start,
                 cwd: root.clone(),
                 source: "synthetic recovery test".into(),
+                invocation: None,
+                creation_run: None,
             };
             let request = |operation| Request {
                 version: 1,

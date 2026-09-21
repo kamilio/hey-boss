@@ -949,7 +949,7 @@ pub fn run(options: &Options) -> Result<()> {
         let cwd = std::env::current_dir()?.canonicalize()?;
         let machine = issues::identity::machine()?;
         let project = issues::identity::project(&cwd, &machine)?;
-        let actor = if operation.needs_actor() || interactive {
+        let mut actor = if operation.needs_actor() || interactive {
             Some(issues::identity::resolve(
                 options.agent.as_deref(),
                 &machine,
@@ -958,6 +958,13 @@ pub fn run(options: &Options) -> Result<()> {
         } else {
             None
         };
+        if matches!(
+            operation,
+            Operation::Create { .. } | Operation::CreateSubtask { .. }
+        ) && let Some(actor) = actor.as_mut()
+        {
+            issues::identity::creation_context(actor);
+        }
         let request = Request {
             version: 1,
             project,
@@ -1342,6 +1349,9 @@ fn print_issue_line(issue: &Value) {
             "es"
         }
     );
+    if issue["origin_error"]["message"].is_string() {
+        println!("  Origin unavailable: {}", line(&issue["origin_error"]["message"]));
+    }
     if let Some(status) = issue["status"].as_object() {
         println!(
             "  Status [{}]: {}",

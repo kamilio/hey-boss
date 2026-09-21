@@ -205,16 +205,14 @@ impl Supervisor {
         let run_id = request["run"]
             .as_str()
             .ok_or_else(|| invalid("Missing agent"))?;
-        let cursor = request.get("cursor").cloned().unwrap_or(json!(0));
-        if cursor.as_u64().is_none() {
-            return Err(invalid("Invalid conversation cursor"));
-        }
+        let window: crate::agent_conversations::Window = serde_json::from_value(request.clone())?;
+        let cursor = serde_json::to_value(&window)?;
         let status = self.status()?;
         let machine = status["machines"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|m| m["host"] == host)
+            .find(|m| m["host"] == host || (!taking_over && m["hostname"] == host))
             .ok_or_else(|| invalid("This device is no longer available"))?;
         let run = machine["workers"]
             .as_array()
@@ -222,7 +220,25 @@ impl Supervisor {
             .flatten()
             .flat_map(|w| w["runs"].as_array().into_iter().flatten())
             .find(|r| r["id"] == run_id)
-            .ok_or_else(|| invalid("This agent is no longer available"))?;
+            .cloned();
+        let run = if let Some(run) = run {
+            run
+        } else if !taking_over {
+            let db = self.ctx.db()?;
+            let origin = crate::issues::provenance::referenced(&db, host, run_id)?
+                .ok_or_else(|| invalid("This agent is no longer available"))?;
+            if run_id.starts_with("session:") {
+                crate::issues::provenance::saved_run(&db, run_id)?
+                    .ok_or_else(|| invalid("This conversation is no longer available"))?
+            } else {
+                origin["run"].clone()
+            }
+        } else {
+            return Err(invalid("This agent is no longer available"));
+        };
+        let host = machine["host"]
+            .as_str()
+            .ok_or_else(|| invalid("Missing device"))?;
         let project = replica::rows(
             &self.ctx.db()?,
             "SELECT hidden_at FROM projects WHERE id=?",
@@ -235,7 +251,9 @@ impl Supervisor {
             if taking_over {
                 return takeover::apply(&self.ctx, run_id);
             }
-            return conversation::page(&self.ctx, run_id, &cursor);
+            let mut result = conversation::page(&self.ctx, run_id, &cursor)?;
+            crate::issues::provenance::enrich_conversation(&self.ctx.db()?, run_id, &mut result)?;
+            return Ok(result);
         }
         let identifier = id()?;
         let (tx, rx) = mpsc::sync_channel(1);
@@ -264,6 +282,9 @@ impl Supervisor {
             .map_err(|_| invalid("This device did not respond. Try again when it reconnects."));
         self.state.lock().unwrap().waiters.remove(&identifier);
         let mut result = result?;
+        if !taking_over && result["ok"] == true {
+            crate::issues::provenance::enrich_conversation(&self.ctx.db()?, run_id, &mut result)?;
+        }
         if taking_over && result["ok"] != false && result["stopped"] == true {
             result["resume_command"] = takeover::command(
                 host,

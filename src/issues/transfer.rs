@@ -95,7 +95,7 @@ pub(super) fn execute(
         "UPDATE projects SET next_number=next_number+1 WHERE id=?1",
         [&target.id],
     )?;
-    db.execute("INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,version,labels,sort_order,draft) SELECT ?3,?4,title,body,state,assignee,created_by,closed_by,created_at,?5,closed_at,version+1,labels,(SELECT coalesce(max(sort_order),0)+1 FROM issues WHERE project_id=?3),draft FROM issues WHERE project_id=?1 AND number=?2",params![source.id,number,target.id,next,now])?;
+    db.execute("INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,version,labels,sort_order,draft,origin) SELECT ?3,?4,title,body,state,assignee,created_by,closed_by,created_at,?5,closed_at,version+1,labels,(SELECT coalesce(max(sort_order),0)+1 FROM issues WHERE project_id=?3),draft,origin FROM issues WHERE project_id=?1 AND number=?2",params![source.id,number,target.id,next,now])?;
     // Fleet history is append-only. Copy history with fresh IDs rather than
     // relocating existing rows that replicas have already acknowledged.
     db.execute("INSERT INTO issue_status_updates(id,project_id,issue_number,author,level,comment,created_at) SELECT lower(hex(randomblob(16))),?3,?4,author,level,comment,created_at FROM issue_status_updates WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,id",params![source.id,number,target.id,next])?;

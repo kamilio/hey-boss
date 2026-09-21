@@ -112,6 +112,8 @@ pub fn resolve(explicit: Option<&str>, machine: &str, cwd: &Path) -> Result<Acto
         process_start: None,
         cwd: cwd.into(),
         source: String::new(),
+        invocation: None,
+        creation_run: None,
     };
     let configured = explicit
         .map(str::to_owned)
@@ -161,7 +163,37 @@ pub fn resolve(explicit: Option<&str>, machine: &str, cwd: &Path) -> Result<Acto
             .map(|p| p.pid);
     }
     actor.process_start = actor.pid.and_then(crate::agents::process_identity);
+    // Stable explicit Codex identities also carry their actual session. Human
+    // callers never inherit the agent environment that launched their terminal.
+    if actor.session_id.is_none() && actor.id.starts_with("codex:") {
+        actor.session_id = actor.id.strip_prefix("codex:").map(str::to_owned);
+        actor.kind = "codex".into();
+    }
     Ok(actor)
+}
+
+/// Capture only for creations, on the caller's machine before remote transport.
+pub fn creation_context(actor: &mut Actor) {
+    if actor.session_id.is_none() {
+        return;
+    }
+    actor.invocation = (actor.kind == "codex")
+        .then(|| {
+            actor
+                .session_id
+                .as_deref()
+                .and_then(crate::agent_conversations::invocation)
+        })
+        .flatten();
+    if let Ok(path) = super::database_path()
+        && let Ok(db) =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    {
+        let _ = db.busy_timeout(std::time::Duration::from_millis(100));
+        actor.creation_run = super::provenance::source_run(&db, actor, super::worker::now())
+            .ok()
+            .flatten();
+    }
 }
 
 fn ancestor_session<'a>(
@@ -327,6 +359,8 @@ mod tests {
             process_start: crate::agents::process_identity(pid),
             cwd: "/".into(),
             source: "test".into(),
+            invocation: None,
+            creation_run: None,
         };
         assert!(actor.process_start.is_some());
         assert_eq!(presence(&actor, "local"), "running");

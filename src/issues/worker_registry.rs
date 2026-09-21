@@ -709,6 +709,8 @@ pub(super) fn reserve(
                 process_start: None,
                 cwd: config.cwd.clone().into(),
                 source: "unclaimed worker reservation".into(),
+                invocation: None,
+                creation_run: None,
             };
             let issue = json!(get_issue(&tx, &project.id, number, false)?);
             // Thread rollouts and unfinished checkout edits belong to this host
