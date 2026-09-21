@@ -67,12 +67,18 @@ function prompt(text) {
     }
     return;
   }
-  if (text === 'burst completion') {
-    for (let i = 0; i < 160; i++) {
+  if (text === 'burst completion' || text === 'large burst completion') {
+    for (let i = 0; i < (text === 'burst completion' ? 160 : 600); i++) {
       if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:'x'}});
       else if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text:'x'}}});
       else send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'x'}});
     }
+    complete(); return;
+  }
+  if (text === 'coalesce boundaries' && provider === 'codex') {
+    for (const delta of ['é'.repeat(10000), 'b'.repeat(10000), 'c'.repeat(10000)]) send({method:'item/agentMessage/delta',params:{threadId:session,delta}});
+    send({method:'item/started',params:{threadId:session,item:{id:'boundary-tool',type:'commandExecution'}}});
+    send({method:'item/agentMessage/delta',params:{threadId:session,delta:'after tool'}});
     complete(); return;
   }
   if (text === 'completion then disconnect') {

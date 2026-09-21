@@ -183,6 +183,18 @@ fn text(content: &Value) -> String {
         .join("\n")
 }
 impl AgentSession {
+    fn text_delta(&mut self, text: &str) {
+        // Backlogged streaming fragments need not occupy one event each. Keep
+        // tool/message boundaries and cap each merged fragment at 32 KiB.
+        if let Some(Event::TextDelta { text: pending }) = self.events.back_mut()
+            && pending.len() + text.len() <= 32000
+        {
+            pending.push_str(text);
+        } else {
+            self.events
+                .push_back(Event::TextDelta { text: text.into() });
+        }
+    }
     pub(super) fn normalize(&mut self, value: Value) -> io::Result<()> {
         self.normalize_event(value).inspect_err(|_| {
             self.uncertain = true;
@@ -305,9 +317,7 @@ impl AgentSession {
                 }
             }
             "item/agentMessage/delta" => {
-                self.events.push_back(Event::TextDelta {
-                    text: params["delta"].as_str().unwrap_or("").into(),
-                });
+                self.text_delta(params["delta"].as_str().unwrap_or(""));
             }
             "item/started" => {
                 let item = &params["item"];
@@ -389,12 +399,7 @@ impl AgentSession {
             }
             Some("stream_event") => {
                 if value["event"]["delta"]["type"] == "text_delta" {
-                    self.events.push_back(Event::TextDelta {
-                        text: value["event"]["delta"]["text"]
-                            .as_str()
-                            .unwrap_or("")
-                            .into(),
-                    });
+                    self.text_delta(value["event"]["delta"]["text"].as_str().unwrap_or(""));
                 } else {
                     self.events.push_back(Event::Other(value));
                 }
@@ -488,12 +493,11 @@ impl AgentSession {
     fn pi(&mut self, value: Value) -> io::Result<()> {
         match value["type"].as_str() {
             Some("message_update") if value["assistantMessageEvent"]["type"] == "text_delta" => {
-                self.events.push_back(Event::TextDelta {
-                    text: value["assistantMessageEvent"]["delta"]
+                self.text_delta(
+                    value["assistantMessageEvent"]["delta"]
                         .as_str()
-                        .unwrap_or("")
-                        .into(),
-                })
+                        .unwrap_or(""),
+                )
             }
             Some("message_end") if value["message"]["role"] == "assistant" => {
                 self.output = text(&value["message"]["content"]);
