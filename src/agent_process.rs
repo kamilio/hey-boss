@@ -237,10 +237,11 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",
-            "printf 'failed to initialize sqlite state runtime: database is locked\\n' >&2; exit 1",
+            "exec 0<&-; printf 'failed to initialize sqlite state runtime: database is locked\\n' >&2; exit 1",
         ]);
         let mut process = Process::spawn(&mut command).unwrap();
-        // Receiving EOF ensures stdin has also closed before the first write.
+        // The fixture closes stdin explicitly; stdout EOF alone does not
+        // guarantee that all of the exiting child's other FDs have closed.
         process.receive(Duration::from_secs(3)).unwrap_err();
         let error = process
             .send(&serde_json::json!({"id":1,"method":"initialize"}))
