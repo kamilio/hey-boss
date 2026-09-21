@@ -67,6 +67,18 @@ function prompt(text) {
     }
     return;
   }
+  if (text === 'missing approval ownership' && provider === 'codex') {
+    send({id:'unowned-approval',method:'item/commandExecution/requestApproval',params:{command:'unowned command'}});
+    return;
+  }
+  if (text === 'invalid approval identity' && provider === 'codex') {
+    send({id:{invalid:true},method:'item/commandExecution/requestApproval',params:{threadId:session,turnId:turn,command:'unowned command'}});
+    return;
+  }
+  if (text === 'tool event classifications' && provider === 'codex') {
+    for (const item of [{id:'user',type:'userMessage'},{id:'reasoning',type:'reasoning'},{id:'command',type:'commandExecution',status:'declined'},{id:'dynamic',type:'dynamicToolCall',status:'completed',success:false}]) send({method:'item/completed',params:{threadId:session,item}});
+    complete(); return;
+  }
   if (text === 'burst completion' || text === 'large burst completion') {
     for (let i = 0; i < (text === 'burst completion' ? 160 : 600); i++) {
       if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:'x'}});

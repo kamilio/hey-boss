@@ -298,6 +298,11 @@ impl AgentSession {
         }
         let method = value["method"].as_str().unwrap_or("");
         if value.get("id").is_some() && !method.is_empty() {
+            if value["id"].as_i64().is_none()
+                && !value["id"].as_str().is_some_and(|id| !id.is_empty())
+            {
+                return Err(io::Error::other("Codex returned an invalid callback ID"));
+            }
             let id = serde_json::to_string(&value["id"])?;
             let approval = matches!(
                 method,
@@ -305,7 +310,12 @@ impl AgentSession {
                     | "item/fileChange/requestApproval"
                     | "item/permissions/requestApproval"
             );
-            return self.register(id, value.clone(), approval, method.into());
+            if approval {
+                required(params, "threadId")?;
+                required(params, "turnId")?;
+            }
+            let method = method.to_owned();
+            return self.register(id, value, approval, method);
         }
         match method {
             "turn/started" => {
@@ -340,12 +350,18 @@ impl AgentSession {
                         role: "assistant".into(),
                         text: self.output.clone(),
                     });
-                } else {
+                } else if matches!(
+                    item["type"].as_str(),
+                    Some("commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall")
+                ) {
                     self.events.push_back(Event::ToolCompleted {
                         id: item["id"].as_str().unwrap_or("").into(),
                         output: item.clone(),
-                        failed: item["status"] == "failed",
+                        failed: matches!(item["status"].as_str(), Some("failed" | "declined"))
+                            || item["success"] == false,
                     });
+                } else {
+                    self.events.push_back(Event::Other(value));
                 }
             }
             "turn/completed" if params["turn"]["id"].as_str() == self.turn.as_deref() => {
