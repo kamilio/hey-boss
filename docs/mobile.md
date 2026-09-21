@@ -1,226 +1,66 @@
 # iPhone companion
 
-`mobile/` contains a private Home Screen web app and a single-user Fly.io hub.
-The UI uses Radix UI for accessible controls, `liquid-glass-react` for its floating
-navigation, and translucent CSS surfaces. Safari and reduced-motion users receive
-the simpler glass fallback; no remote fonts, analytics or third-party push service.
+`mobile/` is a private Home Screen web app with an authenticated Fly relay. Inbox contains unread updates and questions, with **Unread / History** views inside it. Issues contains project work. Agents are available through existing saved conversation links, but have no entry in the phone's primary navigation. Notification settings remain under the header gear.
+
+Issues ships the regular web interface directly: project switching, hidden-project restoration, text/tag/assignee filters, open/blocked/closed/deleted states, queue ordering, full issue details, Markdown editing and preview, drafts, comments and resolution, assignment, lifecycle actions, transfer, activity, progress, subtasks, PR links, artifacts, and attachments. Project documents and mindmaps are secondary project resources. The same source assets supply desktop and phone behavior; the phone does not have a separate issue action implementation.
+
+## Storage and availability
+
+**No durable user data is stored on Fly.** The authoritative issue database, documents, attachment files, and retry journal stay on the supervisor and fleet devices. Issue browsing and mutations go through an in-memory request bridge to the supervisor. Requests disappear when completed, disconnected, timed out, or stopped. The server sets `Cache-Control: no-store`; it does not put issue responses or attachments in a service-worker cache.
+
+Fly holds notification routing and delivery state in RAM. Its durable private checkpoint, `mobile-relay.json`, lives beside the supervisor's `issues.db`. Successful pairing, push-subscription changes, notification answers/read receipts, settings changes, and native publication are acknowledged only after the supervisor atomically saves and fsyncs the checkpoint. That file includes pairing hashes, push subscriptions, notification bodies/outcomes, routing preferences, and stable VAPID keys. It is mode 0600: back it up locally and never print it or put it in Git.
+
+A restarted relay restores that local checkpoint before accepting phone changes. The supervisor must be online to browse issues and acknowledge durable notification actions. If it cannot respond/save, the phone gets a retryable connection error. An uncertain issue mutation may already have completed locally: retry the same content with the same request ID; the authoritative store deduplicates it. Explicit conflict/validation errors preserve editable content. A disconnected or timed-out HTTP request does not reverse a change already committed on the supervisor.
+
+This policy removes the old Fly SQLite volume and the old offline cloud queue. Unsaved issue drafts on HTTPS remain in the current tab, matching the regular private mobile web interface; keep the tab open while reconnecting. Notification answer drafts and offline read receipts retain their existing local browser storage behavior. Existing issue-creation clients are supported through the checkpointed legacy transport, but the new Issues screen uses the regular editor.
+
+See [hosting costs and storage boundaries](mobile-costs.md) for the resource inventory, current rates, expected budget, and billing limits.
 
 ## Deploy and pair
 
-Prerequisites: Node 22.13+, Xcode command-line tools, Fly CLI and an authenticated
-Fly account. Fly hosting costs are separate from Apple Developer membership;
-Apple membership is not needed for this web app.
+Prerequisites: Node 22.13+, Rust, Xcode command-line tools on the Mac, Fly CLI with an authenticated account, and the installed fleet supervisor. The legacy provisioning helper still uses the existing Python tooling; the relay and new supervisor implementation are JavaScript and Rust. Apple Developer membership is not required for this web app.
 
 ```sh
-cd mobile && npm ci && npm test && npm run build
+cd mobile
+npm ci
+npm test
+npm run build
 cd ..
-flyctl auth login
-python3 tools/setup_mobile.py
+hey-boss upgrade --source "$PWD"
+fly deploy --config mobile/fly.toml --dockerfile mobile/Dockerfile --ha=false
 ```
 
-To pair another phone later, run `python3 tools/setup_mobile.py --pair-only`.
+Keep exactly **one** relay machine. Pairing and active transport state are coordinated with one supervisor; multiple independent relay machines are unsupported. `auto_stop_machines = "off"` keeps pushes and bridge requests available. Deployments do not create volumes. Existing installations must migrate their legacy hub checkpoint to the supervisor before detaching/removing their Fly volume; verify pairing, stable VAPID keys, notification outcomes, and a process restart before deleting the legacy copy. A detached volume still incurs charges.
 
-The setup script creates the private hub, a 1 GB persistent volume, a random
-bridge credential, and builds/installs the updated native daemon. It prints only
-the five-minute pairing code, never the bridge secret. Use `--app NAME` to choose
-a different Fly app. The service must run **one machine**, with `--ha=false`:
-SQLite and the push outbox live on its persistent volume. Back up that volume.
-The hub must not be exposed before its mandatory `HUB_TOKEN` is configured.
+The existing provisioning helper `tools/setup_mobile.py` no longer creates a Fly volume. It configures the mandatory `HUB_TOKEN` and local `mobile.json` without printing bridge secrets. Upgrade/install the fleet supervisor before first use. `--pair-only` prints a five-minute single-use pairing code for another phone. `mobile.json` is mode 0600 beside the authoritative issue store and holds the relay origin and bridge credential.
 
-On iPhone (iOS 16.4+), visit the printed HTTPS URL, Add to Home Screen, open it
-from there, enter the pairing code and enable notifications in Settings. The
-session uses an HttpOnly Secure SameSite cookie; the server stores only its hash.
-Pairing codes expire and can be used once. Web Push subscriptions and VAPID keys
-persist across process restarts. Subscription endpoints are restricted to Apple.
+On iOS 16.4+, open the HTTPS app, **Add to Home Screen**, launch it there, enter the pairing code, and enable notifications in Settings. The session uses an HttpOnly Secure SameSite cookie, and only its hash appears in the local checkpoint. Subscription endpoints are restricted to Apple. Pairing and VAPID keys survive relay process restarts through supervisor restoration. The local native SQLite outbox retries interrupted publication, and phone outcomes are applied locally before acknowledgment.
 
-Configuration is `~/Library/Application Support/hey-boss/mobile.json`, mode 0600.
-The native app automatically publishes newly created notifications and questions
-when configured. Its durable SQLite outbox retries interrupted publication. A
-five-second sync retrieves phone outcomes and acknowledges only after local save.
-No agent inventory scans are introduced by mobile sync.
+The regular `/issues` route and older root issue hashes both open the same issue browser. Copied phone issue links also work with `hey-boss lookup`. Existing `/agents/session`, `/project-resource`, and artifact links remain available.
 
-## Create project issues from your phone
+## Notifications and safety
 
-Open **Issues** in the paired Fly app, select a registered project, and enter a
-title, optional description, and comma-separated labels. Creations use the same
-pairing session as the Inbox and are recorded as Boss in the normal issue queue.
-The phone can reach Fly over cellular; no direct connection to the Mac is needed.
+Automatic routing defaults to ten minutes without mouse or keyboard input, confirmed for another minute of continuous reliable samples. Lock/sleep or a two-minute heartbeat disconnect also enables phone pushes. Missing or unreliable idle readings stay quiet. **Always** and **Off** override automatic routing. Only aggregate inactivity and lock/sleep state are shared; no keys, app contents, or screen recording are captured.
 
-The fleet supervisor publishes its registered projects and delivers creations
-every five seconds, using the existing `mobile.json` beside its authoritative
-`issues.db`. Run `hey-boss fleet setup` if the supervisor is not installed. Only
-the supervisor consumes this queue; companions receive issues through fleet sync.
-Upgrade the CLI with `hey-boss upgrade --source /path/to/hey-boss` and deploy the
-mobile app with `flyctl deploy --config mobile/fly.toml --dockerfile mobile/Dockerfile --ha=false` from the repository root.
+Automatic-mode pushes wait at least thirty seconds after enqueue. The sender checks current task and presence state before each batch; three or more queued items become one digest. Answered requests do not push. Updates older than thirty minutes remain in Inbox without generating an old push. Failed delivery uses bounded retry/backoff; expired subscriptions are removed.
 
-**Pending** means the submission is saved on the phone or accepted into Fly's
-persistent SQLite queue, as indicated on screen. Accepted submissions survive an
-offline supervisor and Fly restarts. **Synced** includes the authoritative issue
-number and means workers can pick it up. **Error** includes the validation or
-project error and an **Edit saved draft** action with the full original content.
-Project choices remain available from the last supervisor sync while it is offline.
+Mac and phone answers share one atomic pending-to-terminal transition; one answer wins and competing answers receive the accepted outcome. A successful cloud response now also means the supervisor has saved the relay checkpoint. Opening alerts and updates records an idempotent read receipt; opening a question never answers it. Pending questions/reviews cleared from Inbox are cancelled without an answer or approval. History retains the accepted result and handling device.
 
-Unsubmitted and uncertain drafts persist in browser storage. Uncertain submissions
-keep their fields locked and retry the same request ID after reconnect/reload;
-they cannot accidentally become a second creation. Fly and the native issue store
-both deduplicate that ID, including when a successful delivery acknowledgment is
-lost. Validation failures keep the draft editable. If browser storage is full,
-submission stops before sending and explains how to retry.
+Delivered Apple pushes cannot be recalled immediately. Resolved queued pushes are suppressed, and delivered notifications are cleared on foreground refresh or another legitimate push. iOS does not offer approval buttons or text input in a Web Push banner; those controls appear after opening the app. Real physical iPhone push delivery requires a device check.
 
-## Quiet notification routing
+Inbox pull-to-refresh supports deliberate vertical drags from the top and has an accessible refresh button. Reader/settings/interactive controls do not capture the gesture. Light/dark appearance follows the device; reduced motion/transparency preferences are respected. Large notification Markdown uses worker parsing and progressive rendering. Raw HTML and unsafe link protocols are blocked; remote images are links rather than automatic tracker fetches.
 
-Default routing is **When I’m away**, with a two-minute input-idle threshold.
-Keyboard and mouse activity keep pushes on the Mac; lock/sleep state routes to
-the phone immediately after the next heartbeat. A heartbeat older than 30 seconds
-counts as offline, allowing phone delivery even when the laptop remains powered on.
-The Mac shares only aggregate idle seconds and lock/sleep state with the existing
-private hub; it does not record keystrokes, cursor positions, or screen content.
-The phone inbox always syncs, regardless of whether push delivery is enabled.
+Application logs omit payloads, credentials, subscriptions, and document bodies. Push failure logs include only status, transport code, and attempt number. Fly and Apple still process HTTPS/push traffic and ordinary transport metadata; the policy concerns durable user-content storage on Fly, not zero cloud processing.
 
-Phone Settings offers **When away**, **Always**, and **Off**, with a
-one-, two-, or five-minute away threshold. Settings persist on the hub. While the
-Mac is active, queued pushes stay pending without consuming retry attempts.
-Answered requests are suppressed. Updates older than 30 minutes stay in the inbox
-without an old push; unanswered decisions remain eligible. Three or more queued
-items become one summary rather than a burst of notifications.
-
-Mac alert banners disappear after 12 seconds, and update banners after 20 seconds.
-Hovering over a card or reading its document pauses the timer. This only hides the
-banner: it does not mark the update as read or cancel its review. The menu-bar
-**Inbox** shows the unread count and reopens hidden items; reopened items stay until
-dismissed. Hidden banners stay hidden after restart. Questions remain until answered
-or explicitly cancelled. A sender’s explicit `--autoclose` keeps its existing
-completion behavior.
-
-## One decision across devices
-
-The Fly hub is authoritative for outcomes. Both Mac and phone use the same atomic
-pending-to-terminal transition. Exactly one answer wins; competing answers receive
-409 and the accepted outcome. The Mac adopts the accepted outcome, even if a phone
-answer races a local click. Local waiting agents receive that winning answer.
-A lost acknowledgement is replayed without replacing the answer.
-
-When configured, a Mac answer requires the hub to be reachable. An unavailable
-hub leaves the request pending and re-enables the answer controls for retry. This
-avoids accepting conflicting offline answers. A phone answer can be saved while
-the Mac is offline and is delivered when the Mac reconnects.
-
-## iOS boundaries
-
-Automatic push routing uses aggregate hardware input inactivity (`IOHIDSystem`
-`HIDIdleTime`) and lock/sleep state. The previous CGEventSource sampler returned
-more than three days of inactivity while actual HID inactivity was 0.02 seconds.
-The Mac now publishes the corrected idle value and an explicit reliability flag
-every five seconds. No subprocess, key/event monitor, screen recording,
-Accessibility permission or privileged helper is used. Amphetamine keeping the
-machine awake does not replace actual mouse/keyboard input in this signal.
-
-Both the live user's and new-installation thresholds are ten minutes. Away
-status requires another minute of continuous reliable samples, with no gap
-over fifteen seconds. New input or unreliable/missing samples reset confirmation;
-an old sample cannot confirm itself merely by aging. Unknown idle data stays
-quiet. Lock/sleep or a heartbeat missing for two minutes also enables automatic
-phone pushes. Explicit Always and Off modes remain available. The web header
-shows Mac active, idle duration or confirming away; details show last input age.
-The Mac menu bar preserves the existing speech-bubble icon and adds a small
-activity badge: green active, hollow gray idle/unknown, amber confirming away,
-purple confirmed away, gray locked/disconnected. Tooltip and menu describe the
-state, phone routing and unread count. Updates reuse the existing heartbeat;
-the badge redraws only when its state changes and never intercepts menu clicks.
-
-The native benchmark measured 200 HID reads: mean 0.0204 ms, p95 0.0553 ms
-on the development Mac (`out/hey-boss-hid-audit.log`).
-
-Automatic-mode pushes wait at least 30 seconds after cloud enqueue, using a
-durable retry timestamp. The sender rechecks presence and terminal task state
-before each delivery batch, including after an earlier asynchronous push.
-Opening/answering on the Mac during that grace period suppresses the queued
-push. Already submitted Apple pushes cannot be recalled by this grace period.
-
-Opening an individual alert or update from a notification, inbox card, or its
-main link saves an idempotent read receipt and clears the Mac card on the next
-sync (normally within five seconds). Opening a question never answers it.
-Offline read receipts are stored in IndexedDB and retried when the app reconnects.
-Receipt requests have a 2.5-second deadline and do not delay opening the reader;
-offline retry stops at the first connection failure rather than flooding attempts.
-Foreground API requests have a ten-second deadline, and overlapping refreshes
-are coalesced. Connection errors clear after a successful reconnect.
-Pull down from the top of Inbox or Activity to refresh. A resisted drag reveals
-a release indicator and spinner; short, sideways, cancelled and multitouch
-gestures do not refresh. Reader/settings and interactive controls do not capture
-this gesture. Repeated pulls reuse the active refresh; an accessible refresh
-button also supports pointer and keyboard use.
-There is no separate Mark as read action. Activity keeps compact rows with the
-accepted result and which device handled it; opening a row shows its document.
-Unread alerts and updates remain visible on the Mac until opened or dismissed,
-matching the phone inbox. The old automatic 12/20-second banner hiding is removed;
-startup restores legacy unread items with hidden banners. Explicit `--autoclose`
-still completes the item and propagates that outcome through the shared state.
-Activity groups completed requests by local calendar day and shows completion
-times. Legacy records without a completion timestamp appear under Earlier.
-Light and dark appearances follow the device, including Markdown and glass
-controls. Reduced motion and reduced transparency preferences are respected.
-Text answers save as local drafts until submitted or the request is handled;
-disconnecting clears drafts. Unexpected render errors show a recovery view.
-
-Push previews convert Markdown to readable plain text, retaining lists,
-checklists, code text and link labels. Apple does not render rich Markdown in
-notification banners. The app's reader renders GFM headings, emphasis, tables,
-checklists, quotes, links and fenced code. Raw HTML is ignored and unsafe link
-protocols are disabled. Remote images are explicit links so merely reading a
-document does not fetch trackers. Full UTF-8 Markdown (up to 1 MiB) is transferred;
-inbox and native sync responses use bounded previews/outcomes.
-
-Documents above 16,000 characters parse in a dedicated worker. Lists, tables
-and document blocks append in memoized batches while preserving semantic DOM
-structure, selection and ordered-list numbering. The worker uses a DOM-free
-entity decoder and is permitted only from this app's origin by CSP.
-
-WebKit iPhone 15 browser measurements on the local production build: a
-185,019-byte checklist previously caused an 871 ms maximum animation-frame
-gap; worker parsing and progressive rendering reduced the observed gap to
-56 ms. A 1,036,021-byte document rendered all 28,000 checklist items without
-errors. Its full 30-second probe observed occasional frame gaps of 85–155 ms
-across batching revisions; this extreme case is not uniformly smooth. These
-are browser measurements on the development Mac, not physical iPhone FPS.
-Mixed worker-path checks preserved tables, entities and internal footnotes,
-started ordered lists at 3, blocked unsafe links and raw HTML, and loaded no
-remote images. Screenshot: `output/playwright/mobile-worker-markdown-final.png`.
-
-Home Screen and notification icons reuse Hey Boss's existing SF Symbol identity,
-with manifest icons and an Apple touch icon. iOS controls its “from Hey Boss”
-attribution and can cache the Home Screen icon from installation.
-Browser tabs use a versioned 32-pixel PNG and a standard multi-size ICO fallback,
-exported from the existing icon by `tools/export_favicons.py`.
-An existing Home Screen install may need re-adding to adopt a changed icon; this can require
-pairing and enabling notifications again.
-
-These are real Apple Web Push notifications and can arrive while the app is
-closed. Approval buttons and text input appear inside the web app after tapping
-the notification. iOS Web Push does not provide native notification action buttons.
-
-Silent withdrawal pushes are not sent. Resolved queued pushes are suppressed;
-resolved delivered notifications are cleared when the app refreshes in the foreground or on a subsequent legitimate push.
-Opening a delivered notification checks the authoritative state, so a stale Lock
-Screen card cannot accept a second answer. Immediate Lock Screen withdrawal is
-not guaranteed by iOS Web Push. Real iPhone push delivery requires a device test.
-
-## Checks
+## Verification
 
 ```sh
-cd mobile && npm test && npm run build
+cd mobile
+npm test
+npm run build
 cd ..
-xcrun swiftc -O -parse-as-library -D HEY_BOSS_MOBILE_AUDIT \
-  hey_boss_daemon.swift mobile/native_audit.swift -o out/hey-boss-mobile-audit
-out/hey-boss-mobile-audit
+cargo test --lib fleet::native::mobile
+cargo test --test lookup
 ```
 
-The native integration audit starts an isolated local hub and proves Mac-first,
-phone-first, replay/ack and offline refusal. The server tests prove atomic answers,
-authentication, origin protection, pairing expiry/use, and push outbox handling.
-
-Push sender identity uses `PUBLIC_ORIGIN` (the deployed HTTPS app URL) unless
-`VAPID_SUBJECT` supplies a real HTTPS URL or contact email. Placeholder sender
-addresses can cause Apple to reject delivery with `403 BadJwtToken`. Delivery
-failures log only status, transport code and attempt number, never subscriptions
-or private keys.
+Regression coverage includes pairing restoration, accepted answers after restart, durable acknowledgment barriers, authentication/origin checks, transient request cleanup, bounded requests, notification routing, atomic competing answers, attachments, and stable mutation retries. Visual verification uses synthetic issues in isolated databases and checks phone/desktop layouts, light/dark modes, filtering, state browsing, Markdown preview, editing, comments, attachment upload, activity, subtasks, and reconnect behavior. Close only task-owned browser sessions and remove temporary previews/reports after verification.
