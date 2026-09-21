@@ -108,6 +108,20 @@ fn automatic_discovery_does_not_register_temporary_agent_folders() {
     assert_eq!(
         db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
             .unwrap(),
+        1
+    );
+    store
+        .discover_projects(&[(
+            Project {
+                id: "local:remote:/home/dev/Workspace/another-project".into(),
+                name: "another-project".into(),
+            },
+            100,
+        )])
+        .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
         2
     );
 }
