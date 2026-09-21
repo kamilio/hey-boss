@@ -177,3 +177,82 @@ fn buffered_claude_completions_preserve_queued_goal_scope() {
     assert_eq!(goal.turns_completed(), 2);
     assert_eq!(goal.summary(), Some("Queued instruction verified"));
 }
+
+#[test]
+#[ignore = "real authenticated Codex, Claude and Pi CLIs; models and scratch-only tools"]
+fn real_managed_goals_verify_tool_effects() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let root = std::env::temp_dir().join(format!(
+            "hey-boss-live-goal-{}-{}-{}",
+            provider.name(),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut agent = AgentSession::launch(Launch {
+            provider,
+            binary: None,
+            cwd: root.clone(),
+            resume: None,
+            env: BTreeMap::new(),
+            output_schema: None,
+        })
+        .unwrap();
+        let mut goal = ManagedGoal::new("Create proof.txt in the current directory containing exactly VERIFIED_GOAL. Use the file write tool, then read the file back with the file read tool and verify the exact contents. Do not change any other files. Return only the required JSON status/summary object, without Markdown or code fences. Report completed only after reading and verifying the file.").unwrap();
+        goal.start(&mut agent).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut tools = 0;
+        while goal.status() == GoalStatus::Active {
+            assert!(
+                Instant::now() < deadline,
+                "{} timed out: {:?}",
+                provider.name(),
+                agent.state()
+            );
+            if let Some(event) = agent.receive(Duration::from_millis(100)).unwrap() {
+                match &event {
+                    hey_boss::agent_runtime::Event::Approval { id, .. } => {
+                        agent.decide(id, true).unwrap()
+                    }
+                    hey_boss::agent_runtime::Event::ToolStarted { .. } => tools += 1,
+                    _ => {}
+                }
+                goal.observe(&mut agent, &event).unwrap();
+                assert!(
+                    goal.turns_completed() <= 3,
+                    "{} did not return a valid goal report",
+                    provider.name()
+                );
+            }
+        }
+        assert_eq!(
+            goal.status(),
+            GoalStatus::Complete,
+            "{}: {:?}",
+            provider.name(),
+            goal.summary()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("proof.txt"))
+                .unwrap()
+                .trim(),
+            "VERIFIED_GOAL"
+        );
+        assert!(
+            tools >= 2,
+            "{} skipped required tool verification",
+            provider.name()
+        );
+        assert!(goal.session().is_some());
+        agent.stop().unwrap();
+        eprintln!(
+            "PASS {} real managed goal; {} turns; {tools} tools; scratch {}",
+            provider.name(),
+            goal.turns_completed(),
+            root.display()
+        );
+    }
+}
