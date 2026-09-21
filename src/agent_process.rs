@@ -13,9 +13,11 @@ const RECORD_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct Process {
     child: Child,
-    input: ChildStdin,
-    inbox: mpsc::Receiver<io::Result<Value>>,
+    input: Option<ChildStdin>,
+    inbox: Option<mpsc::Receiver<io::Result<Value>>>,
     stopped: bool,
+    #[cfg(test)]
+    reader: thread::JoinHandle<()>,
 }
 impl Process {
     pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
@@ -36,7 +38,7 @@ impl Process {
             return Err(error);
         }
         let (send, inbox) = mpsc::sync_channel(16);
-        thread::spawn(move || {
+        let _reader = thread::spawn(move || {
             let mut reader = BufReader::new(output);
             loop {
                 let mut line = Vec::new();
@@ -61,9 +63,11 @@ impl Process {
         });
         Ok(Self {
             child,
-            input,
-            inbox,
+            input: Some(input),
+            inbox: Some(inbox),
             stopped: false,
+            #[cfg(test)]
+            reader: _reader,
         })
     }
     pub(crate) fn pid(&self) -> u32 {
@@ -81,7 +85,12 @@ impl Process {
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut offset = 0;
         while offset < bytes.len() {
-            match self.input.write(&bytes[offset..]) {
+            match self
+                .input
+                .as_mut()
+                .expect("running process input")
+                .write(&bytes[offset..])
+            {
                 Ok(0) => return Err(io::Error::other("Agent input disconnected")),
                 Ok(size) => offset += size,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -100,7 +109,11 @@ impl Process {
         Ok(())
     }
     pub(crate) fn receive(&mut self, timeout: Duration) -> io::Result<Option<Value>> {
-        match self.inbox.recv_timeout(timeout) {
+        let inbox = self
+            .inbox
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Agent is stopped"))?;
+        match inbox.recv_timeout(timeout) {
             Ok(value) => value.map(Some),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
@@ -133,6 +146,10 @@ impl Process {
         signal(libc::SIGKILL)?;
         self.child.wait()?;
         self.stopped = true;
+        self.input.take();
+        // A full bounded channel otherwise keeps the reader and stdout alive
+        // for as long as the caller retains the stopped process's state.
+        self.inbox.take();
         Ok(())
     }
 }
@@ -154,4 +171,56 @@ fn group_has_no_live_processes(group: i32) -> bool {
             fields.next().and_then(|v| v.parse::<i32>().ok()) == Some(-group)
                 && fields.next().is_none_or(|state| !state.starts_with('Z'))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor_identity(fd: i32) -> Option<(libc::dev_t, libc::ino_t)> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let stat = unsafe { stat.assume_init() };
+        Some((stat.st_dev, stat.st_ino))
+    }
+
+    #[test]
+    fn stopping_closes_the_owned_input_descriptor() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        let input_fd = process.input.as_ref().unwrap().as_raw_fd();
+        let identity = descriptor_identity(input_fd).unwrap();
+        process.stop().unwrap();
+        // Other parallel tests may reuse the numeric descriptor after close.
+        assert_ne!(descriptor_identity(input_fd), Some(identity));
+    }
+
+    #[test]
+    fn stopping_releases_a_reader_blocked_by_backpressure() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "i=0; while [ $i -lt 100 ]; do printf '{}\\n'; i=$((i+1)); done; sleep 30",
+        ]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        // More than the channel's capacity fits in the output pipe. The reader
+        // cannot drain it while the stopped session retains its receiver.
+        thread::sleep(Duration::from_millis(100));
+        process.stop().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !process.reader.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            process.reader.is_finished(),
+            "Stopped process retained its output reader"
+        );
+        assert!(
+            process.receive(Duration::ZERO).is_err(),
+            "Stopped transport returned stale output"
+        );
+    }
 }
