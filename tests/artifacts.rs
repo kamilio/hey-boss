@@ -134,6 +134,7 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
     );
     let mut other = request(json!({"action":"artifact","operation":{"command":"view","id":id}}));
     other.project.id = "named:Other".into();
+    other.project.name = "Other".into();
     assert_eq!(store.execute(&other).unwrap_err().code, "not_found");
     store.execute(&request(json!({"action":"mindmap","operation":{"command":"remove","node":"first","recursive":false}}))).unwrap();
     assert_eq!(
