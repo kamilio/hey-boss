@@ -505,6 +505,13 @@ impl Store {
             && issue.title == job.issue["title"]
             && issue.body == job.issue["body"]
         {
+            // A launch can fail before worker_attach registers the reservation's
+            // actor. Blocking still writes comments and events referencing it.
+            // Register within this transaction without overwriting live metadata.
+            tx.execute(
+                "INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING",
+                params![job.actor.id, serde_json::to_string(&job.actor)?, now()],
+            )?;
             mutate(
                 &tx, &job.project, &job.actor,
                 &Operation::Block {
@@ -653,6 +660,44 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn exhausted_reservation_without_registered_actor_can_finalize() {
+        let mut f = HandoffFixture::new(false);
+        f.apply(Operation::Unassign {
+            number: 1,
+            force: false,
+        });
+        f.job.actor.id = format!("reservation:{}", f.job.id);
+        f.job.actor.session_id = None;
+        f.store.db.execute(
+            "UPDATE worker_runs SET actor_id=?2,job=?3,state='reserved',claimed_at=NULL WHERE id=?1",
+            params![f.job.id, f.job.actor.id, serde_json::to_string(&f.job).unwrap()],
+        ).unwrap();
+        for n in 0..4 {
+            f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES(?1,?2,1,'{}',?3,'failed',1,'start','unit',0,0,1)", params![format!("failed-{n}"), f.job.project.id, f.job.actor.id]).unwrap();
+        }
+        f.store.db.execute("INSERT INTO issue_agent_launches SELECT id,project_id,issue_number,started_at FROM worker_runs", []).unwrap();
+        f.store
+            .worker_finish(&f.job, "failed", "Session failed before attachment")
+            .unwrap();
+        assert_eq!(f.issue().state, "blocked");
+        assert!(f.issue().assignee.is_none());
+        assert_eq!(f.state(), "failed");
+        let version = f.issue().version;
+        f.store
+            .worker_finish(&f.job, "failed", "Duplicate recovery")
+            .unwrap();
+        assert_eq!(f.issue().version, version);
+        let violations: i64 = f
+            .store
+            .db
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
     }
 
     #[test]
