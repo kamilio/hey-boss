@@ -4,11 +4,7 @@ primary_region = "ord"
   dockerfile = "Dockerfile"
 [env]
   PORT = "8787"
-  DATA_DIR = "/data"
   PUBLIC_ORIGIN = "https://hey-boss-mobile-kamil.fly.dev"
-[[mounts]]
-  source = "hey_boss_data"
-  destination = "/data"
 [http_service]
   internal_port = 8787
   force_https = true

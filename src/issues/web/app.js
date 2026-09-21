@@ -603,11 +603,11 @@ $("#issue-search").oninput = () => {
   );
 };
 $("#label-filter").onchange = () =>
-  navigate({ label: $("#label-filter").value });
+  navigate({ label: $("#label-filter").value, search: $("#issue-search").value });
 $("#owner-filter").onchange = () =>
-  navigate({ owner: $("#owner-filter").value });
+  navigate({ owner: $("#owner-filter").value, search: $("#issue-search").value });
 $$("[data-state]").forEach(
-  (b) => (b.onclick = () => navigate({ state: b.dataset.state })),
+  (b) => (b.onclick = () => navigate({ state: b.dataset.state, search: $("#issue-search").value })),
 );
 $("#refresh").onclick = () => refresh(false);
 async function refreshProjects(project = model.project.id) {

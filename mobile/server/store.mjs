@@ -4,6 +4,7 @@ export const hash = value => createHash('sha256').update(value).digest('hex');
 export const token = () => randomBytes(32).toString('base64url');
 export function equal(a,b){const x=Buffer.from(a??''),y=Buffer.from(b??'');return x.length===y.length&&timingSafeEqual(x,y);}
 export class HubError extends Error{constructor(status,message){super(message);this.status=status;}}
+const checkpointTables=['tasks','devices','pairing','outbox','metadata','issue_creations','artifact_requests'];
 export class HubStore{
  constructor(path=':memory:'){
   this.db=new DatabaseSync(path);this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
@@ -20,6 +21,23 @@ export class HubStore{
    INSERT OR IGNORE INTO metadata VALUES('revision','0');`);
  }
  revision(){return Number(this.db.prepare("SELECT value FROM metadata WHERE key='revision'").get().value);}
+ ensureRoom(extra){
+  const {bytes}=this.db.prepare("SELECT coalesce((SELECT sum(length(cast(body AS BLOB))) FROM tasks),0)+coalesce((SELECT sum(length(cast(body AS BLOB))) FROM issue_creations),0)+coalesce((SELECT sum(length(cast(payload AS BLOB))+coalesce(length(cast(result AS BLOB)),0)) FROM artifact_requests),0) AS bytes").get();
+  if(bytes+extra>32*1048576)throw new HubError(503,'The relay is full. Read pending notices and reconnect the supervisor before retrying.');
+ }
+ snapshot(){return Object.fromEntries(checkpointTables.map(table=>[table,this.db.prepare('SELECT * FROM '+table).all()]));}
+ restore(snapshot){return this.transaction(()=>{
+  if(!snapshot||checkpointTables.some(table=>!Array.isArray(snapshot[table])))throw new HubError(400,'Invalid supervisor checkpoint');
+  for(const table of checkpointTables){
+   const columns=this.db.prepare('PRAGMA table_info('+table+')').all().map(row=>row.name);
+   this.db.exec('DELETE FROM '+table);
+   const insert=this.db.prepare(`INSERT INTO ${table} (${columns.join(',')}) VALUES (${columns.map(()=>'?').join(',')})`);
+   for(const row of snapshot[table]){
+    if(Object.keys(row).length!==columns.length||columns.some(column=>!(column in row)))throw new HubError(400,'Invalid supervisor checkpoint row');
+    insert.run(...columns.map(column=>row[column]));
+   }
+  }
+ });}
  next(){this.db.exec("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");return this.revision();}
  transaction(fn){this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;}}
  get(id){const r=this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);if(!r)throw new HubError(404,'This request is no longer available');return {...JSON.parse(r.body),status:r.status,result:r.answer,handledBy:r.actor,version:r.version};}
@@ -44,6 +62,7 @@ export class HubStore{
  upsert(row){return this.transaction(()=>{
   const existing=this.db.prepare('SELECT status FROM tasks WHERE id=?').get(row.taskID);
   if(existing)return {task:this.get(row.taskID),created:false};
+  this.ensureRoom(Buffer.byteLength(JSON.stringify(row)));
   const version=this.next();this.db.prepare('INSERT INTO tasks(id,body,status,answer,actor,version,delivered) VALUES(?,?,?,?,?,?,1)').run(row.taskID,JSON.stringify(row),'pending',null,null,version);
   return {task:this.get(row.taskID),created:true};
  });}
@@ -58,7 +77,10 @@ export class HubStore{
   const version=this.next();this.db.prepare('UPDATE tasks SET status=?,answer=?,actor=?,version=?,delivered=0,body=json_set(body,\'$.completedAt\',?) WHERE id=? AND status=\'pending\'').run(status,cancel?null:result??null,actor,version,Date.now()/1000,id);return this.get(id);
  });}
  terminal(){return this.db.prepare("SELECT id FROM tasks WHERE status!='pending' AND delivered=0 LIMIT 20").all().map(r=>this.get(r.id));}
- ack(id,version){this.db.prepare('UPDATE tasks SET delivered=1 WHERE id=? AND version=?').run(id,version);}
+ ack(id,version){this.db.prepare('UPDATE tasks SET delivered=1 WHERE id=? AND version=?').run(id,version);
+  // Native history is authoritative; the phone already shows only 300 past rows.
+  this.db.exec("DELETE FROM tasks WHERE status!='pending' AND delivered=1 AND id NOT IN (SELECT id FROM tasks WHERE status!='pending' ORDER BY version DESC LIMIT 300); DELETE FROM outbox WHERE json_extract(body,'$.id') NOT IN (SELECT id FROM tasks)");
+ }
  pairing(){const code=randomBytes(5).toString('hex').toUpperCase();this.db.prepare('DELETE FROM pairing WHERE expires<?').run(Date.now());this.db.prepare('INSERT INTO pairing VALUES(?,?)').run(hash(code),Date.now()+300000);return code;}
  pair(code){return this.transaction(()=>{
   const r=this.db.prepare('DELETE FROM pairing WHERE code=? AND expires>? RETURNING code').get(hash(code.toUpperCase()),Date.now());if(!r)throw new HubError(401,'Pairing code expired or incorrect');
@@ -110,6 +132,7 @@ export class HubStore{
   const existing=this.db.prepare('SELECT * FROM issue_creations WHERE id=?').get(value.requestID);
   // Accepted retries remain readable even if their project later disappears.
   if(existing){if(existing.device!==device||existing.body!==payload)throw new HubError(409,'This request ID already belongs to another submission');return this.issueCreation(existing);}
+  this.ensureRoom(Buffer.byteLength(payload));
   if(!this.issueProjects().some(project=>project.id===value.project))throw new HubError(400,'Choose a registered project. Reconnect the supervisor to refresh projects.');
   if(this.db.prepare("SELECT COUNT(*) AS n FROM issue_creations WHERE status='pending'").get().n>=10000)throw new HubError(503,'The issue queue is full. Keep this draft and retry after the supervisor reconnects.');
   this.db.prepare('INSERT INTO issue_creations(id,device,body,created) VALUES(?,?,?,?)').run(value.requestID,device,payload,Date.now());this.next();
@@ -137,6 +160,7 @@ export class HubStore{
   if(Buffer.byteLength(payload)>(attachment?16:2)*1048576)throw new HubError(400,'Artifact request is too large');
   const existing=this.db.prepare('SELECT * FROM artifact_requests WHERE id=?').get(id);
   if(existing){if(existing.device!==device||existing.payload!==payload)throw new HubError(409,'ID belongs to another request');return this.artifactResult(device,id);}
+  this.ensureRoom(Buffer.byteLength(payload));
   if(!this.issueProjects().some(p=>p.id===value.project))throw new HubError(400,'Choose a registered project; reconnect the supervisor to refresh projects');
   if(this.db.prepare("SELECT count(*) AS n FROM artifact_requests WHERE device=? AND status='pending'").get(device).n>=100)throw new HubError(503,'Too many pending requests; reconnect the supervisor');
   // This is a transport journal, never an authoritative artifact store.
@@ -154,5 +178,5 @@ export class HubStore{
   }
   return result;
  }
- finishArtifact(id,result){if(typeof result?.ok!=='boolean'||Buffer.byteLength(JSON.stringify(result))>32*1048576)throw new HubError(400,'Invalid artifact transport result');if(!this.db.prepare('SELECT id FROM artifact_requests WHERE id=?').get(id))throw new HubError(404,'Artifact request not found');this.db.prepare("UPDATE artifact_requests SET status='done',result=? WHERE id=? AND status='pending'").run(JSON.stringify(result),id);}
+ finishArtifact(id,result){const data=JSON.stringify(result);if(typeof result?.ok!=='boolean'||Buffer.byteLength(data)>32*1048576)throw new HubError(400,'Invalid artifact transport result');const row=this.db.prepare('SELECT status FROM artifact_requests WHERE id=?').get(id);if(!row)throw new HubError(404,'Artifact request not found');if(row.status==='pending'){this.ensureRoom(Buffer.byteLength(data));this.db.prepare("UPDATE artifact_requests SET status='done',result=? WHERE id=? AND status='pending'").run(data,id);}}
 }

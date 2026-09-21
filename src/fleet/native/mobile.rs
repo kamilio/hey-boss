@@ -1,7 +1,7 @@
 //! Authenticated HTTPS bridge. Pairing credentials never enter logs or argv.
 use super::{
     Result,
-    context::{Context, read_json},
+    context::{Context, atomic_json, read_json},
     replica::{self, invalid},
 };
 use crate::issues::{Actor, Operation, Project, Request, Store};
@@ -17,7 +17,8 @@ struct Mobile {
 }
 impl Mobile {
     fn rpc(&self, operation: Value, project: Option<&Value>, key: Option<String>) -> Result<Value> {
-        let actor = key.as_ref().map(|_| Actor {
+        let operation = serde_json::from_value::<Operation>(operation)?;
+        let actor = operation.needs_actor().then(|| Actor {
             id: "human:boss".into(),
             kind: "human".into(),
             session_id: None,
@@ -41,7 +42,7 @@ impl Mobile {
                 }),
             project_override: None,
             actor,
-            operation: serde_json::from_value::<Operation>(operation)?,
+            operation,
             request_id: key,
         };
         match Store::open(&self.ctx.path)?.execute(&request) {
@@ -95,13 +96,41 @@ impl Mobile {
             return Err(invalid("Mobile service temporarily unavailable"));
         }
         let mut bytes = vec![];
-        response
-            .take(crate::issues::WIRE_LIMIT as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > crate::issues::WIRE_LIMIT {
+        let limit = if path.starts_with("/api/bridge/checkpoint") {
+            64 * 1024 * 1024
+        } else {
+            crate::issues::WIRE_LIMIT
+        };
+        response.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
             return Err(invalid("Mobile response exceeds limit"));
         }
         Ok(serde_json::from_slice(&bytes)?)
+    }
+    fn checkpoint(&self) -> Result<()> {
+        let state = self.call("/api/bridge/checkpoint", None)?;
+        let path = self
+            .ctx
+            .path
+            .parent()
+            .ok_or_else(|| invalid("Missing mobile state directory"))?
+            .join("mobile-relay.json");
+        if state["ready"] == false {
+            let snapshot = read_json(&path, Value::Null)?;
+            self.call(
+                "/api/bridge/checkpoint/restore",
+                Some(&json!({"snapshot":snapshot})),
+            )?;
+        } else if let Some(snapshot) = state.get("snapshot") {
+            // atomic_json fsyncs both the private file and its parent directory.
+            // Only then may Fly acknowledge pairing, answers, or publication.
+            atomic_json(&path, snapshot)?;
+            self.call(
+                "/api/bridge/checkpoint/ack",
+                Some(&json!({"epoch":state["epoch"],"version":state["version"]})),
+            )?;
+        }
+        Ok(())
     }
     fn accepted(&self, project: &str, key: &str) -> Result<bool> {
         Ok(!replica::rows(
@@ -169,6 +198,129 @@ impl Mobile {
         self.artifacts(&projects, &visible)?;
         self.agents(&visible)?;
         Ok(())
+    }
+    fn web(&self, projects: &BTreeMap<String, Value>, visible: &BTreeSet<String>) -> Result<()> {
+        let queue = self.call("/api/bridge/web", None)?;
+        for request in queue["requests"].as_array().into_iter().flatten() {
+            let id = transport_id(&request["id"])?;
+            let result = self.web_request(request, projects, visible).unwrap_or_else(|_| {
+                json!({"ok":false,"error":{"code":"unavailable","message":"Supervisor could not complete this request. Reconnect and retry."}})
+            });
+            self.call(&format!("/api/bridge/web/{id}/result"), Some(&result))?;
+        }
+        Ok(())
+    }
+    fn web_request(
+        &self,
+        request: &Value,
+        projects: &BTreeMap<String, Value>,
+        visible: &BTreeSet<String>,
+    ) -> Result<Value> {
+        let payload = &request["payload"];
+        let mut value = match request["kind"].as_str() {
+            Some("bootstrap") => {
+                let project = projects
+                    .values()
+                    .find(|p| visible.contains(p["id"].as_str().unwrap_or("")));
+                let mut value = self.rpc(
+                    json!({"action":"projects","include_hidden":true}),
+                    project,
+                    None,
+                )?;
+                value["csrf"] = json!("paired-device");
+                value["actor"] = json!({"id":"human:boss","kind":"human"});
+                value["backend_host"] = Value::Null;
+                value
+            }
+            Some("preview") => {
+                let body = payload["body"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Expected Markdown"))?;
+                if body.len() > crate::issues::BODY_LIMIT {
+                    return Err(invalid("Markdown exceeds 1 MiB"));
+                }
+                json!({"ok":true,"html":crate::markdown::render_fragment(body)})
+            }
+            Some("inbox") => {
+                let action = serde_json::from_value::<crate::notices::Action>(payload.clone())?;
+                if let crate::notices::Action::Link {
+                    issue: Some(reference),
+                    ..
+                } = &action
+                {
+                    if !visible.contains(&reference.project) {
+                        return Err(invalid("Project is hidden"));
+                    }
+                    self.rpc(
+                        json!({"action":"view","number":reference.number}),
+                        projects.get(&reference.project),
+                        None,
+                    )?;
+                }
+                crate::notices::execute(&action)?
+            }
+            Some("action") => {
+                let operation = mobile_web_operation(payload)?;
+                let project_id = payload["project"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Expected project"))?;
+                let new_project = json!({"id":project_id,"name":project_id.strip_prefix("named:").unwrap_or(project_id)});
+                let creating_project = matches!(operation, Operation::Create { .. })
+                    && project_id.starts_with("named:");
+                let project = projects
+                    .get(project_id)
+                    .or_else(|| creating_project.then_some(&new_project))
+                    .ok_or_else(|| invalid("Unknown project"))?;
+                let writing = operation.writes();
+                let key = if writing {
+                    Some(format!(
+                        "web-mobile:{}",
+                        transport_id(&payload["request_id"])?
+                    ))
+                } else {
+                    None
+                };
+                let registry = matches!(
+                    operation,
+                    Operation::Projects { .. } | Operation::RestoreProject
+                );
+                if !visible.contains(project_id)
+                    && !registry
+                    && !(!projects.contains_key(project_id) && creating_project)
+                    && !(writing && self.accepted(project_id, key.as_deref().unwrap())?)
+                {
+                    return Ok(
+                        json!({"ok":false,"error":{"code":"not_found","message":"Project is hidden; restore it before accessing issues"}}),
+                    );
+                }
+                if let Operation::Transfer { destination, .. } = &operation {
+                    if !visible.contains(destination) {
+                        return Err(invalid("Destination project is hidden"));
+                    }
+                }
+                self.rpc(serde_json::to_value(operation)?, Some(project), key)?
+            }
+            _ => return Err(invalid("Unknown mobile web request")),
+        };
+        if let Some(issue) = value.get_mut("issue") {
+            if let Some(body) = issue["body"].as_str() {
+                issue["body_html"] = json!(crate::markdown::render_fragment(body));
+            }
+        }
+        if let Some(comments) = value["comments"].as_array_mut() {
+            for comment in comments {
+                if let Some(body) = comment["body"].as_str() {
+                    comment["body_html"] = json!(crate::markdown::render_fragment(body));
+                }
+            }
+        }
+        if crate::mindmap::needs_inbox(&value) {
+            crate::mindmap::enrich_notifications(
+                &mut value,
+                crate::notices::execute(&crate::notices::Action::List),
+            )?;
+        }
+        Ok(value)
     }
     fn artifacts(
         &self,
@@ -251,6 +403,87 @@ impl Mobile {
         Ok(())
     }
 }
+fn mobile_web_operation(payload: &Value) -> Result<Operation> {
+    if !payload["host"].is_null() {
+        return Err(invalid("Remote hosts are not accepted"));
+    }
+    let operation: Operation = serde_json::from_value(payload["operation"].clone())?;
+    if matches!(
+        operation,
+        Operation::ReadPlan { .. } | Operation::BindPlan { .. } | Operation::Status { .. }
+    ) {
+        return Err(invalid(
+            "Plan files and status updates use the terminal workflow",
+        ));
+    }
+    if let Operation::Mindmap { operation } = &operation {
+        if operation.writes() {
+            return Err(invalid("Mindmaps are read-only on the web"));
+        }
+    }
+    Ok(operation)
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+    #[test]
+    fn web_operations_keep_desktop_restrictions() {
+        assert!(mobile_web_operation(&json!({"operation":{"action":"view","number":77}})).is_ok());
+        assert!(
+            mobile_web_operation(
+                &json!({"host":"devbox","operation":{"action":"view","number":77}})
+            )
+            .is_err()
+        );
+        assert!(mobile_web_operation(&json!({"operation":{"action":"status","number":77,"level":"green","comment":"Agent only"}})).is_err());
+        assert!(mobile_web_operation(&json!({"operation":{"action":"mindmap","operation":{"command":"add","title":"No"}}})).is_err());
+    }
+    #[test]
+    fn phone_issue_mutations_are_authoritative_idempotent_and_render_markdown() {
+        let directory = std::env::temp_dir().join(format!(
+            "hb-mobile-web-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let ctx = Context {
+            home: directory.clone(),
+            state: directory.clone(),
+            desired: directory.join("fleet.json"),
+            binary: std::env::current_exe().unwrap(),
+            path: directory.join("issues.db"),
+            node: "test-device".into(),
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let mobile = Mobile {
+            ctx,
+            client: reqwest::blocking::Client::new(),
+        };
+        let project = json!({"id":"named:Phone","name":"Phone"});
+        let projects = BTreeMap::from([("named:Phone".to_owned(), project.clone())]);
+        let visible = BTreeSet::from(["named:Phone".to_owned()]);
+        let creation = json!({"kind":"action","payload":{"project":"named:Phone","request_id":"stable-key","operation":{"action":"create","title":"Phone issue","body":"**Private content**","labels":[]}}});
+        let first = mobile.web_request(&creation, &projects, &visible).unwrap();
+        assert_eq!(first["issue"]["created_by"], "human:boss");
+        assert!(
+            first["issue"]["body_html"]
+                .as_str()
+                .unwrap()
+                .contains("<strong>Private content</strong>")
+        );
+        let repeated = mobile.web_request(&creation, &projects, &visible).unwrap();
+        assert_eq!(first["issue"]["number"], repeated["issue"]["number"]);
+        let hidden = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &BTreeSet::new()).unwrap();
+        assert_eq!(hidden["error"]["code"], "not_found");
+        let read = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &visible).unwrap();
+        assert_eq!(read["issue"]["title"], "Phone issue");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
 fn transport_id(value: &Value) -> Result<&str> {
     let id = value
         .as_str()
@@ -273,9 +506,57 @@ pub(super) fn run(ctx: Context) {
     else {
         return;
     };
+    let checkpoint = Mobile {
+        ctx: ctx.clone(),
+        client: client.clone(),
+    };
+    // Inbox actions can wait for cloud acknowledgment while the regular bridge
+    // is serving them. Keep durable checkpoint acknowledgments independent.
+    let checkpointer = std::thread::spawn(move || {
+        while !checkpoint.ctx.stopped() {
+            let _ = checkpoint.checkpoint();
+            checkpoint.ctx.wait(Duration::from_secs(1));
+        }
+    });
+    let web = Mobile {
+        ctx: ctx.clone(),
+        client: client.clone(),
+    };
+    let web_bridge = std::thread::spawn(move || {
+        while !web.ctx.stopped() {
+            let _ = (|| -> Result<()> {
+                let registry = web.rpc(
+                    json!({"action":"projects","include_hidden":true}),
+                    None,
+                    None,
+                )?;
+                let projects = registry["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| {
+                        p["id"]
+                            .as_str()
+                            .map(|id| (id.to_owned(), json!({"id":id,"name":p["name"]})))
+                    })
+                    .collect();
+                let visible = registry["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["hidden_at"].is_null())
+                    .filter_map(|p| p["id"].as_str().map(str::to_owned))
+                    .collect();
+                web.web(&projects, &visible)
+            })();
+            web.ctx.wait(Duration::from_secs(1));
+        }
+    });
     let mobile = Mobile { ctx, client };
     while !mobile.ctx.stopped() {
         let _ = mobile.sync();
         mobile.ctx.wait(Duration::from_secs(5));
     }
+    let _ = checkpointer.join();
+    let _ = web_bridge.join();
 }
