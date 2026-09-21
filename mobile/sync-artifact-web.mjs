@@ -1,5 +1,6 @@
 import {readFileSync,writeFileSync,mkdirSync,cpSync,rmSync} from 'node:fs';
 import './sync-issue-web.mjs';
+import {addAgentGuidance} from './agent-guidance.mjs';
 const source=new URL('../src/issues/web/',import.meta.url);
 const destination=new URL('./public/artifact-web/',import.meta.url);
 mkdirSync(destination,{recursive:true});
@@ -11,7 +12,7 @@ for(const name of ['artifacts.html','artifact-editor.js','artifact-diagrams.js',
  if(name==='artifacts.html'){
   let html=value.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replace(/<!--[^]*?-->/g,''));
   html=html.replace('<html lang="en">','<html lang="en" data-artifact-mobile="true">').replace(/(?:<script src="\/quick-issue.js" defer><\/script>)/g,'').replace(/(src|href)="\/(icon.png|routes.js|components.js|components.css|app.css|artifacts.js|artifacts.css|attachments.js|attachments.css|status.js|status.css|origin.js|origin.css)"/g,'$1="/artifact-web/$2"');
-  value=Buffer.from(html);
+  value=Buffer.from(addAgentGuidance(html));
  }
  writeFileSync(new URL(name,destination),value);
 }
@@ -25,10 +26,10 @@ const agentDestination=new URL('./public/agent-web/',import.meta.url);
 mkdirSync(agentDestination,{recursive:true});
 for(const name of ['fleet.html','fleet.js','fleet.css']){
  let value=readFileSync(new URL(name,source));
- if(name==='fleet.html')value=Buffer.from(value.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replace(/<!--[^]*?-->/g,''))
+ if(name==='fleet.html')value=Buffer.from(addAgentGuidance(value.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replace(/<!--[^]*?-->/g,''))
   .replace('<html lang="en">','<html lang="en" data-agent-mobile="true">')
   .replace(/<script src="\/quick-issue.js" defer><\/script>/g,'')
   .replace(/(src|href)="\/(routes.js|components.js|components.css|origin.css|icon.png)"/g,'$1="/artifact-web/$2"')
-  .replace(/(src|href)="\/(fleet.js|fleet.css)"/g,'$1="/agent-web/$2"'));
+  .replace(/(src|href)="\/(fleet.js|fleet.css)"/g,'$1="/agent-web/$2"')));
  writeFileSync(new URL(name,agentDestination),value);
 }

@@ -324,6 +324,16 @@ for links without a project. Issue resources honor `--host`, then the fragment's
 reads your configured store or authenticated SSH backend. Inbox reads use the
 connected desktop, and conversation `host` identifies the owning fleet device.
 
+Every web page includes a source comment and a `hidden` guide for agents, with a
+shell-quoted `hey-boss lookup 'URL' --json` command that follows URL navigation.
+The paired Inbox root uses `hey-boss inbox --json`. `/llms.txt` publishes the same
+Markdown guide on desktop and paired web installations. This is a discovery
+convention, not a guarantee that a browser agent reads hidden content. The guide
+is not a copy of resource data: lookup uses the existing CLI readers and JSON
+fields, so new fields need no parallel Markdown renderer. URL fragments select
+resources in these pages and are not sent to an HTTP `.md` endpoint. User-written
+resource bodies remain data, not agent instructions.
+
 ## Upgrading every machine
 
 Run `hey-boss upgrade` on the Mac to update its CLI, desktop app, canonical agent
