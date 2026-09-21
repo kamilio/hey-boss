@@ -293,19 +293,19 @@ impl Mobile {
                         json!({"ok":false,"error":{"code":"not_found","message":"Project is hidden; restore it before accessing issues"}}),
                     );
                 }
-                if let Operation::Transfer { destination, .. } = &operation {
-                    if !visible.contains(destination) {
-                        return Err(invalid("Destination project is hidden"));
-                    }
+                if let Operation::Transfer { destination, .. } = &operation
+                    && !visible.contains(destination)
+                {
+                    return Err(invalid("Destination project is hidden"));
                 }
                 self.rpc(serde_json::to_value(operation)?, Some(project), key)?
             }
             _ => return Err(invalid("Unknown mobile web request")),
         };
-        if let Some(issue) = value.get_mut("issue") {
-            if let Some(body) = issue["body"].as_str() {
-                issue["body_html"] = json!(crate::markdown::render_fragment(body));
-            }
+        if let Some(issue) = value.get_mut("issue")
+            && let Some(body) = issue["body"].as_str()
+        {
+            issue["body_html"] = json!(crate::markdown::render_fragment(body));
         }
         if let Some(comments) = value["comments"].as_array_mut() {
             for comment in comments {
@@ -416,74 +416,14 @@ fn mobile_web_operation(payload: &Value) -> Result<Operation> {
             "Plan files and status updates use the terminal workflow",
         ));
     }
-    if let Operation::Mindmap { operation } = &operation {
-        if operation.writes() {
-            return Err(invalid("Mindmaps are read-only on the web"));
-        }
+    if let Operation::Mindmap { operation } = &operation
+        && operation.writes()
+    {
+        return Err(invalid("Mindmaps are read-only on the web"));
     }
     Ok(operation)
 }
 
-#[cfg(test)]
-mod web_tests {
-    use super::*;
-    #[test]
-    fn web_operations_keep_desktop_restrictions() {
-        assert!(mobile_web_operation(&json!({"operation":{"action":"view","number":77}})).is_ok());
-        assert!(
-            mobile_web_operation(
-                &json!({"host":"devbox","operation":{"action":"view","number":77}})
-            )
-            .is_err()
-        );
-        assert!(mobile_web_operation(&json!({"operation":{"action":"status","number":77,"level":"green","comment":"Agent only"}})).is_err());
-        assert!(mobile_web_operation(&json!({"operation":{"action":"mindmap","operation":{"command":"add","title":"No"}}})).is_err());
-    }
-    #[test]
-    fn phone_issue_mutations_are_authoritative_idempotent_and_render_markdown() {
-        let directory = std::env::temp_dir().join(format!(
-            "hb-mobile-web-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let ctx = Context {
-            home: directory.clone(),
-            state: directory.clone(),
-            desired: directory.join("fleet.json"),
-            binary: std::env::current_exe().unwrap(),
-            path: directory.join("issues.db"),
-            node: "test-device".into(),
-            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
-        let mobile = Mobile {
-            ctx,
-            client: reqwest::blocking::Client::new(),
-        };
-        let project = json!({"id":"named:Phone","name":"Phone"});
-        let projects = BTreeMap::from([("named:Phone".to_owned(), project.clone())]);
-        let visible = BTreeSet::from(["named:Phone".to_owned()]);
-        let creation = json!({"kind":"action","payload":{"project":"named:Phone","request_id":"stable-key","operation":{"action":"create","title":"Phone issue","body":"**Private content**","labels":[]}}});
-        let first = mobile.web_request(&creation, &projects, &visible).unwrap();
-        assert_eq!(first["issue"]["created_by"], "human:boss");
-        assert!(
-            first["issue"]["body_html"]
-                .as_str()
-                .unwrap()
-                .contains("<strong>Private content</strong>")
-        );
-        let repeated = mobile.web_request(&creation, &projects, &visible).unwrap();
-        assert_eq!(first["issue"]["number"], repeated["issue"]["number"]);
-        let hidden = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &BTreeSet::new()).unwrap();
-        assert_eq!(hidden["error"]["code"], "not_found");
-        let read = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &visible).unwrap();
-        assert_eq!(read["issue"]["title"], "Phone issue");
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-}
 fn transport_id(value: &Value) -> Result<&str> {
     let id = value
         .as_str()
@@ -559,4 +499,65 @@ pub(super) fn run(ctx: Context) {
     }
     let _ = checkpointer.join();
     let _ = web_bridge.join();
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+    #[test]
+    fn web_operations_keep_desktop_restrictions() {
+        assert!(mobile_web_operation(&json!({"operation":{"action":"view","number":77}})).is_ok());
+        assert!(
+            mobile_web_operation(
+                &json!({"host":"devbox","operation":{"action":"view","number":77}})
+            )
+            .is_err()
+        );
+        assert!(mobile_web_operation(&json!({"operation":{"action":"status","number":77,"level":"green","comment":"Agent only"}})).is_err());
+        assert!(mobile_web_operation(&json!({"operation":{"action":"mindmap","operation":{"command":"add","title":"No"}}})).is_err());
+    }
+    #[test]
+    fn phone_issue_mutations_are_authoritative_idempotent_and_render_markdown() {
+        let directory = std::env::temp_dir().join(format!(
+            "hb-mobile-web-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let ctx = Context {
+            home: directory.clone(),
+            state: directory.clone(),
+            desired: directory.join("fleet.json"),
+            binary: std::env::current_exe().unwrap(),
+            path: directory.join("issues.db"),
+            node: "test-device".into(),
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let mobile = Mobile {
+            ctx,
+            client: reqwest::blocking::Client::new(),
+        };
+        let project = json!({"id":"named:Phone","name":"Phone"});
+        let projects = BTreeMap::from([("named:Phone".to_owned(), project.clone())]);
+        let visible = BTreeSet::from(["named:Phone".to_owned()]);
+        let creation = json!({"kind":"action","payload":{"project":"named:Phone","request_id":"stable-key","operation":{"action":"create","title":"Phone issue","body":"**Private content**","labels":[]}}});
+        let first = mobile.web_request(&creation, &projects, &visible).unwrap();
+        assert_eq!(first["issue"]["created_by"], "human:boss");
+        assert!(
+            first["issue"]["body_html"]
+                .as_str()
+                .unwrap()
+                .contains("<strong>Private content</strong>")
+        );
+        let repeated = mobile.web_request(&creation, &projects, &visible).unwrap();
+        assert_eq!(first["issue"]["number"], repeated["issue"]["number"]);
+        let hidden = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &BTreeSet::new()).unwrap();
+        assert_eq!(hidden["error"]["code"], "not_found");
+        let read = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &visible).unwrap();
+        assert_eq!(read["issue"]["title"], "Phone issue");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
