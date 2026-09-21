@@ -478,15 +478,16 @@ hey-boss issue create --title 'Reconnect' --label bug --label network
 hey-boss issue edit 1 --label needs-review --remove-label blocked
 hey-boss issue list --state closed --search reconnect
 hey-boss issue list --label bug --label network --limit 10 --offset 0
+hey-boss issue list --all --label bug --unassigned
 hey-boss issue history 1 --limit 20 --offset 0
 hey-boss issue edit 1 --body 'Updated description' --if-version 3
 hey-boss issue list --state deleted
 hey-boss issue restore 1
 ```
 
-`list` defaults to open, nondeleted issues. `--state all` includes open and closed
-issues; `--state deleted` selects deleted ones separately. Results sort by issue
-number. `--mine` and `--unassigned` are mutually exclusive. Repeat `--label` to
+`list` defaults to open, nondeleted issues. `--state all` includes open, blocked, and closed
+issues; `--state deleted` selects deleted ones separately. Results follow the shared queue
+order. `--mine` and `--unassigned` are mutually exclusive. Repeat `--label` to
 require every named label. Labels are case-sensitive, at most 64 UTF-8 bytes
 each, with at most 50 labels per issue. Search is a literal substring of title
 or body; case folding follows SQLite's built-in ASCII `lower()` behavior.
@@ -504,6 +505,12 @@ No-op commands do not add events.
 end before `--limit`; always use the returned `next_offset`. History sorts from oldest to newest.
 Concurrent new events can be picked up on the next page; filtered list pages
 are snapshots of each individual invocation.
+
+`list --all` retrieves every matching issue in queue order in one invocation;
+it cannot be combined with `--limit` or `--offset`. The small copy button beside
+**Queue order** in the web list copies this command with the current project,
+queue host, state, search, label, and assignee filters. **Assigned to me** targets
+Boss explicitly, so an agent running the copied command sees the same issues.
 
 Every change increments an issue's `version`. `edit --if-version N` rejects
 an outdated edit, preventing silent overwrites when an agent edits a description

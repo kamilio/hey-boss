@@ -147,11 +147,21 @@
                 >
               </button>
             </div>
-            <span
-              class="list-sort"
-              title="Drag issue handles to change pickup order"
-              >Queue order<span data-icon="sort"></span
-            ></span>
+            <div class="list-actions">
+              <span
+                class="list-sort"
+                title="Drag issue handles to change pickup order"
+                >Queue order<span data-icon="sort"></span
+              ></span>
+              <button
+                class="icon-button"
+                id="copy-list-command"
+                type="button"
+                aria-label="Copy command to retrieve the filtered issue list"
+                title="Copy command to retrieve the filtered issue list"
+                disabled
+              ><span data-icon="copy"></span></button>
+            </div>
           </div>
           <div id="issue-list" role="tabpanel" aria-label="Issues">
             <div class="loading-state">

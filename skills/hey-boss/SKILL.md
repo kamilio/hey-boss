@@ -73,6 +73,7 @@ settings remain accessible. Worktrees share one repository project.
 
 ```sh
 hey-boss issue list --unassigned --json
+hey-boss issue list --all --label ready --unassigned --json
 hey-boss issue create --title 'Fix reconnect' --body 'Describe the problem' --request-id reconnect-1
 hey-boss issue claim 1
 hey-boss issue status 1 green --comment 'Checking what causes the reconnect failure.'

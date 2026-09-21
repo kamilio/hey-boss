@@ -324,6 +324,7 @@ function updateHeader() {
   $("#project-caption").textContent =
     p.id.startsWith("local:") || p.id.startsWith("named:") ? p.name : p.id;
   $("#copy-create-command").disabled = false;
+  $("#copy-list-command").disabled = false;
   $("#heading-count").textContent = p.open;
   $("#open-count").textContent = p.open;
   $("#blocked-count").textContent = p.blocked || 0;
@@ -1338,14 +1339,16 @@ function closeEditor() {
   target.focus();
 }
 $("#new-issue").onclick = () => openEditor();
-$("#copy-create-command").onclick = async () => {
-  const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+const shellQuote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+function issueCommandScope() {
   const host = model.route.host || model.defaultHost;
   // The CLI resolves names, but exact IDs take precedence over name matches.
   const {id, name} = model.project;
   const ambiguous = model.projects.some(p => p.id !== id && (p.name === name || p.id === name));
   const project = ambiguous ? id : name;
-  const command = `hey-boss issue create --project ${quote(project)}${host ? ` --host ${quote(host)}` : ""} --title '<title>' --body '<markdown>'`;
+  return `--project ${shellQuote(project)}${host ? ` --host ${shellQuote(host)}` : ""}`;
+}
+async function copyIssueCommand(command, success) {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(command);
@@ -1365,10 +1368,26 @@ $("#copy-create-command").onclick = async () => {
         focus?.focus({preventScroll: true});
       }
     }
-    toast("Agent command copied. Replace the title and Markdown placeholders.");
+    toast(success);
   } catch {
-    toast("Could not copy the agent command. Allow clipboard access and try again.", true);
+    toast("Could not copy the command. Allow clipboard access and try again.", true);
   }
+}
+$("#copy-create-command").onclick = () => copyIssueCommand(
+  `hey-boss issue create ${issueCommandScope()} --title '<title>' --body '<markdown>'`,
+  "Agent command copied. Replace the title and Markdown placeholders.",
+);
+$("#copy-list-command").onclick = () => {
+  const {state, owner, label} = model.route;
+  // Include search input even during its route-update debounce.
+  const search = $("#issue-search").value;
+  let command = `hey-boss issue list ${issueCommandScope()} --all --state ${state}`;
+  if (owner === "unassigned") command += " --unassigned";
+  // Web 'mine' is Boss, while CLI --mine would target the receiving agent.
+  else if (owner !== "all") command += ` --assignee ${shellQuote(owner === "mine" ? "human:boss" : owner)}`;
+  if (label) command += ` --label ${shellQuote(label)}`;
+  if (search) command += ` --search ${shellQuote(search)}`;
+  return copyIssueCommand(command, "Issue list command copied. Retrieves all matching issues.");
 };
 $("#editor-close").onclick = closeEditor;
 $("#editor-cancel").onclick = closeEditor;
