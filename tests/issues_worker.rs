@@ -1850,6 +1850,49 @@ fn worker_startup_waits_for_transient_writer_contention() {
 }
 
 #[test]
+fn codex_sqlite_startup_contention_retries_the_same_reservation() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("codex-sqlite-startup");
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&["--concurrency", "1"]);
+    let mock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py");
+    let wrapper = f.root.join("codex.sh");
+    fs::write(&wrapper, format!("#!/bin/sh\nif [ ! -f startup-retried ]; then\n touch startup-retried\n printf 'Error: failed to initialize sqlite state runtime: database is locked\\n' >&2\n exit 1\nfi\nexec '{}' \"$@\"\n", mock.display())).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "completed", "{status}");
+    assert_eq!(
+        status["runs"].as_array().unwrap().len(),
+        1,
+        "Startup retry created an issue attempt"
+    );
+    worker.stop();
+}
+
+#[test]
+fn stopping_worker_cancels_codex_sqlite_startup_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("codex-sqlite-startup-stop");
+    f.setup(&["--concurrency", "1"]);
+    let wrapper = f.root.join("codex.sh");
+    fs::write(&wrapper, "#!/bin/sh\nprintf 'Error: failed to initialize sqlite state runtime: database is locked\\n' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut worker = f.worker();
+    f.wait(|s| {
+        s["runs"][0]["last_event"]
+            .as_str()
+            .is_some_and(|event| event.contains("retrying startup"))
+    });
+    let started = Instant::now();
+    worker.stop();
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let status = f.cli(&["worker", "status"]);
+    assert_eq!(status["runs"][0]["state"], "cancelled", "{status}");
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+}
+
+#[test]
 fn worker_shutdown_waits_for_writer_and_exits_successfully() {
     let f = Fixture::new("shutdown-writer-contention");
     fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
