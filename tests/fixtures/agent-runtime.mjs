@@ -66,6 +66,19 @@ function prompt(text) {
     }
     return;
   }
+  if (text === 'burst completion') {
+    for (let i = 0; i < 160; i++) {
+      if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:'x'}});
+      else if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text:'x'}}});
+      else send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'x'}});
+    }
+    complete(); return;
+  }
+  if (text === 'completion then disconnect') {
+    complete();
+    process.stdout.write('', () => process.exit(0));
+    return;
+  }
   if (text === 'background killed' && provider === 'claude') {
     send({type:'system',subtype:'task_started',task_id:'task-1',task_type:'local_agent'});
     send({type:'result',session_id:session,subtype:'success',is_error:false,result:'provisional'});
@@ -116,7 +129,10 @@ for await (const chunk of process.stdin) {
       if (p.approvalPolicy !== 'on-request' || p.approvalsReviewer !== 'auto_review' || p.sandbox !== 'workspace-write') throw new Error('Thread must explicitly use Auto permissions, including on resume');
       result = {thread:{id:session}};
     }
-    if (r.method === 'turn/start') { turn = 'fixture-turn-' + (++turnNumber); result = {turn:{id:turn}}; }
+    if (r.method === 'turn/start') {
+      turn = 'fixture-turn-' + (++turnNumber); result = {turn:{id:turn}};
+      if (p.input[0].text === 'start before ack') send({method:'turn/started',params:{threadId:session,turn:{id:turn}}});
+    }
     if (r.method === 'turn/steer') result = {turnId:turn};
     if (r.method === 'thread/read') result = {thread:{id:session,status:{type:streaming?'active':'idle'},canAcceptDirectInput:streaming}};
     send({id:r.id,result});

@@ -213,6 +213,7 @@ pub struct AgentSession {
     queued_turns: VecDeque<(String, String)>,
     prompt_ack: Option<(String, Instant)>,
     tasks: BTreeSet<String>,
+    refreshing_pi: bool,
 }
 impl AgentSession {
     pub fn launch(launch: Launch) -> io::Result<Self> {
@@ -310,6 +311,7 @@ impl AgentSession {
             queued_turns: VecDeque::new(),
             prompt_ack: None,
             tasks: BTreeSet::new(),
+            refreshing_pi: false,
         };
         match client.provider {
             Provider::Codex => {
@@ -339,9 +341,15 @@ impl AgentSession {
     }
     pub fn inspect(&mut self) -> io::Result<State> {
         // Consume already-arrived notifications before checking a turn guard.
+        self.normalize_pending()?;
         while !self.stopped {
             match self.process.receive(Duration::ZERO) {
-                Ok(Some(value)) => self.queue(value)?,
+                Ok(Some(value)) => {
+                    self.normalize(value)?;
+                    // A normalizer may perform an RPC that buffers earlier
+                    // notifications. Preserve their order before reading more.
+                    self.normalize_pending()?;
+                }
                 Ok(None) => break,
                 Err(error) => {
                     self.uncertain = true;
@@ -589,6 +597,7 @@ impl AgentSession {
     pub fn stop(&mut self) -> io::Result<()> {
         self.process.stop()?;
         self.stopped = true;
+        self.pending.clear();
         self.queued_turns.clear();
         self.prompt_ack = None;
         self.tasks.clear();
@@ -635,7 +644,10 @@ impl AgentSession {
         Ok(())
     }
     fn refresh_pi(&mut self) -> io::Result<()> {
-        let state = self.rpc("get_state", json!({}))?;
+        self.refreshing_pi = true;
+        let result = self.rpc("get_state", json!({}));
+        self.refreshing_pi = false;
+        let state = result?;
         self.attach(
             required(&state, "sessionId")?,
             state["sessionFile"].as_str().map(PathBuf::from),
@@ -668,6 +680,13 @@ impl AgentSession {
             };
             if let Some(result) = protocol::response(self.provider, &id, &value) {
                 return result;
+            }
+            if self.refreshing_pi {
+                // State reads can race large output bursts. Normalize in order
+                // without buffering a second copy or recursively refreshing.
+                self.normalize_pending()?;
+                self.normalize(value)?;
+                continue;
             }
             let preflight_input = self.provider == Provider::Pi
                 && method == "prompt"
