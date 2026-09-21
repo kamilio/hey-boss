@@ -111,6 +111,45 @@ fn ambiguous_duplicate_request_ids_disable_controls() {
 }
 
 #[test]
+fn codex_approvals_require_valid_callback_identity_and_session_ownership() {
+    for prompt in ["missing approval ownership", "invalid approval identity"] {
+        let mut session = launch(Provider::Codex, None);
+        session.prompt(prompt, None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match session.receive(Duration::from_millis(50)) {
+                Err(_) => break,
+                Ok(Some(Event::Approval { .. })) => {
+                    panic!("Exposed an approval without valid ownership: {prompt}")
+                }
+                _ => assert!(Instant::now() < deadline),
+            }
+        }
+        assert!(session.state().outcome_uncertain);
+        assert!(session.state().pending_requests.is_empty());
+    }
+}
+
+#[test]
+fn codex_tool_events_exclude_non_tools_and_report_declines_and_failures() {
+    let mut session = launch(Provider::Codex, None);
+    session.prompt("tool event classifications", None).unwrap();
+    let mut tools = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match session.receive(Duration::from_millis(50)).unwrap() {
+            Some(Event::ToolCompleted { id, failed, .. }) => tools.push((id, failed)),
+            Some(Event::TurnCompleted { .. }) => break,
+            _ => assert!(Instant::now() < deadline),
+        }
+    }
+    assert_eq!(
+        tools,
+        vec![("command".into(), true), ("dynamic".into(), true)]
+    );
+}
+
+#[test]
 fn broken_rpc_input_marks_delivery_uncertain_and_prevents_replay() {
     for provider in [Provider::Codex, Provider::Pi] {
         let mut session = launch(provider, None);
