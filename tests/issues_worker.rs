@@ -91,8 +91,12 @@ impl Fixture {
                 .env("HEY_BOSS_TEST_CLI", self.notification_cli())
                 .env(
                     "HEY_BOSS_CODEX",
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/fixtures/codex-worker.py"),
+                    if self.root.join("codex.sh").exists() {
+                        self.root.join("codex.sh")
+                    } else {
+                        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/fixtures/codex-worker.py")
+                    },
                 )
                 .env_remove("HEY_BOSS_ISSUE_HOST")
                 .args([
@@ -616,6 +620,53 @@ fn saved_sessions_are_not_reused_on_another_machine_or_checkout() {
         );
         replacement.stop();
     }
+}
+
+#[test]
+fn large_saved_sessions_resume_without_loading_history_into_the_worker() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("large-resume");
+    f.setup(&[]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    let machine: String = db
+        .query_row(
+            "SELECT json_extract(metadata,'$.machine') FROM agents LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let job = serde_json::json!({"config":{"cwd":f.root.canonicalize().unwrap()}});
+    db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,session_id,retry_allowed) VALUES('previous',(SELECT id FROM projects LIMIT 1),1,?1,'old-agent','cancelled',1,'old-start',?2,0,0,1,'saved-session',1)", rusqlite::params![job.to_string(), machine]).unwrap();
+    let script = f.root.join("codex.sh");
+    fs::write(&script, r#"#!/bin/sh
+while IFS= read -r message; do
+    printf '%s\n' "$message" >> protocol.jsonl
+    case "$message" in
+        *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"method":"thread/resume"'*)
+            case "$message" in
+                *'"excludeTurns":true'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"saved-session","turns":[]}}}' ;;
+                *)
+                    printf '%s' '{"id":2,"result":{"thread":{"id":"saved-session","turns":[{"text":"'
+                    head -c 9000000 /dev/zero | tr '\000' x
+                    printf '%s\n' '"}]}}}' ;;
+            esac ;;
+        *'"method":"turn/start"'*)
+            "$HEY_BOSS_TEST_CLI" issue --project 'Worker fixture' --agent codex:saved-session claim 1 --json >/dev/null || exit 1
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn"}}}'
+            printf '%s\n' '{"method":"item/completed","params":{"threadId":"saved-session","item":{"type":"agentMessage","text":"{\"status\":\"completed\",\"summary\":\"Resumed without transferring history\"}"}}}'
+            printf '%s\n' '{"method":"turn/completed","params":{"threadId":"saved-session","turn":{"id":"turn","status":"completed"}}}' ;;
+    esac
+done
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut worker = f.worker();
+    let finished =
+        f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["finished_at"].is_number());
+    assert_eq!(finished["runs"][0]["state"], "completed", "{finished}");
+    assert_eq!(finished["runs"][0]["session_id"], "saved-session");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    worker.stop();
 }
 
 #[test]

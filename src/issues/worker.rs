@@ -1088,7 +1088,9 @@ fn run_thread(
         store.worker_event(&job.id, &format!("Resuming Codex session {session}"), None)?;
         (
             "thread/resume",
-            json!({"threadId":session,"cwd":job.config.cwd}),
+            // Codex retains the full history; the worker only needs the session
+            // metadata. Large rollouts otherwise exceed the transport limit.
+            json!({"threadId":session,"cwd":job.config.cwd,"excludeTurns":true}),
         )
     } else {
         (
