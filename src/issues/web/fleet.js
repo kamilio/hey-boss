@@ -68,7 +68,7 @@ if (typeof document !== 'undefined') (() => {
   const base = '/agents';
   const route = () => new URLSearchParams(location.hash.slice(1));
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
-  let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=true, selected;
+  let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical;
   const seen = new Set();
   let takeoverBusy=false, takeoverTarget;
   const takeovers=new Map();
@@ -185,7 +185,10 @@ if (typeof document !== 'undefined') (() => {
       if (entry) history.replaceState(null, '', link(entry));
     }
     const resource=HeyBossRoutes.resolve();
-    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&e.machine.host===resource.host&&e.run.id===resource.id);
+    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&(e.machine.host===resource.host||e.machine.hostname===resource.host)&&e.run.id===resource.id);
+    if(!selected&&resource?.entity==='agent'&&resource.project){
+      selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
+    }
     $('back').href=base+(route().get('project')?'#'+new URLSearchParams({project:route().get('project')}):'');
     if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
@@ -193,7 +196,8 @@ if (typeof document !== 'undefined') (() => {
     $('session-title').textContent=run.title||'Preparing your task';
     $('session-context').textContent=(run.project_name||'Project')+' · '+(machine.hostname||machine.host);
     $('session-state').replaceChildren(stateBadge(selected));
-    $('session-issue').href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
+    $('session-issue').hidden=!run.number;
+    $('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
     $('session-status').textContent=!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
     renderTakeover();
     if(!loaded&&!loading)loadConversation();
@@ -206,7 +210,7 @@ if (typeof document !== 'undefined') (() => {
   function fail(error) {$('error').textContent=error.message;$('error').hidden=false;}
   function renderTakeover() {
     const state=savedTakeover(selected), button=$('takeover-open');
-    button.hidden=Boolean(state?.stopped)||(runEnded()&&!state?.pending);
+    button.hidden=selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
     button.disabled=takeoverBusy||!selected.online;
     button.textContent=state?.pending?'Check takeover':'Take over';
     $('takeover-note').hidden=!state?.pending;
@@ -250,15 +254,31 @@ if (typeof document !== 'undefined') (() => {
     $('load-earlier').disabled=true;$('conversation').setAttribute('aria-busy','true');
     try{
       const initial=!loaded;
-      const query={host:selected.machine.host,run:selected.run.id,cursor};
-      if(earlier)query.before=olderCursor;else if(initial)query.latest=1;
+      const query={host:route().get('host')||selected.machine.host,run:selected.run.id,project:selected.run.project_id,cursor};
+      if(earlier)query.before=olderCursor;else if(initial){if(route().has('at'))query.at=route().get('at');else query.latest=1;}
       const oldHeight=document.documentElement.scrollHeight,oldScroll=scrollY;
       const data=await read('/api/fleet/conversation?'+new URLSearchParams(query));
       if(token!==generation||disposed)return;
+      if(data.run){historical={...selected,run:data.run};selected=historical;renderDetail(last);}
+      if(data.created_resources){
+        const resources=data.created_resources;
+        $('session-resources').hidden=!resources.length;
+        $('session-resources-title').textContent=(selected.run.standalone?'Created in this session':'Created in this run')+' · '+resources.length;
+        $('session-resources-list').replaceChildren(...resources.map(resource=>{
+          const item=element('li'),a=element('a','',resource.title);
+          a.href=(resource.kind==='artifact'?'/artifacts#':mobile?'/project-resource#':'/#')+new URLSearchParams({project:resource.project_id,[resource.kind]:resource.id});
+          item.append(element('span','resource-kind',resource.kind==='issue'?'Issue #'+resource.id:'Artifact'),a);return item;
+        }));
+        $('session-resources-more').hidden=!data.more_created_resources;
+      }
       const entries=data.messages.filter(m=>!seen.has(m.id));
       const fragment=document.createDocumentFragment();
       for(const item of entries){seen.add(item.id);fragment.append(message(item));}
       if(earlier)$('conversation').prepend(fragment);else $('conversation').append(fragment);
+      if(initial&&route().has('at')){
+        const target=[...$('conversation').children].find(e=>e.dataset.message===route().get('at'));
+        if(target){target.classList.add('is-origin');if(target.tagName==='DETAILS')target.open=true;target.prepend(element('div','origin-invocation-label','Creating invocation'));requestAnimationFrame(()=>target.scrollIntoView({block:'center'}));}
+      }
       if(!earlier)cursor=data.cursor;loaded=true;
       if(initial||earlier){olderCursor=data.older_cursor||0;$('load-earlier').hidden=!data.has_earlier;}
       if(earlier)scrollTo(0,oldScroll+document.documentElement.scrollHeight-oldHeight);
@@ -266,11 +286,11 @@ if (typeof document !== 'undefined') (() => {
       $('conversation-empty').textContent=data.availability==='waiting'?(selected.run.finished_at!=null?'Saved history is unavailable on this device.':'The agent is getting started. Its saved conversation will appear here.'):'No messages yet. This page will update as the agent works.';
       if(!earlier&&follow&&entries.length){$('conversation-end').scrollIntoView({behavior:'instant',block:'end'});}
       $('jump-live').hidden=follow||!seen.size;
-      if(data.has_more&&!earlier)setTimeout(()=>loadConversation(),0);
+      if(data.has_more&&!earlier&&!route().has('at'))setTimeout(()=>loadConversation(),0);
     }catch(e){fail(e);}finally{if(token===generation){loading=false;$('load-earlier').disabled=false;$('conversation').setAttribute('aria-busy','false');}}
   }
   $('overview-page').hidden=detail;$('session-page').hidden=!detail;
-  if(detail){document.body.classList.add('conversation-page');$('load-earlier').onclick=()=>{follow=false;loadConversation(true);};$('jump-live').onclick=()=>{follow=true;$('conversation-end').scrollIntoView({behavior:'smooth',block:'end'});$('jump-live').hidden=true;};addEventListener('scroll',()=>{follow=$('conversation-end').getBoundingClientRect().bottom<=innerHeight+160;$('jump-live').hidden=follow||!seen.size;},{passive:true});}
+  if(detail){document.body.classList.add('conversation-page');$('load-earlier').onclick=()=>{follow=false;loadConversation(true);};$('jump-live').onclick=()=>{if(route().has('at')){const params=route();params.delete('at');history.replaceState(null,'','#'+params);loaded=false;cursor=0;seen.clear();$('conversation').replaceChildren();loadConversation();}follow=true;$('conversation-end').scrollIntoView({behavior:'smooth',block:'end'});$('jump-live').hidden=true;};addEventListener('scroll',()=>{follow=!route().has('at')&&$('conversation-end').getBoundingClientRect().bottom<=innerHeight+160;$('jump-live').hidden=follow||!seen.size;},{passive:true});}
   $('takeover-open').onclick=()=>{
     if(!selected)return;
     if(savedTakeover(selected)?.pending){takeOver(selected);return;}
@@ -288,7 +308,7 @@ if (typeof document !== 'undefined') (() => {
     b.disabled=true;
     try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:crypto.randomUUID()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
   };
-  addEventListener('hashchange',()=>{if(detail){$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('hashchange',()=>{if(detail){historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{
@@ -297,6 +317,6 @@ if (typeof document !== 'undefined') (() => {
     await refresh();
     if(!mobile){const events=new EventSource('/api/fleet/events');events.addEventListener('connected',()=>refresh());events.onmessage=()=>refresh();events.onerror=()=>{$('connection').classList.add('offline');$('connection').querySelector('span').textContent='Reconnecting…';};events.onopen=()=>{$('connection').classList.remove('offline');$('connection').querySelector('span').textContent='Connected';};}
   }catch(e){fail(e);}})();
-  setInterval(()=>{if(!document.hidden&&!disposed){refresh();if(detail){loadConversation();const state=selected&&savedTakeover(selected);if(selected?.online&&state?.pending&&!state.error)takeOver(selected);}}},3000);
+  setInterval(()=>{if(!document.hidden&&!disposed){refresh();if(detail){if(!route().has('at'))loadConversation();const state=selected&&savedTakeover(selected);if(selected?.online&&state?.pending&&!state.error)takeOver(selected);}}},3000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();if(detail)loadConversation();}});
 })();

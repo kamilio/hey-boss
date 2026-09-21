@@ -57,6 +57,14 @@ Files must be private; existing keys, links, and tracked files are refused. Redi
 
 ## Issues
 
+Issue and artifact creation automatically records session/device/checkout origin
+and the creating tool invocation when available; no extra flags are needed.
+JSON details expose `origin`. The web Origin card opens the saved creator
+conversation at its invocation, including older runs outside recent activity;
+Created in this run links back to its issues and artifacts. Origins survive edits,
+retries, project moves and issue replica sync. Legacy origins are unknown;
+missing transcripts and disconnected devices are reported without guessing.
+
 Project defaults to the repository across worktrees. Fleet companions keep durable local replicas and sync automatically with their supervisor. Standalone queues require the same `--host` / `HEY_BOSS_ISSUE_HOST` to target another machine.
 
 ```sh

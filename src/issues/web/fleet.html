@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/fleet.css" />
     <script src="/routes.js" defer></script><script src="/components.js" defer></script><script src="/quick-issue.js" defer></script>
     <script src="/fleet.js" defer></script>
+    <link rel="stylesheet" href="/origin.css">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to agents</a>
@@ -29,6 +30,7 @@
           <div class="session-actions"><button id="takeover-open" class="button" type="button" hidden>Take over</button><p id="takeover-note" class="device-note" role="status" hidden></p></div>
           <section id="resume-panel" class="resume-panel" aria-label="Resume your agent" hidden><h2>You’re in charge</h2><p id="resume-note">The agent has stopped and the issue is assigned to you. Run this command in your terminal to continue the saved session.</p><div class="resume-command"><code id="resume-command"></code><button id="resume-copy" class="button" type="button">Copy command</button></div><p id="copy-status" role="status"></p></section>
         </header>
+        <details id="session-resources" class="session-resources" hidden><summary id="session-resources-title">Created in this run</summary><ul id="session-resources-list"></ul><p id="session-resources-more" hidden>Showing the first 50 issues and 50 artifacts.</p></details>
         <div class="conversation-wrap">
           <div class="conversation-intro"><span data-icon="spark"></span><span>The conversation behind the work</span></div>
           <button id="load-earlier" class="button load-history" type="button" hidden>Load earlier messages</button>
