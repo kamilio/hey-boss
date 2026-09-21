@@ -808,8 +808,15 @@ impl Store {
     pub(crate) fn worker_reload_allowed(&self, id: &str) -> Result<bool> {
         Ok(self.db.query_row("SELECT (json_extract(config,'$.enabled')=1 OR coalesce(json_extract(config,'$.upgrading')=1,0)) AND stop_requested=0 FROM issue_workers WHERE id=?1", [id], |r| r.get(0))?)
     }
-    pub(crate) fn worker_mark_upgrading(&self, id: &str) -> Result<()> {
-        self.db.execute("INSERT OR IGNORE INTO issue_worker_runtime(worker_id,owner_pid,owner_start) SELECT id,owner_pid,owner_start FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![id,std::process::id()])?;
+    pub(crate) fn worker_set_upgrading(&self, id: &str, draining: bool) -> Result<()> {
+        if draining {
+            self.db.execute("INSERT OR IGNORE INTO issue_worker_runtime(worker_id,owner_pid,owner_start) SELECT id,owner_pid,owner_start FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![id,std::process::id()])?;
+        } else {
+            self.db.execute(
+                "DELETE FROM issue_worker_runtime WHERE worker_id=?1 AND owner_pid=?2",
+                params![id, std::process::id()],
+            )?;
+        }
         Ok(())
     }
 }

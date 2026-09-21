@@ -344,8 +344,16 @@ resolve that cause and retry rather than deleting the store. Committed schema
 changes are retained if a later installation step fails, so recovery must use a
 build that supports the migrated schema. The existing state, issue databases, and running workers are
 preserved. The desktop daemon and managed companion brokers restart after an
-upgrade. Updated workers drain their active sessions and then restart with the
-same ID and settings before picking up more issues. Workers started before this
+upgrade. Updated workers keep picking up issues and load the new CLI when naturally
+idle, retaining the same ID and settings. Emergency draining is explicit: create
+an empty `issues.db.drain-for-update` file beside the machine's issue database
+before or after replacing the CLI. Only workers awaiting a CLI update stop pickup;
+active agents finish normally. The dashboard labels this **Emergency update drain**.
+Remove the file to resume pickup or after the emergency update; it is not removed
+automatically and applies to later updates while present. With `HEY_BOSS_ISSUE_DB`,
+append `.drain-for-update` to that database path. Each machine has its own marker.
+Workers running an older build still use their previous update behavior until
+their first reload. Workers started before this
 handoff feature need a one-time restart. Unreachable hosts do not prevent the other machines from updating;
 rerun the command after reconnecting to retry them.
 

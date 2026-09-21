@@ -1132,10 +1132,21 @@ fn offline_replica_launches_only_work_allocated_to_its_machine() {
     worker.stop();
 }
 #[test]
-fn replacing_cli_drains_active_sessions_then_restores_same_worker() {
-    let f = Fixture::new("upgrade-handoff");
+fn emergency_cli_update_drains_active_sessions_then_restores_same_worker() {
+    cli_update_idle_handoff(true);
+}
+#[test]
+fn routine_cli_update_reloads_when_idle_with_the_same_worker_settings() {
+    cli_update_idle_handoff(false);
+}
+fn cli_update_idle_handoff(emergency: bool) {
+    let f = Fixture::new(if emergency {
+        "emergency-upgrade-handoff"
+    } else {
+        "routine-upgrade-handoff"
+    });
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
-    f.setup(&[]);
+    f.setup(&["--concurrency", "2"]);
     let directory = f.root.join("bin");
     fs::create_dir_all(&directory).unwrap();
     let binary = directory.join("hey-boss");
@@ -1144,15 +1155,32 @@ fn replacing_cli_drains_active_sessions_then_restores_same_worker() {
     let initial = f.wait(|s| s["active"] == 1 && s["runs"][0]["state"] == "running");
     let id = initial["worker_id"].as_str().unwrap().to_owned();
     let run = initial["runs"][0]["id"].as_str().unwrap().to_owned();
+    if emergency {
+        fs::write(f.db.with_added_extension("drain-for-update"), "").unwrap();
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(f.cli(&["worker", "status"])["upgrading"], false);
+    }
     let replacement = directory.join("hey-boss.new");
     fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &replacement).unwrap();
     fs::rename(replacement, binary).unwrap();
-    let still_running = f.wait(|status| status["upgrading"] == true);
+    let still_running = if emergency {
+        f.wait(|status| status["upgrading"] == true)
+    } else {
+        thread::sleep(Duration::from_secs(2));
+        f.cli(&["worker", "status"])
+    };
     assert_eq!(still_running["active"], 1);
     assert_eq!(still_running["runs"][0]["id"], run);
     assert_eq!(still_running["version"], initial["version"]);
-    assert_eq!(still_running["upgrading"], true);
-    assert_eq!(still_running["workers"][0]["upgrading"], true);
+    assert_eq!(still_running["upgrading"], emergency);
+    assert_eq!(still_running["workers"][0]["upgrading"], emergency);
+    if emergency {
+        f.cli(&["create", "--title", "Queued during emergency drain"]);
+        thread::sleep(Duration::from_secs(1));
+        let waiting = f.cli(&["worker", "status"]);
+        assert_eq!(waiting["active"], 1);
+        assert_eq!(waiting["runs"].as_array().unwrap().len(), 1);
+    }
     // Unfinished work is eligible immediately after stop. Configure the next
     // attempt before reload can pick it up, rather than racing its startup.
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
@@ -1163,7 +1191,55 @@ fn replacing_cli_drains_active_sessions_then_restores_same_worker() {
     });
     assert_eq!(restored["worker_id"], id);
     assert_eq!(restored["upgrading"], false);
+    assert_eq!(restored["config"], initial["config"]);
     f.wait(|s| s["runs"][0]["state"] == "completed");
+    worker.stop();
+}
+#[test]
+fn routine_cli_update_keeps_picking_up_work_and_emergency_drain_is_reversible() {
+    let f = Fixture::new("upgrade-continued-pickup");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&["--concurrency", "2"]);
+    let directory = f.root.join("bin");
+    fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("hey-boss");
+    fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
+    let mut worker = f.worker_binary(&binary);
+    let initial = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let replacement = directory.join("hey-boss.new");
+    fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &replacement).unwrap();
+    fs::rename(replacement, binary).unwrap();
+    // Give the scheduler time to notice the replacement before adding work.
+    thread::sleep(Duration::from_secs(2));
+    assert_eq!(f.cli(&["worker", "status"])["upgrading"], false);
+    f.cli(&["create", "--title", "Work after routine update"]);
+    let busy = f.wait(|s| {
+        s["active"] == 2
+            && s["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["claimed_at"].is_number())
+    });
+    assert_eq!(busy["version"], initial["version"]);
+    assert_eq!(busy["workers"][0]["pid"], initial["workers"][0]["pid"]);
+    assert!(
+        busy["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == initial["runs"][0]["id"]
+                && r["session_id"] == initial["runs"][0]["session_id"])
+    );
+    let marker = f.db.with_added_extension("drain-for-update");
+    fs::write(&marker, "").unwrap();
+    let draining = f.wait(|s| s["upgrading"] == true);
+    assert_eq!(draining["config"]["enabled"], true);
+    assert_eq!(draining["version"], initial["version"]);
+    fs::remove_file(marker).unwrap();
+    let resumed = f.wait(|s| s["upgrading"] == false);
+    assert_eq!(resumed["active"], 2);
+    assert_eq!(resumed["version"], initial["version"]);
     worker.stop();
 }
 #[test]

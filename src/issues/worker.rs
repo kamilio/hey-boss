@@ -336,6 +336,8 @@ impl Worker {
         let reload_ready = reload.clone();
         let stopped = stop.clone();
         let handle = thread::spawn(move || {
+            let drain_marker = path.with_added_extension("drain-for-update");
+            let mut update_pending = false;
             let mut handles: Vec<(String, thread::JoinHandle<()>)> = vec![];
             let mut chiefs: Vec<thread::JoinHandle<()>> = vec![];
             let mut last_chief = Instant::now() - Duration::from_secs(5);
@@ -373,16 +375,25 @@ impl Worker {
                     && executable_identity(&executable)
                         .is_some_and(|current| Some(current) != original_executable)
                 {
-                    upgrade_requested.store(true, Ordering::Relaxed);
+                    update_pending = true;
                 }
-                if upgrade_requested.load(Ordering::Relaxed) {
+                // Routine replacement never suspends pickup. The old process
+                // loads the new CLI at a natural idle point; only an explicit
+                // emergency marker stops new work while existing agents finish.
+                let draining = update_pending && drain_marker.is_file();
+                if draining != upgrade_requested.load(Ordering::Relaxed) {
                     if let Some(id) = &worker_id
-                        && let Err(e) = store.worker_mark_upgrading(id)
+                        && let Err(e) = store.worker_set_upgrading(id, draining)
                     {
                         crate::worker_tui::diagnostics::report(format_args!(
                             "Worker upgrade status: {e}"
                         ));
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
                     }
+                    upgrade_requested.store(draining, Ordering::Relaxed);
+                }
+                if update_pending {
                     if handles.is_empty()
                         && chiefs.is_empty()
                         && abandoned.is_empty()
@@ -399,8 +410,10 @@ impl Worker {
                         }
                         break;
                     }
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
+                    if draining {
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
                 }
                 if last_recovery.elapsed() >= Duration::from_secs(5) {
                     if let Err(e) = recover(&mut store, &machine) {
@@ -1403,7 +1416,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         v["active"],
         v["config"]["concurrency"],
         if v["config"]["enabled"] == true && v["upgrading"] == true {
-            "draining for CLI upgrade"
+            "emergency drain for CLI update"
         } else if v["config"]["enabled"] == true {
             "pickup on"
         } else {
