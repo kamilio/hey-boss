@@ -2671,6 +2671,8 @@ button.avatar.self:hover {
 .preview-heading { padding:18px; border-bottom:1px solid var(--line); }
 .preview-eyebrow { display:block; font-size:10px; letter-spacing:.09em; color:var(--muted); margin-bottom:8px; }
 .preview-choices { font-size:11px; color:var(--accent); margin-top:12px; }
+.preview-heading .field-label { margin-top:16px; }
+.preview-heading .field-help { font-size:11px; margin:8px 0 0; }
 #project-instructions-preview { padding:18px; margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; min-height:220px; }
 .planning-settings { border-top:1px solid var(--line); padding-top:14px; font-size:12px; }
 .planning-settings summary { cursor:pointer; color:var(--text); font-size:14px; font-weight:600; padding:8px 0; margin-bottom:12px; }

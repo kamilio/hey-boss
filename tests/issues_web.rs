@@ -1476,6 +1476,7 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
     let overrides = json!({"worktree":"Isolate issue {{number}}.","checkout":"Use checkout {{number}}.","prs":"Review with PR {{number}}.","main":"Ship directly {{number}}."});
     for worktree in [false, true] {
         for prs in [false, true] {
+            web.ok(json!({"action":"configure_project","prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides}));
             let config = json!({"projects":[web.project],"prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides});
             let preview = web.ok(json!({"action":"preview_worker","config":config,"number":1}));
             let expected = format!(
@@ -1505,7 +1506,18 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
             assert_eq!(settings["worktree_enabled"], worktree);
             assert_eq!(settings["prompt_overrides"], overrides);
             let claim = web.ok(json!({"action":"claim","number":1,"force":false}));
-            assert_eq!(claim["instructions"], preview["prompt"]);
+            assert!(
+                claim["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Use checkout 1.")
+            );
+            assert!(
+                !claim["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Isolate issue")
+            );
         }
     }
     let version = web.ok(json!({"action":"project_settings"}))["version"].clone();
@@ -1522,13 +1534,41 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
 }
 
 #[test]
+fn project_worktree_permission_gates_worker_and_draft_previews() {
+    let web = Web::start();
+    for allowed in [false, true] {
+        web.ok(json!({"action":"configure_project","worktree_enabled":allowed}));
+        for choice in [None, Some(false), Some(true)] {
+            let config = json!({"projects":[web.project],"worktree_enabled":choice});
+            let preview = web.ok(json!({"action":"preview_worker","config":config}));
+            assert_eq!(preview["worktree_enabled"], allowed && choice == Some(true));
+            assert!(preview["prompt"].as_str().unwrap().contains(
+                if allowed && choice == Some(true) {
+                    "dedicated Git worktree"
+                } else {
+                    "existing checkout"
+                }
+            ));
+            // A read-only project-settings preview can use an unsaved permission.
+            let draft = web
+                .ok(json!({"action":"preview_worker","config":config,"worktree_allowed":!allowed}));
+            assert_eq!(draft["worktree_enabled"], !allowed && choice == Some(true));
+            assert_eq!(
+                web.ok(json!({"action":"project_settings"}))["worktree_enabled"],
+                allowed
+            );
+        }
+    }
+}
+
+#[test]
 fn project_workflow_legacy_templates_reset_and_version_guards() {
     let web = Web::start();
     web.ok(json!({"action":"configure_project","prompt":"/goal Claim {{issue_command}}.\n\n{{ commit_instruction }}", "worktree_enabled":true,"prompt_overrides":{"worktree":"Custom isolated {{number}}."}}));
     let settings = web.ok(json!({"action":"project_settings"}));
     assert_eq!(settings["prompt"], "/goal Claim {{issue_command}}.");
     let preview = web
-        .ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":null}));
+        .ok(json!({"action":"preview_worker","config":{"projects":[web.project],"worktree_enabled":true},"number":null}));
     assert!(
         preview["prompt"]
             .as_str()
@@ -1547,7 +1587,7 @@ fn project_workflow_legacy_templates_reset_and_version_guards() {
     let stale = web.action(&web.project, json!({"action":"configure_project","worktree_enabled":false,"if_version":settings["version"]}), None);
     assert_eq!(stale.status, 409);
     let preview = web
-        .ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":null}));
+        .ok(json!({"action":"preview_worker","config":{"projects":[web.project],"worktree_enabled":true},"number":null}));
     assert!(
         preview["prompt"]
             .as_str()

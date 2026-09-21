@@ -1,6 +1,6 @@
 async page => {
   const checks = [], errors = [];
-  const prefix = page.context().browser().browserType().name() === "webkit" ? "issue39-webkit" : "issue39";
+  const prefix = page.context().browser().browserType().name() === "webkit" ? "issue90-webkit" : "issue90";
   const check = (ok, label) => { if (!ok) throw Error(label); checks.push(label); };
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('http://127.0.0.1:4782/#project=named%3AWorkflow%20QA', {waitUntil:'domcontentloaded'});
@@ -29,6 +29,7 @@ async page => {
   for (const worktree of [false,true]) for (const prs of [false,true]) {
     await page.locator('#project-worktree').setChecked(worktree);
     await page.locator('#project-prs').setChecked(prs);
+    await page.locator('#project-preview-workspace').selectOption(worktree ? 'worktree' : 'checkout');
     await ready(prs ? 'Publish a PR' : 'Publish main');
     const text=await preview();
     check(text.startsWith('Implement hey-boss issue view 1.'),`Shared instructions ${worktree}/${prs}`);
@@ -37,6 +38,16 @@ async page => {
     check(!text.includes(prs?'Publish main':'Publish a PR'),`Inactive delivery excluded ${worktree}/${prs}`);
     check(await page.locator('.workflow-branch.active').count()===2,`Two included branches ${worktree}/${prs}`);
   }
+  await page.locator('#project-worktree').uncheck();
+  await ready('Use the existing checkout');
+  check(await page.locator('#project-preview-workspace').inputValue()==='checkout','Disabling permission resets worktree preview');
+  check(await page.locator('#project-preview-workspace option[value=worktree]').isDisabled(),'Disallowed worktree cannot be selected');
+  check(await page.locator('[data-branch=worktree] .branch-state').textContent()==='Not allowed','Worktree permission is explicit');
+  await page.locator('#project-worktree').check();
+  await ready('Use the existing checkout');
+  check(await page.locator('#project-preview-workspace').inputValue()==='checkout','Allowing worktrees keeps worker default checkout');
+  await page.locator('#project-preview-workspace').selectOption('worktree');
+  await ready('Isolate 1');
   check(await page.locator('#project-goal-indicator').isVisible(),'Goal indicator');
   await page.locator('[data-reset-prompt=worktree]').click();
   await ready('dedicated Git worktree');
@@ -68,6 +79,12 @@ async page => {
   check(await page.locator('#project-settings-trigger').evaluate(el=>el===document.activeElement),'Save restores focus');
   await open();
   check(await page.locator('#project-worktree').isChecked() && await page.locator('#project-prs').isChecked(),'Choices persist');
+  await ready('Inactive edit');
+  check(await page.locator('#project-preview-workspace').inputValue()==='checkout','Preview choice is not saved as worker configuration');
+  check(await page.locator('#project-settings-form button[type=submit]').isDisabled(),'Preview starts without unsaved changes');
+  await page.locator('#project-preview-workspace').selectOption('worktree');
+  await ready('dedicated Git worktree');
+  check(await page.locator('#project-settings-form button[type=submit]').isDisabled(),'Preview choice alone never enables Save');
   check(await page.locator('#project-prompt-checkout').inputValue()==='Inactive edit must stay excluded.','Inactive override persists');
   check(await page.locator('#project-prompt-worktree').inputValue()==='','Default reset persists');
   await page.emulateMedia({colorScheme:'dark'});
@@ -79,6 +96,8 @@ async page => {
     check(await page.locator('.settings-preview').evaluate(el=>el.getBoundingClientRect().top>=document.querySelector('.settings-editor').getBoundingClientRect().bottom),`Stacked preview ${width}`);
     await page.locator('#project-prompt').scrollIntoViewIfNeeded();
     await page.screenshot({path:`output/playwright/${prefix}-mobile-dark-${width}.png`});
+    await page.locator('.preview-heading').scrollIntoViewIfNeeded();
+    await page.screenshot({path:`output/playwright/${prefix}-mobile-workspace-${width}.png`});
     await page.locator('#project-instructions-preview').scrollIntoViewIfNeeded();
     await page.screenshot({path:`output/playwright/${prefix}-mobile-preview-${width}.png`});
     check(await page.getByRole('button',{name:'Save',exact:true}).isVisible(),`Sticky footer ${width}`);

@@ -139,9 +139,8 @@ fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> 
         use_goal: c.use_goal,
         enabled: true,
         prs_enabled: c.prs_enabled.unwrap_or(defaults["prs_enabled"] == true),
-        worktree_enabled: c
-            .worktree_enabled
-            .unwrap_or(defaults["worktree_enabled"] == true),
+        // Project permission is a ceiling, not a worker's workspace choice.
+        worktree_enabled: defaults["worktree_enabled"] == true && c.worktree_enabled == Some(true),
         prompt_overrides: c.prompt_overrides.clone().unwrap_or(serde_json::from_value(
             defaults["prompt_overrides"].clone(),
         )?),
@@ -430,7 +429,11 @@ pub(super) fn execute(
             }
             status(db, Some(worker_id), p)
         }
-        Operation::PreviewWorker { config, number } => {
+        Operation::PreviewWorker {
+            config,
+            number,
+            worktree_allowed,
+        } => {
             let candidate = if let Some(n) = number {
                 Some((p.clone(), *n))
             } else {
@@ -454,11 +457,18 @@ pub(super) fn execute(
             } else {
                 json!({"number":"<number>","title":"<issue title>","body":"<issue body>"})
             };
-            let runtime = runtime(db, config, &project)?;
+            let mut runtime = runtime(db, config, &project)?;
+            // Settings previews may inspect an unsaved permission without changing
+            // the project or affecting worker registration and pickup.
+            if let Some(allowed) = worktree_allowed {
+                runtime.worktree_enabled = *allowed && config.worktree_enabled == Some(true);
+            }
             let prs_enabled = runtime.prs_enabled && worker::artifact_task(&issue).is_none();
+            let worktree_enabled =
+                runtime.worktree_enabled && worker::artifact_task(&issue).is_none();
             let (prompt, goal, objective) = worker::preview(&runtime, &project, issue);
             Ok(
-                json!({"ok":true,"prompt":prompt,"use_goal":goal,"objective":objective,"number":candidate.map(|(_,n)|n),"project":project,"template":runtime.prompt,"prs_enabled":prs_enabled}),
+                json!({"ok":true,"prompt":prompt,"use_goal":goal,"objective":objective,"number":candidate.map(|(_,n)|n),"project":project,"template":runtime.prompt,"prs_enabled":prs_enabled,"worktree_enabled":worktree_enabled}),
             )
         }
         Operation::ProjectSettings => project_settings(db, p),

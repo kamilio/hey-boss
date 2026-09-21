@@ -339,11 +339,12 @@
               <p class="field-help">{{issue_command}} retrieves the issue. Use {{number}} for its number. Start with /goal to enable a goal. {{create_issue_command poe-code}} creates an issue in poe-code.</p>
             </section>
 <section class="settings-section" aria-labelledby="settings-workspace-title">
- <div class="settings-section-heading"><div><h3 id="settings-workspace-title">Workspace</h3><p class="field-help">Choose where agents make changes.</p></div>
- <label class="workflow-toggle"><input type="checkbox" id="project-worktree" /><span>Use worktrees</span></label></div>
- <div class="workflow-branches"><div class="workflow-branch" data-branch="worktree"><div class="branch-heading"><label for="project-prompt-worktree"><small>If worktrees are enabled</small><strong>Dedicated worktree</strong></label><span class="branch-state">Inactive</span></div>
+ <div class="settings-section-heading"><div><h3 id="settings-workspace-title">Workspace</h3><p class="field-help">Allow workers to choose a dedicated worktree or the existing checkout.</p></div>
+ <label class="workflow-toggle"><input type="checkbox" id="project-worktree" aria-describedby="project-worktree-help" /><span>Allow worktrees</span></label></div>
+ <p class="field-help" id="project-worktree-help">Workers use the existing checkout by default. When allowed, --worktree selects a dedicated worktree. Turning this off prevents workers from using worktrees for new tasks.</p>
+ <div class="workflow-branches"><div class="workflow-branch" data-branch="worktree"><div class="branch-heading"><label for="project-prompt-worktree"><small>Worker uses --worktree</small><strong>Dedicated worktree</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-worktree" rows="3" maxlength="32000" aria-describedby="project-source-worktree"></textarea>
-  <div class="branch-footer"><span id="project-source-worktree">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="worktree">Use default</button></div></div><div class="workflow-branch" data-branch="checkout"><div class="branch-heading"><label for="project-prompt-checkout"><small>Otherwise</small><strong>Existing checkout</strong></label><span class="branch-state">Inactive</span></div>
+  <div class="branch-footer"><span id="project-source-worktree">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="worktree">Use default</button></div></div><div class="workflow-branch" data-branch="checkout"><div class="branch-heading"><label for="project-prompt-checkout"><small>Default or --no-worktree</small><strong>Existing checkout</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-checkout" rows="3" maxlength="32000" aria-describedby="project-source-checkout"></textarea>
   <div class="branch-footer"><span id="project-source-checkout">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="checkout">Use default</button></div></div></div></section><section class="settings-section" aria-labelledby="settings-delivery-title">
  <div class="settings-section-heading"><div><h3 id="settings-delivery-title">Delivery</h3><p class="field-help">Choose how agents publish their changes.</p></div>
@@ -375,7 +376,10 @@
           </div>
           <aside class="settings-preview" aria-labelledby="settings-preview-title">
             <div class="preview-heading"><span class="preview-eyebrow">ASSEMBLED PROMPT</span><h3 id="settings-preview-title">What the agent receives <span id="project-goal-indicator" class="goal-indicator" hidden>/goal</span></h3>
-            <p class="field-help">Shared instructions + active workspace + active delivery. Updates as you edit.</p>
+            <p class="field-help">Shared instructions + the workspace preview + active delivery. Updates as you edit.</p>
+            <label class="field-label" for="project-preview-workspace">Preview worker workspace</label>
+            <select class="text-input" id="project-preview-workspace" aria-describedby="project-preview-workspace-help"><option value="checkout">Existing checkout</option><option value="worktree">Dedicated worktree</option></select>
+            <p class="field-help" id="project-preview-workspace-help">Preview only. Each worker chooses its own workspace.</p>
             <div id="project-preview-choices" class="preview-choices"></div></div>
             <p id="project-instructions-preview" aria-live="polite"></p>
           </aside>
