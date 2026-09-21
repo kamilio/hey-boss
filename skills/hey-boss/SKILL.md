@@ -104,8 +104,10 @@ Use **green** for on track, **orange** for a risk you are working through, and
 language: what is happening and, when useful, what comes next. Avoid tool logs,
 file lists, jargon, and repetitive updates. Status comments are one line, up to
 500 characters. Set the final status before closing or handing off ownership.
-Only the owner of an open, non-draft issue can update it; status never claims,
-blocks, closes, or changes an issue's revision. The web is a read-only viewer.
+Anyone can update an open, non-draft issue; posting status or a comment warns
+when you are not its owner and reports the owner's process presence when known.
+Status never claims, blocks, closes, or changes an issue's revision or fleet
+allocation. The web is a read-only viewer.
 `issue status-history NUMBER --limit 20 --offset 0` reads its separate history.
 Use ordinary **comments** for lasting findings, decisions, essential questions,
 and final verification. Keep routine progress in status so comments stay useful.
@@ -168,8 +170,8 @@ still race the final check. See `docs/github-drain.md` in the source repository.
 
 ## Issue workers
 
-Issues labeled `task:plan` or `task:research` are artifact tasks. Their worker
-prompt replaces implementation and Git delivery with a plan or research findings
+Issues labeled `task:plan` are artifact tasks. Customize their Plan prompt in
+project settings; it replaces implementation and Git delivery with a plan
 saved as issue-linked artifacts. Use a mindmap for related output and draft
 follow-up issues for proposed implementation; do not start them. These tasks
 close on successful artifact delivery even in PR-enabled projects. The web
@@ -250,7 +252,12 @@ completion, pickup, or shutdown. Replay is FIFO with acknowledgments and exponen
 backoff; duplicates after acknowledgment loss are acceptable. Explicit human review
 or approval waits still require a reply.
 Test against an isolated DB and Inbox socket. Approval decisions must be explicit;
-cancellation is never approval. Unsupported input requests block for manual resumption.
+cancellation is never approval. MCP forms offer an explicit ‘Continue without
+this tool’ choice that cancels only the tool request and preserves the running
+session; form values and credentials are never collected. Other unsupported
+input requests block for manual resumption. Save delivery and verification
+evidence in an issue comment before optional cleanup, and run cleanup separately
+from read-only Git, CI and verification commands.
 
 ## Issue priority order
 
