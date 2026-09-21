@@ -3650,6 +3650,34 @@ final class QuickIssueShortcut {
     }
 }
 
+/// The browser shortcut uses the same modifiers as native Quick Add, with O.
+/// Carbon registration works across apps without Accessibility permissions.
+final class IssuesShortcut {
+    private var hotKey: EventHotKeyRef?
+    private var handler: EventHandlerRef?
+    let open: () -> Void
+    init(open: @escaping () -> Void) {
+        self.open = open
+        var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var identity = EventHotKeyID()
+            guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identity) == noErr,
+                  identity.signature == 0x4842494F, identity.id == 1 else { return OSStatus(eventNotHandledErr) }
+            Unmanaged<IssuesShortcut>.fromOpaque(context).takeUnretainedValue().open()
+            return noErr
+        }, 1, &event, context, &handler)
+        guard installed == noErr else { NSLog("Hey Boss Issues shortcut handler unavailable (%d); use the menu.", installed); return }
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_O), UInt32(cmdKey | controlKey | optionKey | shiftKey), EventHotKeyID(signature: 0x4842494F, id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        if status != noErr { NSLog("Hey Boss Issues shortcut unavailable (%d); use the menu.", status) }
+    }
+    deinit {
+        if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let handler { RemoveEventHandler(handler) }
+    }
+}
+
 /// Opens the normal browser, reusing or starting the local issue service.
 final class IssuesLauncher {
     enum Page: String {
@@ -3773,6 +3801,7 @@ final class NativeMindmapViewer: NSObject, WKNavigationDelegate {
 }
 
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate {
+    lazy var issuesShortcut = IssuesShortcut { [weak self] in self?.showIssues() }
     lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in self?.showQuickIssue() }
     @objc func showQuickIssue() { issuesLauncher.open(cli: cli, page: .quickIssue) }
     var openInbox: (() -> Void)?
@@ -3784,7 +3813,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     lazy var mindmapViewer = NativeMindmapViewer()
     @objc func showMindmaps() { if let openMindmaps { openMindmaps() } else { mindmapViewer.open(cli: cli) } }
     let inboxMenuItem = NSMenuItem(title: "Inbox…", action: nil, keyEquivalent: "")
-    let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "")
+    let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "o")
     let mindmapsMenuItem = NSMenuItem(title: "Mindmaps…", action: nil, keyEquivalent: "")
     let statusMenu = NSMenu()
     let activityMenuItem = NSMenuItem(title: "Activity status unavailable", action: nil, keyEquivalent: "")
@@ -3990,6 +4019,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         menu.addItem(inboxMenuItem)
         issuesMenuItem.action = #selector(showIssues)
         issuesMenuItem.target = self
+        issuesMenuItem.keyEquivalentModifierMask = [.command, .control, .option, .shift]
         menu.addItem(issuesMenuItem)
         mindmapsMenuItem.action = #selector(showMindmaps)
         mindmapsMenuItem.target = self
@@ -4804,6 +4834,7 @@ struct Daemon {
         let ui = Interface(present: true)
         let overview = AgentsOverview()
         _ = overview.quickIssueShortcut
+        _ = overview.issuesShortcut
         let secrets = SecretPrompts()
         let actions = DesktopActions(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"])
         guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_STATE_DIR"] else {

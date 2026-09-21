@@ -12,10 +12,12 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ISSUES_SHORTCUT_ONLY"] == "1" { auditIssuesShortcut(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MINDMAP_ONLY"] == "1" { auditNativeMindmap(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
     auditQuickIssue()
+    auditIssuesShortcut()
     auditSecretInput()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HEALTH_ONLY"] == "1" { auditMachineHealth(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
@@ -161,6 +163,52 @@ func auditNativeMindmap() {
     precondition(viewer.policy(for: URL(string: "file:///tmp/private")!) == .cancel && browserURLs.count == count)
     viewer.window.close()
     print("Passed: native mindmap window, focused URL, persistent project storage, reopen and resource links")
+}
+
+func auditIssuesShortcut() {
+    let overview = AgentsOverview(present: false, cli: nil)
+    var urls: [URL] = []
+    overview.issuesLauncher.probe = { $0(true) }
+    overview.issuesLauncher.openURL = { urls.append($0); return true }
+    let item = overview.issuesMenuItem
+    precondition(item.keyEquivalent == "o" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
+    precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
+    precondition(urls.count == 1 && urls[0].absoluteString == "http://127.0.0.1:4781/")
+    let shortcut = IssuesShortcut { overview.showIssues() }
+    withExtendedLifetime(shortcut) {
+        var event: EventRef?
+        precondition(CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), GetCurrentEventTime(), 0, &event) == noErr)
+        defer { ReleaseEvent(event) }
+        for (signature, id, expected) in [(UInt32(0x4842494F), UInt32(1), 2), (UInt32(0x4842494F), UInt32(2), 2), (UInt32(0x48425149), UInt32(1), 2)] {
+            var identity = EventHotKeyID(signature: signature, id: id)
+            precondition(SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &identity) == noErr)
+            _ = SendEventToEventTarget(event, GetApplicationEventTarget())
+            precondition(urls.count == expected, "Only the Issues hotkey opens the browser")
+        }
+    }
+    var failures: [String] = []
+    overview.issuesLauncher.probe = { $0(false) }
+    overview.issuesLauncher.report = { failures.append($0) }
+    overview.showIssues()
+    precondition(failures.count == 1 && !overview.issuesLauncher.launching && urls.count == 2)
+    let launcher = IssuesLauncher()
+    var starts = 0, probes = 0
+    launcher.start = { _ in starts += 1 }
+    launcher.openURL = { urls.append($0); return true }
+    launcher.probe = { probes += 1; $0(probes > 1) }
+    launcher.open(cli: "/usr/bin/true")
+    precondition(starts == 1 && urls.count == 3 && !launcher.launching, "Start the missing service before opening the browser")
+    var ready: ((Bool) -> Void)?
+    launcher.probe = { ready = $0 }
+    launcher.open(cli: nil); launcher.open(cli: nil)
+    ready?(true)
+    precondition(starts == 1 && urls.count == 4 && !launcher.launching, "Repeated shortcut activation must reuse the service")
+    launcher.report = { failures.append($0) }
+    launcher.probe = { $0(true) }
+    launcher.openURL = { _ in false }
+    launcher.open(cli: nil)
+    precondition(failures.count == 2 && failures.last!.contains("http://127.0.0.1:4781/"))
+    print("Passed: Issues menu shortcut, global callback, browser destination, unrelated hotkeys, cold start, repeated activation and error recovery")
 }
 
 func auditQuickIssue() {
