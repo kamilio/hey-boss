@@ -1093,6 +1093,12 @@ fn command_context(value: &Value) -> String {
     context
 }
 pub(crate) fn print_text(value: &Value) {
+    if let Some(warning) = value["ownership_warning"].as_str() {
+        eprintln!("Warning: {}", line(&json!(warning)));
+        if let Some(presence) = value["assignee_presence"].as_str() {
+            eprintln!("Assignee process: {presence}.");
+        }
+    }
     if let Some(warnings) = value["project_warnings"].as_array() {
         for warning in warnings {
             eprintln!("Warning: {}", line(&warning["message"]));

@@ -474,19 +474,14 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             return Err(invalid("Status update identity already exists"));
         }
         if old.is_null() && change["bootstrap"] != true {
-            let owned = rows(
+            let eligible = rows(
                 db,
-                "SELECT 1 FROM issues i JOIN fleet_allocations a ON a.project_id=i.project_id AND a.issue_number=i.number WHERE i.project_id=? AND i.number=? AND i.assignee=? AND a.node=? AND i.state='open' AND i.draft=0 AND i.deleted_at IS NULL",
-                &[
-                    after["project_id"].clone(),
-                    after["issue_number"].clone(),
-                    after["author"].clone(),
-                    json!(node),
-                ],
+                "SELECT 1 FROM issues WHERE project_id=? AND number=? AND state='open' AND draft=0 AND deleted_at IS NULL",
+                &[after["project_id"].clone(), after["issue_number"].clone()],
             )?;
-            if owned.is_empty() {
+            if eligible.is_empty() {
                 return Err(invalid(
-                    "Status owner or machine allocation changed while offline; update retained for review",
+                    "Issue closed, drafted or deleted while offline; status update retained for review",
                 ));
             }
         }
@@ -1783,16 +1778,58 @@ mod tests {
         main.db
             .execute("UPDATE issues SET assignee=NULL", [])
             .unwrap();
-        agent.db.execute("INSERT INTO issue_status_updates VALUES('status-stale','named:Native fleet',1,'human:fixture','red','A stale owner update.',102)",[]).unwrap();
+        main.db
+            .execute("UPDATE fleet_allocations SET node='another-machine'", [])
+            .unwrap();
+        agent.db.execute("INSERT INTO issue_status_updates VALUES('status-unassigned','named:Native fleet',1,'human:fixture','red','An update without ownership.',102)",[]).unwrap();
         let replay = accept_changes(&main.db, "agent", &journal(&agent.db, 0).unwrap()).unwrap();
-        assert!(replay.iter().any(|r| r["state"] == "conflict"));
+        assert!(
+            replay.iter().all(|r| r["state"] != "conflict"),
+            "{replay:?}"
+        );
         assert_eq!(
             main.db
                 .query_row("SELECT count(*) FROM issue_status_updates", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &replay,
+        )
+        .unwrap();
+        assert!(
+            rows(&agent.db, "SELECT assignee FROM issues", &[]).unwrap()[0]["assignee"].is_null()
+        );
+        assert_eq!(
+            rows(&main.db, "SELECT node FROM fleet_allocations", &[]).unwrap()[0]["node"],
+            "another-machine"
+        );
+        for (id, change) in [
+            ("status-closed", "state='closed'"),
+            ("status-draft", "state='open',draft=1"),
+            ("status-deleted", "draft=0,deleted_at=1"),
+        ] {
+            main.db
+                .execute(&format!("UPDATE issues SET {change}"), [])
+                .unwrap();
+            agent.db.execute("INSERT INTO issue_status_updates VALUES(?1,'named:Native fleet',1,'human:fixture','red','Not eligible.',103)",[id]).unwrap();
+            let replay =
+                accept_changes(&main.db, "agent", &journal(&agent.db, 0).unwrap()).unwrap();
+            assert!(replay.iter().any(|r| r["state"] == "conflict"));
+            assert_eq!(
+                rows(
+                    &main.db,
+                    "SELECT count(*) AS count FROM issue_status_updates",
+                    &[]
+                )
+                .unwrap()[0]["count"],
+                3
+            );
+        }
     }
 
     #[test]
