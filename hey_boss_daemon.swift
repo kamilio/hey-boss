@@ -396,7 +396,7 @@ final class MobileHub {
     func track(_ row: Record) throws { try store.database.execute("INSERT INTO mobile_outbox(id, revision) VALUES('\(row.taskID.replacingOccurrences(of: "'", with: "''"))', 1) ON CONFLICT(id) DO UPDATE SET revision=revision+1") }
     func call(_ path: String, method: String = "GET", body: [String: Any]? = nil) throws -> (Int, [String: Any]) {
         guard let base = URL(string: configuration.url), let url = URL(string: path, relativeTo: base)?.absoluteURL, url.host == base.host else { throw StorageError(description: "Invalid mobile endpoint") }
-        var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 2
+        var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 10
         request.setValue("Bearer " + configuration.token, forHTTPHeaderField: "Authorization")
         if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let completed = DispatchSemaphore(value: 0); let lock = NSLock()
@@ -408,7 +408,7 @@ final class MobileHub {
             response = (http.statusCode, json)
         }
         task.resume()
-        guard completed.wait(timeout: .now() + 3) == .success else { task.cancel(); throw StorageError(description: "Mobile service unavailable. The request remains open; try again when connected.") }
+        guard completed.wait(timeout: .now() + 11) == .success else { task.cancel(); throw StorageError(description: "Mobile service unavailable. The request remains open; try again when connected.") }
         lock.lock(); defer { lock.unlock() }
         if failure != nil { throw StorageError(description: "Mobile service unavailable. The request remains open; try again when connected.") }
         guard let response else { throw StorageError(description: "No mobile response") }; return response

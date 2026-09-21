@@ -58,6 +58,9 @@ fn lookup_resolves_issue_url_project_before_worker_default_without_mutating() {
     assert_eq!(value["issue"]["title"], "Lookup example");
     assert_eq!(value["issue"]["body"], "# Details\nRead only");
     assert_eq!(value["issue"]["version"], 1);
+    let phone = f.value("https://hey-boss-mobile-kamil.fly.dev/issues#project=github.com%2Fpoe-platform%2Fpoe-code&issue=1");
+    assert_eq!(phone["route"]["entity"], "issue");
+    assert_eq!(phone["issue"]["title"], "Lookup example");
     let text = f.lookup(url, false);
     assert!(text.status.success());
     let text = String::from_utf8(text.stdout).unwrap();

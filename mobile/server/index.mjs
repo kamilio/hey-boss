@@ -1,19 +1,26 @@
 import express from 'express';
 import {agentRoutes} from './agents.mjs';
+import {webRoutes} from './web.mjs';
+import {checkpointRoutes} from './checkpoint.mjs';
 import webpush from 'web-push';
-import {mkdirSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {HubStore,HubError,equal,token} from './store.mjs';
 import {pushContent,preview} from './markdown-text.mjs';
-export function createApp({store=new HubStore(),hubToken,origin,secure=true,push=webpush,vapid,now=Date.now}={}){
+export function createApp({store=new HubStore(),hubToken,origin,secure=true,push=webpush,vapid,now=Date.now,checkpoint=false}={}){
  if(!hubToken||hubToken.length<32)throw Error('HUB_TOKEN must contain at least 32 characters');
- const app=express();app.disable('x-powered-by');app.use('/api/bridge/artifacts',express.json({limit:'32mb'}));app.use('/api/artifact-requests',express.json({limit:'16mb'}));app.use(express.json({limit:'8mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
+ const app=express();app.disable('x-powered-by');app.use('/api/bridge/checkpoint',express.json({limit:'64mb'}));app.use('/api/bridge/artifacts',express.json({limit:'32mb'}));app.use('/api/artifact-requests',express.json({limit:'16mb'}));app.use(express.json({limit:'16mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
  if(vapid)push.setVapidDetails(vapid.subject,vapid.publicKey,vapid.privateKey);
  app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"});if(req.method!=='GET'&&req.headers.origin&&req.headers.origin!==origin)return res.status(403).json({error:'Request origin is not allowed'});next();});
  const change=()=>{for(const res of listeners)res.write('data: '+JSON.stringify({revision:store.revision(),connected:Date.now()-bridgeSeen<30000})+'\n\n');};
  const auth=(req,res,next)=>{const secret=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('hb_session='))?.slice(11);req.device=secret?store.device(secret):null;if(!req.device)return res.status(401).json({error:'Pair this device to continue'});next();};
  const bridge=(req,res,next)=>{if(!equal(req.headers.authorization,'Bearer '+hubToken))return res.status(401).json({error:'Invalid bridge credentials'});bridgeSeen=Date.now();next();};
+ const closeCheckpoint=checkpointRoutes(app,{store,bridge,enabled:checkpoint,hubToken,onRestore:()=>{
+  const keys=store.db.prepare("SELECT value FROM metadata WHERE key='vapid'").get();
+  if(vapid&&keys){Object.assign(vapid,JSON.parse(keys.value));push.setVapidDetails(vapid.subject,vapid.publicKey,vapid.privateKey);}
+ }});
  const closeAgents=agentRoutes(app,{auth,bridge,store,now});
+ const closeWeb=webRoutes(app,{auth,bridge});
+ app.use('/issue-web',auth,express.static(fileURLToPath(new URL('../dist/issue-web/',import.meta.url))));
  app.get('/healthz',(req,res)=>res.json({ok:true}));
  app.post('/api/bridge/pair-code',bridge,(req,res)=>res.json({code:store.pairing(),expiresIn:300}));
  app.post('/api/pair',(req,res)=>{
@@ -31,7 +38,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.get('/api/bridge/issues',bridge,(req,res)=>res.json({creations:store.pendingIssues()}));
  app.post('/api/bridge/issues/:id/result',bridge,(req,res)=>{store.finishIssue(req.params.id,req.body);change();res.json({ok:true});});
  app.get('/project-resource',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/resource.html',import.meta.url))));
- app.get('/artifacts',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/artifacts.html',import.meta.url))));
+ app.get('/artifacts',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/issue-web/artifacts.html',import.meta.url))));
  app.use('/agent-web',auth,express.static(fileURLToPath(new URL('../dist/agent-web/',import.meta.url))));
  app.use('/artifact-web',auth,express.static(fileURLToPath(new URL('../dist/artifact-web/',import.meta.url))));
  app.get('/api/artifact-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects(),connected:store.issueConnected()}));
@@ -107,11 +114,11 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
    }
   }finally{pumping=false;}
  };
- app.locals.pump=pump;app.locals.close=()=>{closeAgents();for(const res of listeners)res.end();};return app;
+ app.locals.pump=pump;app.locals.close=()=>{closeCheckpoint();closeWeb();closeAgents();for(const res of listeners)res.end();};return app;
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
- const directory=process.env.DATA_DIR??'.data';mkdirSync(directory,{recursive:true});const store=new HubStore(directory+'/hub.db');
+ const store=new HubStore();
  let keys=store.db.prepare("SELECT value FROM metadata WHERE key='vapid'").get();if(!keys){keys={value:JSON.stringify(webpush.generateVAPIDKeys())};store.db.prepare("INSERT INTO metadata VALUES('vapid',?)").run(keys.value);}const vapid={...JSON.parse(keys.value),subject:process.env.VAPID_SUBJECT??process.env.PUBLIC_ORIGIN};
- const app=createApp({store,hubToken:process.env.HUB_TOKEN,origin:process.env.PUBLIC_ORIGIN,secure:process.env.INSECURE_LOCAL!=='1',vapid});const server=app.listen(Number(process.env.PORT??8787),'0.0.0.0');const timer=setInterval(()=>app.locals.pump().catch(()=>{}),2000);timer.unref();
+ const app=createApp({store,hubToken:process.env.HUB_TOKEN,origin:process.env.PUBLIC_ORIGIN,secure:process.env.INSECURE_LOCAL!=='1',vapid,checkpoint:true});const server=app.listen(Number(process.env.PORT??8787),'0.0.0.0');const timer=setInterval(()=>app.locals.pump().catch(()=>{}),2000);timer.unref();
  for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{clearInterval(timer);app.locals.close();server.close(()=>{store.close();process.exit(0);});setTimeout(()=>process.exit(1),10000).unref();});
 }

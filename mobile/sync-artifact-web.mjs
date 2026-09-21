@@ -1,4 +1,5 @@
 import {readFileSync,writeFileSync,mkdirSync,cpSync,rmSync} from 'node:fs';
+import './sync-issue-web.mjs';
 const source=new URL('../src/issues/web/',import.meta.url);
 const destination=new URL('./public/artifact-web/',import.meta.url);
 mkdirSync(destination,{recursive:true});

@@ -19,8 +19,6 @@ def main():
     token=existing['token'] if existing and existing['url']==f'https://{args.app}.fly.dev' else secrets.token_urlsafe(48)
     app_check=subprocess.run(['flyctl','status','--app',args.app],capture_output=True)
     if app_check.returncode:run(['flyctl','apps','create',args.app,'--org',args.org])
-    volumes=json.loads(run(['flyctl','volumes','list','--app',args.app,'--json'],capture_output=True,text=True).stdout)
-    if not any(v.get('name')=='hey_boss_data' for v in volumes):run(['flyctl','volumes','create','hey_boss_data','--app',args.app,'--region',args.region,'--size','1','--yes'])
     run(['flyctl','secrets','import','--app',args.app,'--stage'],input=f'HUB_TOKEN={token}\nPUBLIC_ORIGIN=https://{args.app}.fly.dev\n',text=True,stdout=subprocess.DEVNULL)
     run(['flyctl','deploy','--config','mobile/fly.toml','--dockerfile','mobile/Dockerfile','--app',args.app,'--ha=false','--primary-region',args.region],cwd=ROOT)
     url=f'https://{args.app}.fly.dev'

@@ -6,7 +6,7 @@ COPY mobile/ .
 COPY src/issues/web/ /src/issues/web/
 RUN npm run build
 FROM node:22-alpine
-ENV NODE_ENV=production PORT=8787 DATA_DIR=/data
+ENV NODE_ENV=production PORT=8787
 WORKDIR /app
 COPY mobile/package*.json ./
 RUN npm ci --omit=dev

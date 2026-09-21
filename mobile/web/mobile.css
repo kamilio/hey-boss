@@ -1,0 +1,24 @@
+/* The regular issue layout already adapts to narrow screens. Keep primary
+   phone destinations quiet and leave project documents one tap away. */
+.app-navigation .navigation-inner{justify-content:center}
+#nav-workers{display:none}
+.app-navigation a{min-height:44px}
+.project-resources{display:flex;justify-content:flex-end;gap:18px;max-width:1100px;margin:0 auto;padding:12px 20px;font-size:12px;color:var(--muted)}
+.project-resources a{display:inline-flex;align-items:center;gap:6px;min-height:44px}
+.project-resources svg{width:15px;height:15px}
+input,textarea,select{font-size:16px}
+body{padding-bottom:env(safe-area-inset-bottom)}
+@media(max-width:600px){
+ .header-inner{gap:8px}
+ .header-divider{display:none}
+ .project-control{min-width:0}
+ .project-trigger{max-width:max(64px,calc(100vw - 272px));min-width:0}
+ #project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .header-right{flex-shrink:0}
+ .instructions-trigger span:not([data-icon]){display:none}
+ .connection{display:none}
+ .navigation-inner{gap:0}
+ .app-navigation a{flex:1;justify-content:center;padding-left:8px;padding-right:8px;font-size:12px}
+ .detail-top h1{overflow-wrap:anywhere}
+ .editor-dialog{max-height:calc(100dvh - 16px)}
+}

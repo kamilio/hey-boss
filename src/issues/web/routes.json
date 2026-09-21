@@ -1,7 +1,7 @@
 [
-  {"paths":["/"],"query_selector":"task","entity":"notice","collection":"inbox"},
-  {"paths":["/"],"when":{"view":"inbox"},"selector":"notice","entity":"notice","collection":"inbox"},
-  {"paths":["/"],"selector":"issue","number":true,"entity":"issue","collection":"issues"},
+  {"paths":["/","/issues"],"query_selector":"task","entity":"notice","collection":"inbox"},
+  {"paths":["/","/issues"],"when":{"view":"inbox"},"selector":"notice","entity":"notice","collection":"inbox"},
+  {"paths":["/","/issues"],"selector":"issue","number":true,"entity":"issue","collection":"issues"},
   {"paths":["/artifacts"],"selector":"artifact","entity":"artifact","collection":"artifacts"},
   {"paths":["/mm"],"selector":"node","entity":"node","collection":"mindmap"},
   {"paths":["/project-resource"],"present":"issue","selector":"issue","number":true,"entity":"issue","collection":"issues"},
