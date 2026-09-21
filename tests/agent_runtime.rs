@@ -149,10 +149,10 @@ fn inspecting_a_burst_preserves_events_and_terminal_state() {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
-        let mut deltas = 0;
+        let mut text = String::new();
         loop {
             match session.receive(Duration::ZERO).unwrap() {
-                Some(Event::TextDelta { .. }) => deltas += 1,
+                Some(Event::TextDelta { text: delta }) => text.push_str(&delta),
                 Some(Event::TurnCompleted { status, .. }) => {
                     assert_eq!(status, TurnStatus::Completed);
                     break;
@@ -161,8 +161,68 @@ fn inspecting_a_burst_preserves_events_and_terminal_state() {
                 None => panic!("{provider:?} lost completion"),
             }
         }
-        assert_eq!(deltas, 161);
+        assert_eq!(text, format!("burst completion{}", "x".repeat(160)));
     }
+}
+
+#[test]
+fn consecutive_streaming_deltas_do_not_exhaust_the_control_queue() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let mut session = launch(provider, None);
+        session.prompt("large burst completion", None).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.inspect().unwrap().turn.is_some() {
+            assert!(Instant::now() < deadline);
+        }
+        let mut text = String::new();
+        while let Some(event) = session.receive(Duration::ZERO).unwrap() {
+            match event {
+                Event::TextDelta { text: delta } => text.push_str(&delta),
+                Event::TurnCompleted { status, .. } => assert_eq!(status, TurnStatus::Completed),
+                _ => {}
+            }
+        }
+        assert_eq!(text, format!("large burst completion{}", "x".repeat(600)));
+        assert!(!session.state().outcome_uncertain);
+    }
+}
+
+#[test]
+fn merged_deltas_preserve_utf8_size_and_tool_boundaries() {
+    let mut session = launch(Provider::Codex, None);
+    session.prompt("coalesce boundaries", None).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.inspect().unwrap().turn.is_some() {
+        assert!(Instant::now() < deadline);
+    }
+    let mut fragments = Vec::new();
+    let mut saw_tool = false;
+    while let Some(event) = session.receive(Duration::ZERO).unwrap() {
+        match event {
+            Event::TextDelta { text } => {
+                assert!(text.len() <= 32000);
+                if saw_tool {
+                    assert_eq!(text, "after tool");
+                }
+                fragments.push(text);
+            }
+            Event::ToolStarted { .. } => saw_tool = true,
+            _ => {}
+        }
+    }
+    assert!(saw_tool);
+    assert_eq!(fragments.len(), 3);
+    assert_eq!(
+        fragments.concat(),
+        format!(
+            "coalesce boundaries{}{}{}after tool",
+            "é".repeat(10000),
+            "b".repeat(10000),
+            "c".repeat(10000)
+        )
+    );
 }
 
 #[test]
