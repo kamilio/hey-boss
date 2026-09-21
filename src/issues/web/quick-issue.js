@@ -258,7 +258,7 @@ const HeyBossQuickIssue = (() => {
         link.textContent = `Created #${value.issue.number} in ${value.project.name}`;
         status.replaceChildren(link); status.hidden = false;
         clearTimeout(statusTimer); statusTimer = setTimeout(() => status.hidden = true, 10000);
-        window.dispatchEvent(new CustomEvent("hey-boss-issue-created", {detail:value}));
+        window.dispatchEvent(new CustomEvent("hey-boss-issue-created", {detail:{...value, host:savedHost}}));
       } catch (e) { fail(`${e.message} Your title is preserved; retry to submit safely.`); }
       finally { saving = false; input.disabled = false; bottom.disabled = false; kind.disabled = false; if (dialog.open) { preview(); error.hidden = false; input.focus(); } }
     };
