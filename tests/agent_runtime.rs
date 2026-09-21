@@ -138,6 +138,82 @@ fn broken_rpc_input_marks_delivery_uncertain_and_prevents_replay() {
 }
 
 #[test]
+fn inspecting_a_burst_preserves_events_and_terminal_state() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let mut session = launch(provider, None);
+        session.prompt("burst completion", None).unwrap();
+        // Let the fixture fill the bounded transport before inspecting it.
+        std::thread::sleep(Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.inspect().unwrap().turn.is_some() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut deltas = 0;
+        loop {
+            match session.receive(Duration::ZERO).unwrap() {
+                Some(Event::TextDelta { .. }) => deltas += 1,
+                Some(Event::TurnCompleted { status, .. }) => {
+                    assert_eq!(status, TurnStatus::Completed);
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("{provider:?} lost completion"),
+            }
+        }
+        assert_eq!(deltas, 161);
+    }
+}
+
+#[test]
+fn disconnect_keeps_buffered_confirmed_completion_in_last_observed_state() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let mut session = launch(provider, None);
+        session.prompt("completion then disconnect", None).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.inspect().is_ok() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(session.state().outcome_uncertain);
+        assert!(
+            session.state().turn.is_none(),
+            "{provider:?} discarded confirmed completion on EOF"
+        );
+        assert!(
+            session
+                .prompt("must not restart a disconnected agent", None)
+                .is_err()
+        );
+        // Confirmed events remain available even though new controls are disabled.
+        let Event::TurnCompleted { status, .. } = until(&mut session, |event| {
+            matches!(event, Event::TurnCompleted { .. })
+        }) else {
+            unreachable!()
+        };
+        assert_eq!(status, TurnStatus::Completed);
+    }
+}
+
+#[test]
+fn stopping_does_not_reactivate_a_buffered_turn_start() {
+    let mut session = launch(Provider::Codex, None);
+    let turn = session.prompt("start before ack", None).unwrap();
+    session.stop().unwrap();
+    let mut completions = 0;
+    while let Some(event) = session.receive(Duration::ZERO).unwrap() {
+        if let Event::TurnCompleted { id, status, .. } = event {
+            assert_eq!(id, turn);
+            assert_eq!(status, TurnStatus::Interrupted);
+            completions += 1;
+        }
+    }
+    assert_eq!(completions, 1);
+    assert!(session.inspect().unwrap().turn.is_none());
+}
+
+#[test]
 fn cross_provider_resume_is_rejected_before_spawning() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let result = AgentSession::launch(Launch {

@@ -527,7 +527,9 @@ impl AgentSession {
                     serde_json::from_str(&self.output).ok(),
                     Value::Null,
                 )?;
-                self.refresh_pi()?;
+                if !self.refreshing_pi {
+                    self.refresh_pi()?;
+                }
             }
             _ => self.events.push_back(Event::Other(value)),
         }
