@@ -703,18 +703,29 @@ Empty, uninitialized submodule directories do not block cleanup; submodule
 contents and symlinked submodule paths remain protected.
 
 The **Caches** tab lists known disposable candidates and preservation reasons.
+Cache inspection runs before the slower Git inventory. Quiet observations allow
+the actual duration of the previous completed check as well as the timer interval,
+so large inventories do not continually reset the cleanup grace period.
 Cleanup covers Chrome/Chrome Beta cache subdirectories, npm/pip/uv download
 caches, macOS Chrome signing copies, and stale hey-boss health test fixtures in
 the OS user temp directory. Signing copies must be inactive for an hour; other
 candidates for a day. It checks ownership, recent changes throughout each tree,
 open files, and stable identities across repeated observations, then rechecks
 before removal. Symlinked roots, incomplete inspections and oversized trees are
-preserved; symlinks inside caches are never followed. Browser profiles, history,
-cookies, bookmarks, offline storage and arbitrary project artifacts are not
+preserved; symlinks inside caches are never followed.
+The recognized user-owned Chrome signing-copy container may include its copied
+root-owned executable; all directories must still belong to the current user.
+Browser profiles, history, cookies, bookmarks, offline storage and arbitrary project artifacts are not
 cleanup targets. Use the cache checkbox or `configure --caches false` to disable.
 The footer and CLI report measured **net free-space change** on the home volume.
 This includes concurrent writes and shared APFS blocks, rather than summing
 directory sizes that can substantially overstate reclaimed space.
+Worker-log trimming is disabled by default; enable it separately with
+`hey-boss health configure --logs true`. It trims `fleet-worker-<id>.log` diagnostic files above
+128 MiB, retaining the latest 64 MiB in the same inode so existing append-only
+workers keep running. Issue history, session transcripts and databases are
+preserved. As with copy-truncate log rotation, concurrent diagnostic output can
+race trimming; durable issue progress remains unchanged.
 
 Scheduling is opt-in. The macOS job runs at standard priority with `nice 10`, not
 launchd's background tier: that tier is throttled whenever builds or tests run, which

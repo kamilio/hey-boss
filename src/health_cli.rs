@@ -60,6 +60,9 @@ pub enum Action {
         worktrees: Option<bool>,
         #[arg(long, action = clap::ArgAction::Set)]
         caches: Option<bool>,
+        /// Limit managed worker diagnostics to 128 MiB, retaining the latest 64 MiB.
+        #[arg(long, action = clap::ArgAction::Set)]
+        logs: Option<bool>,
     },
     #[command(hide = true)]
     Run,
@@ -115,6 +118,7 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
             processes,
             worktrees,
             caches,
+            logs,
         } => {
             let mut args = vec!["configure".into()];
             if let Some(value) = processes {
@@ -125,6 +129,9 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
             }
             if let Some(value) = caches {
                 args.extend(["--caches".into(), value.to_string()]);
+            }
+            if let Some(value) = logs {
+                args.extend(["--logs".into(), value.to_string()]);
             }
             args
         }
@@ -172,6 +179,12 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
         println!(
             "Net free disk-space change: {:+.1} MiB (includes concurrent writes and shared blocks)",
             change as f64 / 1_048_576.0
+        );
+    }
+    if s.trimmed_logs > 0 {
+        println!(
+            "Trimmed {} oversized worker logs, retaining recent diagnostics and active writers",
+            s.trimmed_logs
         );
     }
     println!(
@@ -294,6 +307,7 @@ pub fn run(action: &Action) -> io::Result<()> {
             processes,
             worktrees,
             caches,
+            logs,
         } => {
             let _lock = store.lock()?;
             let mut config = store.config()?;
@@ -306,10 +320,13 @@ pub fn run(action: &Action) -> io::Result<()> {
             if let Some(v) = caches {
                 config.clean_caches = *v;
             }
+            if let Some(v) = logs {
+                config.trim_worker_logs = *v;
+            }
             store.save("config.json", &config)?;
             store.record_setting(&format!(
-                "Process harvesting: {}; worktree cleanup: {}; cache cleanup: {}",
-                config.harvest_processes, config.clean_worktrees, config.clean_caches
+                "Process harvesting: {}; worktree cleanup: {}; cache cleanup: {}; worker-log trimming: {}",
+                config.harvest_processes, config.clean_worktrees, config.clean_caches, config.trim_worker_logs
             ))?;
             println!("Cleanup settings updated.");
             Ok(())
