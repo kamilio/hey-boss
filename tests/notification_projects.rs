@@ -190,7 +190,7 @@ fn notifications_share_git_project_across_subdirectories_and_worktrees() {
 }
 
 #[test]
-fn overrides_use_shared_names_reject_ambiguity_and_preserve_hidden_state() {
+fn overrides_reuse_unique_names_warn_about_collisions_and_preserve_hidden_state() {
     let f = Fixture::new();
     f.notify(
         f.alert(&f.cwd)
@@ -241,13 +241,25 @@ fn overrides_use_shared_names_reject_ambiguity_and_preserve_hidden_state() {
         f.alert(&f.cwd)
             .args(["--project", "github.com/other/Atlas"]),
     );
-    let output = f
-        .alert(&f.cwd)
-        .args(["--project", "Atlas"])
-        .output()
+    assert_eq!(
+        f.notify(f.alert(&f.cwd).args(["--project", "Atlas"]))["project"],
+        "Atlas"
+    );
+    let count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM projects WHERE name='Atlas'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("ambiguous"));
+    assert_eq!(count, 1);
+    assert!(
+        f.projects()["project_warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["rejected_id"] == "github.com/other/Atlas")
+    );
     assert_eq!(
         f.notify(
             f.alert(&f.cwd)
