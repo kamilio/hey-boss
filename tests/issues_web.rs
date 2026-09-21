@@ -774,7 +774,10 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
         assert_eq!(value["use_goal"], use_goal);
         let text = value["prompt"].as_str().unwrap();
-        assert_eq!(text, expected);
+        assert!(text.starts_with(&format!(
+            "{expected}\n\nRecord delivery and verification evidence"
+        )));
+        assert!(text.contains("hey-boss issue comment <number>"));
         assert!(!text.contains("--project"));
         assert_eq!(value["objective"], text);
     }
@@ -1492,13 +1495,17 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
                     "Ship directly 1."
                 }
             );
+            let text = preview["prompt"].as_str().unwrap();
+            assert!(text.starts_with(&format!(
+                "{expected}\n\nRecord delivery and verification evidence"
+            )));
+            assert!(text.contains("hey-boss issue comment 1"));
             if prs {
-                let text = preview["prompt"].as_str().unwrap();
-                assert!(text.starts_with(&format!("{expected}\n\nPR handoff:")));
+                assert!(text.contains("\n\nPR handoff:"));
                 assert!(text.contains("Keep the issue open until the actual fix PR is merged"));
                 assert!(text.contains("hey-boss issue assign-to-boss 1"));
             } else {
-                assert_eq!(preview["prompt"], expected);
+                assert!(!text.contains("PR handoff:"));
             }
             assert_eq!(preview["use_goal"], true);
             web.ok(json!({"action":"configure_project","prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides}));
