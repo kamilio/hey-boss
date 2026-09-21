@@ -449,6 +449,49 @@ fn cross_provider_resume_is_rejected_before_spawning() {
 }
 
 #[test]
+fn executable_lookup_resolves_relative_path_entries_before_changing_cwd() {
+    const PROBE: &str = "HEY_BOSS_RELATIVE_PATH_PROBE";
+    if let Some(expected) = std::env::var_os(PROBE) {
+        assert_eq!(Provider::Pi.binary().unwrap(), PathBuf::from(expected));
+        return;
+    }
+    let root = std::env::temp_dir().join(format!(
+        "hey-boss-relative-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::os::unix::fs::symlink(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
+        root.join("bin/pi"),
+    )
+    .unwrap();
+    // Isolate process environment changes from parallel tests.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "executable_lookup_resolves_relative_path_entries_before_changing_cwd",
+            "--nocapture",
+        ])
+        .current_dir(&root)
+        .env("PATH", "bin")
+        .env_remove("HEY_BOSS_PI")
+        .env(PROBE, root.canonicalize().unwrap().join("bin/pi"))
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn pi_retries_are_not_terminal_and_extension_input_can_be_cancelled() {
     let mut session = launch(Provider::Pi, None);
     session.prompt("retry", None).unwrap();

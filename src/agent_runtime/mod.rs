@@ -55,16 +55,21 @@ impl Provider {
             }
             return Ok(path);
         }
-        let mut candidates: Vec<_> =
+        if let Some(binary) = find_executable(
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .map(|p| p.join(self.name()))
-                .collect();
+                .map(|p| p.join(self.name())),
+        )? {
+            return Ok(binary);
+        }
+        let mut candidates = Vec::new();
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
-            candidates.extend([
+            if let Some(binary) = find_executable([
                 home.join(".local/bin").join(self.name()),
                 home.join(".cargo/bin").join(self.name()),
-            ]);
+            ])? {
+                return Ok(binary);
+            }
             if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
                 let mut versions: Vec<_> = versions.flatten().map(|p| p.path()).collect();
                 versions.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
@@ -83,16 +88,20 @@ impl Provider {
         if self == Self::Codex {
             candidates.push("/Applications/Codex.app/Contents/Resources/codex".into());
         }
-        candidates
-            .into_iter()
-            .find(|p| executable(p))
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "{} CLI was not found. Install it or set {key} to its absolute path.",
-                    self.name()
-                ))
-            })
+        find_executable(candidates)?.ok_or_else(|| {
+            io::Error::other(format!(
+                "{} CLI was not found. Install it or set {key} to its absolute path.",
+                self.name()
+            ))
+        })
     }
+}
+fn find_executable(paths: impl IntoIterator<Item = PathBuf>) -> io::Result<Option<PathBuf>> {
+    paths
+        .into_iter()
+        .find(|path| executable(path))
+        .map(std::path::absolute)
+        .transpose()
 }
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
