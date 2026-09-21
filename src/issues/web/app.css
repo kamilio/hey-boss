@@ -59,8 +59,8 @@
   color: var(--blocked-text, #9b620c);
 }
 @media (max-width: 400px) {
-  .issue-panel .list-heading { padding: 0 8px; gap: 8px; }
-  .list-heading .state-tabs { gap: 4px; }
+  .issue-panel .list-heading { padding: 0 6px; gap: 6px; }
+  .list-heading .state-tabs { gap: 2px; }
   .list-heading .state-tabs button { gap: 3px; font-size: 10px; }
   .state-tabs button svg { display: none; }
   .state-tabs .tab-count { min-width: 0; padding: 1px 3px; }
@@ -593,6 +593,7 @@ dialog::backdrop {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: max-content;
   max-width: calc(100vw - 32px);
   padding: 12px 17px;
   border: 1px solid var(--line);
