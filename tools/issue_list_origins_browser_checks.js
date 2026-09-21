@@ -6,12 +6,14 @@ async page => {
   await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread:0}}));
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   const base='http://127.0.0.1:59676/#project=named%3AList%20origin%20QA';
+  const rows = ids => page.waitForFunction(expected =>
+    JSON.stringify([...document.querySelectorAll('.issue-row')].map(row=>Number(row.dataset.issueNumber)))===JSON.stringify(expected), ids);
   for (const theme of ['light','dark']) {
     await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
     for (const width of [1440,768,390,320]) {
       await page.setViewportSize({width,height:900});
       await page.goto(base);
-      await page.locator('.issue-row').nth(3).waitFor();
+      await rows([1,2,4,5]);
       check(await page.locator('.issue-row').count()===4,`${theme}/${width}: all open rows survive invalid origins`);
       check(await page.locator('[data-issue-number="2"] .comment-count').getAttribute('title')==='2 comments',`${theme}/${width}: correct comment count`);
       check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${theme}/${width}: list fits`);
@@ -24,15 +26,17 @@ async page => {
       check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${theme}/${width}: detail fits`);
       await page.screenshot({path:`output/playwright/issue76/${theme}-${width}-detail.png`,fullPage:true});
       await page.goto(base);
+      await rows([1,2,4,5]);
       await page.getByRole('tab',{name:/Closed/}).click();
-      await page.locator('[data-issue-number="3"]').waitFor();
+      await rows([3]);
       check(await page.locator('.issue-row').count()===1,`${theme}/${width}: closed NULL-origin row`);
       await page.goto(base);
-      await page.getByLabel('Filter by assignee').selectOption('unassigned');
-      await page.locator('[data-issue-number="2"]').waitFor({state:'hidden'});
+      await rows([1,2,4,5]);
+      await page.getByLabel('Filter by assignee',{exact:true}).selectOption('unassigned');
+      await rows([1,4,5]);
       check(await page.locator('.issue-row').count()===3,`${theme}/${width}: owner filter survives invalid origins`);
       await page.getByLabel('Search issues').fill('Malformed');
-      await page.locator('.issue-row').nth(1).waitFor({state:'hidden'});
+      await rows([4]);
       check(await page.locator('[data-issue-number="4"]').count()===1,`${theme}/${width}: damaged origin remains searchable`);
     }
   }
