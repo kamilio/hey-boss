@@ -508,6 +508,7 @@ function renderList(result) {
           tag: focused.tagName,
           href: focused.getAttribute("href"),
           move: focused.dataset.moveIssue,
+          progress: focused.classList.contains("issue-progress"),
           top: focused.getBoundingClientRect().top,
         }
       : null;
@@ -520,7 +521,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span><span>${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(actorName(i.created_by))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}</div>${HeyBossStatus.list(i)}</div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee, i.number) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span>${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(actorName(i.created_by))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee, i.number) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -535,8 +536,10 @@ function renderList(result) {
       $("#issue-list"),
     );
     const control = row &&
-      $$("a, button", row).find((el) =>
-        savedFocus.move
+      $$("a, button, .issue-progress", row).find((el) =>
+        savedFocus.progress
+          ? el.classList.contains("issue-progress")
+          : savedFocus.move
           ? el.dataset.moveIssue === savedFocus.move
           : el.tagName === savedFocus.tag &&
             el.getAttribute("href") === savedFocus.href,

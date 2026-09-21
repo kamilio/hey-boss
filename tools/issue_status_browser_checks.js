@@ -13,9 +13,9 @@ async page => {
   for(const width of [1440,768,390,320]){
    await page.setViewportSize({width,height:1000});await goto(base);
    await page.locator('.issue-row').nth(5).waitFor();
-   check(await page.locator('.issue-progress .progress-badge').allTextContents().then(v=>JSON.stringify(v)===JSON.stringify(['On track','At risk','In trouble','At risk','On track'])),`${theme}/${width}: all three statuses and unset omitted`);
+   check(await page.locator('.issue-meta .issue-progress').evaluateAll(els=>JSON.stringify(els.map(el=>el.getAttribute('aria-label').split(' · ')[0]))===JSON.stringify(['On track','At risk','In trouble','At risk','On track'])),`${theme}/${width}: all three statuses and unset omitted`);
    check(await fits()&&await elementFits('.issue-progress'),`${theme}/${width}: list fits`);
-   check(await page.locator('[data-issue-number="5"] .issue-progress-comment').evaluate(el=>el.scrollWidth>el.clientWidth),`${theme}/${width}: long list update is compact`);
+   check(await page.locator('[data-issue-number="5"] .issue-progress').evaluate(el=>el.getBoundingClientRect().width<=24&&el.getAttribute('aria-label').includes('A'.repeat(500))),`${theme}/${width}: long list update is compact and fully available`);
    await page.screenshot({path:`output/playwright/issue70/${theme}-${width}-list.png`});
    await page.locator('.issue-title').nth(0).click();await page.locator('.issue-progress-card').waitFor();
    check(!await page.locator('.progress-history').getAttribute('open'),`${theme}/${width}: history starts collapsed`);

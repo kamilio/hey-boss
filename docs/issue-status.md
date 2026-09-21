@@ -25,7 +25,9 @@ minutes while actively working. Describe what is happening and what comes next;
 skip command logs and technical lists. Keep lasting findings, decisions,
 questions and final verification in ordinary comments.
 
-The issue list shows the current color, label and message. The detail page shows
+The issue list shows a colored dot beside the ticket number. Hover or focus the
+dot to read the status label, full message, previous-owner marker and update time;
+Escape dismisses the tooltip. Issues without an update have no dot. The detail page shows
 the full message, author and update time. Status history starts collapsed and
 loads only when opened, in pages of 20, newest first. The web and paired-device
 viewers are read-only; use the CLI to publish. Status refreshes in an open desktop

@@ -8,8 +8,33 @@ window.HeyBossStatus = (() => {
     const s = issue.status;
     if (!s) return "";
     const previous = issue.assignee && issue.assignee !== s.author ? " · Previous owner" : "";
-    return `<div class="issue-progress" title="${esc(`${label(s)} · ${s.comment}${previous} · ${new Date(s.created_at).toLocaleString()}`)}">${badge(s)}<span class="issue-progress-comment">${esc(s.comment)}</span>${previous ? '<span class="progress-previous">Previous owner</span>' : ""}</div>`;
+    const help = `${label(s)} · ${s.comment}${previous} · ${new Date(s.created_at).toLocaleString()}`;
+    return `<span class="issue-progress progress-${esc(s.level)}" role="img" tabindex="0" aria-label="${esc(help)}"><span class="progress-dot" aria-hidden="true"></span><span class="issue-progress-help" aria-hidden="true">${esc(help)}</span></span>`;
   }
+  function positionHelp(dot) {
+    const help = dot.querySelector('.issue-progress-help');
+    dot.classList.remove('progress-help-below');
+    const bounds = dot.getBoundingClientRect();
+    help.style.left = `${Math.max(16, Math.min(bounds.left, innerWidth - help.offsetWidth - 16)) - bounds.left}px`;
+    const panel = dot.closest('.issue-panel');
+    if (help.getBoundingClientRect().top < Math.max(16, panel?.getBoundingClientRect().top || 0)) dot.classList.add('progress-help-below');
+  }
+  // Delegation also handles refreshed lists without adding per-row listeners.
+  for (const type of ['pointerover', 'focusin']) document.addEventListener(type, event => {
+    const dot = event.target.closest('.issue-progress');
+    if (dot && !dot.contains(event.relatedTarget)) {
+      dot.classList.remove('progress-help-dismissed');
+      positionHelp(dot);
+    }
+  });
+  window.addEventListener('resize', () => document.querySelectorAll('.issue-progress:hover, .issue-progress:focus').forEach(positionHelp));
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    const dots = document.querySelectorAll('.issue-progress:hover, .issue-progress:focus');
+    if (!dots.length) return;
+    dots.forEach(dot => dot.classList.add('progress-help-dismissed'));
+    event.preventDefault();event.stopImmediatePropagation();
+  }, true);
   function current(issue, name) {
     const s = issue.status;
     if (!s) return '<div class="progress-empty"><span class="progress-dot" aria-hidden="true"></span>No status update yet</div>';
