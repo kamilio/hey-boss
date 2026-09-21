@@ -165,6 +165,7 @@ fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
         Style::default().fg(color(&status)),
     )));
     if run["finished_at"].is_null()
+        && run["state"] == "awaiting_claim"
         && run["claimed_at"].is_null()
         && let Some(expires) = run["reservation_expires"].as_i64()
     {
@@ -239,6 +240,29 @@ fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
         }));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn claim_deadline_is_only_shown_when_the_agent_is_awaiting_claim() {
+        for state in ["reserved", "awaiting_model", "awaiting_claim", "running"] {
+            let run = serde_json::json!({
+                "state": state, "finished_at": null, "claimed_at": null,
+                "reservation_expires": 600_000
+            });
+            let content: String = activity(&run, 0)
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+                .collect();
+            assert_eq!(
+                content.contains("Manual claim deadline"),
+                state == "awaiting_claim",
+                "{state}"
+            );
+        }
+    }
 }
 
 fn overlay(frame: &mut Frame, title: &str, message: &str) {
@@ -524,7 +548,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             .block(activity_block.title_bottom(Line::from(position).right_aligned())),
         right[1],
     );
-    let status = if let Some(error) = &app.error {
+    let status = if let Some(error) = app.error.as_ref().or(app.diagnostic.as_ref()) {
         format!(" {}", text(&Value::String(error.clone())))
     } else if size.width < 90 && app.owned_worker {
         " Live · q / Ctrl+C stops worker + agents".into()
@@ -541,7 +565,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         Paragraph::new(vec![
             Line::from(Span::styled(
                 status,
-                Style::default().fg(if app.error.is_some() {
+                Style::default().fg(if app.error.is_some() || app.diagnostic.is_some() {
                     color("error")
                 } else {
                     MUTED
