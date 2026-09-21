@@ -1887,7 +1887,7 @@ function revealCreatedIssue(value, host) {
   );
 }
 window.addEventListener("hey-boss-issue-created", event => {
-  if (model.route.view === "issues") revealCreatedIssue(event.detail, event.detail.host);
+  if (model.route.view === "issues" && !$("dialog[open]")) revealCreatedIssue(event.detail, event.detail.host);
   else refresh(false);
 });
 
