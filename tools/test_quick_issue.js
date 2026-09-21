@@ -7,6 +7,12 @@ const projects = [
   {id:'named:café',name:'café'},
 ];
 const current = projects[0];
+const {taskKind, taskLabels} = require('../src/issues/web/quick-issue.js');
+assert.equal(taskKind(['ready','task:plan']), 'plan');
+assert.equal(taskKind(['task:plan','task:research']), 'research');
+assert.equal(taskKind(['plan','research']), 'implement');
+assert.deepEqual(taskLabels(['ready','task:plan','ready'], 'research'), ['ready','task:research']);
+assert.deepEqual(taskLabels(['bug','task:research'], 'implement'), ['bug']);
 const check = (text, title, project = projects[1]) => assert.deepEqual(parse(text, projects, current), {title, project});
 check('Fix reconnect', 'Fix reconnect', current);
 check('@poe-code Fix reconnect', 'Fix reconnect');

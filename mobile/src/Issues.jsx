@@ -1,6 +1,6 @@
 import React,{useState,useEffect,useRef} from 'react';
 import {Button,TextField,TextArea} from '@radix-ui/themes';
-import {emptyIssueDraft,loadIssueDraft,saveIssueDraft,issuePayload} from './issue-draft';
+import {emptyIssueDraft,loadIssueDraft,saveIssueDraft,issuePayload,taskKind,taskLabels} from './issue-draft';
 
 export default function Issues({api}){
  const [draft,setDraft]=useState(()=>{const draft=loadIssueDraft(localStorage);if(!draft.submitted){try{const project=JSON.parse(localStorage.getItem("hey-boss-issues-project"));if(typeof project==="string"&&project)draft.project=project;}catch{}}return draft;});
@@ -57,7 +57,7 @@ export default function Issues({api}){
   try{
    const {creation}=await api('/issues/'+encodeURIComponent(summary.requestID));
    if(current.current.submitted)return;
-   keep({...emptyIssueDraft(),project:creation.project,title:creation.title,body:creation.body,labels:creation.labels.join(', ')});
+   keep({...emptyIssueDraft(),project:creation.project,title:creation.title,body:creation.body,task:taskKind(creation.labels),labels:taskLabels(creation.labels,'implement').join(', ')});
    setError('');setMessage('Draft restored. Edit it and submit again.');
   }catch(e){setError(e.status?e.message:'Could not restore the draft. Check your connection and browser storage, then retry.');}
  }
@@ -75,6 +75,9 @@ export default function Issues({api}){
    <TextField.Root id="issue-title" required value={draft.title} disabled={draft.submitted} onChange={e=>change('title',e.target.value)} placeholder="What needs to happen?" size="3"/>
    <label htmlFor="issue-description">Description <span className="fine">optional</span></label>
    <TextArea id="issue-description" value={draft.body} disabled={draft.submitted} onChange={e=>change('body',e.target.value)} placeholder="Details for the agent" rows={4}/>
+   <label htmlFor="issue-kind">Task</label>
+   <select id="issue-kind" value={taskKind(issuePayload(draft).labels)} disabled={draft.submitted} onChange={e=>change('task',e.target.value)} aria-describedby="issue-kind-help"><option value="implement">Implement</option><option value="plan">Plan</option><option value="research">Research</option></select>
+   <p id="issue-kind-help" className="fine">{taskKind(issuePayload(draft).labels)==='implement'?'Make and ship changes.':'Produce artifacts linked to this issue.'}</p>
    <label htmlFor="issue-labels">Labels <span className="fine">optional, separated by commas</span></label>
    <TextField.Root id="issue-labels" value={draft.labels} disabled={draft.submitted} onChange={e=>change('labels',e.target.value)} placeholder="ready, bug"/>
    <Button size="3" loading={busy} disabled={!draft.title.trim()||!draft.project} type="submit">{draft.submitted?'Retry pending submission':'Create issue'}</Button>

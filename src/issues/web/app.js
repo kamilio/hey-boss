@@ -120,6 +120,7 @@ function labelTone(name) {
   );
 }
 function label(name) {
+  if (["task:plan", "task:research"].includes(name)) return `<span class="label task-kind-badge" title="Produces linked artifacts">${name === "task:plan" ? "Plan" : "Research"}</span>`;
   return `<span class="label tone-${labelTone(name)}" title="${esc(name)}">${esc(name)}</span>`;
 }
 function toast(message, error = false) {
@@ -1243,7 +1244,7 @@ function editorValues() {
   return {
     title: $("#editor-subject").value,
     body: $("#editor-body").value,
-    labels: editorTags.values().join(", "),
+    labels: HeyBossQuickIssue.taskLabels(editorTags.values(), $("#editor-kind").value).join(", "),
     draft: $("#editor-draft").checked,
     bottom: $("#editor-bottom").checked,
     version: model.editor?.version,
@@ -1288,6 +1289,9 @@ function openEditor(issue = null, options = {}) {
   $("#editor-project").textContent = project.name;
   $("#editor-subject").value = draft?.title ?? issue?.title ?? "";
   $("#editor-body").value = draft?.body ?? issue?.body ?? "";
+  const taskLabels = (draft?.labels ?? issue?.labels.join(", ") ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  $("#editor-kind").value = HeyBossQuickIssue.taskKind(taskLabels);
+  updateEditorTaskHelp();
   $("#editor-draft").checked = !options.parent && (draft?.draft ?? issue?.draft ?? false);
   $("#editor-bottom").checked = draft?.bottom ?? false;
   $("#editor-bottom-control").hidden = !!issue;
@@ -1305,10 +1309,7 @@ function openEditor(issue = null, options = {}) {
     toast(error.message, true);
   });
   editorTags.set(
-    (draft?.labels ?? issue?.labels.join(", ") ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
+    taskLabels.filter(label => !["task:plan", "task:research"].includes(label)),
   );
   $("#editor-submit").innerHTML =
     `${issue ? "Save changes" : options.parent ? "Create subtask" : "Create issue"}${icon("arrow-right")}`;
@@ -1384,10 +1385,14 @@ for (const id of ["editor-subject", "editor-body", "editor-labels"])
 const editorTags = new TagInput(
   $("#editor-tags"),
   $("#editor-labels"),
-  () => model.labels,
+  () => model.labels.filter(label => !["task:plan", "task:research"].includes(label)),
   saveEditor,
 );
 $("#editor-write").onclick = () => preview("editor", false);
+function updateEditorTaskHelp() {
+  $("#editor-kind-help").textContent = $("#editor-kind").value === "plan" ? "A concrete plan, saved as a linked artifact." : $("#editor-kind").value === "research" ? "Findings and sources, saved as linked artifacts." : "Make and ship changes.";
+}
+$("#editor-kind").onchange = () => { updateEditorTaskHelp(); saveEditor(); };
 $("#editor-preview").onclick = () => preview("editor", true);
 async function preview(prefix, show) {
   const input = $("#" + prefix + "-body"),
@@ -1505,7 +1510,7 @@ $("#editor-form").onsubmit = async (e) => {
 };
 function editorBusy(busy) {
   if (model.editor) model.editor.busy = busy;
-  $$("input,textarea,button", $("#editor-form")).forEach(
+  $$("input,textarea,button,select", $("#editor-form")).forEach(
     (el) => (el.disabled = busy),
   );
   updateEditorReadiness();
