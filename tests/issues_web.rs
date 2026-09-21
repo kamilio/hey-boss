@@ -395,6 +395,49 @@ fn takeover_requires_csrf_and_json_before_contacting_the_fleet() {
 }
 
 #[test]
+fn steering_requires_csrf_json_and_same_origin() {
+    let web = Web::start();
+    let body = br#"{"host":"local","run":"synthetic","scope":"session","text":"Focus","request_id":"test"}"#;
+    assert_eq!(
+        web.http(
+            "POST",
+            "/api/fleet/steer",
+            &[("Content-Type", "application/json")],
+            body
+        )
+        .status,
+        403
+    );
+    assert_eq!(
+        web.http(
+            "POST",
+            "/api/fleet/steer",
+            &[
+                ("X-Hey-Boss-CSRF", &web.token),
+                ("Content-Type", "text/plain")
+            ],
+            body
+        )
+        .status,
+        400
+    );
+    assert_eq!(
+        web.http(
+            "POST",
+            "/api/fleet/steer",
+            &[
+                ("X-Hey-Boss-CSRF", &web.token),
+                ("Content-Type", "application/json"),
+                ("Origin", "https://evil.example")
+            ],
+            body
+        )
+        .status,
+        403
+    );
+}
+
+#[test]
 fn artifact_diagrams_are_bundled_locally_and_preserve_markdown_source() {
     let web = Web::start();
     let bundle = web.http("GET", "/artifact-diagrams.js", &[], b"");

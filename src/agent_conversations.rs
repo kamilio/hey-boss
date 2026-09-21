@@ -310,6 +310,14 @@ pub(crate) fn window_page(
     let mut result =
         json!({"ok":true,"messages":[],"cursor":cursor,"has_more":false,"availability":"waiting"});
     result["run"] = json!(metadata);
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='agent_steering' AND type='table')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        let mut stmt = db.prepare("SELECT request_id,scope,text,state,error FROM agent_steering WHERE run_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 16")?;
+        result["steering"] = json!(stmt.query_map([run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"scope":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"error":r.get::<_,Option<String>>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
     let Some(session) = session else {
         return Ok(result);
     };
@@ -617,9 +625,9 @@ fn bridge(path: &Path) -> Result<()> {
             .ok_or_else(|| Error::invalid("Invalid conversation transport ID"))?;
         let result = if !projects.contains(request["project"].as_str().unwrap_or("")) {
             Err(Error::invalid("This project is no longer available"))
-        } else if request["action"] == "takeover" {
+        } else if request["action"] == "takeover" || request["action"] == "steer" {
             crate::fleet::call(
-                &json!({"kind":"takeover","host":request["host"],"run":request["run"]}),
+                &json!({"kind":request["action"],"host":request["host"],"run":request["run"],"scope":request["scope"],"text":request["text"],"request_id":request["request_id"]}),
             )
         } else {
             conversation(

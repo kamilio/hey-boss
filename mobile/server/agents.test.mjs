@@ -30,6 +30,17 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal(pending.length,1);assert.equal(pending[0].action,'takeover');assert.equal(pending[0].project,'named:Atlas');
  await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,stopped:true,resume_command:'cd /repo && codex resume session'},bridge);
  assert.equal((await(await takeover).json()).resume_command,'cd /repo && codex resume session');
+ const instruction={host:'local',run:'run',scope:'issue',text:'Preserve keyboard navigation',request_id:'steer-test'};
+ assert.equal((await call('/api/fleet/steer',instruction)).status,401);
+ assert.equal((await call('/api/fleet/steer',{...instruction,run:'private'},headers)).status,404);
+ assert.equal((await call('/api/fleet/steer',{...instruction,run:'old',project:'named:Atlas'},headers)).status,404);
+ assert.equal((await call('/api/fleet/steer',instruction,{...headers,Origin:'https://evil.example'})).status,403);
+ for(const change of [{scope:'all'},{text:' '},{text:'🔥'.repeat(8001)},{request_id:'invalid id'}])assert.equal((await call('/api/fleet/steer',{...instruction,...change},headers)).status,400);
+ const steering=call('/api/fleet/steer',instruction,headers);
+ for(let i=0;i<20;i++){pending=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(pending.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(pending[0].action,'steer');assert.equal(pending[0].scope,'issue');assert.equal(pending[0].text,instruction.text);assert.equal(pending[0].request_id,'steer-test');
+ await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,state:'queued'},bridge);
+ assert.equal((await(await steering).json()).state,'queued');
  assert.equal((await call('/api/fleet/conversation?host=local&run=old&project=named%3AAtlas&at=-1',null,headers)).status,400);
  assert.equal((await call('/api/fleet/takeover',{host:'local',run:'old',project:'named:Atlas'},headers)).status,404,'Historical fallback never authorizes takeover');
  const historical=call('/api/fleet/conversation?host=local&run=old&project=named%3AAtlas&at=123',null,headers);

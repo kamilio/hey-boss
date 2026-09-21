@@ -40,6 +40,10 @@ pub(super) fn command(host: &str, directory: &str, session: &str) -> Result<Stri
     );
     Ok(format!("ssh -t {} {}", quote(host), quote(&remote)))
 }
+pub(super) fn steer(ctx: &Context, request: &Value) -> Result<Value> {
+    Ok(Store::open(&ctx.path)?.worker_steer(request["run"].as_str().unwrap_or(""), request)?)
+}
+
 pub(super) fn apply(ctx: &Context, run: &str) -> Result<Value> {
     let boss = crate::issues::identity::resolve(Some("human:boss"), &ctx.node, &ctx.home)?;
     let mut result = Store::open(&ctx.path)?.worker_takeover(run, &boss)?;

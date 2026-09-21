@@ -199,6 +199,8 @@ impl Supervisor {
     }
     fn conversation(&self, request: &Value) -> Result<Value> {
         let taking_over = request["kind"] == "takeover";
+        let steering = request["kind"] == "steer";
+        let mutation = taking_over || steering;
         let host = request["host"]
             .as_str()
             .ok_or_else(|| invalid("Missing device"))?;
@@ -212,7 +214,7 @@ impl Supervisor {
             .as_array()
             .unwrap()
             .iter()
-            .find(|m| m["host"] == host || (!taking_over && m["hostname"] == host))
+            .find(|m| m["host"] == host || (!mutation && m["hostname"] == host))
             .ok_or_else(|| invalid("This device is no longer available"))?;
         let run = machine["workers"]
             .as_array()
@@ -223,7 +225,7 @@ impl Supervisor {
             .cloned();
         let run = if let Some(run) = run {
             run
-        } else if !taking_over {
+        } else if !mutation {
             let db = self.ctx.db()?;
             let origin = crate::issues::provenance::referenced(&db, host, run_id)?
                 .ok_or_else(|| invalid("This agent is no longer available"))?;
@@ -248,6 +250,9 @@ impl Supervisor {
             return Err(invalid("This project is hidden or no longer available"));
         }
         if host == "local" {
+            if steering {
+                return takeover::steer(&self.ctx, request);
+            }
             if taking_over {
                 return takeover::apply(&self.ctx, run_id);
             }
@@ -272,7 +277,7 @@ impl Supervisor {
             }
             outgoing
                 .try_send(
-                    json!({"kind":if taking_over {"takeover"} else {"conversation"},"id":identifier,"run":run_id,"cursor":cursor}),
+                    json!({"kind":request["kind"],"id":identifier,"run":run_id,"cursor":cursor,"scope":request["scope"],"text":request["text"],"request_id":request["request_id"]}),
                 )
                 .map_err(|_| invalid("This device is busy. Try again in a moment."))?;
             state.waiters.insert(identifier.clone(), tx);
@@ -282,7 +287,7 @@ impl Supervisor {
             .map_err(|_| invalid("This device did not respond. Try again when it reconnects."));
         self.state.lock().unwrap().waiters.remove(&identifier);
         let mut result = result?;
-        if !taking_over && result["ok"] == true {
+        if !mutation && result["ok"] == true {
             crate::issues::provenance::enrich_conversation(&self.ctx.db()?, run_id, &mut result)?;
         }
         if taking_over && result["ok"] != false && result["stopped"] == true {
@@ -733,7 +738,7 @@ impl Supervisor {
                         )?;
                     }
                 }
-                Some("conversation" | "takeover") => {
+                Some("conversation" | "takeover" | "steer") => {
                     if let Some(waiter) = self
                         .state
                         .lock()
@@ -1033,7 +1038,7 @@ impl Supervisor {
         let result = match request["kind"].as_str() {
             Some("status") => self.status(),
             Some("overview") => self.overview(),
-            Some("conversation" | "takeover") => self.conversation(&request),
+            Some("conversation" | "takeover" | "steer") => self.conversation(&request),
             Some("signal") => self.signal(&request),
             _ => Err(invalid("Unknown supervisor request")),
         };

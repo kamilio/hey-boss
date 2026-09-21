@@ -187,6 +187,13 @@ services; `fleet setup` manages their installation.
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory. Agents continue allocated work offline and replay durable changes on reconnect. `/agents` groups tasks by project with device labels and separate live conversation pages. Saved requests, replies and tool activity load in pages; disconnected tasks show their last known state. Paired web devices read through the authenticated supervisor bridge. Manage devices contains service controls; `/workers` remains an alias; `fleet status` shows the same fleet in the CLI. The terminal shows the
 queue host and database.
+In a live Agents conversation, **Steer** adds an instruction without stopping it.
+Choose **This agent** for a one-session message, **This issue** to also save it in
+the issue requirements, or **This project** to also append it to the base project
+instructions. Other agents using project instructions receive the update; worker
+overrides remain in effect. Queue acceptance is not delivery: confirmation appears
+in the conversation. Retries reuse the request ID to avoid duplicate instructions.
+
 In a live Agents conversation, **Take over** stops only that agent and assigns
 its issue to Boss. Once stopped, **Copy command** provides a terminal resume
 command with SSH and the checkout directory for remote sessions. Paired devices

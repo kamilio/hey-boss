@@ -27,10 +27,11 @@
           <a id="back" class="back-link" href="/agents"><span data-icon="arrow-left"></span>Agents</a>
           <div class="session-heading"><div><p id="session-context" class="session-context"></p><h1 id="session-title">Loading conversation…</h1></div><div id="session-state"></div></div>
           <div class="session-subheading"><p id="session-status" role="status"></p><a id="session-issue" class="project-issues"></a></div>
-          <div class="session-actions"><button id="takeover-open" class="button" type="button" hidden>Take over</button><p id="takeover-note" class="device-note" role="status" hidden></p></div>
+          <div class="session-actions"><button id="steer-open" class="button primary" type="button" hidden>Steer</button><button id="takeover-open" class="button" type="button" hidden>Take over</button><p id="steer-note" class="device-note" role="status" hidden></p><p id="takeover-note" class="device-note" role="status" hidden></p></div>
           <section id="resume-panel" class="resume-panel" aria-label="Resume your agent" hidden><h2>You’re in charge</h2><p id="resume-note">The agent has stopped and the issue is assigned to you. Run this command in your terminal to continue the saved session.</p><div class="resume-command"><code id="resume-command"></code><button id="resume-copy" class="button" type="button">Copy command</button></div><p id="copy-status" role="status"></p></section>
         </header>
         <details id="session-resources" class="session-resources" hidden><summary id="session-resources-title">Created in this run</summary><ul id="session-resources-list"></ul><p id="session-resources-more" hidden>Showing the first 50 issues and 50 artifacts.</p></details>
+        <details id="steering-updates" class="session-resources" hidden><summary>Your instructions <span id="steering-count"></span></summary><ul id="steering-list" aria-label="Steering delivery status"></ul></details>
         <div class="conversation-wrap">
           <div class="conversation-intro"><span data-icon="spark"></span><span>The conversation behind the work</span></div>
           <button id="load-earlier" class="button load-history" type="button" hidden>Load earlier messages</button>
@@ -43,5 +44,21 @@
       <footer class="page-footer"><span data-icon="spark"></span><span>Good work, in good company.</span><button id="refresh" class="button small" type="button"><span data-icon="refresh"></span>Refresh</button></footer>
     </main>
     <dialog id="takeover-dialog" class="takeover-dialog" aria-labelledby="takeover-title"><h2 id="takeover-title">Take over this task?</h2><p>Stop this agent and assign its issue to you. You can continue its saved session in your terminal.</p><p id="takeover-task" class="takeover-task"></p><div class="takeover-dialog-actions"><button id="takeover-cancel" class="button" type="button">Keep agent working</button><button id="takeover-confirm" class="button primary" type="button">Take over</button></div></dialog>
+    <dialog id="steer-dialog" class="takeover-dialog steer-dialog" aria-labelledby="steer-title">
+      <form id="steer-form">
+        <div class="eyebrow">Keep the task moving</div><h2 id="steer-title">Steer this agent</h2>
+        <p id="steer-task" class="takeover-task"></p>
+        <fieldset class="steer-scopes"><legend>Where should this instruction apply?</legend>
+          <label><input type="radio" name="scope" value="session" checked><span><strong>This agent</strong><small>Send a message to this running session. Saved requirements stay the same.</small></span></label>
+          <label><input type="radio" name="scope" value="issue"><span><strong>This issue</strong><small>Add to the issue’s requirements and send to this agent. Future attempts keep it.</small></span></label>
+          <label><input type="radio" name="scope" value="project"><span><strong>This project</strong><small>Save in the project’s base instructions. Agents using them receive the update, including this agent.</small></span></label>
+        </fieldset>
+        <label class="steer-label" for="steer-text">What should the agent know?</label>
+        <textarea id="steer-text" rows="4" required maxlength="32000" placeholder="Also check the keyboard navigation before shipping…" aria-describedby="steer-help"></textarea>
+        <p id="steer-help">The agent keeps working in its current session. Delivery confirmation appears in the conversation.</p>
+        <p id="steer-error" class="error" role="alert" hidden></p>
+        <div class="takeover-dialog-actions"><button id="steer-cancel" class="button" type="button">Cancel</button><button id="steer-send" class="button primary" type="submit">Send to agent</button></div>
+      </form>
+    </dialog>
   </body>
 </html>

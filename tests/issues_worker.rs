@@ -177,6 +177,23 @@ fn saved_prompt_edits_respect_worker_overrides_and_active_branches() {
     live_prompt_scenario("override");
 }
 
+#[test]
+fn agent_messages_reach_only_the_owned_turn_once() {
+    live_prompt_scenario("message");
+}
+#[test]
+fn agent_messages_survive_a_completed_turn_race_in_the_same_session() {
+    live_prompt_scenario("message-race");
+}
+#[test]
+fn unconfirmed_agent_messages_are_never_replayed() {
+    live_prompt_scenario("message-uncertain");
+}
+#[test]
+fn rejected_agent_messages_are_reported_without_retrying() {
+    live_prompt_scenario("message-rejected");
+}
+
 fn live_prompt_scenario(mode: &str) {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new(&format!("live-prompt-{mode}"));
@@ -205,11 +222,12 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
  }
  if(v.method==='turn/steer'){
   steers++;
-  if(mode==='race'){
+  if(mode==='race'||mode==='message-race'){
    send({method:'item/completed',params:{threadId:'live-prompt-session',item:{type:'agentMessage',text:'{"status":"completed","summary":"Old instructions done"}'}}});
    send({method:'turn/completed',params:{threadId:'live-prompt-session',turn:{id:'owned-turn',status:'completed'}}});
    send({id:v.id,error:{message:'Turn has already completed'}});
-  }else if(mode==='reject'&&steers===1)send({id:v.id,error:{message:'Temporary steering failure'}});
+  }else if(mode==='message-uncertain')send({id:v.id,result:{turnId:'wrong-turn'}});
+  else if(mode==='message-rejected'||(mode==='reject'&&steers===1))send({id:v.id,error:{message:'Temporary steering failure'}});
   else send({id:v.id,result:{turnId:v.params.expectedTurnId}});
  }
 });
@@ -232,6 +250,73 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
     };
     let run = active["runs"][0]["id"].as_str().unwrap();
     let db = rusqlite::Connection::open(&f.db).unwrap();
+    if mode.starts_with("message") {
+        db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,created_at) VALUES('message',?1,'session','Check keyboard navigation',1)", [run]).unwrap();
+        let expected = match mode {
+            "message-uncertain" => "uncertain",
+            "message-rejected" => "rejected",
+            _ => "delivered",
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let state: String = db
+                .query_row(
+                    "SELECT state FROM agent_steering WHERE request_id='message'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if state == expected {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Message stayed {state}; expected {expected}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        thread::sleep(Duration::from_millis(2300));
+        let transcript = f.transcript();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|v| v["method"] == "turn/steer")
+                .count(),
+            1
+        );
+        let message = transcript
+            .iter()
+            .find(|v| v["method"] == "turn/steer")
+            .unwrap();
+        assert_eq!(message["params"]["threadId"], "live-prompt-session");
+        assert_eq!(message["params"]["expectedTurnId"], "owned-turn");
+        assert!(
+            message["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Check keyboard navigation")
+        );
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|v| v["method"] == "thread/start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|v| v["method"] == "turn/start")
+                .count(),
+            if mode == "message-race" { 2 } else { 1 }
+        );
+        assert_eq!(
+            f.cli(&["view", "1"])["issue"]["assignee"],
+            "codex:live-prompt-session"
+        );
+        worker.stop();
+        return;
+    }
     db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Unrelated','Unrelated',1,0,0);
         INSERT INTO project_settings(project_id,prompt,version) VALUES('named:Unrelated','Never send this to another project',1);").unwrap();
     db.execute("INSERT INTO project_settings(project_id,prompt,version,prompt_overrides,prs_enabled,worktree_enabled) SELECT id,?1,1,'{\"worktree\":\"Inactive branch change\"}',1,1 FROM projects WHERE name='Worker fixture'", [if mode == "override" { "Project prompt is overridden" } else { "Claim and implement `{{issue_command}}`." }]).unwrap();
