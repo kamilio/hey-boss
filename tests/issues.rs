@@ -1102,12 +1102,15 @@ fn project_identity_groups_worktrees_and_normalizes_origins() {
             .output()
             .unwrap(),
     );
-    f.fail("session-a", &["list", "--project", "hey-boss"], 4);
+    assert_eq!(
+        f.run("session-a", &["list", "--project", "hey-boss"])["project"],
+        primary["project"]
+    );
     assert_eq!(
         f.run(
             "session-a",
             &["list", "--project", "github.com/another/hey-boss"]
-        )["issues"][0]["title"],
+        )["issues"][1]["title"],
         "other"
     );
     git(&f.cwd, &["remote", "remove", "origin"]);
@@ -1128,7 +1131,7 @@ fn project_identity_groups_worktrees_and_normalizes_origins() {
 }
 
 #[test]
-fn plain_directories_and_explicit_projects_are_isolated() {
+fn same_named_directories_share_a_destination_and_explicit_names_are_isolated() {
     let f = Fixture::new();
     let one = f.create();
     let second = f.root.join("different/project");
@@ -1139,9 +1142,15 @@ fn plain_directories_and_explicit_projects_are_isolated() {
             .output()
             .unwrap(),
     );
-    assert_ne!(one["project"]["id"], two["project"]["id"]);
-    assert_eq!(two["issue"]["number"], 1);
-    f.fail("session-a", &["list", "--project", "project"], 4);
+    assert_eq!(one["project"]["id"], two["project"]["id"]);
+    assert_eq!(two["issue"]["number"], 2);
+    assert_eq!(
+        f.run("session-a", &["list", "--project", "project"])["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let custom = f.run(
         "session-a",
         &["create", "--title", "custom", "--project", "shared"],

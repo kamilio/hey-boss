@@ -116,7 +116,7 @@ const HeyBossQuickIssue = (() => {
         const icon = document.createElement("span"); icon.className = "quick-issue-project-icon"; icon.textContent = "@"; icon.setAttribute("aria-hidden","true");
         const text = document.createElement("span"); text.className = "quick-issue-project-text";
         const name = document.createElement("strong"); name.textContent = project.name;
-        const id = document.createElement("span"); id.textContent = project.id;
+        const id = document.createElement("span"); id.textContent = "Project name";
         text.append(name,id); option.append(icon,text);
         if (project.id === current?.id) { const badge = document.createElement("span"); badge.className = "quick-issue-project-current"; badge.textContent = "Current"; option.append(badge); }
         // Keep input focus on mouse selection without suppressing touch clicks.
@@ -250,7 +250,7 @@ const HeyBossQuickIssue = (() => {
       hidePicker();
       saving = true; input.disabled = true; bottom.disabled = true; kind.disabled = true; submit.disabled = true; error.hidden = true; context.textContent = "Creating…";
       try {
-        const value = await post(operation, parsed.project.id, pending.id);
+        const value = await post(operation, parsed.project.name, pending.id);
         const savedHost = host;
         pending = null; input.value = ""; bottom.checked = false; kind.value = "implement"; saving = false; close();
         const link = document.createElement("a");

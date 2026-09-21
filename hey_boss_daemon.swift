@@ -3861,7 +3861,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                 let data = try result.get()
                 struct Bootstrap: Decodable { let projects: [QuickIssueProject] }
                 self.projects = try JSONDecoder().decode(Bootstrap.self, from: data).projects
-                self.current = self.projects.first { $0.id == self.preferences.string(forKey: "quickIssueProject") }
+                self.current = self.projects.first { $0.name == self.preferences.string(forKey: "quickIssueProject") || $0.id == self.preferences.string(forKey: "quickIssueProject") }
                 // No implicit project from the daemon's working directory: the
                 // first native issue requires an explicit @project destination.
                 self.ready = true; self.changed()
@@ -3918,7 +3918,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         let project = matches[row]; let view = NSTableCellView()
         let symbol = NSTextField(labelWithString: "@"); symbol.font = .systemFont(ofSize: 22, weight: .medium); symbol.textColor = .controlAccentColor
         let name = NSTextField(labelWithString: project.name + (project.id == current?.id ? "   · Current" : "")); name.font = .systemFont(ofSize: 13, weight: .semibold)
-        let id = NSTextField(labelWithString: project.id); id.font = .systemFont(ofSize: 11); id.textColor = .secondaryLabelColor
+        let id = NSTextField(labelWithString: "Project name"); id.font = .systemFont(ofSize: 11); id.textColor = .secondaryLabelColor
         for label in [name, id] { label.lineBreakMode = .byTruncatingMiddle }
         symbol.frame = NSRect(x: 12, y: 15, width: 28, height: 28)
         name.frame = NSRect(x: 52, y: 32, width: window.frame.width - 112, height: 18)
@@ -3956,7 +3956,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         guard ready, !saving, !succeeded, (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
         do {
             let parsed = try QuickIssueText.parse(input.stringValue, projects: projects, current: current)
-            var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.id, "--title", parsed.title]
+            var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.name, "--title", parsed.title]
             if bottom.state != .on { args.append("--at-top") }
             if pending?.key != args { pending = (args, UUID().uuidString) }
             let requestID = pending!.id; saving = true; error.stringValue = ""; context.stringValue = "Creating in \(parsed.project.name)…"
@@ -3967,7 +3967,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                 do {
                     let data = try result.get()
                     guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the issue. Retry safely with the same draft.") }
-                    self.current = parsed.project; self.preferences.set(parsed.project.id, forKey: "quickIssueProject")
+                    self.current = parsed.project; self.preferences.set(parsed.project.name, forKey: "quickIssueProject")
                     self.pending = nil; self.input.stringValue = ""; self.bottom.state = .off
                     self.succeeded = true
                     self.context.stringValue = "Created #\(number) in \(parsed.project.name)"; self.updateEnabled(); self.layout()

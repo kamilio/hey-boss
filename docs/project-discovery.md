@@ -1,9 +1,22 @@
 # Project discovery
 
-Projects represent repositories, not individual checkouts. Git origins identify
-the same project across machines and worktrees; repositories without an origin
-use the machine ID and shared Git directory. Two unrelated repositories with the
-same name remain separate projects.
+Project names are unique identifiers (case insensitive). A folder, repository,
+worktree, notification or explicit project selector with an existing name reuses
+that project's destination instead of creating another project. Quick Issue
+submissions use names. Git origins and local paths remain compatibility storage
+IDs, not separate destinations with the same name.
+
+The registry rejects duplicate names even when another process writes directly.
+Collisions are recorded once per incoming identity and shown in the project list
+response and an expandable warning on web pages. Paired devices also deduplicate
+their inventory and accept names as issue destinations.
+
+On upgrade, existing duplicate names choose one stable destination, preferring
+saved undeleted issues, then artifacts and mindmap data, then the oldest entry.
+The picker shows that destination once. Other legacy rows and all their saved
+data remain accessible through their full IDs; the warning links to that history.
+They are not silently merged, renumbered or deleted. Use the project name for new
+work. Hidden destinations stay hidden when another identity is discovered.
 
 Automatic agent discovery ignores home directories and local temporary folders,
 including macOS per-user temporary directories. Live agent tests previously
