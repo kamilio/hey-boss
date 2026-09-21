@@ -176,6 +176,11 @@ fn text(content: &Value) -> String {
 }
 impl AgentSession {
     pub(super) fn normalize(&mut self, value: Value) -> io::Result<()> {
+        self.normalize_event(value).inspect_err(|_| {
+            self.uncertain = true;
+        })
+    }
+    fn normalize_event(&mut self, value: Value) -> io::Result<()> {
         if self.events.len() >= 256 {
             self.uncertain = true;
             return Err(io::Error::other(
