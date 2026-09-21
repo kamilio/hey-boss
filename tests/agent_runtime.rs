@@ -531,6 +531,32 @@ fn pi_retries_are_not_terminal_and_extension_input_can_be_cancelled() {
 }
 
 #[test]
+fn pi_idle_state_rejects_steering_before_the_terminal_event_arrives() {
+    let mut session = launch(Provider::Pi, None);
+    let turn = session.prompt("hold idle provider", None).unwrap();
+    until(&mut session, |event| {
+        matches!(event, Event::TextDelta { .. })
+    });
+    assert!(
+        session
+            .steer(&turn, "must not queue for an unrelated later turn")
+            .is_err()
+    );
+    assert!(!session.state().outcome_uncertain);
+    session.interrupt().unwrap();
+    let Event::TurnCompleted { status, .. } = until(&mut session, |event| {
+        matches!(event, Event::TurnCompleted { .. })
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(
+        status,
+        TurnStatus::Completed,
+        "Idle provider was falsely reported as interrupted"
+    );
+}
+
+#[test]
 fn claude_queued_input_keeps_a_distinct_guarded_turn() {
     let mut session = launch(Provider::Claude, None);
     let turn = session.prompt("queued turns", None).unwrap();
