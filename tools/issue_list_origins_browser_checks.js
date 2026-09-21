@@ -2,6 +2,8 @@
 async page => {
   const checks=[], errors=[];
   page.on('pageerror', error => errors.push(error.message));
+  // Inbox is deliberately absent from this isolated issue-only fixture.
+  await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread:0}}));
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   const base='http://127.0.0.1:59676/#project=named%3AList%20origin%20QA';
   for (const theme of ['light','dark']) {

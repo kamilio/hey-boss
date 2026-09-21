@@ -1350,7 +1350,10 @@ fn print_issue_line(issue: &Value) {
         }
     );
     if issue["origin_error"]["message"].is_string() {
-        println!("  Origin unavailable: {}", line(&issue["origin_error"]["message"]));
+        println!(
+            "  Origin unavailable: {}",
+            line(&issue["origin_error"]["message"])
+        );
     }
     if let Some(status) = issue["status"].as_object() {
         println!(
