@@ -34,13 +34,13 @@ impl Mobile {
         let request = Request {
             version: 1,
             project: project
-                .map(|p| serde_json::from_value::<Project>(p.clone()))
+                .map(|p| serde_json::from_value::<Project>(json!({"id":p["id"],"name":p["name"]})))
                 .transpose()?
                 .unwrap_or(Project {
                     id: "named:Fleet".into(),
                     name: "Fleet".into(),
                 }),
-            project_override: None,
+            project_override: project.and_then(|p| p["id"].as_str()).map(str::to_owned),
             actor,
             operation,
             request_id: key,
@@ -158,7 +158,10 @@ impl Mobile {
             let id = p["id"]
                 .as_str()
                 .ok_or_else(|| invalid("Invalid project ID"))?;
-            projects.insert(id.to_owned(), json!({"id":p["id"],"name":p["name"]}));
+            projects.insert(
+                id.to_owned(),
+                json!({"id":p["id"],"name":p["name"],"name_collisions":p["name_collisions"]}),
+            );
             if p["hidden_at"].is_null() {
                 visible.insert(id.to_owned());
             }
@@ -170,7 +173,14 @@ impl Mobile {
             .ok_or_else(|| invalid("Invalid mobile creation queue"))?
         {
             let request_id = transport_id(&creation["requestID"])?;
-            let project = projects.get(creation["project"].as_str().unwrap_or(""));
+            let selector = creation["project"].as_str().unwrap_or("");
+            let project = projects.get(selector).or_else(|| {
+                projects.values().find(|p| {
+                    p["name"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(selector))
+                })
+            });
             let key = format!("mobile:{request_id}");
             let accepted = if let Some(project) = project {
                 !visible.contains(project["id"].as_str().unwrap())
@@ -267,10 +277,37 @@ impl Mobile {
                 let new_project = json!({"id":project_id,"name":project_id.strip_prefix("named:").unwrap_or(project_id)});
                 let creating_project = matches!(operation, Operation::Create { .. })
                     && project_id.starts_with("named:");
+                let history_project = projects.values().find_map(|p| {
+                    p["name_collisions"]
+                        .as_array()
+                        .and_then(|warnings| {
+                            warnings
+                                .iter()
+                                .find(|w| w["legacy"] == true && w["rejected_id"] == project_id)
+                        })
+                        .map(|_| json!({"id":project_id,"name":p["name"],"canonical_id":p["id"]}))
+                });
+                if history_project.is_some() && operation.writes() {
+                    return Err(invalid(
+                        "This is saved legacy history. Use the project name for new work.",
+                    ));
+                }
                 let project = projects
                     .get(project_id)
+                    .or_else(|| {
+                        projects.values().find(|p| {
+                            p["name"]
+                                .as_str()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(project_id))
+                        })
+                    })
+                    .or(history_project.as_ref())
                     .or_else(|| creating_project.then_some(&new_project))
                     .ok_or_else(|| invalid("Unknown project"))?;
+                let resolved_id = project["canonical_id"]
+                    .as_str()
+                    .or_else(|| project["id"].as_str())
+                    .unwrap_or(project_id);
                 let writing = operation.writes();
                 let key = if writing {
                     Some(format!(
@@ -284,10 +321,10 @@ impl Mobile {
                     operation,
                     Operation::Projects { .. } | Operation::RestoreProject
                 );
-                if !visible.contains(project_id)
+                if !visible.contains(resolved_id)
                     && !registry
                     && !(!projects.contains_key(project_id) && creating_project)
-                    && !(writing && self.accepted(project_id, key.as_deref().unwrap())?)
+                    && !(writing && self.accepted(resolved_id, key.as_deref().unwrap())?)
                 {
                     return Ok(
                         json!({"ok":false,"error":{"code":"not_found","message":"Project is hidden; restore it before accessing issues"}}),
@@ -477,7 +514,7 @@ pub(super) fn run(ctx: Context) {
                     .filter_map(|p| {
                         p["id"]
                             .as_str()
-                            .map(|id| (id.to_owned(), json!({"id":id,"name":p["name"]})))
+                            .map(|id| (id.to_owned(), json!({"id":id,"name":p["name"],"name_collisions":p["name_collisions"]})))
                     })
                     .collect();
                 let visible = registry["projects"]
@@ -554,10 +591,37 @@ mod web_tests {
         );
         let repeated = mobile.web_request(&creation, &projects, &visible).unwrap();
         assert_eq!(first["issue"]["number"], repeated["issue"]["number"]);
+        let mut by_name = creation.clone();
+        by_name["payload"]["project"] = json!("Phone");
+        assert_eq!(
+            mobile.web_request(&by_name, &projects, &visible).unwrap()["issue"]["number"],
+            first["issue"]["number"]
+        );
         let hidden = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &BTreeSet::new()).unwrap();
         assert_eq!(hidden["error"]["code"], "not_found");
         let read = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &visible).unwrap();
         assert_eq!(read["issue"]["title"], "Phone issue");
+        let db = mobile.ctx.db().unwrap();
+        db.execute_batch(
+            "UPDATE fleet_meta SET syncing=1;
+            INSERT INTO projects(id,name,next_number) VALUES('local:legacy:/saved/Phone','Phone',1);
+            UPDATE fleet_meta SET syncing=0;",
+        )
+        .unwrap();
+        drop(db);
+        let legacy = json!({"id":"local:legacy:/saved/Phone","name":"Phone"});
+        mobile
+            .rpc(
+                json!({"action":"create","title":"Legacy issue","body":"","labels":[]}),
+                Some(&legacy),
+                None,
+            )
+            .unwrap();
+        let mut with_history = projects.clone();
+        with_history.get_mut("named:Phone").unwrap()["name_collisions"] =
+            json!([{"legacy":true,"rejected_id":"local:legacy:/saved/Phone"}]);
+        let historical = mobile.web_request(&json!({"kind":"action","payload":{"project":"local:legacy:/saved/Phone","operation":{"action":"view","number":1}}}), &with_history, &visible).unwrap();
+        assert_eq!(historical["issue"]["title"], "Legacy issue");
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

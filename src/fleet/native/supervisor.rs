@@ -537,9 +537,25 @@ impl Supervisor {
         {
             let db = self.ctx.db()?;
             let tx = db.unchecked_transaction()?;
+            // Import compatibility rows so offline history keeps its foreign
+            // keys. The name registry still exposes one destination per name.
             for project in hello["projects"].as_array().into_iter().flatten() {
                 if replica::current_row(&db, "projects", project)?.is_null() {
+                    let legacy: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM project_name_keys WHERE name=?1)",
+                        [project["name"].as_str().unwrap_or("")],
+                        |r| r.get(0),
+                    )?;
+                    if legacy {
+                        db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
+                    }
                     replica::put_row(&db, "projects", project)?;
+                    if legacy {
+                        db.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
+                        // Preserve propagation after bypassing the name guard
+                        // for an imported compatibility row.
+                        db.execute("INSERT INTO fleet_outbox(table_name,after_json,created_at) VALUES('projects',?1,?2)", rusqlite::params![replica::current_row(&db, "projects", project)?.to_string(),crate::issues::worker::now()])?;
+                    }
                 }
             }
             tx.commit()?;

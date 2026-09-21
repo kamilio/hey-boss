@@ -839,6 +839,14 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
         }
         tables.insert((*table).into(), json!(data));
     }
+    // Canonical name choices belong to the supervisor. Keep this additive
+    // snapshot metadata out of companion write journals and older protocols.
+    for table in ["project_name_keys", "project_name_collisions"] {
+        tables.insert(
+            table.into(),
+            json!(rows(db, &format!("SELECT * FROM {table}"), &[])?),
+        );
+    }
     let cursor: i64 = db.query_row("SELECT coalesce(max(seq),0) FROM fleet_outbox", [], |r| {
         r.get(0)
     })?;
@@ -1121,6 +1129,33 @@ pub(super) fn apply_pull(
             }
         }
     }
+    for row in payload["tables"]["project_name_keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        execute(
+            db,
+            "INSERT INTO project_name_keys(name,project_id) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET project_id=excluded.project_id",
+            &[row["name"].clone(), row["project_id"].clone()],
+        )?;
+    }
+    for row in payload["tables"]["project_name_collisions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        execute(
+            db,
+            "INSERT INTO project_name_collisions(rejected_id,name,project_id,legacy) VALUES(?,?,?,?) ON CONFLICT(rejected_id) DO UPDATE SET project_id=excluded.project_id,legacy=excluded.legacy",
+            &[
+                row["rejected_id"].clone(),
+                row["name"].clone(),
+                row["project_id"].clone(),
+                row["legacy"].clone(),
+            ],
+        )?;
+    }
     for change in payload["changes"].as_array().into_iter().flatten() {
         let table = change["table_name"]
             .as_str()
@@ -1398,6 +1433,51 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn snapshots_preserve_legacy_project_rows_and_the_supervisors_unique_name_choice() {
+        let main = Fixture::new();
+        let agent = Fixture::new();
+        main.capture();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        main.db.execute_batch("UPDATE fleet_meta SET syncing=1;
+            INSERT INTO projects(id,name,next_number) VALUES('github.com/other/Native fleet','Native fleet',1);
+            UPDATE fleet_meta SET syncing=0;").unwrap();
+        agent.db.execute_batch("UPDATE fleet_meta SET syncing=1;
+            INSERT INTO projects(id,name,next_number) VALUES('github.com/other/Native fleet','Native fleet',1);
+            UPDATE project_name_keys SET project_id='github.com/other/Native fleet' WHERE name='Native fleet';
+            UPDATE fleet_meta SET syncing=0;").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row(
+                    "SELECT project_id FROM project_name_keys WHERE name='Native fleet'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "named:Native fleet"
+        );
+        assert_eq!(
+            agent
+                .db
+                .query_row(
+                    "SELECT count(*) FROM projects WHERE name='Native fleet'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(agent.db.query_row("SELECT legacy FROM project_name_collisions WHERE rejected_id='github.com/other/Native fleet'", [], |r| r.get::<_,bool>(0)).unwrap(), true);
+    }
 
     struct Fixture {
         path: PathBuf,

@@ -37,7 +37,9 @@ export default function Issues({api}){
      }else if(mounted.current)setError(e.status===401?'Pair this device again to send the saved draft.':e.status?e.message:'Pending — saved on this phone. Retrying when connected.');
     }
    }
-   const value=await api('/issues');if(mounted.current)setState(value);
+   const value=await api('/issues');
+   if(!current.current.submitted){const project=value.projects.find(p=>p.id===current.current.project);if(project)keep({...current.current,project:project.name});}
+   if(mounted.current)setState(value);
   }catch(e){if(mounted.current)setError(e.status?e.message:'Unable to refresh issues. Your draft is saved; retry when online.');}
   finally{running.current=false;if(mounted.current)setBusy(false);}
  }
@@ -67,10 +69,11 @@ export default function Issues({api}){
    <label htmlFor="issue-project">Project</label>
    <select id="issue-project" required value={draft.project} disabled={draft.submitted} onChange={e=>{change('project',e.target.value);try{localStorage.setItem('hey-boss-issues-project',JSON.stringify(e.target.value));}catch{}}}>
     <option value="">Select a project</option>
-    {draft.project&&!state.projects.some(p=>p.id===draft.project)&&<option value={draft.project}>{draft.project}</option>}
-    {state.projects.map(project=><option key={project.id} value={project.id}>{project.name}</option>)}
+    {draft.project&&!state.projects.some(p=>p.name===draft.project)&&<option value={draft.project}>{state.projects.find(p=>p.id===draft.project)?.name||draft.project}</option>}
+    {state.projects.map(project=><option key={project.name} value={project.name}>{project.name}</option>)}
    </select>
    {!state.projects.length&&<p className="fine">Waiting for registered projects. Connect the supervisor to load them.</p>}
+   {state.projects.some(p=>p.name_collisions?.length>0)&&<details className="fine"><summary>Existing project names reused</summary><p>Another folder or repository matched an existing name. No new destination was created.</p></details>}
    <label htmlFor="issue-title">Title</label>
    <TextField.Root id="issue-title" required value={draft.title} disabled={draft.submitted} onChange={e=>change('title',e.target.value)} placeholder="What needs to happen?" size="3"/>
    <label htmlFor="issue-description">Description <span className="fine">optional</span></label>
@@ -88,7 +91,7 @@ export default function Issues({api}){
   <div className="issue-deliveries"><h2>Your submissions</h2><p className="fine">{state.connected?'Supervisor connected':'Supervisor offline — accepted issues stay queued on the server.'}</p>
    {!state.creations.length&&<p className="fine">Your submitted issues will appear here.</p>}
    {state.creations.map(creation=><article className="issue-delivery glass" key={creation.requestID}>
-    <a href={`/project-resource#${new URLSearchParams({project:creation.project,issue:creation.number})}`} hidden={!creation.number}>Open issue and artifacts</a><span className="fine">{state.projects.find(p=>p.id===creation.project)?.name||creation.project}</span><h3>{creation.title}</h3>
+    <a href={`/project-resource#${new URLSearchParams({project:creation.project,issue:creation.number})}`} hidden={!creation.number}>Open issue and artifacts</a><span className="fine">{state.projects.find(p=>p.id===creation.project||p.name===creation.project)?.name||creation.project}</span><h3>{creation.title}</h3>
     <p role="status">{creation.status==='synced'?`Synced · #${creation.number}`:creation.status==='error'?'Error':'Pending — waiting for the supervisor'}</p>
     {creation.status==='error'&&<><p className="reader-error">{creation.error}</p><Button variant="soft" disabled={draft.submitted} onClick={()=>restore(creation)}>Edit saved draft</Button></>}
    </article>)}

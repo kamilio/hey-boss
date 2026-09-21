@@ -1093,6 +1093,11 @@ fn command_context(value: &Value) -> String {
     context
 }
 pub(crate) fn print_text(value: &Value) {
+    if let Some(warnings) = value["project_warnings"].as_array() {
+        for warning in warnings {
+            eprintln!("Warning: {}", line(&warning["message"]));
+        }
+    }
     if let Some(destination) = value.get("moved_to") {
         println!(
             "Issue moved to {} ({}) #{}. Open it with --project {}.",

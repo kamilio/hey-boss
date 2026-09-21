@@ -28,6 +28,8 @@ mod workers;
 mod artifacts;
 #[path = "batch.rs"]
 mod batch;
+#[path = "project_names.rs"]
+mod project_names;
 #[path = "status.rs"]
 mod status;
 #[path = "transfer.rs"]
@@ -554,8 +556,26 @@ fn resolve_project(
     override_id: Option<&str>,
 ) -> Result<Project> {
     let Some(value) = override_id else {
-        return Ok(detected.clone());
+        if let Some(existing) = db
+            .query_row(
+                "SELECT id,name FROM projects WHERE id=?1",
+                [&detected.id],
+                |r| {
+                    Ok(Project {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+        {
+            return project_names::canonical(db, existing);
+        }
+        return project_names::canonical(db, detected.clone());
     };
+    if let Some(project) = project_names::by_name(db, value)? {
+        return Ok(project);
+    }
     let exact = db
         .query_row("SELECT id,name FROM projects WHERE id=?1", [value], |row| {
             Ok(Project {
@@ -567,43 +587,29 @@ fn resolve_project(
     if let Some(project) = exact {
         return Ok(project);
     }
-    let mut query = db.prepare("SELECT id,name FROM projects WHERE name=?1 ORDER BY id LIMIT 2")?;
-    let found = query
-        .query_map([value], |row| {
-            Ok(Project {
-                id: row.get(0)?,
-                name: row.get(1)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    match found.len() {
-        1 => return Ok(found.into_iter().next().unwrap()),
-        2 => {
-            return Err(Error::conflict(format!(
-                "Project name {value:?} is ambiguous; use its full project ID"
-            )));
-        }
-        _ => {}
-    }
     if value == detected.id || value == detected.name {
-        return Ok(detected.clone());
+        return project_names::canonical(db, detected.clone());
     }
-    // Canonical repository IDs and explicit custom names can be used outside a
-    // checkout. Short names are isolated from automatically detected repos.
-    Ok(Project {
-        id: if value.contains('/') || value.starts_with("local:") || value.starts_with("named:") {
-            value.into()
-        } else {
-            format!("named:{value}")
+    // Keep repository IDs and custom selectors compatible, then resolve their
+    // name to the existing destination before registration.
+    project_names::canonical(
+        db,
+        Project {
+            id: if value.contains('/') || value.starts_with("local:") || value.starts_with("named:")
+            {
+                value.into()
+            } else {
+                format!("named:{value}")
+            },
+            name: value
+                .rsplit('/')
+                .next()
+                .unwrap_or(value)
+                .strip_prefix("named:")
+                .unwrap_or_else(|| value.rsplit('/').next().unwrap_or(value))
+                .into(),
         },
-        name: value
-            .rsplit('/')
-            .next()
-            .unwrap_or(value)
-            .strip_prefix("named:")
-            .unwrap_or_else(|| value.rsplit('/').next().unwrap_or(value))
-            .into(),
-    })
+    )
 }
 
 pub struct Store {
@@ -767,6 +773,7 @@ impl Store {
         status::migrate(&db)?;
         provenance::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
+        project_names::migrate(&db)?;
         Ok(Self {
             db,
             attachment_root: path.with_extension("attachments"),
@@ -787,7 +794,7 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let project = resolve_project(&tx, detected, override_id)?;
-        if override_id.is_none() && super::identity::is_home_project(&project) {
+        if override_id.is_none() && super::identity::is_home_project(detected) {
             return Err(Error::invalid(
                 "The home directory is not a project. Use --project or run from a project directory.",
             ));
@@ -800,6 +807,8 @@ impl Store {
             .as_millis() as i64;
         tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3)
             ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)", params![project.id,project.name,now])?;
+        project_names::record(&tx, detected, &project)?;
+        project_names::record_override(&tx, override_id, &project)?;
         tx.commit()?;
         Ok(project)
     }
@@ -820,7 +829,7 @@ impl Store {
         // Existing-project reads use a WAL snapshot and do not compete with
         // worker reservations, event writes, or replica synchronization.
         let detected = resolve_project(&self.db, &r.project, r.project_override.as_deref())?;
-        let home = r.project_override.is_none() && super::identity::is_home_project(&detected);
+        let home = r.project_override.is_none() && super::identity::is_home_project(&r.project);
         if write
             && home
             && !matches!(
@@ -886,6 +895,10 @@ impl Store {
         if (write || register) && !home {
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
         }
+        if write || register {
+            project_names::record(&tx, &r.project, &project)?;
+            project_names::record_override(&tx, r.project_override.as_deref(), &project)?;
+        }
         if write {
             let actor = actor.unwrap();
             tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",
@@ -946,7 +959,7 @@ impl Store {
                     p.activity_at,p.hidden_at,p.created_at,
                     coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0)
                     FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
-                    WHERE ?1 OR p.hidden_at IS NULL GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
+                    WHERE EXISTS(SELECT 1 FROM project_name_keys k WHERE k.project_id=p.id) AND (?1 OR p.hidden_at IS NULL) GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
@@ -965,11 +978,20 @@ impl Store {
                     OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=?1)",
                 )?;
                 let mut listed_projects = Vec::with_capacity(projects.len());
-                for p in projects {
+                let warnings = project_names::warnings(&tx)?;
+                for mut p in projects {
                     let id = p["id"].as_str().unwrap();
                     if !super::identity::is_temporary_project(id)
                         || saved_work.query_row([id], |r| r.get::<_, bool>(0))?
                     {
+                        p["name_collisions"] = json!(
+                            warnings
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter(|w| w["project_id"] == p["id"])
+                                .collect::<Vec<_>>()
+                        );
                         listed_projects.push(p);
                     }
                 }
@@ -981,7 +1003,7 @@ impl Store {
                 let assignees = query
                     .query_map([&project.id], |r| r.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                json!({"ok":true,"project":project,"projects":listed_projects,"labels":labels,"assignees":assignees})
+                json!({"ok":true,"project":project,"projects":listed_projects,"project_warnings":project_names::warnings(&tx)?,"labels":labels,"assignees":assignees})
             }
             Operation::HideProject | Operation::RestoreProject => {
                 let changed = if matches!(r.operation, Operation::HideProject) {
@@ -1278,6 +1300,18 @@ impl Store {
                 params![project.id, now],
             )?;
         }
+        if (write || register) && result.get("project_warnings").is_none() {
+            let warnings = project_names::warnings(&tx)?;
+            let warnings = warnings
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["project_id"] == project.id)
+                .collect::<Vec<_>>();
+            if !warnings.is_empty() {
+                result["project_warnings"] = json!(warnings);
+            }
+        }
         if let (Some(key), Some(actor)) = (&r.request_id, actor) {
             tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response) VALUES(?1,?2,?3,?4,?5)",
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
@@ -1323,10 +1357,13 @@ impl Store {
             }
             identifier(&project.id, "project ID", 8192)?;
             identifier(&project.name, "project name", 1024)?;
+            let incoming = project;
+            let project = project_names::canonical(&tx, project.clone())?;
             let at = (*activity).clamp(0, now);
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?4)
                 ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)
                 WHERE excluded.activity_at>projects.activity_at",params![project.id,project.name,now,at])?;
+            project_names::record(&tx, incoming, &project)?;
         }
         tx.commit()?;
         Ok(())

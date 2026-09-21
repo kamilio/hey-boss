@@ -7,6 +7,19 @@ import {HubStore} from './store.mjs';
 import {createApp} from './index.mjs';
 const project={id:'github.com/kamilio/hey-boss',name:'hey-boss'};
 const draft={requestID:'mobile-123',project:project.id,title:'Phone issue',body:'Description',labels:['ready']};
+test('project names are unique destinations and accept name-based submissions',()=>{
+ const store=new HubStore();
+ try{
+  store.setIssueProjects([project,{id:'named:hey-boss',name:'HEY-BOSS'}]);
+  assert.equal(store.issueProjects().length,1);
+  assert.equal(store.issueProjects()[0].name_collisions.length,1);
+  const byName={...draft,project:'hey-boss'};
+  const created=store.createIssue('phone',byName);
+  assert.equal(created.project,'hey-boss');
+  assert.deepEqual(store.createIssue('phone',byName),created);
+  assert.equal(store.createIssue('phone',{...draft,requestID:'compatibility-id'}).project,project.id);
+ }finally{store.close();}
+});
 test('offline creations survive restart and lost acknowledgments without duplicates',()=>{
  const directory=mkdtempSync(join(tmpdir(),'hb-issues-'));let store=new HubStore(join(directory,'hub.db'));
  try{

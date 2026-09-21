@@ -112,7 +112,13 @@ export class HubStore{
  issueProjects(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='issue_projects'").get();return row?JSON.parse(row.value):[];}
  setIssueProjects(projects){
   if(!Array.isArray(projects)||projects.length>10000||projects.some(p=>typeof p.id!=='string'||!p.id.trim()||Buffer.byteLength(p.id)>8192||typeof p.name!=='string'||!p.name.trim()||Buffer.byteLength(p.name)>1024))throw new HubError(400,'Invalid project registry');
-  this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_projects',?)").run(JSON.stringify(projects.map(({id,name})=>({id,name}))));
+  const names=new Map();
+  for(const {id,name,name_collisions=[]} of projects){
+   const key=name.toLowerCase(),existing=names.get(key);
+   if(existing){existing.name_collisions.push({name:existing.name,project_id:existing.id,rejected_id:id,legacy:false});continue;}
+   names.set(key,{id,name,name_collisions:Array.isArray(name_collisions)?name_collisions.filter(w=>w&&typeof w.rejected_id==='string'&&typeof w.name==='string'&&typeof w.project_id==='string').map(w=>({name:w.name,project_id:w.project_id,rejected_id:w.rejected_id,legacy:w.legacy===true})):[]});
+  }
+  this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_projects',?)").run(JSON.stringify([...names.values()]));
   this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('issue_bridge_seen',?)").run(String(Date.now()));
  }
  issueConnected(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='issue_bridge_seen'").get();return !!row&&Date.now()-Number(row.value)<30000;}
@@ -133,7 +139,7 @@ export class HubStore{
   // Accepted retries remain readable even if their project later disappears.
   if(existing){if(existing.device!==device||existing.body!==payload)throw new HubError(409,'This request ID already belongs to another submission');return this.issueCreation(existing);}
   this.ensureRoom(Buffer.byteLength(payload));
-  if(!this.issueProjects().some(project=>project.id===value.project))throw new HubError(400,'Choose a registered project. Reconnect the supervisor to refresh projects.');
+  if(!this.issueProjects().some(project=>project.id===value.project||typeof value.project==='string'&&project.name.toLowerCase()===value.project.toLowerCase()))throw new HubError(400,'Choose a registered project. Reconnect the supervisor to refresh projects.');
   if(this.db.prepare("SELECT COUNT(*) AS n FROM issue_creations WHERE status='pending'").get().n>=10000)throw new HubError(503,'The issue queue is full. Keep this draft and retry after the supervisor reconnects.');
   this.db.prepare('INSERT INTO issue_creations(id,device,body,created) VALUES(?,?,?,?)').run(value.requestID,device,payload,Date.now());this.next();
   return this.issueCreation(this.db.prepare('SELECT * FROM issue_creations WHERE id=?').get(value.requestID));
