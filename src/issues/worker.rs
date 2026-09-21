@@ -17,6 +17,17 @@ use std::{
 };
 
 pub const DEFAULT_PROMPT: &str = "Claim and implement `{{issue_command}}`.";
+/// Stored as ordinary labels so task intent uses the existing durable fleet wire format.
+pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
+    let labels = issue["labels"].as_array()?;
+    if labels.iter().any(|label| label == "task:research") {
+        Some("research")
+    } else if labels.iter().any(|label| label == "task:plan") {
+        Some("plan")
+    } else {
+        None
+    }
+}
 pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for this issue. Create it before editing files and keep unrelated changes intact.";
 pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checkout.";
 pub const DEFAULT_MAIN_PROMPT: &str =
@@ -217,6 +228,9 @@ pub(crate) struct Job {
     pub machine: String,
 }
 impl Job {
+    pub(crate) fn requires_pr(&self) -> bool {
+        self.config.prs_enabled && artifact_task(&self.issue).is_none()
+    }
     pub fn number(&self) -> i64 {
         self.issue["number"].as_i64().unwrap()
     }
@@ -882,6 +896,7 @@ fn template(text: &str, job: &Job) -> String {
             "issue_command" => format!("hey-boss issue view {}", number_text(job)),
             "create_issue_command" => create_issue_command(None),
             "project" => job.project.id.clone(),
+            "project_arg" => format!("'{}'", job.project.id.replace('\'', "'\\''")),
             "number" => number_text(job),
             "title" => job.issue["title"].as_str().unwrap().into(),
             "body" => job.issue["body"].as_str().unwrap().into(),
@@ -959,6 +974,28 @@ fn prompt(job: &Job) -> (String, bool, String) {
     } else {
         rendered
     };
+    if let Some(kind) = artifact_task(&job.issue) {
+        // Task intent replaces saved implementation instructions, including custom
+        // delivery/workspace branches. Goal mode still follows the saved /goal prefix.
+        let focus = if kind == "plan" {
+            "Produce a concrete plan with scope, design, tradeoffs, implementation steps, and verification criteria."
+        } else {
+            "Investigate the question and document findings, sources, uncertainties, tradeoffs, and recommendations."
+        };
+        let instructions = template(
+            &format!(
+                "Claim and {kind} `{{{{issue_command}}}}`.\n\n{focus}\n\nDeliver artifacts only; do not implement code, commit, push, or deploy. Save the result with `hey-boss artifact create --title '<title>' --body '<markdown>' --issue {{{{number}}}} --project {{{{project_arg}}}}`. Link every output artifact to this issue. When several related artifacts or topics benefit from an overview, organize and link them in a project mindmap using `hey-boss mm --project {{{{project_arg}}}}`. If the result identifies actionable work, create draft follow-up issues with `hey-boss issue create --draft --title '<title>' --body '<markdown>' --project {{{{project_arg}}}}` and reference the source artifact and this issue; do not start those issues. If drafts are unavailable, record proposed follow-ups in the artifact. Finish with links to the saved artifacts, any mindmap, and follow-up issues."
+            ),
+            job,
+        );
+        let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
+            format!("{instructions}\n\nPlan document: {path}")
+        } else {
+            instructions
+        };
+        let objective = instructions.trim().chars().take(4000).collect();
+        return (instructions, goal, objective);
+    }
     let overrides = &job.config.prompt_overrides;
     let workspace = if job.config.worktree_enabled {
         overrides
@@ -1526,6 +1563,48 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn artifact_tasks_replace_implementation_and_delivery_prompts() {
+        for kind in ["plan", "research"] {
+            for base in [
+                DEFAULT_PROMPT,
+                "/goal",
+                "/goal Implement and deploy everything",
+            ] {
+                let config = ProjectConfig {
+                    prompt: base.into(),
+                    prs_enabled: true,
+                    worktree_enabled: true,
+                    ..Default::default()
+                };
+                let mut task = issue();
+                task["labels"] = json!([format!("task:{kind}"), "ready"]);
+                task["plan"] = json!({"path":"/tmp/task-notes.md"});
+                let (text, goal, objective) = preview(&config, &project(), task);
+                assert!(text.contains(&format!("Claim and {kind}")), "{text}");
+                assert!(text.contains("hey-boss artifact create"), "{text}");
+                assert!(text.contains("--issue 7"));
+                assert!(text.contains("mindmap"));
+                assert!(text.contains("draft follow-up issues"));
+                assert!(text.contains("Plan document: /tmp/task-notes.md"));
+                assert!(!text.contains("Commit your changes"));
+                assert!(!text.contains("pull request"));
+                assert!(!text.contains("dedicated Git worktree"));
+                assert!(!text.contains("Implement and deploy everything"));
+                assert_eq!(goal, base.starts_with("/goal"));
+                assert!(objective.starts_with(&format!("Claim and {kind}")));
+            }
+        }
+    }
+    #[test]
+    fn ordinary_labels_do_not_change_task_behavior() {
+        let mut task = issue();
+        task["labels"] = json!(["plan", "research", "task:unknown"]);
+        assert_eq!(
+            preview(&ProjectConfig::default(), &project(), task).0,
+            preview(&ProjectConfig::default(), &project(), issue()).0
+        );
+    }
     #[test]
     fn pr_handoff_instructions_survive_custom_delivery_prompts() {
         for custom in [None, Some("Publish custom PR {{number}}.".into())] {

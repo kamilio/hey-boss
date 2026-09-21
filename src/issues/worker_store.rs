@@ -7,7 +7,7 @@ type ActiveProcess = (Job, Option<u32>, Option<String>);
 // Only the owning agent's deliberate handoff may finish after changing owners.
 // A human takeover must still stop the session and invalidate its completion.
 fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
-    if !job.config.prs_enabled
+    if !job.requires_pr()
         || issue.state != "open"
         || issue.deleted_at.is_some()
         || issue.assignee.as_deref() != Some("human:boss")
@@ -420,7 +420,9 @@ impl Store {
             && !own_closed
             && ((!own && !handed_off)
                 || issue.title != job.issue["title"]
-                || issue.body != job.issue["body"])
+                || issue.body != job.issue["body"]
+                || crate::issues::worker::artifact_task(&json!({"labels": issue.labels}))
+                    != crate::issues::worker::artifact_task(&job.issue))
         {
             state = "blocked";
             summary = format!(
@@ -448,7 +450,7 @@ impl Store {
         };
         if (own || handed_off) && issue.deleted_at.is_none() && issue.state == "open" {
             let report = format!("### Worker {}\n\n{}", state, summary);
-            if state == "completed" && !job.config.prs_enabled {
+            if state == "completed" && !job.requires_pr() {
                 mutate(
                     &tx,
                     &job.project,
@@ -471,7 +473,7 @@ impl Store {
                     },
                     now(),
                 )?;
-                if state == "completed" && job.config.prs_enabled {
+                if state == "completed" && job.requires_pr() {
                     mutate(
                         &tx,
                         &job.project,
@@ -1010,6 +1012,34 @@ mod tests {
                 .unwrap();
             assert_eq!(f.issue().state, "closed");
             assert_eq!(f.state(), "completed");
+            assert!(f.issue().assignee.is_none());
+        }
+    }
+
+    #[test]
+    fn artifact_tasks_close_without_prs_and_changed_task_intent_blocks_completion() {
+        for changed in [false, true] {
+            let mut f = HandoffFixture::new(true);
+            f.job.issue["labels"] = json!(["task:plan"]);
+            f.store
+                .db
+                .execute(
+                    "UPDATE issues SET labels=?1 WHERE project_id=?2 AND number=1",
+                    params![
+                        if changed {
+                            "[\"task:research\"]"
+                        } else {
+                            "[\"task:plan\"]"
+                        },
+                        f.job.project.id
+                    ],
+                )
+                .unwrap();
+            f.store
+                .worker_finish(&f.job, "completed", "Artifact saved.")
+                .unwrap();
+            assert_eq!(f.issue().state, if changed { "open" } else { "closed" });
+            assert_eq!(f.state(), if changed { "blocked" } else { "completed" });
             assert!(f.issue().assignee.is_none());
         }
     }
