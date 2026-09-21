@@ -1,5 +1,7 @@
 "use strict";
 const HeyBossQuickIssue = (() => {
+  const taskKind = (labels = []) => labels.includes("task:research") ? "research" : labels.includes("task:plan") ? "plan" : "implement";
+  const taskLabels = (labels, kind) => [...new Set(labels.filter(label => !["task:plan", "task:research"].includes(label))), ...(["plan", "research"].includes(kind) ? [`task:${kind}`] : [])];
   const fold = value => value.normalize("NFC").toLocaleLowerCase();
   // Scan whole tokens so email addresses, escaped @ signs and @ inside quotes
   // cannot open another picker. Offsets match the input's selection offsets.
@@ -85,6 +87,7 @@ const HeyBossQuickIssue = (() => {
       context = document.getElementById("quick-issue-context"),
       submit = document.getElementById("quick-issue-submit"),
       bottom = document.getElementById("quick-issue-bottom"),
+      kind = document.getElementById("quick-issue-kind"),
       status = document.getElementById("quick-issue-status");
     const picker = document.getElementById("quick-issue-project-picker"),
       list = document.getElementById("quick-issue-projects"),
@@ -241,15 +244,15 @@ const HeyBossQuickIssue = (() => {
       if (!ready || saving) return;
       let parsed;
       try { parsed = parse(input.value, projects, current); } catch (e) { fail(e.message); input.focus(); return; }
-      const operation = {action:"create", title:parsed.title, body:"", labels:[], at_top:!bottom.checked};
+      const operation = {action:"create", title:parsed.title, body:"", labels:taskLabels([],kind.value), at_top:!bottom.checked};
       const key = JSON.stringify([host, parsed.project.id, operation]);
       if (pending?.key !== key) pending = {key, id:crypto.randomUUID()};
       hidePicker();
-      saving = true; input.disabled = true; bottom.disabled = true; submit.disabled = true; error.hidden = true; context.textContent = "Creating…";
+      saving = true; input.disabled = true; bottom.disabled = true; kind.disabled = true; submit.disabled = true; error.hidden = true; context.textContent = "Creating…";
       try {
         const value = await post(operation, parsed.project.id, pending.id);
         const savedHost = host;
-        pending = null; input.value = ""; bottom.checked = false; saving = false; close();
+        pending = null; input.value = ""; bottom.checked = false; kind.value = "implement"; saving = false; close();
         const link = document.createElement("a");
         link.href = `/#${new URLSearchParams({project:value.project.id, issue:value.issue.number, ...(savedHost ? {host:savedHost} : {})})}`;
         link.textContent = `Created #${value.issue.number} in ${value.project.name}`;
@@ -257,10 +260,10 @@ const HeyBossQuickIssue = (() => {
         clearTimeout(statusTimer); statusTimer = setTimeout(() => status.hidden = true, 10000);
         window.dispatchEvent(new CustomEvent("hey-boss-issue-created", {detail:value}));
       } catch (e) { fail(`${e.message} Your title is preserved; retry to submit safely.`); }
-      finally { saving = false; input.disabled = false; bottom.disabled = false; if (dialog.open) { preview(); error.hidden = false; input.focus(); } }
+      finally { saving = false; input.disabled = false; bottom.disabled = false; kind.disabled = false; if (dialog.open) { preview(); error.hidden = false; input.focus(); } }
     };
   }
   if (typeof document !== "undefined") init();
-  return {parse, mentionAt, suggestions, completeMention};
+  return {parse, mentionAt, suggestions, completeMention, taskKind, taskLabels};
 })();
 if (typeof module !== "undefined") module.exports = HeyBossQuickIssue;

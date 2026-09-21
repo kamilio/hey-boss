@@ -163,6 +163,13 @@ still race the final check. See `docs/github-drain.md` in the source repository.
 
 ## Issue workers
 
+Issues labeled `task:plan` or `task:research` are artifact tasks. Their worker
+prompt replaces implementation and Git delivery with a plan or research findings
+saved as issue-linked artifacts. Use a mindmap for related output and draft
+follow-up issues for proposed implementation; do not start them. These tasks
+close on successful artifact delivery even in PR-enabled projects. The web
+editor and Quick Add offer a small Task selector; Implement remains the default.
+
 Use **Supervisor → Worker → Agent** consistently: the supervisor coordinates the
 fleet, workers pick issues and manage agent lifecycle/retries, and agents are
 Codex coding sessions. A machine companion synchronizes its replica and applies
