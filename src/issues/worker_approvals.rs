@@ -14,9 +14,28 @@ struct Prompt {
 
 fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
     if method == "mcpServer/elicitation/request" {
-        // Form elicitations may request credentials; never collect them in Inbox.
+        // Never collect form values (which may be credentials) in Inbox. An
+        // explicit skip cancels only this tool request, preserving the session.
         if params["mode"] != "url" {
-            return Ok(None);
+            let server = params["serverName"].as_str().unwrap_or("MCP server");
+            let message = params["message"]
+                .as_str()
+                .unwrap_or("This tool requires a form response.");
+            return Ok(Some(Prompt {
+                question: format!("{server} needs input Hey Boss cannot collect"),
+                description: format!(
+                    "Hey Boss does not collect MCP form responses or credentials. Choose ‘Continue without this tool’ to cancel this tool request and let Codex use another approach in the same session. ‘Cancel’ stops the worker for explicit retry. Neither choice approves the tool or supplies form values.\n\n**Server message**\n\n{}",
+                    code(message)
+                ),
+                choices: vec![
+                    (
+                        "Continue without this tool".into(),
+                        json!({"action":"cancel","content":null}),
+                    ),
+                    ("Cancel".into(), json!({"action":"cancel","content":null})),
+                ],
+                link: None,
+            }));
         }
         let url = params["url"]
             .as_str()
@@ -573,14 +592,66 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_mcp_forms_can_be_skipped_explicitly_without_collecting_input() {
+        let p = prompt("mcpServer/elicitation/request", &json!({"mode":"form","serverName":"Browser","message":"This operation needs a form response.","requestedSchema":{"type":"object","properties":{"password":{"type":"string","default":"synthetic-secret"}}}})).unwrap().unwrap();
+        assert!(p.question.contains("Browser"));
         assert!(
-            prompt(
-                "mcpServer/elicitation/request",
-                &json!({"mode":"form","requestedSchema":{"type":"object"}})
-            )
-            .unwrap()
-            .is_none()
+            p.description
+                .contains("This operation needs a form response.")
         );
+        assert!(!p.description.contains("synthetic-secret"));
+        assert!(p.link.is_none());
+        assert_eq!(
+            p.choices[0],
+            (
+                "Continue without this tool".into(),
+                json!({"action":"cancel","content":null})
+            )
+        );
+        assert_eq!(p.choices[1].0, "Cancel");
+        assert!(p.choices.iter().all(|(_, v)| v["action"] != "accept"));
+    }
+
+    #[test]
+    fn inbox_tool_skip_returns_cancellation_without_stopping_the_worker() {
+        use std::io::Write;
+        let p = prompt("mcpServer/elicitation/request", &json!({"mode":"form"}))
+            .unwrap()
+            .unwrap();
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        server.write_all(br#"{"task_id":"synthetic-skip","status":"ok","result":"Continue without this tool"}"#).unwrap();
+        drop(server);
+        let mut approvals = Approvals {
+            pending: vec![Pending {
+                id: json!("request-skip"),
+                item: Value::Null,
+                turn: Value::Null,
+                questions: vec![Question {
+                    task: "synthetic-skip".into(),
+                    choices: p.choices,
+                    reading: Some(Reading {
+                        stream,
+                        bytes: vec![],
+                        started: Instant::now(),
+                    }),
+                }],
+                response: json!({}),
+            }],
+            polled: None,
+        };
+        let replies = approvals.poll().unwrap();
+        assert_eq!(
+            replies,
+            vec![(
+                json!({"id":"request-skip","result":{"action":"cancel","content":null}}),
+                false
+            )]
+        );
+        assert!(!approvals.is_pending());
     }
 
     #[test]

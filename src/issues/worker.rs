@@ -32,6 +32,7 @@ pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for 
 pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checkout.";
 pub const DEFAULT_MAIN_PROMPT: &str =
     "Commit your changes. If a Git remote is configured, push to main.";
+const DELIVERY_EVIDENCE_PROMPT: &str = "Record delivery and verification evidence with `hey-boss issue comment {{number}} --body '<what shipped, commit or PR, checks and installation results>'` before cleaning generated output. Keep cleanup commands separate from Git, CI and verification commands. If optional cleanup needs extra approval after the requested work is delivered and verified, leave those files intact, document them and finish; never treat a declined cleanup request as approval or bypass required checks.";
 pub const DEFAULT_PRS_PROMPT: &str = "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {{number}} '<pr-url>'`.";
 pub(crate) const PR_HANDOFF_PROMPT: &str = "PR handoff: Keep the issue open until the actual fix PR is merged. CI passing and a ready-for-review handoff are not a merge. Continue in this session until required CI and reviews are complete, code feedback and findings are addressed, and conflicts are resolved. Only when the fix is fully merge-ready, record the verification and remaining merge step in an issue comment, then hand it to Boss with `hey-boss issue assign-to-boss {{number}}` and report completed. Do not close the issue at this handoff or merge automatically. If work remains, continue working; if blocked, report blocked rather than completed or assigning it to Boss. Review attachment purposes: supporting evidence PRs do not all need to merge. An explicitly requested source/group closure may still close normally.";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1046,10 +1047,11 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
         overrides.main.as_deref().unwrap_or(DEFAULT_MAIN_PROMPT)
     };
     let instructions = format!(
-        "{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n{}\n\n{}",
         instructions.trim_end(),
         template(workspace, job),
-        template(delivery, job)
+        template(delivery, job),
+        template(DELIVERY_EVIDENCE_PROMPT, job)
     );
     // Lifecycle rules also apply to saved/custom delivery prompts. Preview,
     // claims, new sessions and resumed sessions all use this assembly path.
@@ -1741,6 +1743,24 @@ mod tests {
         let (text, _, _) = preview(&ProjectConfig::default(), &project(), issue());
         assert!(!text.contains("assign-to-boss"));
     }
+    #[test]
+    fn delivery_evidence_precedes_cleanup_even_with_custom_workflow_prompts() {
+        for prs_enabled in [false, true] {
+            let config = ProjectConfig {
+                prs_enabled,
+                prompt_overrides: PromptOverrides {
+                    main: Some("Custom main delivery.".into()),
+                    prs: Some("Custom PR delivery.".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (text, _, _) = preview(&config, &project(), issue());
+            assert!(text.contains("Record delivery and verification evidence"));
+            assert!(text.contains("hey-boss issue comment 7"));
+            assert!(text.contains("Keep cleanup commands separate"));
+        }
+    }
     fn project() -> Project {
         Project {
             id: "named:a'b $(touch nope)".into(),
@@ -1749,7 +1769,8 @@ mod tests {
     }
     fn with_workflow(base: &str) -> String {
         format!(
-            "{base}\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
+            "{base}\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.\n\n{}",
+            DELIVERY_EVIDENCE_PROMPT.replace("{{number}}", "7")
         )
     }
     fn issue() -> Value {
