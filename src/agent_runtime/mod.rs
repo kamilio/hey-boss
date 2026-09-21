@@ -227,6 +227,7 @@ pub struct AgentSession {
     prompt_ack: Option<(String, Instant)>,
     tasks: BTreeSet<String>,
     refreshing_pi: bool,
+    pi_streaming: bool,
 }
 impl AgentSession {
     pub fn launch(launch: Launch) -> io::Result<Self> {
@@ -325,6 +326,7 @@ impl AgentSession {
             prompt_ack: None,
             tasks: BTreeSet::new(),
             refreshing_pi: false,
+            pi_streaming: false,
         };
         match client.provider {
             Provider::Codex => {
@@ -459,6 +461,11 @@ impl AgentSession {
                 "Prompt is waiting for provider acknowledgment",
             ));
         }
+        if self.provider == Provider::Pi && !self.pi_streaming {
+            return Err(io::Error::other(
+                "Pi is no longer executing this turn; wait for its terminal event",
+            ));
+        }
         match self.provider {
             Provider::Codex => {
                 let result = self.rpc("turn/steer", json!({"threadId":self.session.as_ref().unwrap().id,"expectedTurnId":expected_turn,"input":[{"type":"text","text":text}]}))?;
@@ -488,6 +495,15 @@ impl AgentSession {
         self.ready()?;
         self.inspect()?;
         if self.turn.is_none() {
+            return Ok(());
+        }
+        if self.provider == Provider::Pi
+            && !self.pi_streaming
+            && self.prompt_ack.is_none()
+            && self.requests.is_empty()
+        {
+            // The engine may become idle before its settled event is emitted.
+            // Do not rewrite that completed turn as interrupted or queue work.
             return Ok(());
         }
         self.interrupted = true;
@@ -720,7 +736,13 @@ impl AgentSession {
         self.refreshing_pi = false;
         let state = result?;
         let id = required(&state, "sessionId").inspect_err(|_| self.uncertain = true)?;
-        self.attach(id, state["sessionFile"].as_str().map(PathBuf::from))
+        let streaming = state["isStreaming"]
+            .as_bool()
+            .ok_or_else(|| io::Error::other("Pi omitted its activity state"))
+            .inspect_err(|_| self.uncertain = true)?;
+        self.attach(id, state["sessionFile"].as_str().map(PathBuf::from))?;
+        self.pi_streaming = streaming;
+        Ok(())
     }
     fn send(&mut self, value: &Value) -> io::Result<()> {
         self.process.send(value).inspect_err(|error| {

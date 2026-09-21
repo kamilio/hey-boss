@@ -107,6 +107,10 @@ function prompt(text) {
   if (text === 'hold native tool' && provider === 'codex') {
     nativeTool = spawn('/bin/sh', ['-c', 'sleep 0.6; printf BAD > native-finished'], {cwd:process.env.HEY_BOSS_FIXTURE_EFFECTS,stdio:'ignore'});
   }
+  if (text === 'hold idle provider' && provider === 'pi') {
+    streaming = false;
+    setTimeout(() => complete(), 600);
+  }
   if (text.startsWith('hold')) return;
   if (text === 'missing session acknowledgement') return;
   if (text.startsWith('queued goal')) { output = JSON.stringify({status:'completed',summary:'Initial turn verified'}); setTimeout(() => complete(), 300); return; }
