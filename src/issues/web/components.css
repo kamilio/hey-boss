@@ -468,6 +468,14 @@ h1 {
   border-bottom: 1px solid var(--line);
   color: var(--faint);
 }
+.project-menu {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 96px - env(safe-area-inset-bottom));
+}
+.project-menu > * {
+  flex-shrink: 0;
+}
 .popover-search input {
   min-width: 0;
   flex: 1;
@@ -484,8 +492,12 @@ h1 {
   padding: 13px 10px 6px;
 }
 #project-options {
+  flex-shrink: 1;
+  min-height: 0;
   max-height: 330px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding: 4px;
 }
 .project-option {
   display: flex;
@@ -631,6 +643,13 @@ h1 {
     width: 27px;
     height: 27px;
   }
+  .brand > span,
+  .header-divider {
+    display: none;
+  }
+  .project-control {
+    flex: 1;
+  }
   .header-divider {
     height: 20px;
   }
@@ -651,10 +670,12 @@ h1 {
     margin-left: -6px;
   }
   .project-control .project-trigger {
+    width: 100%;
     max-width: 100%;
+    min-height: 44px;
   }
   .project-trigger > span:last-child {
-    margin-left: 0;
+    margin-left: auto;
   }
   .project-trigger .project-glyph {
     display: none;
@@ -703,6 +724,18 @@ h1 {
     min-width: 0;
     max-width: none;
     top: 66px;
+    max-height: calc(100dvh - 84px - env(safe-area-inset-bottom));
+  }
+  .popover-search input {
+    font-size: 16px;
+  }
+  .project-option strong {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .project-choice .project-visibility {
+    width: 44px;
+    height: 44px;
   }
   .page-heading.detail-page {
     display: none;
