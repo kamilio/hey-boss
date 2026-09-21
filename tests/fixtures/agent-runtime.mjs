@@ -2,6 +2,7 @@
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 const provider = process.env.HEY_BOSS_FIXTURE_PROVIDER;
 const args = process.argv.slice(2);
 if (provider === 'codex') {
@@ -48,6 +49,23 @@ function prompt(text) {
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
   if (provider === 'pi') send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
+  if (text === 'closed input') {
+    const event = provider === 'codex'
+      ? {method:'item/agentMessage/delta',params:{threadId:session,delta:'INPUT_CLOSED'}}
+      : {type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'INPUT_CLOSED'}};
+    // The surviving child keeps stdout open, but closes the last stdin reader.
+    // Wait for its marker before attempting a write to the broken input pipe.
+    spawn('/bin/sh', ['-c', `exec 0<&-; printf '%s\\n' '${JSON.stringify(event)}'; sleep 30`], {stdio:['inherit','inherit','ignore']});
+    process.exit(0);
+  }
+  if (text === 'duplicate requests') {
+    for (const command of ['first command', 'different command']) {
+      if (provider === 'codex') send({id:'duplicate',method:'item/commandExecution/requestApproval',params:{threadId:session,turnId:turn,command}});
+      else if (provider === 'claude') send({type:'control_request',request_id:'duplicate',request:{subtype:'can_use_tool',tool_name:'Bash',input:{command}}});
+      else send({type:'extension_ui_request',id:'duplicate',method:'select',title:command,options:['one','two']});
+    }
+    return;
+  }
   if (text === 'background killed' && provider === 'claude') {
     send({type:'system',subtype:'task_started',task_id:'task-1',task_type:'local_agent'});
     send({type:'result',session_id:session,subtype:'success',is_error:false,result:'provisional'});

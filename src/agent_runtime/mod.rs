@@ -649,8 +649,7 @@ impl AgentSession {
     fn rpc(&mut self, method: &str, params: Value) -> io::Result<Value> {
         self.sequence += 1;
         let id = format!("hey-boss-{}", self.sequence);
-        self.process
-            .send(&protocol::request(self.provider, &id, method, params))?;
+        self.send(&protocol::request(self.provider, &id, method, params))?;
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if Instant::now() >= deadline {

@@ -85,6 +85,59 @@ fn approvals_require_an_explicit_owned_pending_request() {
 }
 
 #[test]
+fn ambiguous_duplicate_request_ids_disable_controls() {
+    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+        let mut session = launch(provider, None);
+        session.prompt("duplicate requests", None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match session.receive(Duration::from_millis(50)) {
+                Err(_) => break,
+                _ => assert!(Instant::now() < deadline),
+            }
+        }
+        assert!(
+            session.state().outcome_uncertain,
+            "{provider:?} accepted ambiguous request IDs"
+        );
+        let request = session.state().pending_requests.first().unwrap().clone();
+        if provider == Provider::Pi {
+            assert!(session.respond_input(&request, Some("one")).is_err());
+        } else {
+            assert!(session.decide(&request, true).is_err());
+        }
+        session.stop().unwrap();
+    }
+}
+
+#[test]
+fn broken_rpc_input_marks_delivery_uncertain_and_prevents_replay() {
+    for provider in [Provider::Codex, Provider::Pi] {
+        let mut session = launch(provider, None);
+        let turn = session.prompt("closed input", None).unwrap();
+        until(
+            &mut session,
+            |event| matches!(event, Event::TextDelta { text } if text == "INPUT_CLOSED"),
+        );
+        assert!(
+            session
+                .steer(&turn, "must not replay uncertain delivery")
+                .is_err()
+        );
+        assert!(
+            session.state().outcome_uncertain,
+            "{provider:?} did not taint a failed RPC write"
+        );
+        assert!(
+            session
+                .steer(&turn, "retry must be explicitly recovered")
+                .is_err()
+        );
+        session.stop().unwrap();
+    }
+}
+
+#[test]
 fn cross_provider_resume_is_rejected_before_spawning() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let result = AgentSession::launch(Launch {
