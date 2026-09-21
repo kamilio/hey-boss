@@ -47,6 +47,7 @@ async page => {
   await page.goto('http://127.0.0.1:4782/');
   await page.waitForFunction(() => model.csrf && !model.polling);
   await page.locator('.issue-row').first().waitFor();
+  await page.evaluate(() => { document.execCommand = () => true; });
   for (const scheme of ['light', 'dark']) {
     await page.emulateMedia({colorScheme: scheme});
     for (const width of [1440, 768, 390, 320]) {
@@ -55,6 +56,9 @@ async page => {
       check(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.width >= 28 && bounds.width <= 40, `${scheme} ${width}px: compact copy button stays visible`);
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${scheme} ${width}px: no horizontal overflow`);
       if (width === 320) check(await page.locator('.state-tabs').evaluate(el => el.scrollWidth <= el.clientWidth), `${scheme} 320px: all four state tabs fit beside the copy button`);
+      await button.click();
+      const confirmation = await page.locator('#toast').boundingBox();
+      check(confirmation.height <= 96 && confirmation.width <= width - 16, `${scheme} ${width}px: copy confirmation stays compact`);
       await page.screenshot({path: `output/playwright/issue91/list-command-${scheme}-${width}.png`});
     }
   }
