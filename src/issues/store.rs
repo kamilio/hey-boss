@@ -952,6 +952,27 @@ impl Store {
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
                     "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                // Older discovery registered temporary test/agent directories.
+                // Omit only empty entries, without deleting data or changing the
+                // user's visibility choices. Indexed lookups run only for local
+                // temporary identities; repository listings need no filesystem IO.
+                let mut saved_work = tx.prepare(
+                    "SELECT
+                    EXISTS(SELECT 1 FROM issues WHERE project_id=?1)
+                    OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1)
+                    OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=?1)
+                    OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1)
+                    OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=?1)",
+                )?;
+                let mut listed_projects = Vec::with_capacity(projects.len());
+                for p in projects {
+                    let id = p["id"].as_str().unwrap();
+                    if !super::identity::is_temporary_project(id)
+                        || saved_work.query_row([id], |r| r.get::<_, bool>(0))?
+                    {
+                        listed_projects.push(p);
+                    }
+                }
                 let mut query = tx.prepare("SELECT DISTINCT j.value FROM issues i,json_each(i.labels) j WHERE i.project_id=?1 AND i.deleted_at IS NULL ORDER BY j.value")?;
                 let labels = query
                     .query_map([&project.id], |r| r.get::<_, String>(0))?
@@ -960,7 +981,7 @@ impl Store {
                 let assignees = query
                     .query_map([&project.id], |r| r.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                json!({"ok":true,"project":project,"projects":projects,"labels":labels,"assignees":assignees})
+                json!({"ok":true,"project":project,"projects":listed_projects,"labels":labels,"assignees":assignees})
             }
             Operation::HideProject | Operation::RestoreProject => {
                 let changed = if matches!(r.operation, Operation::HideProject) {
@@ -1295,7 +1316,9 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (project, activity) in projects {
-            if super::identity::is_home_project(project) {
+            if super::identity::is_home_project(project)
+                || super::identity::is_temporary_project(&project.id)
+            {
                 continue;
             }
             identifier(&project.id, "project ID", 8192)?;
