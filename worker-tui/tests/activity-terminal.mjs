@@ -41,7 +41,7 @@ const snapshot = {
 };
 await writeFile(fixture, `#!/usr/bin/env node\nimport { existsSync } from 'node:fs';\nif (existsSync(${JSON.stringify(path.join(temporary, "offline"))})) { console.error('Synthetic queue offline'); process.exit(1); }\nconsole.log(${JSON.stringify(JSON.stringify(snapshot))});\n`, { mode: 0o700 });
 const wrapper = path.join(temporary, "terminal.sh");
-await writeFile(wrapper, '#!/bin/sh\nbefore=$(stty -g)\n"$@"\ncode=$?\n[ "$(stty -g)" = "$before" ] || exit 99\nprintf "TERMINAL_RESTORED\\n"\nexit "$code"\n', { mode: 0o700 });
+await writeFile(wrapper, '#!/bin/sh\nbefore=$(stty -g)\n"$@" <&0 &\nchild=$!\ntrap \'kill -TERM "$child" 2>/dev/null; wait "$child"; stty "$before"; exit 143\' TERM INT HUP\nwait "$child"\ncode=$?\n[ "$(stty -g)" = "$before" ] || exit 99\nprintf "TERMINAL_RESTORED\\n"\nexit "$code"\n', { mode: 0o700 });
 const wait = (session, pattern) => session.waitFor(pattern, { scope: "screen", timeout: 12000 });
 async function capture(session, name) {
   await session.waitForQuiet(100);
@@ -61,6 +61,7 @@ try {
   await capture(session, "02-older");
   await session.press("ArrowDown");
   await wait(session, "Waiting for agent activity");
+  await wait(session, "Latest");
   const waiting = await capture(session, "03-waiting");
   assert.ok(!waiting.contains("Older"), "Selection must reset log scroll");
   await session.type("h");
@@ -80,13 +81,15 @@ try {
       await wait(session, "Close help");
       await capture(session, "07-minimum-help");
       await session.press("Escape");
+      await wait(session, "Supervisor: connected");
+      await wait(session, "#86 running");
       await session.waitFor(/^(?![\s\S]*Keyboard)[\s\S]*$/, { scope: "screen", timeout: 2000 });
     }
   }
   await session.resize(120, 36);
   await wait(session, "The blue theme is in place");
   await session.type("?");
-  await wait(session, "Keyboard");
+  await wait(session, "Close help");
   await capture(session, "09-help");
   await session.press("Escape");
   await writeFile(path.join(temporary, "offline"), "");
@@ -101,7 +104,20 @@ try {
   assert.equal(await session.waitForExit({ timeout: 5000 }), 0);
   assert.match((await session.history()).join("\n"), /TERMINAL_RESTORED/);
   console.log(`Activity terminal-pilot review passed: ${output}`);
+} catch (error) {
+  for (const session of pilot.sessions()) {
+    if (session.exitCode === null) await capture(session, "failure");
+  }
+  throw error;
 } finally {
+  // Quit the application before closing its shell's PTY, including on assertions.
+  // Closing only the wrapper can otherwise leave an orphaned dashboard.
+  for (const session of pilot.sessions()) {
+    if (session.exitCode === null) {
+      await session.type("q").catch(() => {});
+      await session.waitForExit({ timeout: 3000 }).catch(() => {});
+    }
+  }
   await pilot.close();
   await rm(temporary, { recursive: true, force: true });
 }
