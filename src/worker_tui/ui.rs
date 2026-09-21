@@ -31,7 +31,7 @@ fn block(title: impl Into<String>, focused: bool) -> Block<'static> {
 
 fn state(w: &Value) -> &'static str {
     if w["upgrading"] == true {
-        "Finishing work before update"
+        "Emergency update drain"
     } else if w["pid"].is_null() {
         if w["config"]["enabled"] == true {
             "offline"
