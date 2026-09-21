@@ -9,9 +9,48 @@ struct Prompt {
     question: String,
     description: String,
     choices: Vec<(String, Value)>,
+    link: Option<String>,
 }
 
 fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
+    if method == "mcpServer/elicitation/request" {
+        // Form elicitations may request credentials; never collect them in Inbox.
+        if params["mode"] != "url" {
+            return Ok(None);
+        }
+        let url = params["url"]
+            .as_str()
+            .and_then(|s| reqwest::Url::parse(s).ok())
+            .filter(|u| {
+                u.scheme() == "https"
+                    && u.host_str().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none()
+            })
+            .ok_or_else(|| {
+                Error::invalid("MCP sign-in requires an HTTPS URL without embedded credentials")
+            })?;
+        let server = params["serverName"].as_str().unwrap_or("MCP server");
+        let message = params["message"].as_str().unwrap_or("Sign in to continue.");
+        return Ok(Some(Prompt {
+            question: format!("{server} needs you to sign in"),
+            description: format!(
+                "Open the sign-in page on {} and finish there. Return here and choose ‘I've finished signing in’ to continue the same Codex session. Opening the link does not approve or answer this request. Never enter credentials in Hey Boss.\n\n**Server**\n\n{}\n**Server message**\n\n{}",
+                url.host_str().unwrap(),
+                code(server),
+                code(message)
+            ),
+            link: Some(url.into()),
+            choices: vec![
+                (
+                    "I've finished signing in".into(),
+                    json!({"action":"accept","content":null}),
+                ),
+                ("Decline".into(), json!({"action":"decline","content":null})),
+                ("Cancel".into(), json!({"action":"cancel","content":null})),
+            ],
+        }));
+    }
     let (question, choices) = match method {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             let question = if method == "item/fileChange/requestApproval" {
@@ -96,7 +135,68 @@ fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
             "{scope} Codex will continue in the same session after your decision.\n\n{context}"
         ),
         choices,
+        link: None,
     }))
+}
+
+fn input_prompts(method: &str, params: &Value) -> Result<Option<Vec<Prompt>>> {
+    if !matches!(
+        method,
+        "tool/requestUserInput" | "item/tool/requestUserInput"
+    ) {
+        return prompt(method, params).map(|p| p.map(|p| vec![p]));
+    }
+    let questions = params["questions"]
+        .as_array()
+        .filter(|q| !q.is_empty() && q.len() <= 20)
+        .ok_or_else(|| Error::invalid("Codex input requires 1–20 choice questions"))?;
+    let mut ids = std::collections::HashSet::new();
+    let mut prompts = vec![];
+    for question in questions {
+        let id = question["id"]
+            .as_str()
+            .filter(|s| !s.is_empty() && ids.insert(*s))
+            .ok_or_else(|| Error::invalid("Codex question IDs must be nonempty and unique"))?;
+        if question["isSecret"] == true {
+            return Err(Error::invalid(
+                "Secret input must not be collected in Inbox",
+            ));
+        }
+        let options = question["options"]
+            .as_array()
+            .filter(|o| !o.is_empty() && o.len() <= 20)
+            .ok_or_else(|| {
+                Error::invalid(
+                    "Codex input requires advertised choices; free text is not supported",
+                )
+            })?;
+        let mut labels = std::collections::HashSet::new();
+        let mut choices = vec![];
+        let mut description = String::from(
+            "Choose one of the requested options. Your answer applies only to this question in the current Codex session.\n\n",
+        );
+        for option in options {
+            let label = option["label"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 512 && labels.insert(*s))
+                .ok_or_else(|| Error::invalid("Codex choice labels must be nonempty and unique"))?;
+            description.push_str(&code(&format!(
+                "{label}: {}",
+                option["description"].as_str().unwrap_or("")
+            )));
+            choices.push((label.into(), json!({"answers":{id:{"answers":[label]}}})));
+        }
+        prompts.push(Prompt {
+            question: question["question"]
+                .as_str()
+                .unwrap_or("Choose an option")
+                .into(),
+            description,
+            choices,
+            link: None,
+        });
+    }
+    Ok(Some(prompts))
 }
 
 fn code(value: &str) -> String {
@@ -151,6 +251,11 @@ struct Pending {
     id: Value,
     item: Value,
     turn: Value,
+    questions: Vec<Question>,
+    response: Value,
+}
+
+struct Question {
     task: String,
     choices: Vec<(String, Value)>,
     reading: Option<Reading>,
@@ -212,71 +317,102 @@ impl Approvals {
         job: &super::worker::Job,
         preview: Option<&Value>,
     ) -> Result<bool> {
-        let Some(mut p) = prompt(value["method"].as_str().unwrap_or(""), &value["params"])? else {
+        let Some(prompts) =
+            input_prompts(value["method"].as_str().unwrap_or(""), &value["params"])?
+        else {
             return Ok(false);
         };
-        if self.pending.len() >= 64 || self.pending.iter().any(|p| p.id == value["id"]) {
+        if self
+            .pending
+            .iter()
+            .map(|p| p.questions.len())
+            .sum::<usize>()
+            + prompts.len()
+            > 64
+            || self.pending.iter().any(|p| p.id == value["id"])
+        {
             return Err(Error::invalid(
                 "Too many or duplicate Codex approval requests",
             ));
         }
-        if let Some(preview) = preview {
-            if preview["previewTooLarge"] == true {
-                return Err(Error::invalid(
-                    "File diff exceeds 64 KiB; review the saved Codex session",
-                ));
-            }
-            p.description.push_str("\n\n**Requested changes**\n\n");
-            if let Some(changes) = preview["changes"].as_array() {
-                for change in changes {
-                    p.description
-                        .push_str(&code(change["path"].as_str().unwrap_or("File change")));
-                    p.description.push('\n');
-                    p.description.push_str(&code(
-                        change["diff"]
-                            .as_str()
-                            .unwrap_or("No diff supplied by Codex."),
-                    ));
-                    p.description.push('\n');
-                }
-            }
-        }
-        if p.description.len() > 65536 {
-            return Err(Error::invalid(
-                "Codex approval context exceeds 64 KiB; inspect the saved session",
-            ));
-        }
-        let mut request = Request::action("ask", None);
-        request.project = Some(job.project.name.clone());
-        request.title = Some(format!("#{} · Codex approval", job.number()));
-        request.question = Some(p.question);
-        request.description = Some(p.description);
-        request.options = Some(p.choices.iter().map(|(label, _)| label.clone()).collect());
-        request.issue = Some(crate::notices::IssueReference {
-            project: job.project.id.clone(),
-            number: job.number(),
-            host: None,
-        });
-        request.severity = Some(crate::Severity::Warning);
-        request.icon = Some("code".into());
-        let reply = Client::new(crate::notices::socket_path()?).try_send(&request)?;
-        // Native asynchronous creation historically returns only the task ID.
-        if !matches!(reply.status.as_deref(), None | Some("ok" | "pending"))
-            || reply.task_id.is_empty()
-        {
-            return Err(Error::new(
-                "blocked",
-                "Codex approval could not be delivered to Inbox; resume the saved session or retry after connecting Hey Boss",
-            ));
-        }
-        self.pending.push(Pending {
+        let mut pending = Pending {
             id: value["id"].clone(),
             item: value["params"]["itemId"].clone(),
             turn: value["params"]["turnId"].clone(),
-            task: reply.task_id,
-            choices: p.choices,
-            reading: None,
-        });
+            questions: vec![],
+            response: json!({}),
+        };
+        // Pending owns delivered questions so partial delivery is cancelled on error.
+        for mut p in prompts {
+            if let Some(preview) = preview {
+                if preview["previewTooLarge"] == true {
+                    return Err(Error::invalid(
+                        "File diff exceeds 64 KiB; review the saved Codex session",
+                    ));
+                }
+                p.description.push_str("\n\n**Requested changes**\n\n");
+                if let Some(changes) = preview["changes"].as_array() {
+                    for change in changes {
+                        p.description
+                            .push_str(&code(change["path"].as_str().unwrap_or("File change")));
+                        p.description.push('\n');
+                        p.description.push_str(&code(
+                            change["diff"]
+                                .as_str()
+                                .unwrap_or("No diff supplied by Codex."),
+                        ));
+                        p.description.push('\n');
+                    }
+                }
+            }
+            if p.description.len() > 65536 {
+                return Err(Error::invalid(
+                    "Codex approval context exceeds 64 KiB; inspect the saved session",
+                ));
+            }
+            let mut request = Request::action("ask", None);
+            request.project = Some(job.project.name.clone());
+            request.title = Some(format!(
+                "#{} · Codex {}",
+                job.number(),
+                if p.link.is_some() {
+                    "sign-in"
+                } else {
+                    "approval"
+                }
+            ));
+            request.question = Some(p.question);
+            request.description = Some(p.description);
+            request.options = Some(p.choices.iter().map(|(label, _)| label.clone()).collect());
+            request.issue = Some(crate::notices::IssueReference {
+                project: job.project.id.clone(),
+                number: job.number(),
+                host: None,
+            });
+            request.severity = Some(crate::Severity::Warning);
+            request.icon = Some("code".into());
+            request.link_url = p.link;
+            request.link_label = request
+                .link_url
+                .as_ref()
+                .map(|_| "Open sign-in page".into());
+            let reply = Client::new(crate::notices::socket_path()?).try_send(&request)?;
+            // Native asynchronous creation historically returns only the task ID.
+            if !matches!(reply.status.as_deref(), None | Some("ok" | "pending"))
+                || reply.task_id.is_empty()
+            {
+                return Err(Error::new(
+                    "blocked",
+                    "Codex approval could not be delivered to Inbox; resume the saved session or retry after connecting Hey Boss",
+                ));
+            }
+            pending.questions.push(Question {
+                task: reply.task_id,
+                choices: p.choices,
+                reading: None,
+            });
+        }
+        self.pending.push(pending);
         Ok(true)
     }
 
@@ -295,52 +431,76 @@ impl Approvals {
         let mut index = 0;
         while index < self.pending.len() {
             let p = &mut self.pending[index];
-            if p.reading.is_none() && due {
-                p.reading = Some(Reading::start(&client, &p.task)?);
-            }
-            let Some(reply) = p
-                .reading
-                .as_mut()
-                .map(Reading::receive)
-                .transpose()?
-                .flatten()
-            else {
-                index += 1;
-                continue;
-            };
-            p.reading = None;
-            if reply.task_id != p.task {
-                return Err(Error::invalid("Inbox returned a different approval task"));
-            }
-            if reply.status.as_deref() == Some("pending") {
-                index += 1;
-                continue;
-            }
-            let answer = if reply.status.as_deref() == Some("ok") {
-                reply.result.as_deref()
-            } else {
-                None
-            };
-            let response = answer
-                .and_then(|answer| p.choices.iter().find(|(label, _)| label == answer))
-                .map(|(_, value)| value.clone());
-            // Free-text, dismissal, missing results and transport errors never approve.
-            let cancelled = response.is_none() || answer == Some("Cancel");
-            let response = response.unwrap_or_else(|| {
-                if p.choices
-                    .iter()
-                    .any(|(_, v)| v.get("permissions").is_some())
-                {
-                    json!({"permissions":{},"scope":"turn"})
-                } else {
-                    json!({"decision":"cancel"})
+            let mut question_index = 0;
+            let mut cancelled = false;
+            while question_index < p.questions.len() {
+                let q = &mut p.questions[question_index];
+                if q.reading.is_none() && due {
+                    q.reading = Some(Reading::start(&client, &q.task)?);
                 }
-            });
-            responses.push((json!({"id":p.id,"result":response}), cancelled));
-            if cancelled {
-                dismiss(&p.task);
+                let Some(reply) = q
+                    .reading
+                    .as_mut()
+                    .map(Reading::receive)
+                    .transpose()?
+                    .flatten()
+                else {
+                    question_index += 1;
+                    continue;
+                };
+                q.reading = None;
+                if reply.task_id != q.task {
+                    return Err(Error::invalid("Inbox returned a different approval task"));
+                }
+                if reply.status.as_deref() == Some("pending") {
+                    question_index += 1;
+                    continue;
+                }
+                let answer = if reply.status.as_deref() == Some("ok") {
+                    reply.result.as_deref()
+                } else {
+                    None
+                };
+                let response = answer
+                    .and_then(|answer| q.choices.iter().find(|(label, _)| label == answer))
+                    .map(|(_, value)| value.clone());
+                // Free text, dismissal and missing results never grant authority.
+                cancelled = response.is_none() || answer == Some("Cancel");
+                let response = response.unwrap_or_else(|| {
+                    let shape = &q.choices[0].1;
+                    if shape.get("permissions").is_some() {
+                        json!({"permissions":{},"scope":"turn"})
+                    } else if shape.get("answers").is_some() {
+                        json!({"answers":{}})
+                    } else if shape.get("action").is_some() {
+                        json!({"action":"cancel","content":null})
+                    } else {
+                        json!({"decision":"cancel"})
+                    }
+                });
+                if cancelled {
+                    p.response = response;
+                    break;
+                }
+                if let Some(answers) = response["answers"].as_object() {
+                    if p.response.get("answers").is_none() {
+                        p.response = json!({"answers":{}});
+                    }
+                    p.response["answers"]
+                        .as_object_mut()
+                        .unwrap()
+                        .extend(answers.clone());
+                } else {
+                    p.response = response;
+                }
+                p.questions.remove(question_index);
             }
-            self.pending.remove(index);
+            if cancelled || p.questions.is_empty() {
+                responses.push((json!({"id":p.id,"result":p.response}), cancelled));
+                self.pending.remove(index);
+            } else {
+                index += 1;
+            }
         }
         Ok(responses)
     }
@@ -354,9 +514,6 @@ impl Approvals {
                 Some("turn/completed") => !p.turn.is_null() && params["turn"]["id"] == p.turn,
                 _ => false,
             };
-            if resolved {
-                dismiss(&p.task);
-            }
             !resolved
         });
     }
@@ -371,10 +528,10 @@ fn dismiss(task: &str) {
         let _ = pending.try_wait();
     }
 }
-impl Drop for Approvals {
+impl Drop for Pending {
     fn drop(&mut self) {
-        for p in &self.pending {
-            dismiss(&p.task);
+        for question in &self.questions {
+            dismiss(&question.task);
         }
     }
 }
@@ -382,6 +539,71 @@ impl Drop for Approvals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_sign_in_has_an_explicit_completion_and_safe_external_link() {
+        let p = prompt("mcpServer/elicitation/request", &json!({"mode":"url","serverName":"Okta","message":"Sign in to continue.","url":"https://login.example.invalid/authorize?state=synthetic","elicitationId":"login-1"})).unwrap().unwrap();
+        assert_eq!(
+            p.link.as_deref(),
+            Some("https://login.example.invalid/authorize?state=synthetic")
+        );
+        assert!(p.description.contains("login.example.invalid"));
+        assert!(p.description.contains("Okta"));
+        assert_eq!(
+            p.choices[0],
+            (
+                "I've finished signing in".into(),
+                json!({"action":"accept","content":null})
+            )
+        );
+        assert_eq!(p.choices[1].1, json!({"action":"decline","content":null}));
+        for url in [
+            "javascript:alert(1)",
+            "http://login.example.invalid",
+            "https://user:password@login.example.invalid",
+            "https:///",
+            "file:///tmp/login",
+        ] {
+            assert!(
+                prompt(
+                    "mcpServer/elicitation/request",
+                    &json!({"mode":"url","url":url,"message":"Sign in"})
+                )
+                .is_err(),
+                "{url}"
+            );
+        }
+        assert!(
+            prompt(
+                "mcpServer/elicitation/request",
+                &json!({"mode":"form","requestedSchema":{"type":"object"}})
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn connector_choices_map_to_exact_question_ids_without_free_text_or_secrets() {
+        for method in ["tool/requestUserInput", "item/tool/requestUserInput"] {
+            let p = input_prompts(method, &json!({"questions":[{"id":"approval","header":"Okta","question":"Allow the requested action?","options":[{"label":"Accept","description":"Run once"},{"label":"Decline","description":"Do not run"}]}]})).unwrap().unwrap();
+            assert_eq!(p.len(), 1);
+            assert_eq!(
+                p[0].choices[0].1,
+                json!({"answers":{"approval":{"answers":["Accept"]}}})
+            );
+            assert!(p[0].description.contains("Run once"));
+            assert!(input_prompts(method, &json!({"questions":[{"id":"secret","isSecret":true,"options":[{"label":"Accept"}]}]})).is_err());
+            assert!(
+                input_prompts(
+                    method,
+                    &json!({"questions":[{"id":"free","question":"Password?","options":null}]})
+                )
+                .is_err()
+            );
+            assert!(input_prompts(method, &json!({"questions":[{"id":"same","options":[{"label":"Accept"}]},{"id":"same","options":[{"label":"Decline"}]}]})).is_err());
+        }
+    }
 
     #[test]
     fn commands_show_context_and_grant_only_this_request() {

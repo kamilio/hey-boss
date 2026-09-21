@@ -8,8 +8,9 @@ func auditMobile() {
         let server = Process(); server.executableURL = URL(fileURLWithPath: "/usr/bin/env"); server.arguments = ["node", "mobile/server/native-fixture.mjs", portFile.path]
         server.standardOutput = FileHandle.nullDevice; server.standardError = FileHandle.nullDevice
         try server.run(); defer { if server.isRunning { server.terminate(); server.waitUntilExit() } }
-        let deadline = Date().addingTimeInterval(5)
-        while !FileManager.default.fileExists(atPath: portFile.path), Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        let deadline = Date().addingTimeInterval(30)
+        while server.isRunning, !FileManager.default.fileExists(atPath: portFile.path), Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        guard FileManager.default.fileExists(atPath: portFile.path) else { throw StorageError(description: "Native mobile fixture did not start within 30 seconds") }
         let port = try String(contentsOf: portFile, encoding: .utf8)
         let store = try Store(root.appendingPathComponent("history.db").path)
         let hub = try MobileHub(store: store, configuration: .init(url: "http://127.0.0.1:" + port, token: "native-audit-local-token-000000000000")); store.mobile = hub
@@ -17,6 +18,23 @@ func auditMobile() {
             let data = try JSONSerialization.data(withJSONObject: ["taskID":id,"kind":"approval","question":"Ship it?","project":"Fixture","title":"Approval race","description":"Exactly one answer","options":["Approve","Reject"],"createdAt":Date().timeIntervalSince1970,"status":"pending"])
             return try JSONDecoder().decode(Record.self, from: data)
         }
+        var signInData = try JSONSerialization.jsonObject(with: JSONEncoder().encode(row("okta-sign-in"))) as! [String:Any]
+        signInData["linkURL"] = "https://login.example.invalid/authorize?state=synthetic"
+        signInData["linkLabel"] = "Open sign-in page"
+        signInData["options"] = ["I've finished signing in", "Decline", "Cancel"]
+        let signIn = try JSONDecoder().decode(Record.self, from: JSONSerialization.data(withJSONObject: signInData))
+        try store.database.save(signIn); try hub.track(signIn); hub.sync()
+        let (_, signInDocument) = try hub.call("/test/document/" + signIn.taskID)
+        let phoneSignIn = signInDocument["task"] as! [String:Any]
+        precondition(phoneSignIn["linkURL"] as? String == signIn.linkURL)
+        precondition(phoneSignIn["linkLabel"] as? String == signIn.linkLabel)
+        _ = try hub.call("/test/open/" + signIn.taskID, method:"POST", body:[:])
+        hub.sync()
+        precondition((try! store.database.get(signIn.taskID)).status == "pending")
+        _ = try hub.call("/test/phone/" + signIn.taskID, method:"POST", body:["result":"I've finished signing in"])
+        hub.sync()
+        precondition((try! store.database.get(signIn.taskID)).result == "I've finished signing in")
+        print("Passed: durable sign-in publication preserves the phone link; opening never answers; phone completion returns to the native waiter")
         let local = try row("local-first"); try store.database.save(local);try hub.track(local)
         try store.finish(local.taskID, "Approve")
         let localResult = try store.database.get(local.taskID); precondition(localResult.result == "Approve")
