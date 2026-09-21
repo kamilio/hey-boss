@@ -127,7 +127,7 @@ impl Process {
                     thread::sleep(Duration::from_millis(5))
                 }
                 Err(error) => {
-                    return Err(io::Error::other(format!(
+                    return Err(self.failure(&format!(
                         "Agent write failed: {error}. Inspect state before retrying."
                     )));
                 }
@@ -144,22 +144,25 @@ impl Process {
             Ok(value) => value.map(Some),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // stdout can reach EOF just before the stderr reader gets its
-                // final chunk. Bound this wait even if a descendant keeps it open.
-                let deadline = Instant::now() + Duration::from_millis(100);
-                while !self.stderr_reader.is_finished() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                let bytes = self.stderr.lock().unwrap();
-                let detail = String::from_utf8_lossy(&bytes);
-                let detail = detail.trim();
-                Err(io::Error::other(if detail.is_empty() {
-                    "Agent disconnected before reporting completion".to_owned()
-                } else {
-                    format!("Agent disconnected before reporting completion: {detail}")
-                }))
+                Err(self.failure("Agent disconnected before reporting completion"))
             }
         }
+    }
+    fn failure(&self, message: &str) -> io::Error {
+        // Either pipe can close just before the stderr reader gets its final
+        // chunk. Bound this wait even if a descendant keeps stderr open.
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while !self.stderr_reader.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let bytes = self.stderr.lock().unwrap();
+        let detail = String::from_utf8_lossy(&bytes);
+        let detail = detail.trim();
+        io::Error::other(if detail.is_empty() {
+            message.to_owned()
+        } else {
+            format!("{message}: {detail}")
+        })
     }
     pub(crate) fn stop(&mut self) -> io::Result<()> {
         if self.stopped {
@@ -226,6 +229,22 @@ mod tests {
         ]);
         let mut process = Process::spawn(&mut command).unwrap();
         let error = process.receive(Duration::from_secs(3)).unwrap_err();
+        assert!(error.to_string().contains("database is locked"), "{error}");
+    }
+
+    #[test]
+    fn startup_exit_before_first_request_retains_stderr() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'failed to initialize sqlite state runtime: database is locked\\n' >&2; exit 1",
+        ]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        // Receiving EOF ensures stdin has also closed before the first write.
+        process.receive(Duration::from_secs(3)).unwrap_err();
+        let error = process
+            .send(&serde_json::json!({"id":1,"method":"initialize"}))
+            .unwrap_err();
         assert!(error.to_string().contains("database is locked"), "{error}");
     }
 
