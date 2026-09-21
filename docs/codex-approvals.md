@@ -21,9 +21,24 @@ stop state are checked again before replying. Status reads are nonblocking so a
 slow companion does not hold up cancellation or incoming Codex events.
 
 This integration covers `item/commandExecution/requestApproval`,
-`item/fileChange/requestApproval` and `item/permissions/requestApproval`.
-Other user-input and MCP elicitation methods retain the existing fail-closed
-behavior. It does not intercept approvals from independently launched terminal
+`item/fileChange/requestApproval`, `item/permissions/requestApproval`, and
+advertised choices in `tool/requestUserInput` / `item/tool/requestUserInput`.
+Connector tool approvals such as Accept, Decline and Cancel reach the same Inbox.
+Each question gets its own notice; a multi-question callback receives one response
+only after every question has an exact advertised answer. Dismissal cancels the
+whole callback and its remaining notices. Secret and free-text questions retain
+the fail-closed behavior.
+
+URL-mode `mcpServer/elicitation/request` also reaches the phone, including
+Okta-style sign-in requests. The pending Inbox card and reader show **Open sign-in
+page**, its destination host, and instructions to return afterward. The URL must
+be HTTPS without embedded credentials. Opening it never answers the request.
+**I've finished signing in** explicitly returns `action: accept, content: null`
+to the original callback; Decline and Cancel return their corresponding actions.
+Credentials stay on the external sign-in page. Schema/form elicitations remain
+unsupported because they can collect sensitive input.
+
+It does not intercept approvals from independently launched terminal
 or desktop sessions, which have their own controlling client. Existing blocked
 attempts need an explicit retry to use the new bridge; they are not approved or
 retried during installation.
@@ -39,6 +54,10 @@ Investigation references:
 Inbox to verify explicit replies, concurrent out-of-order callbacks, approvals
 before turn acknowledgment, file previews, cancellation, slow connections and
 unowned/resolved requests. The fixture never executes an approved command.
+The connector/sign-in cases additionally verify exact actions, URL preservation,
+multi-question answers arriving out of order, and cancellation of sibling notices.
+The native mobile audit verifies durable sign-in publication, pending state after
+opening, and phone completion syncing back to the desktop store.
 
 Visual verification uses the real native Inbox store and a synthetic Codex
 worker. `tools/codex_approvals_browser_checks.js` checks desktop, 390 px and
@@ -48,3 +67,12 @@ including keyboard approval, unchanged winning decisions after late replies,
 and completion in the original worker session. Axe reported zero WCAG A/AA
 violations in four desktop/mobile theme states. Seven unit tests, six app-server
 integration tests and both existing approval-hold regression tests passed.
+
+Issue 74's phone session passed 80 Chrome checks and 92 WebKit checks across
+1440, 390 and 320 px, light/dark themes, and reduced motion. Screenshots were
+reviewed; sign-in completion uses the full row, long readers scroll, and narrow
+navigation fits. Checks covered separate-tab sign-in, unchanged pending state
+after opening/reloading, offline refusal, keyboard completion, phone decline,
+Activity outcomes, and immutable winning decisions after a late reply. Temporary
+browser sessions, screenshots and reports were removed after review. These are
+browser and isolated bridge checks; physical iPhone push delivery was not tested.

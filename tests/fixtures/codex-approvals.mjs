@@ -43,6 +43,13 @@ for await (const line of readline.createInterface({input:process.stdin})) {
         params.permissions={network:{enabled:true},fileSystem:{write:['/synthetic/repo']}};
       } else if (mode === 'network') {
         params.networkApprovalContext={host:'registry.example.com',protocol:'https'};
+      } else if (mode.startsWith('signin')) {
+        method = 'mcpServer/elicitation/request';
+        Object.assign(params,{mode:'url',serverName:'Okta',message:'Sign in to continue.',url:'https://login.example.invalid/authorize?state=synthetic',elicitationId:'login-1'});
+      } else if (mode.startsWith('connector')) {
+        method = mode==='connector-item' ? 'item/tool/requestUserInput' : 'tool/requestUserInput';
+        params.questions=[{id:'okta-approval',question:'Allow the requested Okta action?',options:[{label:'Accept',description:'Run this action once.'},{label:'Decline',description:'Do not run this action.'},{label:'Cancel',description:'Stop here.'}]}];
+        if(mode==='connector-multi')params.questions.push({id:'second-question',question:'Choose the environment',options:[{label:'Staging',description:'Use staging.'},{label:'Production',description:'Use production.'}]});
       } else {
         params.command='cargo test '+(i ? '--lib' : '--offline');
       }

@@ -198,6 +198,94 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn connector_and_sign_in_answers_continue_the_original_session() {
+    for (mode, answer, expected) in [
+        (
+            "signin",
+            "I've finished signing in",
+            json!({"action":"accept","content":null}),
+        ),
+        (
+            "signin-decline",
+            "Decline",
+            json!({"action":"decline","content":null}),
+        ),
+        (
+            "connector",
+            "Accept",
+            json!({"answers":{"okta-approval":{"answers":["Accept"]}}}),
+        ),
+        (
+            "connector-item",
+            "Decline",
+            json!({"answers":{"okta-approval":{"answers":["Decline"]}}}),
+        ),
+        (
+            "connector-multi",
+            "Accept",
+            json!({"answers":{"okta-approval":{"answers":["Accept"]},"second-question":{"answers":["Staging"]}}}),
+        ),
+    ] {
+        let f = Fixture::new(mode);
+        let count = if mode == "connector-multi" { 2 } else { 1 };
+        f.wait(|| f.tasks.lock().unwrap().len() == count);
+        assert!(f.replies().is_empty());
+        if mode.starts_with("signin") {
+            let task = f.tasks.lock().unwrap()["notice-1"].clone();
+            assert_eq!(
+                task["link_url"],
+                "https://login.example.invalid/authorize?state=synthetic"
+            );
+            assert_eq!(task["link_label"], "Open sign-in page");
+        }
+        if count == 2 {
+            f.answer("notice-2", "Staging");
+            thread::sleep(Duration::from_millis(1200));
+            assert!(
+                f.replies().is_empty(),
+                "Wait for every question before replying"
+            );
+        }
+        f.answer("notice-1", answer);
+        f.wait(|| f.finished());
+        assert_eq!(
+            f.replies(),
+            vec![json!({"id":"approval-0","result":expected})]
+        );
+        assert_eq!(
+            f.cli(&["worker", "status"])["runs"][0]["state"],
+            "completed"
+        );
+    }
+}
+
+#[test]
+fn connector_and_sign_in_dismissal_never_approve() {
+    for (mode, expected) in [
+        ("signin-cancel", json!({"action":"cancel","content":null})),
+        ("connector-multi", json!({"answers":{}})),
+    ] {
+        let f = Fixture::new(mode);
+        let count = if mode == "connector-multi" { 2 } else { 1 };
+        f.wait(|| f.tasks.lock().unwrap().len() == count);
+        f.tasks.lock().unwrap().get_mut("notice-1").unwrap()["status"] = json!("cancelled");
+        f.wait(|| f.finished());
+        assert_eq!(
+            f.replies(),
+            vec![json!({"id":"approval-0","result":expected})]
+        );
+        f.wait(|| {
+            f.tasks
+                .lock()
+                .unwrap()
+                .values()
+                .all(|t| t["status"] != "pending")
+        });
+        assert_eq!(f.cli(&["worker", "status"])["runs"][0]["state"], "blocked");
+    }
+}
+
+#[test]
 fn approvals_keep_the_claim_and_continue_the_original_session() {
     for mode in ["command", "files", "permissions", "network", "ack-race"] {
         let f = Fixture::new(mode);
