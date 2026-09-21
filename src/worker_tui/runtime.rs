@@ -70,6 +70,7 @@ pub fn run(
         restore();
         hook(info);
     }));
+    let diagnostics = super::diagnostics::Capture::start();
     let guard = TerminalGuard;
     terminal::enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
@@ -106,7 +107,14 @@ pub fn run(
         owned_worker: options.owned_worker,
         ..Dashboard::default()
     };
-    let result = event_loop(&mut terminal, &mut app, &requests, &results, &cancelled);
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &requests,
+        &results,
+        &cancelled,
+        &diagnostics,
+    );
     cancelled.store(true, Ordering::Relaxed);
     drop(requests);
     let _ = background.join();
@@ -120,6 +128,7 @@ fn event_loop(
     requests: &mpsc::Sender<Request>,
     results: &mpsc::Receiver<(Request, Result<serde_json::Value, String>)>,
     cancelled: &AtomicBool,
+    diagnostics: &super::diagnostics::Capture,
 ) -> Result<Exit, Box<dyn std::error::Error>> {
     let mut dirty = true;
     let mut next_refresh = Instant::now();
@@ -128,6 +137,11 @@ fn event_loop(
     loop {
         if cancelled.load(Ordering::Relaxed) {
             return Ok(Exit::Stopped);
+        }
+        let diagnostic = diagnostics.latest();
+        if diagnostic != app.diagnostic {
+            app.diagnostic = diagnostic;
+            dirty = true;
         }
         while let Ok((request, result)) = results.try_recv() {
             app.pending = false;

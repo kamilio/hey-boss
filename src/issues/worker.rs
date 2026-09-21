@@ -308,7 +308,9 @@ pub fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Resul
     loop {
         match operation() {
             Err(error) if error.code == "database_busy" => {
-                eprintln!("Worker database temporarily busy: {error}; waiting for the writer");
+                crate::worker_tui::diagnostics::report(format_args!(
+                    "Worker database temporarily busy: {error}; waiting for the writer"
+                ));
                 thread::sleep(Duration::from_millis(200));
             }
             result => return result,
@@ -359,7 +361,9 @@ impl Worker {
                 chiefs.retain_mut(|handle| !handle.is_finished());
                 abandoned.retain(|id| {
                     if let Err(e) = finalize_abandoned(&mut store, &machine, id) {
-                        eprintln!("Worker recovery: {e}");
+                        crate::worker_tui::diagnostics::report(format_args!(
+                            "Worker recovery: {e}"
+                        ));
                         true
                     } else {
                         false
@@ -375,7 +379,9 @@ impl Worker {
                     if let Some(id) = &worker_id
                         && let Err(e) = store.worker_mark_upgrading(id)
                     {
-                        eprintln!("Worker upgrade status: {e}");
+                        crate::worker_tui::diagnostics::report(format_args!(
+                            "Worker upgrade status: {e}"
+                        ));
                     }
                     if handles.is_empty()
                         && chiefs.is_empty()
@@ -398,7 +404,9 @@ impl Worker {
                 }
                 if last_recovery.elapsed() >= Duration::from_secs(5) {
                     if let Err(e) = recover(&mut store, &machine) {
-                        eprintln!("Worker recovery: {e}");
+                        crate::worker_tui::diagnostics::report(format_args!(
+                            "Worker recovery: {e}"
+                        ));
                     }
                     last_recovery = Instant::now();
                 }
@@ -412,7 +420,9 @@ impl Worker {
                             }));
                         }
                         Ok(None) => {}
-                        Err(error) => eprintln!("Chief scheduler: {error}"),
+                        Err(error) => crate::worker_tui::diagnostics::report(format_args!(
+                            "Chief scheduler: {error}"
+                        )),
                     }
                     last_chief = Instant::now();
                 }
@@ -427,7 +437,9 @@ impl Worker {
                         continue;
                     }
                     Ok(None) => {}
-                    Err(e) => eprintln!("Worker scheduler: {e}"),
+                    Err(e) => crate::worker_tui::diagnostics::report(format_args!(
+                        "Worker scheduler: {e}"
+                    )),
                 }
                 for _ in 0..5 {
                     if stopped.load(Ordering::Relaxed) {
@@ -441,7 +453,7 @@ impl Worker {
                 if let Err(e) =
                     retry_database_busy(|| finalize_abandoned(&mut store, &machine, &id))
                 {
-                    eprintln!("Worker recovery: {e}");
+                    crate::worker_tui::diagnostics::report(format_args!("Worker recovery: {e}"));
                 }
             }
             for handle in chiefs {
@@ -853,7 +865,7 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
     let mut store = match retry_database_busy(|| Store::open(path)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Worker {}: {e}", job.id);
+            crate::worker_tui::diagnostics::report(format_args!("Worker {}: {e}", job.id));
             return;
         }
     };
@@ -879,7 +891,10 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
         ),
     };
     if let Err(e) = retry_database_busy(|| store.worker_finish(&job, &state, &summary)) {
-        eprintln!("Worker {} could not finalize: {e}", job.id)
+        crate::worker_tui::diagnostics::report(format_args!(
+            "Worker {} could not finalize: {e}",
+            job.id
+        ))
     }
 }
 fn template(text: &str, job: &Job) -> String {
@@ -1073,7 +1088,9 @@ fn run_thread(
         store.worker_event(&job.id, &format!("Resuming Codex session {session}"), None)?;
         (
             "thread/resume",
-            json!({"threadId":session,"cwd":job.config.cwd}),
+            // Codex retains the full history; the worker only needs the session
+            // metadata. Large rollouts otherwise exceed the transport limit.
+            json!({"threadId":session,"cwd":job.config.cwd,"excludeTurns":true}),
         )
     } else {
         (
