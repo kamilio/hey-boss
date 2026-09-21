@@ -19,6 +19,8 @@ mod mindmap;
 mod origin_reader;
 #[path = "worker_registry.rs"]
 mod registry;
+#[path = "steering.rs"]
+mod steering;
 #[path = "subtasks.rs"]
 mod subtasks;
 #[path = "worker_store.rs"]
@@ -772,6 +774,7 @@ impl Store {
         agent_launches::migrate(&db)?;
         status::migrate(&db)?;
         provenance::migrate(&db)?;
+        steering::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
         Ok(Self {

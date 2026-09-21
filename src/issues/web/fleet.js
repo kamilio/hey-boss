@@ -71,6 +71,8 @@ if (typeof document !== 'undefined') (() => {
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical;
   const seen = new Set();
   let takeoverBusy=false, takeoverTarget;
+  let steerBusy=false, steerTarget, steerRequest;
+  const steerDrafts=new Map();
   const takeovers=new Map();
   const takeoverKey=entry=>entry.machine.host+':'+entry.run.id;
   function savedTakeover(entry) {
@@ -190,7 +192,7 @@ if (typeof document !== 'undefined') (() => {
       selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
     }
     $('back').href=base+(route().get('project')?'#'+new URLSearchParams({project:route().get('project')}):'');
-    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
+    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
     $('session-title').textContent=run.title||'Preparing your task';
@@ -209,10 +211,14 @@ if (typeof document !== 'undefined') (() => {
   }
   function fail(error) {$('error').textContent=error.message;$('error').hidden=false;}
   function renderTakeover() {
+    if(!selected)return;
     const state=savedTakeover(selected), button=$('takeover-open');
     button.hidden=selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
-    button.disabled=takeoverBusy||!selected.online;
+    button.disabled=takeoverBusy||steerBusy||!selected.online;
     button.textContent=state?.pending?'Check takeover':'Take over';
+    $('steer-open').hidden=selected.run.standalone||runEnded()||Boolean(state?.pending||state?.stopped)||selected.run.stop_requested===true;
+    $('steer-open').disabled=steerBusy||!selected.online;
+    $('steer-open').title=selected.online?'Add an instruction while this agent keeps working':'Reconnect this device to steer its agent';
     $('takeover-note').hidden=!state?.pending;
     $('takeover-note').textContent=state?.error||(!selected.online?'Reconnect this device to finish taking over.':state?.assigned?'Stopping the agent. Your issue is assigned to you; the resume command will appear when it stops.':'Waiting for the device to confirm takeover…');
     $('resume-panel').hidden=!state?.stopped;
@@ -271,6 +277,16 @@ if (typeof document !== 'undefined') (() => {
         }));
         $('session-resources-more').hidden=!data.more_created_resources;
       }
+      if(!earlier){
+        const receipts=data.steering||[];
+        $('steering-updates').hidden=!receipts.length;$('steering-count').textContent=receipts.length?'('+receipts.length+')':'';
+        $('steering-list').replaceChildren(...receipts.map(receipt=>{
+          const row=element('li'),state=({queued:'Queued',sending:'Delivery unconfirmed',delivered:'Delivered',rejected:'Not delivered',uncertain:'Delivery unconfirmed'})[receipt.state]||'Delivery unconfirmed';
+          row.append(element('div','steering-receipt',state+' · '+({session:'This agent',issue:'This issue',project:'This project'})[receipt.scope]),element('p','steering-instruction',receipt.text));
+          if(receipt.error)row.append(element('p','steering-problem',receipt.error));
+          return row;
+        }));
+      }
       const entries=data.messages.filter(m=>!seen.has(m.id));
       const fragment=document.createDocumentFragment();
       for(const item of entries){seen.add(item.id);fragment.append(message(item));}
@@ -300,6 +316,39 @@ if (typeof document !== 'undefined') (() => {
   };
   $('takeover-cancel').onclick=()=>$('takeover-dialog').close();
   $('takeover-confirm').onclick=()=>{const entry=takeoverTarget;$('takeover-dialog').close();if(entry)takeOver(entry);};
+  const steerDraft=()=>({text:$('steer-text').value,scope:$('steer-form').elements.scope.value});
+  const keepSteerDraft=()=>{if(steerTarget)steerDrafts.set(takeoverKey(steerTarget),steerDraft());};
+  $('steer-open').onclick=()=>{
+    if(!selected||!selected.online||runEnded()||steerBusy)return;
+    steerTarget=selected;
+    const draft=steerDrafts.get(takeoverKey(selected))||{text:'',scope:'session'};
+    $('steer-text').value=draft.text;$('steer-form').elements.scope.value=draft.scope;
+    $('steer-task').textContent='Issue #'+selected.run.number+' · '+(selected.run.title||'Your task')+' · '+(selected.machine.hostname||selected.machine.host);
+    $('steer-error').hidden=true;$('steer-dialog').showModal();$('steer-text').focus();
+  };
+  $('steer-form').oninput=keepSteerDraft;
+  $('steer-dialog').addEventListener('cancel',event=>{if(steerBusy)event.preventDefault();else keepSteerDraft();});
+  $('steer-dialog').addEventListener('close',()=>{if(!steerBusy&&!$('steer-open').hidden)$('steer-open').focus();});
+  $('steer-cancel').onclick=()=>{keepSteerDraft();$('steer-dialog').close();};
+  $('steer-form').onsubmit=async event=>{
+    event.preventDefault();if(steerBusy||!steerTarget)return;
+    const draft=steerDraft(),entry=steerTarget,token=generation,key=takeoverKey(entry);
+    if(!draft.text.trim()||new TextEncoder().encode(draft.text).length>32000){$('steer-error').textContent='Enter an instruction of up to 32000 bytes.';$('steer-error').hidden=false;return;}
+    const payload=JSON.stringify({host:entry.machine.host,run:entry.run.id,...draft});
+    if(steerRequest?.payload!==payload)steerRequest={payload,id:crypto.randomUUID()};
+    steerBusy=true;keepSteerDraft();$('steer-error').hidden=true;
+    for(const control of $('steer-form').elements)control.disabled=true;
+    $('steer-send').textContent='Sending…';renderTakeover();
+    try{
+      const response=await fetch('/api/fleet/steer',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({...JSON.parse(payload),request_id:steerRequest.id})});
+      const result=await response.json();
+      if(!response.ok||result.ok===false)throw Error(result.error?.message||result.error||'Could not send. Your instruction is preserved; retry when the device reconnects.');
+      if(!['queued','delivered'].includes(result.state))throw Error(result.error||'Delivery is unconfirmed. Check the conversation before sending another instruction.');
+      steerDrafts.delete(key);steerRequest=null;
+      if(token===generation&&!disposed){$('steer-text').value='';$('steer-dialog').close();$('steer-note').hidden=false;$('steer-note').textContent=result.state==='delivered'?'Instruction delivered to this agent.':({session:'Message queued for this agent.',issue:'Issue requirement saved. Message queued for this agent.',project:'Project instruction saved. Updates queued for agents using project instructions.'})[draft.scope]+' Watch the conversation for delivery confirmation.';}
+    }catch(error){if(token===generation&&!disposed){$('steer-error').textContent=error.message;$('steer-error').hidden=false;}}
+    finally{steerBusy=false;for(const control of $('steer-form').elements)control.disabled=false;$('steer-send').textContent='Send to agent';if(selected&&token===generation&&!disposed){renderTakeover();if(!$('steer-dialog').open)$('steer-open').focus();}}
+  };
   $('resume-copy').onclick=async()=>{const command=$('resume-command').textContent;try{await navigator.clipboard.writeText(command);$('copy-status').textContent='Command copied.';}catch{$('copy-status').textContent='Select the command and copy it with your keyboard.';const range=document.createRange();range.selectNodeContents($('resume-command'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}};
   $('refresh').onclick=async()=>{await refresh();if(detail)await loadConversation();};
   $('device-list').onclick=async event=>{
@@ -308,7 +357,7 @@ if (typeof document !== 'undefined') (() => {
     b.disabled=true;
     try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:crypto.randomUUID()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
   };
-  addEventListener('hashchange',()=>{if(detail){historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('hashchange',()=>{if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{

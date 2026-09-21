@@ -93,6 +93,15 @@ and redeploys changed source builds. Open **Agents** (`/agents`) for a project
 view of each task and the device where it runs. Open a task for its live Codex
 conversation: the original request, saved replies, and expandable tool activity.
 Conversations open at the latest activity; load earlier messages above it.
+Choose **Steer** in a live conversation to add an instruction while the agent keeps
+working. **This agent** sends a message to that session; **This issue** also appends
+the requirement to the saved issue; **This project** also appends it to the project’s
+base instructions. Other running agents using those project instructions receive
+the update; worker overrides keep their own instructions. Messages are queued on
+the owning device and delivery confirmation appears in the conversation. Retries
+reuse the same request, so a connection interruption cannot duplicate a saved
+requirement. Completed and standalone saved conversations cannot be steered.
+
 Choose **Take over** in a live conversation to stop that agent and assign its issue
 to Boss. After it stops, **Copy command** gives you a terminal command to resume
 the saved session, including SSH and the checkout directory for remote devices.

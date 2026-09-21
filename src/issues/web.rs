@@ -675,6 +675,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/inbox",
             "/api/fleet",
             "/api/fleet/takeover",
+            "/api/fleet/steer",
             "/api/mm",
         ]
         .contains(&path.as_str())
@@ -707,11 +708,17 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             }
             return json_response(crate::fleet::call(&value)?);
         }
-        if path == "/api/fleet/takeover" {
-            let value: Value = serde_json::from_slice(&bytes)?;
-            return json_response(crate::fleet::call(
-                &json!({"kind":"takeover","host":value["host"],"run":value["run"]}),
-            )?);
+        if path == "/api/fleet/takeover" || path == "/api/fleet/steer" {
+            let mut value: Value = serde_json::from_slice(&bytes)?;
+            if !value.is_object() {
+                return Err(Error::invalid("Expected an agent action object"));
+            }
+            value["kind"] = json!(if path.ends_with("/steer") {
+                "steer"
+            } else {
+                "takeover"
+            });
+            return json_response(crate::fleet::call(&value)?);
         }
         if path == "/api/preview" {
             #[derive(Deserialize)]

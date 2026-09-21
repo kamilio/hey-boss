@@ -377,6 +377,28 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
     );
     let request =
         serde_json::json!({"version":1,"kind":"takeover","id":"takeover-fixture","run":run["id"]});
+    let steering = serde_json::json!({"version":1,"kind":"steer","id":"steer-fixture","request_id":"companion-steering","run":run["id"],"scope":"issue","text":"Check keyboard navigation"});
+    for _ in 0..2 {
+        writeln!(input, "{steering}").unwrap();
+        input.flush().unwrap();
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["kind"], "steer");
+        assert_eq!(response["id"], "steer-fixture");
+        assert_eq!(response["result"]["ok"], true);
+    }
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM agent_steering", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let body: String = db
+        .query_row("SELECT body FROM issues WHERE number=1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(body.matches("Check keyboard navigation").count(), 1);
     for stopped in [false, true] {
         writeln!(input, "{request}").unwrap();
         input.flush().unwrap();

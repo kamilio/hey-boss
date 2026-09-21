@@ -428,7 +428,7 @@ impl Mobile {
                 }
                 super::local_request(
                     &self.ctx,
-                    json!({"kind":if request["action"]=="takeover" {"takeover"} else {"conversation"},"host":request["host"],"run":request["run"],"cursor":request.get("cursor").cloned().unwrap_or(json!(0)),"before":request["before"],"latest":request["latest"],"at":request["at"]}),
+                    json!({"kind":request["action"],"host":request["host"],"run":request["run"],"scope":request["scope"],"text":request["text"],"request_id":request["request_id"],"cursor":request.get("cursor").cloned().unwrap_or(json!(0)),"before":request["before"],"latest":request["latest"],"at":request["at"]}),
                 )
             })();
             let outcome = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));

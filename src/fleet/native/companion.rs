@@ -126,9 +126,11 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                     )?;
                 }
             }
-            Some("conversation" | "takeover") => {
+            Some("conversation" | "takeover" | "steer") => {
                 let cursor = message.get("cursor").cloned().unwrap_or(json!(0));
-                let result = if message["kind"] == "takeover" {
+                let result = if message["kind"] == "steer" {
+                    takeover::steer(&ctx, &message)
+                } else if message["kind"] == "takeover" {
                     takeover::apply(&ctx, message["run"].as_str().unwrap_or(""))
                 } else {
                     conversation::page(&ctx, message["run"].as_str().unwrap_or(""), &cursor)

@@ -1219,6 +1219,33 @@ fn run_thread(
         c.poll_approvals(store, job, stop)?;
         if last_prompt_check.elapsed() >= Duration::from_secs(2) {
             last_prompt_check = Instant::now();
+            if let Some(instruction) = store.worker_steering(&job.id)? {
+                let request = instruction["request_id"].as_str().unwrap();
+                let text = steering_text(&instruction);
+                // Persist before sending. A worker crash must never replay an
+                // instruction whose delivery cannot be established.
+                store.worker_steering_result(request, "sending", None)?;
+                match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":text}]}), store, job, stop) {
+                    Ok(ack) if ack["turnId"] == turn => {
+                        store.worker_steering_result(request, "delivered", None)?;
+                        if let Some(body) = instruction["issue_body"].as_str() {
+                            job.issue["body"] = json!(body);
+                            store.worker_prompt(job, &applied_prompt)?;
+                        }
+                        store.worker_event(&job.id, &format!("Steering delivered: {}", instruction["text"].as_str().unwrap()), None)?;
+                    }
+                    Err(error) if error.message.starts_with("Codex turn/steer:") => {
+                        let ended = c.pending.iter().any(|event| event["method"] == "turn/completed" && event["params"]["turn"]["id"] == turn && event["params"]["turn"]["status"] == "completed");
+                        store.worker_steering_result(request, if ended {"queued"} else {"rejected"}, Some(&error.message))?;
+                        store.worker_event(&job.id, &format!("Steering {}: {}", if ended {"awaiting the next turn"} else {"rejected"}, error.message), None)?;
+                    }
+                    result => {
+                        let error = result.err().map(|e| e.message).unwrap_or_else(|| "Unexpected steering acknowledgement".into());
+                        store.worker_steering_result(request, "uncertain", Some(&error))?;
+                        store.worker_event(&job.id, &format!("Steering delivery unconfirmed; not resent: {error}"), None)?;
+                    }
+                }
+            }
             let config = store.worker_prompt_config(job)?;
             let next_prompt = prompt_with_config(job, &config).0;
             if next_prompt != applied_prompt {
@@ -1333,6 +1360,45 @@ fn run_thread(
                         ),
                     ));
                 }
+                if let Some(instruction) = store.worker_steering(&job.id)? {
+                    let request = instruction["request_id"].as_str().unwrap();
+                    store.worker_steering_result(request, "sending", None)?;
+                    let result = c.rpc(
+                        "turn/start",
+                        turn_params(&session, &steering_text(&instruction)),
+                        store,
+                        job,
+                        stop,
+                    );
+                    match result {
+                        Ok(result) if result["turn"]["id"].is_string() => {
+                            turn = result["turn"]["id"].as_str().unwrap().into();
+                            store.worker_steering_result(request, "delivered", None)?;
+                            if let Some(body) = instruction["issue_body"].as_str() {
+                                job.issue["body"] = json!(body);
+                                store.worker_prompt(job, &applied_prompt)?;
+                            }
+                            store.worker_event(
+                                &job.id,
+                                &format!(
+                                    "Steering delivered in the same session: {}",
+                                    instruction["text"].as_str().unwrap()
+                                ),
+                                None,
+                            )?;
+                            final_text.clear();
+                            continue;
+                        }
+                        result => {
+                            let error = result
+                                .err()
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "Missing steering turn acknowledgement".into());
+                            store.worker_steering_result(request, "uncertain", Some(&error))?;
+                            return Err(Error::new("worker_error", error));
+                        }
+                    }
+                }
                 let config = store.worker_prompt_config(job)?;
                 let next_prompt = prompt_with_config(job, &config).0;
                 if next_prompt != applied_prompt {
@@ -1436,6 +1502,14 @@ fn run_thread(
             _ => {}
         }
     }
+}
+
+fn steering_text(instruction: &Value) -> String {
+    format!(
+        "Boss added an instruction for your current task ({} scope). Apply it while preserving your session, progress, workspace and delivery requirements. Verify this instruction before reporting completion.\n\n{}",
+        instruction["scope"].as_str().unwrap(),
+        instruction["text"].as_str().unwrap()
+    )
 }
 
 fn prompt_update(instructions: &str) -> String {

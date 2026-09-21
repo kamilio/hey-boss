@@ -527,6 +527,7 @@ impl Store {
             "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
             params![job.id, state, summary, now()],
         )?;
+        tx.execute("UPDATE agent_steering SET state='rejected',error='The agent stopped before this message was delivered. Saved issue and project instructions remain in place.' WHERE run_id=?1 AND state='queued'", [&job.id])?;
         tx.execute(
             "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
             params![job.project.id, now()],
@@ -825,6 +826,117 @@ mod tests {
             if mode == "new_owner" {
                 assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
             }
+        }
+    }
+
+    #[test]
+    fn steering_is_scoped_durable_and_idempotent() {
+        let mut f = HandoffFixture::new(false);
+        let input =
+            json!({"scope":"session","text":"Check the narrow layout","request_id":"first"});
+        assert_eq!(
+            f.store.worker_steer(&f.job.id, &input).unwrap()["state"],
+            "queued"
+        );
+        f.store.worker_steer(&f.job.id, &input).unwrap();
+        let queued = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+        assert_eq!(queued["text"], "Check the narrow layout");
+        assert!(
+            f.store
+                .worker_steer(
+                    &f.job.id,
+                    &json!({"text":"Different","scope":"session","request_id":"first"})
+                )
+                .is_err()
+        );
+        f.store
+            .worker_steering_result("first", "delivered", None)
+            .unwrap();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+        assert_eq!(
+            f.store.worker_steer(&f.job.id, &input).unwrap()["state"],
+            "delivered"
+        );
+        f.store.worker_steer(&f.job.id, &json!({"scope":"issue","text":"Preserve keyboard navigation","request_id":"issue"})).unwrap();
+        assert!(
+            get_issue(&f.store.db, &f.job.project.id, 1, false)
+                .unwrap()
+                .body
+                .contains("Preserve keyboard navigation")
+        );
+        f.store
+            .worker_steer(
+                &f.job.id,
+                &json!({"scope":"project","text":"Verify dark mode","request_id":"project"}),
+            )
+            .unwrap();
+        assert!(
+            registry::project_settings(&f.store.db, &f.job.project).unwrap()["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Verify dark mode")
+        );
+        assert_eq!(
+            f.store.worker_steering(&f.job.id).unwrap().unwrap()["request_id"],
+            "issue"
+        );
+    }
+
+    #[test]
+    fn steering_rejects_stopped_hidden_changed_owner_and_invalid_input() {
+        for mode in ["finished", "stopping", "owner", "hidden", "closed"] {
+            let mut f = HandoffFixture::new(false);
+            match mode {
+                "finished" => {
+                    f.store
+                        .db
+                        .execute("UPDATE worker_runs SET finished_at=1", [])
+                        .unwrap();
+                }
+                "stopping" => {
+                    f.store
+                        .db
+                        .execute("UPDATE worker_runs SET stop_requested=1", [])
+                        .unwrap();
+                }
+                "owner" => {
+                    f.apply(Operation::AssignBoss {
+                        number: 1,
+                        force: true,
+                    });
+                }
+                "hidden" => {
+                    f.store
+                        .db
+                        .execute("UPDATE projects SET hidden_at=1", [])
+                        .unwrap();
+                }
+                "closed" => {
+                    f.apply(Operation::Close {
+                        number: 1,
+                        comment: None,
+                        force: false,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                f.store
+                    .worker_steer(
+                        &f.job.id,
+                        &json!({"scope":"issue","text":"New requirement","request_id":mode})
+                    )
+                    .is_err(),
+                "{mode}"
+            );
+        }
+        let mut f = HandoffFixture::new(false);
+        for input in [
+            json!({"scope":"unknown","text":"Focus","request_id":"invalid"}),
+            json!({"scope":"session","text":"  ","request_id":"blank"}),
+            json!({"scope":"session","text":"Focus"}),
+        ] {
+            assert!(f.store.worker_steer(&f.job.id, &input).is_err());
         }
     }
 
