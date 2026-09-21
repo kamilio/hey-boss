@@ -50,12 +50,13 @@ pub(super) fn update(
     now: i64,
 ) -> Result<Value> {
     let issue = get_issue(db, &project.id, number, false)?;
-    if issue.state != "open" || issue.draft || issue.assignee.as_deref() != Some(&actor.id) {
+    if issue.state != "open" || issue.draft {
         return Err(Error::conflict(
-            "Only the owner of an open, non-draft issue can update its status. Claim the issue first.",
+            "Only open, non-draft issues can receive status updates.",
         ));
     }
-    super::super::fleet::check_claim(db, &project.id, number, &actor.machine, false)?;
+    // Progress is append-only collaboration, not worker pickup. Allocation and
+    // ownership still guard claims; status writes leave both unchanged.
     // A monotonic timestamp orders same-millisecond updates and clock corrections
     // identically on replicas. IDs stay stable across machines.
     db.execute("INSERT INTO issue_status_updates(id,project_id,issue_number,author,level,comment,created_at)

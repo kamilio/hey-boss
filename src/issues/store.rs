@@ -1312,6 +1312,29 @@ impl Store {
                 result["project_warnings"] = json!(warnings);
             }
         }
+        if matches!(
+            r.operation,
+            Operation::Status { .. } | Operation::Comment { .. }
+        ) {
+            let actor = actor.unwrap();
+            let owner = result["issue"]["assignee"].as_str().map(str::to_owned);
+            if owner.as_deref() != Some(&actor.id) {
+                result["ownership_warning"] = json!(match owner.as_deref() {
+                    Some(owner) => format!(
+                        "You are not the owner; this issue is assigned to {owner}. Consider claiming it before starting work."
+                    ),
+                    None => "This issue is unassigned. Consider claiming it before starting work."
+                        .into(),
+                });
+                if let Some(owner) = owner {
+                    let raw: String =
+                        tx.query_row("SELECT metadata FROM agents WHERE id=?1", [&owner], |r| {
+                            r.get(0)
+                        })?;
+                    result["assignee_agent"] = serde_json::from_str::<Value>(&raw)?;
+                }
+            }
+        }
         if let (Some(key), Some(actor)) = (&r.request_id, actor) {
             tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response) VALUES(?1,?2,?3,?4,?5)",
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;

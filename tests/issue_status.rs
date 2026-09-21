@@ -139,17 +139,33 @@ fn history_pages_keep_their_snapshot_when_new_updates_arrive() {
 }
 
 #[test]
-fn status_is_owner_only_and_separate_from_comments_and_revision() {
+fn status_warns_without_requiring_ownership_and_preserves_comments_and_revision() {
     let f = Fixture::new();
     f.create();
     assert!(f.run("owner", &["view", "1"], 0)["issue"]["status"].is_null());
-    f.run(
+    let unassigned = f.run(
         "owner",
         &["status", "1", "green", "--comment", "Starting the work."],
-        4,
+        0,
+    );
+    assert!(
+        unassigned["ownership_warning"]
+            .as_str()
+            .unwrap()
+            .contains("unassigned")
     );
     let claim = f.run("owner", &["claim", "1"], 0);
-    f.run("other", &["status", "1", "red", "--comment", "Trouble."], 4);
+    let other = f.run("other", &["status", "1", "red", "--comment", "Trouble."], 0);
+    assert!(
+        other["ownership_warning"]
+            .as_str()
+            .unwrap()
+            .contains("owner")
+    );
+    assert_eq!(other["assignee_agent"]["id"], "owner");
+    assert!(other["assignee_presence"].is_string());
+    assert_eq!(other["issue"]["assignee"], "owner");
+    assert_eq!(other["issue"]["status"]["author"], "other");
     let args = [
         "status",
         "1",
@@ -160,6 +176,7 @@ fn status_is_owner_only_and_separate_from_comments_and_revision() {
         "status-one",
     ];
     let first = f.run("owner", &args, 0);
+    assert!(first["ownership_warning"].is_null());
     assert_eq!(first["issue"]["status"]["level"], "green");
     assert_eq!(
         first["issue"]["status"]["comment"],
@@ -222,6 +239,57 @@ fn status_is_owner_only_and_separate_from_comments_and_revision() {
     assert_eq!(
         f.run("owner", &["view", "1"], 0)["issue"]["status"],
         view["issue"]["status"]
+    );
+}
+
+#[test]
+fn forced_takeover_can_publish_status_without_changing_fleet_allocation() {
+    let f = Fixture::new();
+    f.create();
+    f.run("owner", &["claim", "1"], 0);
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Status QA',1,'another-machine')",
+        [],
+    )
+    .unwrap();
+    f.run("other", &["claim", "1"], 4);
+    let claim = f.run("other", &["claim", "1", "--force"], 0);
+    let update = f.run(
+        "other",
+        &["status", "1", "green", "--comment", "Takeover is working."],
+        0,
+    );
+    assert!(update["ownership_warning"].is_null());
+    assert_eq!(update["issue"]["assignee"], "other");
+    assert_eq!(update["issue"]["version"], claim["issue"]["version"]);
+    assert_eq!(
+        db.query_row("SELECT node FROM fleet_allocations", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "another-machine"
+    );
+    f.run("owner", &["claim", "1"], 4);
+}
+
+#[test]
+fn comments_warn_about_other_owners_and_status_still_rejects_drafts() {
+    let f = Fixture::new();
+    f.create();
+    f.run("owner", &["claim", "1"], 0);
+    let comment = f.run("other", &["comment", "1", "--body", "Useful finding."], 0);
+    assert!(
+        comment["ownership_warning"]
+            .as_str()
+            .unwrap()
+            .contains("owner")
+    );
+    assert_eq!(comment["issue"]["assignee"], "owner");
+    f.run("other", &["create", "--title", "Draft", "--draft"], 0);
+    f.run(
+        "other",
+        &["status", "2", "green", "--comment", "Draft update."],
+        4,
     );
 }
 
