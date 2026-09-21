@@ -556,7 +556,7 @@ function renderList(result) {
       row.classList.add("issue-created");
       if (creation.reveal) {
         creation.reveal = false;
-        row.querySelector(".issue-title").focus({ preventScroll: true });
+        row.querySelector(".issue-order-handle").focus({ preventScroll: true });
         row.scrollIntoView({ block: "nearest" });
       }
       if (!creation.timer)
@@ -1487,20 +1487,7 @@ $("#editor-form").onsubmit = async (e) => {
       navigate({project:ctx.project,host:ctx.host,issue:ctx.parent.number},true);
     } else if (ctx.number)
       navigate({ project: ctx.project, issue: value.issue.number });
-    else {
-      clearTimeout(model.creation?.timer);
-      model.creation = {
-        project: ctx.project,
-        host: model.route.host,
-        number: value.issue.number,
-        reveal: true,
-        timer: null,
-      };
-      navigate(
-        { view: "issues", project: ctx.project, issue: null, notice: "" },
-        true,
-      );
-    }
+    else revealCreatedIssue(value, ctx.host);
   } catch (error) {
     $("#editor-error").textContent =
       error.code === "conflict"
@@ -1884,7 +1871,25 @@ async function changePullRequest(action, url, purpose, control) {
   }
 }
 
-window.addEventListener("hey-boss-issue-created", () => refresh(false));
+function revealCreatedIssue(value, host) {
+  host = host || model.defaultHost || "";
+  clearTimeout(model.creation?.timer);
+  model.creation = {
+    project: value.project.id,
+    host,
+    number: value.issue.number,
+    reveal: true,
+    timer: null,
+  };
+  navigate(
+    { view: "issues", project: value.project.id, host, issue: null, notice: "" },
+    true,
+  );
+}
+window.addEventListener("hey-boss-issue-created", event => {
+  if (model.route.view === "issues") revealCreatedIssue(event.detail, event.detail.host);
+  else refresh(false);
+});
 
 $("#editor-draft").onchange = () => { updateEditorReadiness(); saveEditor(); };
 $("#editor-bottom").onchange = saveEditor;
