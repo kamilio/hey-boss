@@ -156,6 +156,170 @@ impl Drop for Fixture {
     }
 }
 struct Worker(Child);
+
+#[test]
+fn saved_prompt_edits_steer_the_owned_turn_without_restarting_the_agent() {
+    live_prompt_scenario("direct");
+}
+
+#[test]
+fn saved_prompt_edits_survive_a_turn_completion_race() {
+    live_prompt_scenario("race");
+}
+
+#[test]
+fn saved_prompt_edits_retry_rejected_steering_without_losing_the_claim() {
+    live_prompt_scenario("reject");
+}
+
+#[test]
+fn saved_prompt_edits_respect_worker_overrides_and_active_branches() {
+    live_prompt_scenario("override");
+}
+
+fn live_prompt_scenario(mode: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new(&format!("live-prompt-{mode}"));
+    f.setup(if mode == "override" {
+        &["--prompt", "Worker instructions for {{number}}"]
+    } else {
+        &[]
+    });
+    fs::write(f.root.join("prompt-mode.txt"), mode).unwrap();
+    let script = f.root.join("codex.sh");
+    fs::write(&script, r#"#!/usr/bin/env node
+const fs = require('node:fs');
+const {spawnSync} = require('node:child_process');
+const send = value => process.stdout.write(JSON.stringify(value)+'\n');
+const mode=fs.readFileSync('prompt-mode.txt','utf8');let turns=0,steers=0;
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+ const v=JSON.parse(line);fs.appendFileSync('protocol.jsonl',line+'\n');
+ if(v.method==='initialize')send({id:v.id,result:{}});
+ if(v.method==='thread/start')send({id:v.id,result:{thread:{id:'live-prompt-session'}}});
+ if(v.method==='turn/start'){
+  turns++;
+  const claim=spawnSync(process.env.HEY_BOSS_TEST_CLI,['issue','--project','Worker fixture','--agent','codex:live-prompt-session','claim','1','--json']);
+  if(claim.status)process.exit(1);
+  send({id:v.id,result:{turn:{id:turns===1?'owned-turn':'updated-turn'}}});
+  send({method:'item/started',params:{threadId:'live-prompt-session',item:{type:'agentMessage'}}});
+ }
+ if(v.method==='turn/steer'){
+  steers++;
+  if(mode==='race'){
+   send({method:'item/completed',params:{threadId:'live-prompt-session',item:{type:'agentMessage',text:'{"status":"completed","summary":"Old instructions done"}'}}});
+   send({method:'turn/completed',params:{threadId:'live-prompt-session',turn:{id:'owned-turn',status:'completed'}}});
+   send({id:v.id,error:{message:'Turn has already completed'}});
+  }else if(mode==='reject'&&steers===1)send({id:v.id,error:{message:'Temporary steering failure'}});
+  else send({id:v.id,result:{turnId:v.params.expectedTurnId}});
+ }
+});
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut worker = f.worker();
+    let active = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let run = active["runs"][0]["id"].as_str().unwrap();
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Unrelated','Unrelated',1,0,0);
+        INSERT INTO project_settings(project_id,prompt,version) VALUES('named:Unrelated','Never send this to another project',1);").unwrap();
+    db.execute("INSERT INTO project_settings(project_id,prompt,version,prompt_overrides,prs_enabled,worktree_enabled) SELECT id,?1,1,'{\"worktree\":\"Inactive branch change\"}',1,1 FROM projects WHERE name='Worker fixture'", [if mode == "override" { "Project prompt is overridden" } else { "Claim and implement `{{issue_command}}`." }]).unwrap();
+    thread::sleep(Duration::from_millis(2300));
+    assert!(
+        !f.transcript().iter().any(|v| v["method"] == "turn/steer"),
+        "Unrelated projects, inactive branches and overridden prompts must not steer"
+    );
+    if mode == "override" {
+        db.execute("UPDATE project_settings SET prompt_overrides='{\"main\":\"Updated instructions for {{number}}: preserve the current task.\"}',version=2 WHERE project_id<>'named:Unrelated'", []).unwrap();
+    } else {
+        db.execute("UPDATE project_settings SET prompt='Updated instructions for {{number}}: preserve the current task.',version=2 WHERE project_id<>'named:Unrelated'", []).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let saved: String = db
+            .query_row(
+                "SELECT expanded_prompt FROM worker_runs WHERE id=?1",
+                [run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if saved.contains("Updated instructions for 1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Saved prompt never reached the running agent"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let t = f.transcript();
+    let steering = t.iter().find(|v| v["method"] == "turn/steer").unwrap();
+    assert_eq!(steering["params"]["threadId"], "live-prompt-session");
+    assert_eq!(steering["params"]["expectedTurnId"], "owned-turn");
+    let text = steering["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Updated instructions for 1"), "{text}");
+    assert!(text.contains("current task"));
+    assert!(!text.contains("Never send this"));
+    assert!(!text.contains("Inactive branch change"));
+    assert!(text.contains("project's existing checkout"));
+    assert!(!text.contains("PR handoff"));
+    if mode == "override" {
+        assert!(text.contains("Worker instructions for 1"));
+        assert!(!text.contains("Project prompt is overridden"));
+    }
+    thread::sleep(Duration::from_millis(2200));
+    let t = f.transcript();
+    assert_eq!(
+        t.iter().filter(|v| v["method"] == "turn/steer").count(),
+        if mode == "reject" { 2 } else { 1 },
+        "Unchanged prompts must not be sent repeatedly"
+    );
+    assert_eq!(
+        t.iter().filter(|v| v["method"] == "turn/start").count(),
+        if mode == "race" { 2 } else { 1 }
+    );
+    if mode == "race" {
+        let followup = t
+            .iter()
+            .filter(|v| v["method"] == "turn/start")
+            .last()
+            .unwrap();
+        assert_eq!(followup["params"]["threadId"], "live-prompt-session");
+        assert!(
+            followup["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Updated instructions for 1")
+        );
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "open");
+    }
+    assert_eq!(
+        t.iter().filter(|v| v["method"] == "thread/start").count(),
+        1
+    );
+    let saved: String = db
+        .query_row(
+            "SELECT expanded_prompt FROM worker_runs WHERE id=?1",
+            [run],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(saved.contains("Updated instructions for 1"));
+    let config: String = db
+        .query_row(
+            "SELECT json_extract(job,'$.config') FROM worker_runs WHERE id=?1",
+            [run],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let config: Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(config["prs_enabled"], false);
+    assert_eq!(config["worktree_enabled"], false);
+    assert_eq!(
+        f.cli(&["view", "1"])["issue"]["assignee"],
+        "codex:live-prompt-session"
+    );
+    worker.stop();
+}
+
 impl Worker {
     fn stop(&mut self) {
         unsafe {

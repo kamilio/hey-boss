@@ -273,10 +273,10 @@ impl Store {
         Ok(json!({"ok":true,"stopped":finished,"session_id":session,"directory":job.config.cwd}))
     }
 
-    pub(crate) fn worker_prompt(&self, id: &str, text: &str) -> Result<()> {
+    pub(crate) fn worker_prompt(&self, job: &Job, text: &str) -> Result<()> {
         self.db.execute(
-            "UPDATE worker_runs SET expanded_prompt=?2 WHERE id=?1",
-            params![id, text],
+            "UPDATE worker_runs SET expanded_prompt=?2,job=?3 WHERE id=?1",
+            params![job.id, text, serde_json::to_string(job)?],
         )?;
         Ok(())
     }

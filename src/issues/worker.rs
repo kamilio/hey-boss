@@ -974,7 +974,10 @@ pub(crate) fn preview(
     prompt(&job)
 }
 fn prompt(job: &Job) -> (String, bool, String) {
-    let rendered = template(&base_prompt(&job.config.prompt), job);
+    prompt_with_config(job, &job.config)
+}
+fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
+    let rendered = template(&base_prompt(&config.prompt), job);
     let after_goal = rendered
         .trim_start()
         .strip_prefix("/goal")
@@ -1011,8 +1014,8 @@ fn prompt(job: &Job) -> (String, bool, String) {
         let objective = instructions.trim().chars().take(4000).collect();
         return (instructions, goal, objective);
     }
-    let overrides = &job.config.prompt_overrides;
-    let workspace = if job.config.worktree_enabled {
+    let overrides = &config.prompt_overrides;
+    let workspace = if config.worktree_enabled {
         overrides
             .worktree
             .as_deref()
@@ -1023,7 +1026,7 @@ fn prompt(job: &Job) -> (String, bool, String) {
             .as_deref()
             .unwrap_or(DEFAULT_CHECKOUT_PROMPT)
     };
-    let delivery = if job.config.prs_enabled {
+    let delivery = if config.prs_enabled {
         overrides.prs.as_deref().unwrap_or(DEFAULT_PRS_PROMPT)
     } else {
         overrides.main.as_deref().unwrap_or(DEFAULT_MAIN_PROMPT)
@@ -1036,7 +1039,7 @@ fn prompt(job: &Job) -> (String, bool, String) {
     );
     // Lifecycle rules also apply to saved/custom delivery prompts. Preview,
     // claims, new sessions and resumed sessions all use this assembly path.
-    let instructions = if job.config.prs_enabled {
+    let instructions = if config.prs_enabled {
         format!("{instructions}\n\n{}", template(PR_HANDOFF_PROMPT, job))
     } else {
         instructions
@@ -1123,7 +1126,7 @@ fn run_thread(
     store.worker_attach(job, &session)?;
     store.worker_event(&job.id, &format!("Codex session {session}"), None)?;
     let (text, goal_enabled, objective) = prompt(job);
-    store.worker_prompt(&job.id, &text)?;
+    store.worker_prompt(job, &text)?;
     let result = c.rpc("turn/start", turn_params(&session, &text), store, job, stop)?;
     let mut turn = result["turn"]["id"]
         .as_str()
@@ -1150,9 +1153,35 @@ fn run_thread(
     let mut claim_window_started = false;
     let mut activity_text = String::new();
     let mut last_log = Instant::now() - Duration::from_secs(2);
+    let mut applied_prompt = text;
+    let mut last_prompt_check = Instant::now();
     loop {
         Codex::check(store, job, stop)?;
         c.poll_approvals(store, job, stop)?;
+        if last_prompt_check.elapsed() >= Duration::from_secs(2) {
+            last_prompt_check = Instant::now();
+            let config = store.worker_prompt_config(job)?;
+            let next_prompt = prompt_with_config(job, &config).0;
+            if next_prompt != applied_prompt {
+                let steering = prompt_update(&next_prompt);
+                match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":steering}]}), store, job, stop) {
+                    Ok(ack) if ack["turnId"] == turn => {
+                        applied_prompt = next_prompt;
+                        job.config = config;
+                        store.worker_prompt(job, &applied_prompt)?;
+                        store.worker_event(&job.id, "Updated instructions delivered to the running agent", None)?;
+                    }
+                    // A turn may have ended while the settings were being read.
+                    // Keep the update pending; completion below starts a follow-up
+                    // in the same thread before accepting a completion report.
+                    result => {
+                        Codex::check(store, job, stop)?;
+                        let detail = result.err().map(|e| e.to_string()).unwrap_or_else(|| "Unexpected steering acknowledgement".into());
+                        store.worker_event(&job.id, &format!("Instruction update pending; retrying: {detail}"), None)?;
+                    }
+                }
+            }
+        }
         let Some(value) = (if let Some(pending) = c.pending.pop_front() {
             Some(pending)
         } else {
@@ -1245,6 +1274,33 @@ fn run_thread(
                         ),
                     ));
                 }
+                let config = store.worker_prompt_config(job)?;
+                let next_prompt = prompt_with_config(job, &config).0;
+                if next_prompt != applied_prompt {
+                    let result = c.rpc(
+                        "turn/start",
+                        turn_params(&session, &prompt_update(&next_prompt)),
+                        store,
+                        job,
+                        stop,
+                    )?;
+                    turn = result["turn"]["id"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            Error::new("worker_error", "Missing instruction update turn")
+                        })?
+                        .into();
+                    applied_prompt = next_prompt;
+                    job.config = config;
+                    store.worker_prompt(job, &applied_prompt)?;
+                    store.worker_event(
+                        &job.id,
+                        "Updated instructions delivered in the same agent session",
+                        None,
+                    )?;
+                    final_text.clear();
+                    continue;
+                }
                 let report = serde_json::from_str::<Value>(final_text.trim())
                     .ok()
                     .filter(|v| {
@@ -1321,6 +1377,12 @@ fn run_thread(
             _ => {}
         }
     }
+}
+
+fn prompt_update(instructions: &str) -> String {
+    format!(
+        "Project instructions have changed. Apply the updated instructions below to your current assigned issue, preserving your progress and session. These replace the previous project instructions. Continue the task and verify it against this update before reporting completion. Your existing workspace, delivery mode, and goal lifecycle remain in effect.\n\n{instructions}"
+    )
 }
 
 pub fn print_status(v: &Value, redraw: bool) {
