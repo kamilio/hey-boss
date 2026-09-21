@@ -277,11 +277,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
         if mode == "race" { 2 } else { 1 }
     );
     if mode == "race" {
-        let followup = t
-            .iter()
-            .filter(|v| v["method"] == "turn/start")
-            .last()
-            .unwrap();
+        let followup = t.iter().rfind(|v| v["method"] == "turn/start").unwrap();
         assert_eq!(followup["params"]["threadId"], "live-prompt-session");
         assert!(
             followup["params"]["input"][0]["text"]
