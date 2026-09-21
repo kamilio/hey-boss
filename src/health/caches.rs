@@ -187,7 +187,14 @@ fn fingerprint(candidate: &Candidate, active: &[PathBuf], at: u64) -> io::Result
         {
             return Err(io::Error::other("Unowned or special cache file; preserved"));
         }
-        let newest = m.mtime().max(m.ctime()).max(0) as u64;
+        // Chrome hard-links files between signing copies. Link creation/removal
+        // updates their shared ctime, even when this disposable copy is idle.
+        // Its directories still enforce age; file identity, mode, size and mtime
+        // still reset quiet observations after actual changes.
+        let shared_copy_file = allow_root_files && m.is_file() && m.nlink() > 1;
+        let changed = if shared_copy_file { 0 } else { m.ctime() };
+        let changed_nsec = if shared_copy_file { 0 } else { m.ctime_nsec() };
+        let newest = m.mtime().max(changed).max(0) as u64;
         if at.saturating_sub(newest) < candidate.min_age {
             return Err(io::Error::other("Recently used or changed; preserved"));
         }
@@ -199,8 +206,8 @@ fn fingerprint(candidate: &Candidate, active: &[PathBuf], at: u64) -> io::Result
             m.len(),
             m.mtime() as u64,
             m.mtime_nsec() as u64,
-            m.ctime() as u64,
-            m.ctime_nsec() as u64,
+            changed as u64,
+            changed_nsec as u64,
             m.mode() as u64,
         ] {
             hash.update(value.to_le_bytes());
@@ -365,6 +372,28 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn new_link_to_shared_chrome_file_does_not_restart_quiet_observation() {
+        let root = fixture();
+        let candidate = Candidate {
+            path: root.join("code_sign_clone.shared"),
+            min_age: 3600,
+            signing_copy: true,
+        };
+        let bundle = candidate.path.join("Google Chrome.app.bundle");
+        fs::create_dir_all(&bundle).unwrap();
+        let executable = bundle.join("Chrome");
+        fs::write(&executable, "shared executable").unwrap();
+        fs::hard_link(&executable, root.join("live-chrome")).unwrap();
+        let at = super::super::now() + 3601;
+        let before = fingerprint(&candidate, &[], at).unwrap();
+        fs::hard_link(&executable, root.join("another-copy")).unwrap();
+        assert_eq!(fingerprint(&candidate, &[], at).unwrap(), before);
+        fs::write(&executable, "changed executable").unwrap();
+        assert_ne!(fingerprint(&candidate, &[], at).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn slow_completed_checks_still_produce_two_quiet_observations() {
