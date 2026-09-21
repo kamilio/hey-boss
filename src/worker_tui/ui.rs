@@ -242,29 +242,6 @@ fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
     lines
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn claim_deadline_is_only_shown_when_the_agent_is_awaiting_claim() {
-        for state in ["reserved", "awaiting_model", "awaiting_claim", "running"] {
-            let run = serde_json::json!({
-                "state": state, "finished_at": null, "claimed_at": null,
-                "reservation_expires": 600_000
-            });
-            let content: String = activity(&run, 0)
-                .iter()
-                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
-                .collect();
-            assert_eq!(
-                content.contains("Manual claim deadline"),
-                state == "awaiting_claim",
-                "{state}"
-            );
-        }
-    }
-}
-
 fn overlay(frame: &mut Frame, title: &str, message: &str) {
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(72);
@@ -620,5 +597,28 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 }
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn claim_deadline_is_only_shown_when_the_agent_is_awaiting_claim() {
+        for state in ["reserved", "awaiting_model", "awaiting_claim", "running"] {
+            let run = serde_json::json!({
+                "state": state, "finished_at": null, "claimed_at": null,
+                "reservation_expires": 600_000
+            });
+            let content: String = activity(&run, 0)
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+                .collect();
+            assert_eq!(
+                content.contains("Manual claim deadline"),
+                state == "awaiting_claim",
+                "{state}"
+            );
+        }
     }
 }
