@@ -1369,7 +1369,10 @@ fn issue_comments_page_independently_with_counts_and_stable_sort() {
     let f = Fixture::new();
     f.create();
     for n in 0..23 {
-        f.run("session-a", &["comment", "1", "--body", &format!("Comment {n}")]);
+        f.run(
+            "session-a",
+            &["comment", "1", "--body", &format!("Comment {n}")],
+        );
     }
     let view = f.run("reader", &["view", "1"]);
     assert_eq!(view["comment_count"], 23);
@@ -1380,7 +1383,12 @@ fn issue_comments_page_independently_with_counts_and_stable_sort() {
     assert_eq!(newest["comment_count"], 23);
     assert_eq!(newest["comments"][0]["body"], "Comment 22");
     assert_eq!(newest["next_offset"], 2);
-    let oldest = f.run("reader", &["comments", "1", "--limit", "2", "--offset", "21", "--sort", "oldest"]);
+    let oldest = f.run(
+        "reader",
+        &[
+            "comments", "1", "--limit", "2", "--offset", "21", "--sort", "oldest",
+        ],
+    );
     assert_eq!(oldest["comments"][0]["body"], "Comment 21");
     assert!(oldest["next_offset"].is_null());
     let end = f.run("reader", &["comments", "1", "--offset", "23"]);
