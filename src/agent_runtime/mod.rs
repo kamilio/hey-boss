@@ -418,7 +418,7 @@ impl AgentSession {
                     params["outputSchema"] = schema;
                 }
                 let result = self.rpc("turn/start", params)?;
-                turn = required(&result["turn"], "id")?;
+                turn = required(&result["turn"], "id").inspect_err(|_| self.uncertain = true)?;
             }
             Provider::Claude => {
                 self.send(&json!({"type":"user","session_id":self.session.as_ref().map(|s|s.id.as_str()).unwrap_or(""),"message":{"role":"user","content":text},"parent_tool_use_id":null}))?;
@@ -478,6 +478,15 @@ impl AgentSession {
             return Ok(());
         }
         self.interrupted = true;
+        let result = self.interrupt_active();
+        if result.is_err() && !self.uncertain {
+            // An explicit rejection did not interrupt the provider. Preserve
+            // its eventual completion rather than rewriting it as canceled.
+            self.interrupted = false;
+        }
+        result
+    }
+    fn interrupt_active(&mut self) -> io::Result<()> {
         match self.provider {
             Provider::Codex => {
                 self.rpc(
@@ -648,10 +657,8 @@ impl AgentSession {
         let result = self.rpc("get_state", json!({}));
         self.refreshing_pi = false;
         let state = result?;
-        self.attach(
-            required(&state, "sessionId")?,
-            state["sessionFile"].as_str().map(PathBuf::from),
-        )
+        let id = required(&state, "sessionId").inspect_err(|_| self.uncertain = true)?;
+        self.attach(id, state["sessionFile"].as_str().map(PathBuf::from))
     }
     fn send(&mut self, value: &Value) -> io::Result<()> {
         self.process.send(value).inspect_err(|_| {
@@ -679,7 +686,14 @@ impl AgentSession {
                 }
             };
             if let Some(result) = protocol::response(self.provider, &id, &value) {
-                return result;
+                return match result {
+                    protocol::Response::Accepted(result) => Ok(result),
+                    protocol::Response::Rejected(error) => Err(error),
+                    protocol::Response::Invalid(error) => {
+                        self.uncertain = true;
+                        Err(error)
+                    }
+                };
             }
             if self.refreshing_pi {
                 // State reads can race large output bursts. Normalize in order

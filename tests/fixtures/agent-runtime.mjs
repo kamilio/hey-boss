@@ -86,6 +86,7 @@ function prompt(text) {
     complete(); return;
   }
   if (text.startsWith('hold')) return;
+  if (text === 'missing session acknowledgement') return;
   if (text.startsWith('queued goal')) { output = JSON.stringify({status:'completed',summary:'Initial turn verified'}); setTimeout(() => complete(), 300); return; }
   if (text === 'queued turns') { setTimeout(() => complete(), 300); return; }
   if (text === 'retry' && provider === 'pi') {
@@ -132,14 +133,34 @@ for await (const chunk of process.stdin) {
     if (r.method === 'turn/start') {
       turn = 'fixture-turn-' + (++turnNumber); result = {turn:{id:turn}};
       if (p.input[0].text === 'start before ack') send({method:'turn/started',params:{threadId:session,turn:{id:turn}}});
+      if (p.input[0].text === 'missing turn acknowledgement') result = {turn:{}};
+      if (p.input[0].text === 'malformed acknowledgement') {
+        send({id:r.id});
+        prompt('hold ambiguous acknowledgement');
+        continue;
+      }
     }
     if (r.method === 'turn/steer') result = {turnId:turn};
+    if ((r.method === 'turn/steer' && p.input[0].text === 'reject steering') || (r.method === 'turn/interrupt' && output === 'hold rejected interrupt')) {
+      send({id:r.id,error:{code:-32000,message:'fixture rejection'}});
+      if (r.method === 'turn/interrupt') setTimeout(() => complete(), 100);
+      continue;
+    }
     if (r.method === 'thread/read') result = {thread:{id:session,status:{type:streaming?'active':'idle'},canAcceptDirectInput:streaming}};
     send({id:r.id,result});
     if (r.method === 'turn/start') prompt(p.input[0].text);
     if (r.method === 'turn/interrupt') complete(true);
   } else if (provider === 'claude') {
     if (r.type === 'control_request') {
+      if (r.request.subtype === 'interrupt' && output === 'hold malformed interrupt') {
+        send({type:'control_response',response:{request_id:r.request_id,subtype:'invalid'}});
+        continue;
+      }
+      if (r.request.subtype === 'interrupt' && output === 'hold rejected interrupt') {
+        send({type:'control_response',response:{request_id:r.request_id,subtype:'error',error:'fixture rejection'}});
+        setTimeout(() => complete(), 100);
+        continue;
+      }
       send({type:'control_response',response:{subtype:'success',request_id:r.request_id,response:{}}});
       if (r.request.subtype === 'interrupt') complete(true);
     } else if (r.type === 'user') {
@@ -166,8 +187,19 @@ for await (const chunk of process.stdin) {
       send({type:'extension_ui_request',id:'preflight-input',method:'select',title:'Preflight',options:['one','two']});
       continue;
     }
+    if (r.type === 'prompt' && r.message === 'malformed prompt acknowledgement') {
+      send({id:r.id,type:'response',command:'prompt'});
+      prompt('hold malformed prompt');
+      continue;
+    }
+    if ((r.type === 'steer' && r.message === 'reject steering') || (r.type === 'clear_queue' && output === 'hold rejected interrupt')) {
+      send({id:r.id,type:'response',command:r.type,success:false,error:'fixture rejection'});
+      if (r.type === 'clear_queue') setTimeout(() => complete(), 100);
+      continue;
+    }
     let data;
     if (r.type === 'get_state') data = {sessionId:session,sessionFile:file,isStreaming:streaming};
+    if (r.type === 'get_state' && output === 'missing session acknowledgement') delete data.sessionId;
     send({id:r.id,type:'response',command:r.type,success:true,data});
     if (r.type === 'prompt') prompt(r.message);
     if (r.type === 'abort') complete(true);
