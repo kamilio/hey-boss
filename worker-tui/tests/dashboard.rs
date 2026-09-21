@@ -244,6 +244,132 @@ fn screen(app: &Dashboard) -> String {
 }
 
 #[test]
+fn activity_prioritizes_latest_event_without_duplicate_or_raw_metadata() {
+    let mut app = Dashboard {
+        now_ms: 120_000,
+        ..Dashboard::default()
+    };
+    let mut value = snapshot();
+    value["runs"][0]["last_event"] = json!("Checking layout\nDesktop and compact views");
+    value["runs"][0]["events"] = json!([
+        {"at": 115_000, "text": "Checking layout\nDesktop and compact views"},
+        {"at": 100_000, "text": "Earlier activity"}
+    ]);
+    value["runs"][0]["goal"] = json!({"status":"active", "objective":"Improve readability"});
+    app.apply(value);
+    let rendered = screen(&app);
+    assert_eq!(rendered.matches("Checking layout").count(), 1);
+    assert!(rendered.contains("5s ago"));
+    assert!(rendered.contains("Desktop and compact views"));
+    assert!(rendered.contains("Goal: active"));
+    assert!(!rendered.contains("Codex: session"));
+    assert!(!rendered.contains("\"objective\""));
+    assert!(rendered.find("Checking layout") < rendered.find("Earlier activity"));
+}
+
+#[test]
+fn activity_retains_line_breaks_and_clamps_overscroll() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["runs"][0]["events"] = json!([{"text":"First line\nSecond line\u{7}\u{202e}"}]);
+    value["runs"][0]["last_event"] = json!("First line\nSecond line\u{7}\u{202e}");
+    app.apply(value);
+    app.detail_scroll = u16::MAX;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let first_y = (0..24)
+        .find(|&y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("First line")
+        })
+        .unwrap();
+    let second_y = (0..24)
+        .find(|&y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Second line")
+        })
+        .unwrap();
+    assert_eq!(second_y, first_y + 1);
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .all(|c| !c.symbol().chars().any(char::is_control))
+    );
+}
+
+#[test]
+fn wide_dashboard_gives_activity_room_without_hiding_sessions() {
+    let mut app = Dashboard::default();
+    app.apply(snapshot());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let activity_y = (0..36)
+        .find(|&y| {
+            (0..120)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Activity")
+        })
+        .unwrap();
+    assert_eq!(
+        activity_y, 5,
+        "Wide terminals should show activity beside sessions"
+    );
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .any(|c| c.fg == ratatui::style::Color::Rgb(161, 175, 255))
+    );
+}
+
+#[test]
+fn activity_empty_and_failure_states_explain_what_happened() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["runs"][0]["events"] = json!([]);
+    value["runs"][0]["last_event"] = json!("");
+    app.apply(value.clone());
+    assert!(screen(&app).contains("Waiting for agent activity"));
+    value["runs"][1]["state"] = json!("failed");
+    value["runs"][1]["summary"] = json!("Network unavailable\nRetry after reconnecting");
+    app.history = true;
+    app.apply(value);
+    let rendered = screen(&app);
+    assert!(rendered.contains("Result"));
+    assert!(rendered.contains("Network unavailable"));
+    assert!(!rendered.contains("Waiting for agent activity"));
+}
+
+#[test]
+fn activity_paging_stops_at_the_end_and_returns_with_one_page_up() {
+    let mut app = Dashboard::default();
+    let mut value = snapshot();
+    value["runs"][0]["events"] = json!([{"text": "Wrapped activity message. ".repeat(100)}]);
+    app.apply(value);
+    let size = ratatui::layout::Rect::new(0, 0, 80, 24);
+    for _ in 0..100 {
+        ui::scroll_activity(&mut app, size, 5);
+    }
+    let bottom = app.detail_scroll;
+    assert!(bottom > 5 && bottom < 500);
+    ui::scroll_activity(&mut app, size, 5);
+    assert_eq!(app.detail_scroll, bottom);
+    ui::scroll_activity(&mut app, size, -5);
+    assert_eq!(app.detail_scroll, bottom - 5);
+    app.detail_scroll = u16::MAX;
+    ui::scroll_activity(&mut app, size, -5);
+    assert_eq!(app.detail_scroll, bottom - 5);
+}
+
+#[test]
 fn dashboard_shows_only_current_worker_and_separates_history() {
     let mut app = Dashboard::default();
     app.apply(snapshot());

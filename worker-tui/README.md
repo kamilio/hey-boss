@@ -62,7 +62,15 @@ after ten seconds. Output retention is bounded.
 | Esc | Cancel confirmation or close help |
 | q or Ctrl+C | Exit dashboard; workers keep running |
 
-At narrow widths, activity is hidden so sessions remain visible. Below 48 columns or 12 rows,
+The dashboard uses the main app's blue and slate palette. At 100 columns and up,
+activity appears beside sessions; narrower terminals stack the panes. Short
+terminals prioritize sessions, while 64 × 18 still shows the latest update.
+Activity retains twelve recent updates, newest first, with relative timestamps,
+multiline messages, readable goal status, and a result section for finished
+attempts. PgUp/PgDn scroll safely within the log; the bottom border shows the
+position. Selecting another session returns to its latest activity.
+
+Below 48 columns or 12 rows,
 only quit keys work. Bracketed paste is ignored. Alternate-screen, cursor, and
 raw-terminal state are restored on exit, errors, panic, SIGINT, and SIGTERM.
 Queue text is stripped of terminal controls and bidi overrides.
@@ -96,6 +104,7 @@ cargo build --locked --manifest-path worker-tui/Cargo.toml
 cd worker-tui
 npm ci
 npm run test:terminal
+npm run test:activity
 cargo build --locked --manifest-path ../Cargo.toml
 node tests/integrated-terminal.mjs
 python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
@@ -106,7 +115,10 @@ queue. It tests history, navigation, help during slow requests, resizing,
 outage recovery, pasted keys, confirmation cancellation,
 pause/stop, and restored terminal settings after quit and SIGTERM. It writes screenshots
 under the ignored `worker-tui/target/terminal-qa` directory. Real queues and
-workers are not changed. CI checks the Rust package and PTY walkthrough on macOS
+workers are not changed. The activity walkthrough adds color screenshots across
+five terminal sizes, paging, waiting/failure states, compact help, and disconnect
+recovery under `worker-tui/target/activity-qa`; its fixtures use Node and shell.
+CI checks the Rust package and PTY walkthrough on macOS
 and Linux. Node.js 22+ and Python 3 are required only for the walkthrough.
 
 `TERMINAL_PILOT_MODULE` and `TERMINAL_PNG_MODULE` can point to built local SDK
