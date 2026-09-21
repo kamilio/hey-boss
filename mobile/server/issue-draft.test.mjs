@@ -5,7 +5,7 @@ test('artifact task intent survives offline retries and matches the shared edito
  const {createRequire}=await import('node:module');
  const shared=createRequire(import.meta.url)('../../src/issues/web/quick-issue.js');
  const storage={data:null,getItem(){return this.data;},setItem(key,value){this.data=value;}};
- for(const kind of ['implement','plan','research']){
+ for(const kind of ['implement','plan']){
   const labels=taskLabels(['ready','task:plan','task:research','ready'],kind);
   assert.deepEqual(labels,shared.taskLabels(['ready','task:plan','task:research','ready'],kind));
   const draft={...loadIssueDraft(storage),task:kind,labels:labels.join(', '),submitted:true};
@@ -28,4 +28,10 @@ test('older pending drafts retain their exact payload after an upgrade',()=>{
  const legacy={project:'project',title:'Pending',body:'Notes',labels:'ready, ready, task:plan, task:research',requestID:'same-retry-id',submitted:true};
  const restored=loadIssueDraft({getItem(){return JSON.stringify(legacy);}});
  assert.deepEqual(issuePayload(restored),{requestID:'same-retry-id',project:'project',title:'Pending',body:'Notes',labels:['ready','ready','task:plan','task:research']});
+});
+test('removed Research choice preserves pending retries and converts editable drafts to Plan',()=>{
+ const legacy={project:'project',title:'Pending',body:'Notes',labels:'ready, ready',task:'research',requestID:'same-retry-id',submitted:true};
+ assert.deepEqual(issuePayload(legacy).labels,['ready','task:research']);
+ assert.equal(taskKind(issuePayload(legacy).labels),'plan');
+ assert.deepEqual(issuePayload({...legacy,submitted:false}).labels,['ready','task:plan']);
 });

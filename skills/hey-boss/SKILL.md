@@ -175,7 +175,8 @@ project settings; it replaces implementation and Git delivery with a plan
 saved as issue-linked artifacts. Use a mindmap for related output and draft
 follow-up issues for proposed implementation; do not start them. These tasks
 close on successful artifact delivery even in PR-enabled projects. The web
-editor and Quick Add offer a small Task selector; Implement remains the default.
+editor and Quick Add offer Implement and Plan. Older `task:research` issues use
+the Plan prompt; Research is no longer a separate task.
 
 Use **Supervisor → Worker → Agent** consistently: the supervisor coordinates the
 fleet, workers pick issues and manage agent lifecycle/retries, and agents are

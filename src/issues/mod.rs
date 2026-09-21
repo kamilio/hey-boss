@@ -213,6 +213,9 @@ pub enum Operation {
         /// Unsaved project permission, used only by the read-only settings preview.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree_allowed: Option<bool>,
+        /// Read-only task preview; omitted for ordinary worker candidate previews.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_kind: Option<String>,
     },
     GlobalSettings,
     ConfigureGlobal {

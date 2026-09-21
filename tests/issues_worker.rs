@@ -553,7 +553,7 @@ fn artifact_task_claim_and_worker_completion_skip_pr_handoff() {
         "--prompt",
         "/goal Implement and deploy",
     ]);
-    f.cli(&["edit", "1", "--label", "task:research"]);
+    f.cli(&["edit", "1", "--label", "task:plan"]);
     let mut worker = f.worker();
     let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(status["runs"][0]["state"], "completed", "{status}");
@@ -564,13 +564,38 @@ fn artifact_task_claim_and_worker_completion_skip_pr_handoff() {
         .find(|v| v["method"] == "turn/start")
         .unwrap();
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("Claim and research"), "{text}");
+    assert!(text.starts_with("Claim and plan"), "{text}");
     assert!(text.contains("hey-boss artifact create"));
     assert!(!text.contains("pull request"));
     assert!(!text.contains("Implement and deploy"));
     assert!(protocol.iter().any(|v| v["method"] == "thread/goal/set"));
     worker.stop();
 }
+#[test]
+fn plan_worker_inherits_custom_project_prompt() {
+    let f = Fixture::new("custom-plan-prompt");
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&["--prs", "--prompt", "Implement and deploy"]);
+    f.cli(&["edit", "1", "--label", "task:plan"]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute("INSERT INTO project_settings(project_id,prompt,version,prompt_overrides) SELECT id,'Implementation prompt',1,?1 FROM projects", [r#"{"plan":"/goal Claim and plan {{issue_command}}. Save a linked artifact for {{title}}."}"#]).unwrap();
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "completed");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    let protocol = f.transcript();
+    let turn = protocol
+        .iter()
+        .find(|v| v["method"] == "turn/start")
+        .unwrap();
+    assert_eq!(
+        turn["params"]["input"][0]["text"],
+        "Claim and plan hey-boss issue view 1. Save a linked artifact for Fixture issue."
+    );
+    assert!(protocol.iter().any(|v| v["method"] == "thread/goal/set"));
+    worker.stop();
+}
+
 #[test]
 fn custom_prompt_slash_goal_preserves_all_lines() {
     let f = Fixture::new("blocked");

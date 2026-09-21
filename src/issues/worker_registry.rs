@@ -83,7 +83,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"plan":worker::DEFAULT_PLAN_PROMPT,"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -433,6 +433,7 @@ pub(super) fn execute(
             config,
             number,
             worktree_allowed,
+            task_kind,
         } => {
             let candidate = if let Some(n) = number {
                 Some((p.clone(), *n))
@@ -452,11 +453,22 @@ pub(super) fn execute(
                 p.clone()
             };
             let (project, n) = candidate.clone().unwrap_or((fallback, 1));
-            let issue = if candidate.is_some() {
+            let mut issue = if candidate.is_some() {
                 json!(get_issue(db, &project.id, n, false)?)
             } else {
                 json!({"number":"<number>","title":"<issue title>","body":"<issue body>"})
             };
+            if let Some(kind) = task_kind {
+                if !["implement", "plan"].contains(&kind.as_str()) {
+                    return Err(Error::invalid("Task preview must be Implement or Plan"));
+                }
+                // Settings previews select a task without altering saved issue metadata.
+                issue["labels"] = if kind == "plan" {
+                    json!(["task:plan"])
+                } else {
+                    json!([])
+                };
+            }
             let mut runtime = runtime(db, config, &project)?;
             // Settings previews may inspect an unsaved permission without changing
             // the project or affecting worker registration and pickup.

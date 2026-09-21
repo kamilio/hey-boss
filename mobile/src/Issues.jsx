@@ -79,7 +79,7 @@ export default function Issues({api}){
    <label htmlFor="issue-description">Description <span className="fine">optional</span></label>
    <TextArea id="issue-description" value={draft.body} disabled={draft.submitted} onChange={e=>change('body',e.target.value)} placeholder="Details for the agent" rows={4}/>
    <label htmlFor="issue-kind">Task</label>
-   <select id="issue-kind" value={taskKind(issuePayload(draft).labels)} disabled={draft.submitted} onChange={e=>change('task',e.target.value)} aria-describedby="issue-kind-help"><option value="implement">Implement</option><option value="plan">Plan</option><option value="research">Research</option></select>
+   <select id="issue-kind" value={taskKind(issuePayload(draft).labels)} disabled={draft.submitted} onChange={e=>change('task',e.target.value)} aria-describedby="issue-kind-help"><option value="implement">Implement</option><option value="plan">Plan</option></select>
    <p id="issue-kind-help" className="fine">{taskKind(issuePayload(draft).labels)==='implement'?'Make and ship changes.':'Produce artifacts linked to this issue.'}</p>
    <label htmlFor="issue-labels">Labels <span className="fine">optional, separated by commas</span></label>
    <TextField.Root id="issue-labels" value={draft.labels} disabled={draft.submitted} onChange={e=>change('labels',e.target.value)} placeholder="ready, bug"/>

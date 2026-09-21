@@ -2682,6 +2682,9 @@ button.avatar.self:hover {
 .planning-settings summary { cursor:pointer; color:var(--text); font-size:14px; font-weight:600; padding:8px 0; margin-bottom:12px; }
 .planning-settings .draft-choice { margin:0 0 18px; }
 .project-settings-body > .form-error { grid-column:1/-1; }
+@media (max-width:600px) {
+ #project-prompt-plan { font-size:16px; }
+}
 @media (max-width:800px) {
  .project-settings-body { grid-template-columns:1fr; gap:12px; padding:16px; }
  .settings-preview { position:static; }
