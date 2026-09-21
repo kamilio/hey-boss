@@ -284,6 +284,54 @@ fn rejected_interrupt_does_not_relabel_normal_completion() {
 }
 
 #[test]
+fn codex_interruption_terminates_native_tools_before_reporting_success() {
+    let root = std::env::temp_dir().join(format!(
+        "hey-boss-native-tool-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut session = AgentSession::launch(Launch {
+        provider: Provider::Codex,
+        binary: Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
+        ),
+        cwd: root.clone(),
+        resume: None,
+        env: BTreeMap::from([
+            ("HEY_BOSS_FIXTURE_PROVIDER".into(), "codex".into()),
+            (
+                "HEY_BOSS_FIXTURE_EFFECTS".into(),
+                root.clone().into_os_string(),
+            ),
+        ]),
+        output_schema: None,
+    })
+    .unwrap();
+    session.prompt("hold native tool", None).unwrap();
+    until(&mut session, |event| {
+        matches!(event, Event::TextDelta { .. })
+    });
+    session.interrupt().unwrap();
+    let Event::TurnCompleted { status, .. } = until(&mut session, |event| {
+        matches!(event, Event::TurnCompleted { .. })
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(status, TurnStatus::Interrupted);
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        !root.join("native-finished").exists(),
+        "Native interrupt left the tool running"
+    );
+    session.stop().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cross_provider_resume_is_rejected_before_spawning() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let result = AgentSession::launch(Launch {

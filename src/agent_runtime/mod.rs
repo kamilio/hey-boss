@@ -493,6 +493,8 @@ impl AgentSession {
                     "turn/interrupt",
                     json!({"threadId":self.session.as_ref().unwrap().id,"turnId":self.turn}),
                 )?;
+                self.terminate_codex_tools()
+                    .inspect_err(|_| self.uncertain = true)?;
             }
             Provider::Claude => {
                 if self.queued_turns.is_empty() {
@@ -513,6 +515,53 @@ impl AgentSession {
                 // Pi abort otherwise continues queued steering/follow-up prompts.
                 self.rpc("clear_queue", json!({}))?;
                 self.rpc("abort", json!({}))?;
+            }
+        }
+        Ok(())
+    }
+    fn codex_terminals(&mut self) -> io::Result<BTreeSet<String>> {
+        let mut processes = BTreeSet::new();
+        let mut cursors = BTreeSet::new();
+        let mut cursor = Value::Null;
+        loop {
+            let result = self.rpc(
+                "thread/backgroundTerminals/list",
+                json!({"threadId":self.session.as_ref().unwrap().id,"limit":100,"cursor":cursor}),
+            )?;
+            let terminals = result["data"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("Codex omitted its native tool list"))?;
+            for terminal in terminals {
+                processes.insert(required(terminal, "processId")?);
+            }
+            if result["nextCursor"].is_null() {
+                return Ok(processes);
+            }
+            let next = required(&result, "nextCursor")?;
+            if cursors.len() >= 128 || !cursors.insert(next.clone()) {
+                return Err(io::Error::other(
+                    "Codex returned invalid native tool pagination",
+                ));
+            }
+            cursor = json!(next);
+        }
+    }
+    fn terminate_codex_tools(&mut self) -> io::Result<()> {
+        // Turn interruption alone can leave unified-exec shells running. These
+        // handles belong to our saved thread, not guessed operating-system PIDs.
+        for process in self.codex_terminals()? {
+            let result = self.rpc(
+                "thread/backgroundTerminals/terminate",
+                json!({"threadId":self.session.as_ref().unwrap().id,"processId":process}),
+            )?;
+            match result["terminated"].as_bool() {
+                Some(true) => {}
+                Some(false) if !self.codex_terminals()?.contains(&process) => {}
+                _ => {
+                    return Err(io::Error::other(
+                        "Codex did not confirm native tool termination",
+                    ));
+                }
             }
         }
         Ok(())
