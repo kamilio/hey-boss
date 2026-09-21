@@ -1073,11 +1073,7 @@ mod tests {
                 .execute(
                     "UPDATE issues SET labels=?1 WHERE project_id=?2 AND number=1",
                     params![
-                        if changed {
-                            "[\"task:research\"]"
-                        } else {
-                            "[\"task:plan\"]"
-                        },
+                        if changed { "[]" } else { "[\"task:plan\"]" },
                         f.job.project.id
                     ],
                 )

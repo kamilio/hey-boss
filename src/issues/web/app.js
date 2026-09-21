@@ -120,7 +120,7 @@ function labelTone(name) {
   );
 }
 function label(name) {
-  if (["task:plan", "task:research"].includes(name)) return `<span class="label task-kind-badge" title="Produces linked artifacts">${name === "task:plan" ? "Plan" : "Research"}</span>`;
+  if (["task:plan", "task:research"].includes(name)) return `<span class="label task-kind-badge" title="Produces linked artifacts">Plan</span>`;
   return `<span class="label tone-${labelTone(name)}" title="${esc(name)}">${esc(name)}</span>`;
 }
 function toast(message, error = false) {
@@ -1409,7 +1409,7 @@ const editorTags = new TagInput(
 );
 $("#editor-write").onclick = () => preview("editor", false);
 function updateEditorTaskHelp() {
-  $("#editor-kind-help").textContent = $("#editor-kind").value === "plan" ? "A concrete plan, saved as a linked artifact." : $("#editor-kind").value === "research" ? "Findings and sources, saved as linked artifacts." : "Make and ship changes.";
+  $("#editor-kind-help").textContent = $("#editor-kind").value === "plan" ? "A concrete plan, saved as a linked artifact." : "Make and ship changes.";
 }
 $("#editor-kind").onchange = () => { updateEditorTaskHelp(); saveEditor(); };
 $("#editor-preview").onclick = () => preview("editor", true);

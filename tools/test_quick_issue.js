@@ -9,9 +9,11 @@ const projects = [
 const current = projects[0];
 const {taskKind, taskLabels} = require('../src/issues/web/quick-issue.js');
 assert.equal(taskKind(['ready','task:plan']), 'plan');
-assert.equal(taskKind(['task:plan','task:research']), 'research');
+assert.equal(taskKind(['task:plan','task:research']), 'plan');
+assert.equal(taskKind(['task:research']), 'plan');
 assert.equal(taskKind(['plan','research']), 'implement');
-assert.deepEqual(taskLabels(['ready','task:plan','ready'], 'research'), ['ready','task:research']);
+assert.deepEqual(taskLabels(['ready','task:research','ready'], 'plan'), ['ready','task:plan']);
+assert.deepEqual(taskLabels(['ready'], 'research'), ['ready']);
 assert.deepEqual(taskLabels(['bug','task:research'], 'implement'), ['bug']);
 const check = (text, title, project = projects[1]) => assert.deepEqual(parse(text, projects, current), {title, project});
 check('Fix reconnect', 'Fix reconnect', current);

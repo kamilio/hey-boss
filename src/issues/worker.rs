@@ -16,13 +16,16 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub const DEFAULT_PLAN_PROMPT: &str = "Claim and plan `{{issue_command}}`.\n\nProduce a concrete plan with scope, design, tradeoffs, implementation steps, and verification criteria.\n\nDeliver artifacts only; do not implement code, commit, push, or deploy. Save the result with `hey-boss artifact create --title '<title>' --body '<markdown>' --issue {{number}} --project {{project_arg}}`. Link every output artifact to this issue. When several related artifacts or topics benefit from an overview, organize and link them in a project mindmap using `hey-boss mm --project {{project_arg}}`. If the result identifies actionable work, create draft follow-up issues with `hey-boss issue create --draft --title '<title>' --body '<markdown>' --project {{project_arg}}` and reference the source artifact and this issue; do not start those issues. If drafts are unavailable, record proposed follow-ups in the artifact. Finish with links to the saved artifacts, any mindmap, and follow-up issues.";
 pub const DEFAULT_PROMPT: &str = "Claim and implement `{{issue_command}}`.";
 /// Stored as ordinary labels so task intent uses the existing durable fleet wire format.
 pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
     let labels = issue["labels"].as_array()?;
-    if labels.iter().any(|label| label == "task:research") {
-        Some("research")
-    } else if labels.iter().any(|label| label == "task:plan") {
+    // Old Research tasks remain artifact-only work and now use the Plan prompt.
+    if labels
+        .iter()
+        .any(|label| label == "task:plan" || label == "task:research")
+    {
         Some("plan")
     } else {
         None
@@ -38,6 +41,8 @@ pub(crate) const PR_HANDOFF_PROMPT: &str = "PR handoff: Keep the issue open unti
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
     pub worktree: Option<String>,
     pub checkout: Option<String>,
     pub prs: Option<String>,
@@ -45,9 +50,15 @@ pub struct PromptOverrides {
 }
 impl PromptOverrides {
     pub fn validate(&self) -> Result<()> {
-        for text in [&self.worktree, &self.checkout, &self.prs, &self.main]
-            .into_iter()
-            .flatten()
+        for text in [
+            &self.plan,
+            &self.worktree,
+            &self.checkout,
+            &self.prs,
+            &self.main,
+        ]
+        .into_iter()
+        .flatten()
         {
             if text.trim().is_empty() || text.len() > 32000 {
                 return Err(Error::invalid(
@@ -1007,20 +1018,29 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
     } else {
         rendered
     };
-    if let Some(kind) = artifact_task(&job.issue) {
-        // Task intent replaces saved implementation instructions, including custom
-        // delivery/workspace branches. Goal mode still follows the saved /goal prefix.
-        let focus = if kind == "plan" {
-            "Produce a concrete plan with scope, design, tradeoffs, implementation steps, and verification criteria."
-        } else {
-            "Investigate the question and document findings, sources, uncertainties, tradeoffs, and recommendations."
-        };
-        let instructions = template(
-            &format!(
-                "Claim and {kind} `{{{{issue_command}}}}`.\n\n{focus}\n\nDeliver artifacts only; do not implement code, commit, push, or deploy. Save the result with `hey-boss artifact create --title '<title>' --body '<markdown>' --issue {{{{number}}}} --project {{{{project_arg}}}}`. Link every output artifact to this issue. When several related artifacts or topics benefit from an overview, organize and link them in a project mindmap using `hey-boss mm --project {{{{project_arg}}}}`. If the result identifies actionable work, create draft follow-up issues with `hey-boss issue create --draft --title '<title>' --body '<markdown>' --project {{{{project_arg}}}}` and reference the source artifact and this issue; do not start those issues. If drafts are unavailable, record proposed follow-ups in the artifact. Finish with links to the saved artifacts, any mindmap, and follow-up issues."
-            ),
+    if artifact_task(&job.issue).is_some() {
+        let rendered = template(
+            config
+                .prompt_overrides
+                .plan
+                .as_deref()
+                .unwrap_or(DEFAULT_PLAN_PROMPT),
             job,
         );
+        let after_goal = rendered
+            .trim_start()
+            .strip_prefix("/goal")
+            .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace));
+        let goal = goal || after_goal.is_some();
+        let instructions = if let Some(rest) = after_goal {
+            if rest.trim().is_empty() {
+                template(DEFAULT_PLAN_PROMPT, job)
+            } else {
+                rest.trim_start().to_owned()
+            }
+        } else {
+            rendered
+        };
         let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
             format!("{instructions}\n\nPlan document: {path}")
         } else {
@@ -1683,7 +1703,7 @@ mod tests {
     use super::*;
     #[test]
     fn artifact_tasks_replace_implementation_and_delivery_prompts() {
-        for kind in ["plan", "research"] {
+        for label in ["task:plan", "task:research"] {
             for base in [
                 DEFAULT_PROMPT,
                 "/goal",
@@ -1696,10 +1716,10 @@ mod tests {
                     ..Default::default()
                 };
                 let mut task = issue();
-                task["labels"] = json!([format!("task:{kind}"), "ready"]);
+                task["labels"] = json!([label, "ready"]);
                 task["plan"] = json!({"path":"/tmp/task-notes.md"});
                 let (text, goal, objective) = preview(&config, &project(), task);
-                assert!(text.contains(&format!("Claim and {kind}")), "{text}");
+                assert!(text.contains("Claim and plan"), "{text}");
                 assert!(text.contains("hey-boss artifact create"), "{text}");
                 assert!(text.contains("--issue 7"));
                 assert!(text.contains("mindmap"));
@@ -1710,7 +1730,7 @@ mod tests {
                 assert!(!text.contains("dedicated Git worktree"));
                 assert!(!text.contains("Implement and deploy everything"));
                 assert_eq!(goal, base.starts_with("/goal"));
-                assert!(objective.starts_with(&format!("Claim and {kind}")));
+                assert!(objective.starts_with("Claim and plan"));
             }
         }
     }

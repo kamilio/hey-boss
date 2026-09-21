@@ -1,7 +1,7 @@
 "use strict";
 const HeyBossQuickIssue = (() => {
-  const taskKind = (labels = []) => labels.includes("task:research") ? "research" : labels.includes("task:plan") ? "plan" : "implement";
-  const taskLabels = (labels, kind) => [...new Set(labels.filter(label => !["task:plan", "task:research"].includes(label))), ...(["plan", "research"].includes(kind) ? [`task:${kind}`] : [])];
+  const taskKind = (labels = []) => labels.some(label => ["task:plan", "task:research"].includes(label)) ? "plan" : "implement";
+  const taskLabels = (labels, kind) => [...new Set(labels.filter(label => !["task:plan", "task:research"].includes(label))), ...(kind === "plan" ? [`task:${kind}`] : [])];
   const fold = value => value.normalize("NFC").toLocaleLowerCase();
   // Scan whole tokens so email addresses, escaped @ signs and @ inside quotes
   // cannot open another picker. Offsets match the input's selection offsets.

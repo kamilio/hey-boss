@@ -1473,6 +1473,67 @@ fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
 }
 
 #[test]
+fn project_plan_prompt_is_saved_previewed_claimed_and_reset() {
+    let web = Web::start();
+    web.ok(json!({"action":"create","title":"Plan fixture","body":"Keep {{number}} literal","labels":["task:plan"]}));
+    let custom = "/goal Claim and plan {{issue_command}}. Scope: {{body}}.";
+    web.ok(json!({"action":"configure_project","prompt":"Implement and deploy","prs_enabled":true,"worktree_enabled":true,"prompt_overrides":{"plan":custom}}));
+    let settings = web.ok(json!({"action":"project_settings"}));
+    assert_eq!(settings["prompt_overrides"]["plan"], custom);
+    assert!(
+        settings["prompt_defaults"]["plan"]
+            .as_str()
+            .unwrap()
+            .contains("hey-boss artifact create")
+    );
+    let expected = "Claim and plan hey-boss issue view 1. Scope: Keep {{number}} literal.";
+    for task_kind in [None, Some("plan")] {
+        let preview = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1,"task_kind":task_kind}));
+        assert_eq!(preview["prompt"], expected);
+        assert_eq!(preview["use_goal"], true);
+        assert_eq!(preview["prs_enabled"], false);
+        assert_eq!(preview["worktree_enabled"], false);
+    }
+    let claim = web.ok(json!({"action":"claim","number":1,"force":false}));
+    assert_eq!(claim["instructions"], expected);
+    let bad = web.action(
+        &web.project,
+        json!({"action":"configure_project","prompt_overrides":{"plan":" "}}),
+        None,
+    );
+    assert_eq!(bad.status, 400);
+    assert_eq!(
+        web.ok(json!({"action":"project_settings"}))["version"],
+        settings["version"]
+    );
+    web.ok(json!({"action":"configure_project","prompt_overrides":{"plan":null}}));
+    let reset =
+        web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1}));
+    assert!(
+        reset["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Claim and plan")
+    );
+    assert!(
+        reset["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("hey-boss artifact create")
+    );
+    let implement = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1,"task_kind":"implement"}));
+    assert!(
+        implement["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Implement and deploy")
+    );
+    assert_eq!(implement["prs_enabled"], true);
+    let invalid = web.action(&web.project, json!({"action":"preview_worker","config":{"projects":[web.project]},"task_kind":"research"}), None);
+    assert_eq!(invalid.status, 400);
+}
+
+#[test]
 fn project_workflow_prompts_select_branches_and_match_claims() {
     let web = Web::start();
     web.ok(json!({"action":"create","title":"Workflow fixture","body":"","labels":[]}));

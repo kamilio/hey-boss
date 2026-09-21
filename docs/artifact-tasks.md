@@ -1,37 +1,37 @@
-# Planning and research tasks
+# Plan tasks
 
-Choose **Task → Plan** or **Research** in the issue editor or Quick Add. Implement
-is the default. The quiet badge in the issue list identifies artifact tasks;
-readiness and draft state remain independent of task intent.
+Choose **Task → Plan** in the issue editor, Quick Add, or phone issue form.
+Implement is the default. A Plan badge identifies artifact tasks; readiness
+and draft state remain independent of task intent.
 
-Plan asks the agent for scope, design, tradeoffs, steps, and verification criteria.
-Research asks for findings, sources, uncertainties, and recommendations. Both
-replace the implementation prompt and Git workspace/delivery instructions with
-artifact delivery, including when the project normally uses worktrees or PRs.
-The `/goal` prefix still enables goal mode.
+Edit **Project settings → Plan → Plan prompt** to customize what planning
+agents receive. The built-in prompt asks for scope, design, tradeoffs,
+implementation steps, and verification criteria, saved as linked artifacts.
+**Use default** clears the project override. Saving prompt edits also updates
+running agents that inherit this prompt, including connected devices.
 
-Agents save and link artifacts to the task. They can organize related output in
-a mindmap and create draft follow-up issues, without starting implementation.
-When project drafts are disabled, proposed follow-ups stay in the artifact.
-Successful artifact tasks close normally; no PR handoff is required.
+The Plan prompt replaces implementation, workspace, and delivery instructions,
+including when the project normally uses worktrees or PRs. It supports the same
+placeholders as implementation prompts. Start it with `/goal` to enable goal
+mode; goal mode also follows the implementation prompt's `/goal` setting.
+Select **Preview task → Plan** to inspect the assembled instructions without
+changing any issues or worker settings.
 
-Task intent uses the existing durable labels: `task:plan` and `task:research`.
-This keeps CLI, replication, transfers, and older clients compatible without a
-schema change. CLI example:
+By default, agents can organize related artifacts in a mindmap and create draft
+follow-up issues without starting implementation. When drafts are disabled,
+proposed follow-ups stay in the artifact. Successful Plan tasks close normally
+without a PR handoff.
+
+Task intent uses the durable `task:plan` label:
 
 ```sh
-hey-boss issue create --title 'Research reconnect strategies' --label task:research
-hey-boss issue edit 12 --remove-label task:research --label task:plan
+hey-boss issue create --title 'Plan reconnect improvements' --label task:plan
 ```
 
-The editor replaces the task label when switching modes and preserves all other
-labels. If a CLI user supplies both, Research takes precedence. Ordinary `plan`
-or `research` labels do not change prompts. Changing task intent during an active
-run prevents that run from closing the changed task.
-
-Regression coverage includes prompt replacement, goal mode, PR-enabled worker
-completion, intent changes during a run, and immutable offline phone retries.
-`tools/artifact_tasks_browser_checks.js` exercises creation, editing, draft
-restoration, failed submission retries, keyboard access, and light/dark layouts
-at 320, 390, 768, and 1440 pixels. It refuses to modify a project without the
-expected isolated test fixture.
+Research is no longer a separate task. Older `task:research` issues use the Plan
+prompt and appear as Plan tasks. Editing their task choice replaces the old
+label with `task:plan`, preserving unrelated labels. Pending phone submissions
+retain their original payload and request ID so retries remain idempotent.
+Ordinary `plan` and `research` labels do not affect task behavior. Changing a
+Plan task to Implement during an active run prevents stale completion from
+closing the changed task.
