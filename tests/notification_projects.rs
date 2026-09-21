@@ -125,18 +125,12 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
-fn notifications_register_directory_and_custom_projects_in_issue_database() {
+fn notifications_hide_empty_temporary_projects_and_register_custom_projects() {
     let f = Fixture::new();
     let notice = f.notify(&mut f.alert(&f.cwd));
     assert_eq!(notice["project"], "project");
     let projects = f.projects();
-    assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
-    assert!(
-        projects["projects"][0]["id"]
-            .as_str()
-            .unwrap()
-            .starts_with("local:")
-    );
+    assert!(projects["projects"].as_array().unwrap().is_empty());
     let notice = f.notify(f.alert(&f.cwd).args(["--project", "Atlas"]));
     assert_eq!(notice["project"], "Atlas");
     let projects = f.projects();
@@ -146,6 +140,24 @@ fn notifications_register_directory_and_custom_projects_in_issue_database() {
             .unwrap()
             .iter()
             .any(|p| p["id"] == "named:Atlas")
+    );
+    // A temporary checkout with saved user work must still remain discoverable.
+    let created = f
+        .command(&f.cwd)
+        .args(["issue", "create", "--title", "Saved work", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        f.projects()["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "project" && p["open"] == 1)
     );
 }
 
