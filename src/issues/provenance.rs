@@ -50,34 +50,6 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn old_capture_triggers_migrate_atomically_without_inventing_origins() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE issues(project_id TEXT,number INTEGER); CREATE TABLE artifacts(project_id TEXT,id TEXT); CREATE TABLE worker_runs(session_id TEXT,started_at INTEGER); CREATE TABLE fleet_outbox(after_json TEXT); CREATE TRIGGER fleet_capture_issues_INSERT AFTER INSERT ON issues BEGIN INSERT INTO fleet_outbox VALUES(json_object('project_id',NEW.\"project_id\",'number',NEW.\"number\")); END; INSERT INTO issues VALUES('Old',1);").unwrap();
-        migrate(&db).unwrap();
-        migrate(&db).unwrap();
-        assert!(
-            db.query_row("SELECT origin FROM issues WHERE number=1", [], |r| r
-                .get::<_, Option<String>>(0))
-                .unwrap()
-                .is_none()
-        );
-        db.execute(
-            "INSERT INTO issues VALUES('New',2,?1)",
-            [json!({"session_id":"exact-session"}).to_string()],
-        )
-        .unwrap();
-        let origin:String=db.query_row("SELECT json_extract(after_json,'$.origin') FROM fleet_outbox ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&origin).unwrap()["session_id"],
-            "exact-session"
-        );
-    }
-}
-
 /// Authorize a historical reference against persisted, visible resources.
 pub(crate) fn referenced(db: &Connection, host: &str, run: &str) -> Result<Option<Value>> {
     let (field, key) = run
@@ -155,4 +127,32 @@ pub(super) fn capture(db: &Connection, actor: &Actor, now: i64) -> Result<String
         source_run(db, actor, now)?
     };
     Ok(json!({"actor_id":actor.id,"kind":actor.kind,"session_id":actor.session_id,"machine":actor.machine,"host":actor.host,"cwd":actor.cwd,"source":actor.source,"created_at":now,"invocation":actor.invocation,"run":run}).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_capture_triggers_migrate_atomically_without_inventing_origins() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE issues(project_id TEXT,number INTEGER); CREATE TABLE artifacts(project_id TEXT,id TEXT); CREATE TABLE worker_runs(session_id TEXT,started_at INTEGER); CREATE TABLE fleet_outbox(after_json TEXT); CREATE TRIGGER fleet_capture_issues_INSERT AFTER INSERT ON issues BEGIN INSERT INTO fleet_outbox VALUES(json_object('project_id',NEW.\"project_id\",'number',NEW.\"number\")); END; INSERT INTO issues VALUES('Old',1);").unwrap();
+        migrate(&db).unwrap();
+        migrate(&db).unwrap();
+        assert!(
+            db.query_row("SELECT origin FROM issues WHERE number=1", [], |r| r
+                .get::<_, Option<String>>(0))
+                .unwrap()
+                .is_none()
+        );
+        db.execute(
+            "INSERT INTO issues VALUES('New',2,?1)",
+            [json!({"session_id":"exact-session"}).to_string()],
+        )
+        .unwrap();
+        let origin:String=db.query_row("SELECT json_extract(after_json,'$.origin') FROM fleet_outbox ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&origin).unwrap()["session_id"],
+            "exact-session"
+        );
+    }
 }
