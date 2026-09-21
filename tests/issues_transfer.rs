@@ -20,6 +20,8 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
         process_start: None,
         cwd: root.clone(),
         source: "test".into(),
+        invocation: None,
+        creation_run: None,
     };
     let mut call = |project: &str, value: Value, key: Option<&str>| {
         store.execute(&Request {

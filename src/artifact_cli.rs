@@ -222,7 +222,7 @@ pub fn run(options: &Options) -> Result<()> {
     op.validate()?;
     let cwd = std::env::current_dir()?.canonicalize()?;
     let machine = issues::identity::machine()?;
-    let actor = if op.writes() {
+    let mut actor = if op.writes() {
         Some(issues::identity::resolve(
             options.agent.as_deref(),
             &machine,
@@ -231,6 +231,11 @@ pub fn run(options: &Options) -> Result<()> {
     } else {
         None
     };
+    if matches!(op, Operation::Create { .. })
+        && let Some(actor) = actor.as_mut()
+    {
+        issues::identity::creation_context(actor);
+    }
     let request = issues::Request {
         version: 1,
         project: issues::identity::project(&cwd, &machine)?,

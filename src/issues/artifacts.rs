@@ -19,7 +19,17 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     )
 }
 pub(super) fn get(db: &Connection, p: &str, id: &str) -> Result<Value> {
-    db.query_row("SELECT id,title,body,version,archived,created_at,updated_at FROM artifacts WHERE project_id=?1 AND id=?2",params![p,id],row).optional()?.ok_or_else(||Error::new("not_found","Artifact not found in this project"))
+    let mut artifact = db.query_row("SELECT id,title,body,version,archived,created_at,updated_at FROM artifacts WHERE project_id=?1 AND id=?2",params![p,id],row).optional()?.ok_or_else(||Error::new("not_found","Artifact not found in this project"))?;
+    let origin: Option<String> = db.query_row(
+        "SELECT origin FROM artifacts WHERE project_id=?1 AND id=?2",
+        params![p, id],
+        |r| r.get(0),
+    )?;
+    artifact["origin"] = origin
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    Ok(artifact)
 }
 fn target(
     db: &Connection,
@@ -165,9 +175,10 @@ pub(super) fn execute(
     db: &Connection,
     p: &Project,
     op: &Operation,
-    author: &str,
+    actor: Option<&crate::issues::Actor>,
     now: i64,
 ) -> Result<Value> {
+    let author = actor.map(|a| a.id.as_str()).unwrap_or("");
     match op {
         Operation::Preview { body } => {
             return Ok(json!({"ok":true,"html":crate::markdown::render_fragment(body)}));
@@ -206,7 +217,10 @@ pub(super) fn execute(
                 "a-{}",
                 bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
-            db.execute("INSERT INTO artifacts(project_id,id,title,body,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5)",params![p.id,id,title,text,now])?;
+            let origin = actor
+                .map(|a| crate::issues::provenance::capture(db, a, now))
+                .transpose()?;
+            db.execute("INSERT INTO artifacts(project_id,id,title,body,created_at,updated_at,origin) VALUES(?1,?2,?3,?4,?5,?5,?6)",params![p.id,id,title,text,now,origin])?;
             if issue.is_some() || node.is_some() {
                 let (kind, target) = target(db, p, *issue, node.as_deref(), true)?;
                 db.execute(

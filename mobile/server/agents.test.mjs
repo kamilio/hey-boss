@@ -30,5 +30,12 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal(pending.length,1);assert.equal(pending[0].action,'takeover');assert.equal(pending[0].project,'named:Atlas');
  await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,stopped:true,resume_command:'cd /repo && codex resume session'},bridge);
  assert.equal((await(await takeover).json()).resume_command,'cd /repo && codex resume session');
+ assert.equal((await call('/api/fleet/conversation?host=local&run=old&project=named%3AAtlas&at=-1',null,headers)).status,400);
+ assert.equal((await call('/api/fleet/takeover',{host:'local',run:'old',project:'named:Atlas'},headers)).status,404,'Historical fallback never authorizes takeover');
+ const historical=call('/api/fleet/conversation?host=local&run=old&project=named%3AAtlas&at=123',null,headers);
+ for(let i=0;i<20;i++){pending=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(pending.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(pending[0].run,'old');assert.equal(pending[0].at,123);assert.equal(pending[0].project,'named:Atlas');
+ await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:false,error:'This origin is not recorded'},bridge);
+ assert.equal((await historical).status,503,'The supervisor must confirm the saved origin before serving history');
  store.setIssueProjects([]);assert.equal((await call('/api/fleet/conversation?host=local&run=run',null,headers)).status,404);
 });

@@ -131,6 +131,8 @@ pub fn serve(config: Config) -> Result<()> {
         process_start: None,
         cwd,
         source: "web interface".into(),
+        invocation: None,
+        creation_run: None,
     };
     let backend = match config.host {
         Some(host) => {
@@ -494,6 +496,11 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 include_bytes!("web/fleet.js"),
             )),
             "/status.css" => Some(("text/css; charset=utf-8", include_bytes!("web/status.css"))),
+            "/origin.css" => Some(("text/css; charset=utf-8", include_bytes!("web/origin.css"))),
+            "/origin.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/origin.js"),
+            )),
             "/status.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/status.js"),
@@ -632,6 +639,11 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                         .transpose()
                         .map_err(|_| Error::invalid("Invalid earlier-history cursor"))?,
                     latest: query.get("latest").is_some_and(|v| v == "1"),
+                    at: query
+                        .get("at")
+                        .map(|s| s.parse::<u64>())
+                        .transpose()
+                        .map_err(|_| Error::invalid("Invalid invocation cursor"))?,
                 },
             )?;
             return json_response(result);

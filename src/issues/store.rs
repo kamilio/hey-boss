@@ -15,6 +15,8 @@ pub(super) mod chief;
 mod claim_recovery;
 #[path = "../mindmap/store.rs"]
 mod mindmap;
+#[path = "origin_reader.rs"]
+mod origin_reader;
 #[path = "worker_registry.rs"]
 mod registry;
 #[path = "subtasks.rs"]
@@ -30,6 +32,7 @@ mod batch;
 mod status;
 #[path = "transfer.rs"]
 mod transfer;
+use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
 const SCHEMA_VERSION: i64 = 13;
@@ -149,7 +152,7 @@ fn migrate_blocked(db: &Connection) -> Result<()> {
     Ok(())
 }
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
@@ -173,10 +176,13 @@ struct Issue {
     agent_launch_count: i64,
     #[serde(default)]
     status: Option<Value>,
+    #[serde(default, flatten)]
+    creation_context: origin_reader::Metadata,
 }
 fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
+        creation_context: origin_reader::Metadata::read(row)?,
         agent_launch_count: row.get(16)?,
         status: row
             .get::<_, Option<String>>(17)?
@@ -283,6 +289,16 @@ fn validate(r: &Request) -> Result<()> {
         }
         if let Some(id) = &actor.session_id {
             identifier(id, "session ID", 256)?;
+        }
+        if let Some(id) = actor.invocation.as_ref().and_then(|i| i.call_id.as_ref()) {
+            identifier(id, "invocation ID", 256)?;
+        }
+        if let Some(run) = &actor.creation_run {
+            identifier(&run.id, "origin run ID", 256)?;
+            identifier(&run.project_id, "origin project ID", 8192)?;
+            if run.number <= 0 || actor.session_id.is_none() {
+                return Err(Error::invalid("Invalid creation run"));
+            }
         }
     }
     if r.operation.needs_actor() && r.actor.is_none() {
@@ -683,6 +699,7 @@ impl Store {
         }
         agent_launches::migrate(&db)?;
         status::migrate(&db)?;
+        provenance::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         Ok(Self {
             db,
@@ -822,13 +839,9 @@ impl Store {
             Operation::Batch { edits, dry_run } => {
                 batch::execute(&tx, &project, actor, edits, *dry_run, now)?
             }
-            Operation::Artifact { operation } => artifacts::execute(
-                &tx,
-                &project,
-                operation,
-                actor.map(|a| a.id.as_str()).unwrap_or(""),
-                now,
-            )?,
+            Operation::Artifact { operation } => {
+                artifacts::execute(&tx, &project, operation, actor, now)?
+            }
             Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
@@ -920,7 +933,7 @@ impl Store {
                     assignee.as_deref()
                 };
                 let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
-                let mut stmt = tx.prepare(&format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) FROM issues WHERE project_id=?1
+                let mut stmt = tx.prepare(&format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) AS comment_count FROM issues WHERE project_id=?1
                     AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
                     AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
                     AND (?5 IS NULL OR instr(lower(title),lower(?5))>0 OR instr(lower(body),lower(?5))>0)
@@ -937,7 +950,7 @@ impl Store {
                         if *all { -1_i64 } else { i64::from(*limit) + 1 },
                         if *all { 0 } else { *offset }
                     ],
-                    |row| Ok((row_issue(row)?, row.get::<_, i64>(18)?)),
+                    |row| Ok((row_issue(row)?, row.get::<_, i64>("comment_count")?)),
                 )?;
                 let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let more = !*all && found.len() > *limit as usize;
@@ -1295,8 +1308,8 @@ fn create_issue(
             [&project.id],
         )?;
     }
-    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,draft) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8,?9)",
-        params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order,draft])?;
+    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,draft,origin) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8,?9,?10)",
+        params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order,draft,provenance::capture(db,actor,now)?])?;
     db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,node FROM fleet_meta WHERE id=1 AND role='agent'", params![project.id,number])?;
     db.execute(
         "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",

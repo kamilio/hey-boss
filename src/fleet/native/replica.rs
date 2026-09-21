@@ -132,6 +132,16 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
             .ok_or_else(|| invalid("Invalid issue row"))?;
         m.entry("draft").or_insert(json!(0));
         m.entry("plan").or_insert(Value::Null);
+        if m.get("origin").is_none_or(Value::is_null) {
+            let existing: Option<Option<String>> = db
+                .query_row(
+                    "SELECT origin FROM issues WHERE project_id=?1 AND number=?2",
+                    rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            m.insert("origin".into(), json!(existing.flatten()));
+        }
     }
     if table == "project_settings" {
         let m = row
@@ -606,7 +616,10 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                 .iter()
                 .filter(|(k, v)| {
                     before[*k] != **v
-                        && !matches!(k.as_str(), "version" | "updated_at" | "sort_order")
+                        && !matches!(
+                            k.as_str(),
+                            "version" | "updated_at" | "sort_order" | "origin"
+                        )
                 })
                 .collect::<Vec<_>>();
             if !changed.is_empty() && !owner.first().is_some_and(|r| r["node"] == node) {
@@ -1415,6 +1428,8 @@ mod tests {
                         process_start: None,
                         cwd: std::env::temp_dir(),
                         source: "test".into(),
+                        invocation: None,
+                        creation_run: None,
                     }),
                     operation: Operation::Create {
                         title: "Original".into(),
@@ -1461,6 +1476,8 @@ mod tests {
             process_start: None,
             cwd: std::env::temp_dir(),
             source: "test".into(),
+            invocation: None,
+            creation_run: None,
         };
         let mut store = Store::open(&main.path).unwrap();
         let mut call = |project: &str, operation: Value| {
@@ -1560,6 +1577,49 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn creation_origin_survives_replication_and_legacy_snapshots() {
+        let main = Fixture::new();
+        main.capture();
+        let origin =
+            json!({"session_id":"creator","host":"source-device","invocation":{"offset":123}})
+                .to_string();
+        main.db
+            .execute("UPDATE issues SET origin=?1", [&origin])
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT origin FROM issues", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            origin
+        );
+        let mut legacy = current_row(
+            &agent.db,
+            "issues",
+            &json!({"project_id":"named:Native fleet","number":1}),
+        )
+        .unwrap();
+        legacy.as_object_mut().unwrap().remove("origin");
+        put_row(&agent.db, "issues", &legacy).unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT origin FROM issues", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            origin
+        );
     }
 
     #[test]
