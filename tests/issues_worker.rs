@@ -216,7 +216,20 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
 "#).unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let mut worker = f.worker();
-    let active = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    // Cold CLI/mock startup can be slow alongside the rest of the integration
+    // suite. Wait for the claim before measuring instruction delivery.
+    let startup_deadline = Instant::now() + Duration::from_secs(60);
+    let active = loop {
+        let status = f.cli(&["worker", "status"]);
+        if status["runs"][0]["claimed_at"].is_number() {
+            break status;
+        }
+        assert!(
+            Instant::now() < startup_deadline,
+            "Agent startup timed out: {status}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
     let run = active["runs"][0]["id"].as_str().unwrap();
     let db = rusqlite::Connection::open(&f.db).unwrap();
     db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Unrelated','Unrelated',1,0,0);
@@ -232,7 +245,8 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
     } else {
         db.execute("UPDATE project_settings SET prompt='Updated instructions for {{number}}: preserve the current task.',version=2 WHERE project_id<>'named:Unrelated'", []).unwrap();
     }
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // A steering RPC allows 45 seconds for acknowledgement in production.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let saved: String = db
             .query_row(
