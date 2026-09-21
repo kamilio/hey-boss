@@ -77,6 +77,35 @@ pub(crate) fn is_home_project(project: &Project) -> bool {
     directory == home
 }
 
+/// Temporary agent checkouts are not durable projects. Inspect the path encoded
+/// in local identities so the same rule works for disconnected fleet machines.
+/// Git remotes and explicitly named projects remain independent of their paths.
+pub(crate) fn is_temporary_project(id: &str) -> bool {
+    let Some((_, directory)) = id.strip_prefix("local:").and_then(|id| id.split_once(':')) else {
+        return false;
+    };
+    let directory = Path::new(directory);
+    if ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"]
+        .iter()
+        .any(|root| directory.starts_with(root))
+    {
+        return true;
+    }
+    // macOS per-user temporary roots have two variable components before T.
+    for root in ["/var/folders", "/private/var/folders"] {
+        if let Ok(relative) = directory.strip_prefix(root) {
+            let mut components = relative.components();
+            if components.next().is_some()
+                && components.next().is_some()
+                && components.next().is_some_and(|c| c.as_os_str() == "T")
+            {
+                return true;
+            }
+        }
+    }
+    directory.starts_with(std::env::temp_dir())
+}
+
 pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> Project {
     let id = git
         .origin

@@ -16,7 +16,7 @@ pub(super) fn projects(snapshot: &Snapshot, machine: &str) -> Vec<(Project, i64)
         } else {
             continue;
         };
-        if identity::is_home_project(&project) {
+        if identity::is_home_project(&project) || identity::is_temporary_project(&project.id) {
             continue;
         }
         let at = agent
