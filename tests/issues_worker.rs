@@ -363,6 +363,36 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
     );
     w.stop();
 }
+
+#[test]
+fn artifact_task_claim_and_worker_completion_skip_pr_handoff() {
+    let f = Fixture::new("completed-artifact-task");
+    // The fixture completes successfully for the ordinary completed mode.
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&[
+        "--prs",
+        "--worktree",
+        "--prompt",
+        "/goal Implement and deploy",
+    ]);
+    f.cli(&["edit", "1", "--label", "task:research"]);
+    let mut worker = f.worker();
+    let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(status["runs"][0]["state"], "completed", "{status}");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    let protocol = f.transcript();
+    let turn = protocol
+        .iter()
+        .find(|v| v["method"] == "turn/start")
+        .unwrap();
+    let text = turn["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Claim and research"), "{text}");
+    assert!(text.contains("hey-boss artifact create"));
+    assert!(!text.contains("pull request"));
+    assert!(!text.contains("Implement and deploy"));
+    assert!(protocol.iter().any(|v| v["method"] == "thread/goal/set"));
+    worker.stop();
+}
 #[test]
 fn custom_prompt_slash_goal_preserves_all_lines() {
     let f = Fixture::new("blocked");

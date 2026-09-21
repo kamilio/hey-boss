@@ -437,9 +437,10 @@ pub(super) fn execute(
                 json!({"number":"<number>","title":"<issue title>","body":"<issue body>"})
             };
             let runtime = runtime(db, config, &project)?;
+            let prs_enabled = runtime.prs_enabled && worker::artifact_task(&issue).is_none();
             let (prompt, goal, objective) = worker::preview(&runtime, &project, issue);
             Ok(
-                json!({"ok":true,"prompt":prompt,"use_goal":goal,"objective":objective,"number":candidate.map(|(_,n)|n),"project":project,"template":runtime.prompt,"prs_enabled":runtime.prs_enabled}),
+                json!({"ok":true,"prompt":prompt,"use_goal":goal,"objective":objective,"number":candidate.map(|(_,n)|n),"project":project,"template":runtime.prompt,"prs_enabled":prs_enabled}),
             )
         }
         Operation::ProjectSettings => project_settings(db, p),
