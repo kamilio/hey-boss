@@ -7,6 +7,7 @@
 .issue-progress-comment{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .progress-previous{color:var(--muted);font-size:11px;white-space:nowrap}
 .issue-progress-card{margin:0 0 20px;border:1px solid var(--line);border-radius:10px;background:var(--surface);overflow:hidden}
+#resource-content>.artifact-reading+.issue-progress-card{margin-top:20px}
 .progress-current{padding:15px 18px}.progress-heading{display:flex;align-items:center;gap:12px}
 .progress-caption{font-size:11px;color:var(--muted)}
 .progress-comment{font-size:14px;line-height:1.6;margin:6px 0 9px;overflow-wrap:anywhere;color:var(--text)}

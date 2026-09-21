@@ -443,7 +443,7 @@ const HeyBossArtifacts = (() => {
       const links=await api(context,issue?{command:"links",issue:Number(issue)}:{command:"links",node:resource.id});
       if(ticket!==resourceGeneration)return;
       document.title=resource.title+" · Hey Boss";
-      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p>${issue?HeyBossStatus.card(resource,author)+HeyBossOrigin.card(resource.origin,context.project,author):""}<article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article><section id="resource-attachments"></section>`;
+      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p><article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article>${issue?HeyBossStatus.card(resource,author)+HeyBossOrigin.card(resource.origin,context.project,author):""}<section id="resource-attachments"></section>`;
       if(issue){
         const attach=()=>HeyBossStatus.mount($(".issue-progress-card"),resource,author,(offset,before)=>rpc(context,{action:"status_history",number:Number(issue),limit:20,offset,before},true));
         let update=attach(),refreshing=false;
