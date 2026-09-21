@@ -2098,19 +2098,28 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
 }
 
 #[test]
-fn worker_worktree_flags_override_project_choices() {
+fn worker_worktree_choice_requires_project_permission() {
     for (mode, project_enabled, flag, expected) in [
+        ("worktree-flag", false, "--worktree", "existing checkout"),
+        ("checkout-flag", true, "--no-worktree", "existing checkout"),
         (
-            "worktree-flag",
-            false,
+            "allowed-worktree",
+            true,
             "--worktree",
             "dedicated Git worktree",
         ),
-        ("checkout-flag", true, "--no-worktree", "existing checkout"),
+        ("default-checkout", true, "", "existing checkout"),
+        (
+            "disabled-checkout",
+            false,
+            "--no-worktree",
+            "existing checkout",
+        ),
+        ("disabled-default", false, "", "existing checkout"),
     ] {
         let f = Fixture::new(mode);
         fs::write(f.root.join("mode.txt"), "completed").unwrap();
-        f.setup(&[flag]);
+        f.setup(&if flag.is_empty() { vec![] } else { vec![flag] });
         f.cli(&[
             "settings",
             "set",
@@ -2122,7 +2131,24 @@ fn worker_worktree_flags_override_project_choices() {
         ]);
         let mut worker = f.worker();
         let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
-        assert_eq!(status["config"]["worktree_enabled"], !project_enabled);
+        assert_eq!(
+            status["config"]["worktree_enabled"],
+            serde_json::to_value(if flag.is_empty() {
+                None
+            } else {
+                Some(flag == "--worktree")
+            })
+            .unwrap()
+        );
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        let captured: String = db
+            .query_row("SELECT job FROM worker_runs LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        let captured: Value = serde_json::from_str(&captured).unwrap();
+        assert_eq!(
+            captured["config"]["worktree_enabled"],
+            project_enabled && flag == "--worktree"
+        );
         let transcript = f.transcript();
         let turn = transcript
             .iter()

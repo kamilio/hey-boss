@@ -227,11 +227,13 @@ closure and non-PR completion can still close normally. Supporting evidence PRs
 do not all need to merge. No automatic merging is performed.
 Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
 A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The shared prompt defaults to `Claim and implement` followed by the backtick-wrapped
-`{{issue_command}}`. Project settings assembles shared instructions + selected
-workspace branch + selected delivery branch and previews the exact result.
-Worktree and PR modes default off. Each branch has a code default and an optional
-project override; **Use default** clears an override. `worker --worktree` /
-`--no-worktree` and `--prs` / `--no-prs` override project choices. Worktree mode
+`{{issue_command}}`. Project settings assembles shared instructions + the workspace preview + selected
+delivery branch. The workspace selector only previews a worker choice.
+Worktree permission and PR mode default off. Each branch has a code default and an optional
+project override; **Use default** clears an override. Workers use the existing checkout
+by default. `worker --worktree` selects worktrees only when the project allows them;
+disabling permission prevents worktree use for new tasks, including saved workers.
+`--prs` / `--no-prs` override project delivery choices. Worktree mode
 instructs the agent to create a dedicated Git worktree before editing.
 Without PRs, delivery commits and pushes main when a remote exists (commit only
 otherwise); PR mode opens and attaches every PR. `{{commit_instruction}}` is

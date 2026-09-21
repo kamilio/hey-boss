@@ -36,10 +36,10 @@ pub struct Options {
     prs: bool,
     #[arg(long, conflicts_with = "prs")]
     no_prs: bool,
-    /// Add instructions to use a dedicated Git worktree for each issue.
+    /// Use a dedicated Git worktree for each issue when the project allows it.
     #[arg(long, conflicts_with = "no_worktree")]
     worktree: bool,
-    /// Override project settings to use the existing checkout.
+    /// Use the existing checkout (the default workspace).
     #[arg(long, conflicts_with = "worktree")]
     no_worktree: bool,
     /// Enable the per-project hourly organizing agent, outside issue concurrency.

@@ -210,6 +210,9 @@ pub enum Operation {
     PreviewWorker {
         config: worker::Settings,
         number: Option<i64>,
+        /// Unsaved project permission, used only by the read-only settings preview.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_allowed: Option<bool>,
     },
     GlobalSettings,
     ConfigureGlobal {

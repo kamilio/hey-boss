@@ -333,11 +333,14 @@ the conversation. Approval requests still block for explicit manual retry.
 The full prompt combines three parts, separated by blank lines:
 
 1. Shared instructions: `Claim and implement {{issue_command}}.` (the command is wrapped in backticks).
-2. Workspace: dedicated Git worktree when enabled; existing checkout otherwise.
+2. Workspace: dedicated Git worktree when the worker selects it and the project allows it; existing checkout otherwise.
 3. Delivery: open and attach pull requests when enabled; commit and push to main otherwise (commit only without a remote).
 
 **Project settings** shows both branches of each choice and the assembled prompt
-on the right (below the editor on small screens). Included branches are marked.
+on the right (below the editor on small screens). The preview workspace selector
+shows either worker choice without changing project policy or worker configuration.
+Allowing worktrees makes both workspace prompts available; disabling them only
+allows the checkout prompt. The branches used in the preview are marked.
 Each branch inherits a code default; entering text creates a project override,
 and **Use default** clears it. Changing an inactive branch does not change the
 assembled prompt until that branch is selected. Settings apply to future jobs;
@@ -357,8 +360,10 @@ Attachment purposes distinguish the actual fix and prerequisites from supporting
 evidence; supporting PRs do not all need to merge. Workers do not merge PRs.
 
 Worktree and PR settings are off by default.
-`worker --worktree` / `--no-worktree` and `--prs` / `--no-prs` override project
-choices for that worker, including restored worker IDs. Worktree mode instructs
+`worker --worktree` selects worktrees only when the project allows them;
+`--no-worktree` or no workspace flag uses the existing checkout. Disabling
+**Allow worktrees** prevents worktree use for future jobs, including saved workers
+with `--worktree`. `--prs` / `--no-prs` still override project delivery choices. Worktree mode instructs
 the agent to create and use a worktree before editing; the worker itself stays
 in its configured checkout.
 
