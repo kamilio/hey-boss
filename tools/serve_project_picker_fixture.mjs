@@ -31,7 +31,7 @@ let syncing=false,boot;
 const timer=setInterval(async()=>{
  if(syncing)return;syncing=true;
  try {
-  boot ||= await (await fetch(native+'/api/bootstrap')).json();
+  boot = await (await fetch(native+'/api/bootstrap')).json();
   for(const row of store.pendingArtifacts()){
    const result=spawnSync(binary,['issue','rpc'],{env,encoding:'utf8',input:JSON.stringify({version:1,project:projects[0],project_override:row.project,actor:null,operation:row.operation,request_id:null})});
    store.finishArtifact(row.id,JSON.parse(result.stdout));
