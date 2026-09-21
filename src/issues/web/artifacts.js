@@ -56,6 +56,15 @@ const HeyBossArtifacts = (() => {
     }
     if(start<html.length)yield html.slice(start);
   }
+  function externalLinks(root) {
+    for(const link of root.querySelectorAll("a[href]")) {
+      let destination;
+      try{destination=new URL(link.getAttribute("href"),document.baseURI);}catch{continue;}
+      if(!["http:","https:"].includes(destination.protocol)||destination.origin===location.origin)continue;
+      link.target="_blank";
+      link.relList.add("noopener","noreferrer");
+    }
+  }
   async function appendMarkdown(root,html) {
     const template=document.createElement("template");
     let buffer="";
@@ -63,7 +72,7 @@ const HeyBossArtifacts = (() => {
       if(!buffer)return true;
       await new Promise(requestAnimationFrame);
       if(!root.isConnected)return false;
-      template.innerHTML=buffer;root.appendChild(template.content);buffer="";
+      template.innerHTML=buffer;externalLinks(template.content);root.appendChild(template.content);buffer="";
       return true;
     };
     for(const block of markdownBlocks(html)) {
@@ -86,7 +95,7 @@ const HeyBossArtifacts = (() => {
   }
   async function renderMarkdown(root,html) {
     root.classList.toggle("artifact-large",html.length>=32000);
-    if(html.length<32000)root.innerHTML=html;
+    if(html.length<32000){root.innerHTML=html;externalLinks(root);}
     else{
       root.setAttribute("aria-busy","true");root.replaceChildren();
       if(!await appendMarkdown(root,html))return;
@@ -287,6 +296,7 @@ const HeyBossArtifacts = (() => {
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
       if(reuse)$("#artifact-reading").replaceWith(previous);
       else{const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content);}
+      externalLinks($("#artifact-threads"));
       HeyBossAttachments.mount($("#artifact-attachments"), {...context,target:{kind:"artifact",id:doc.id}});
       readingHTML=content;
       const showComments=open=>{commentsOpen=open;$("#artifact-comments").hidden=!open;$(".artifact-layout").classList.toggle("comments-hidden",!open);$("#artifact-comments-toggle").setAttribute("aria-expanded",String(open));};
