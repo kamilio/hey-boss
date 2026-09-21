@@ -761,6 +761,24 @@ for guarded file redirection, cancellation behavior, and environment use.
 
 ## Pull request purposes
 
+`hey-boss issue view NUMBER` shows the complete issue body, labels and creation
+context, the latest status, PR URLs, linked artifact titles, and the latest 20
+comments with the total comment count. Recent comments read in chronological order.
+Large bodies may reduce the page size; the continuation offset always reflects
+the comments actually returned.
+
+Read comments separately with `hey-boss issue comments NUMBER --limit 20
+--offset 20 --sort newest`. Use `--sort oldest` to read from the beginning;
+sorting uses the comment ID to keep ties deterministic. Both sorts support
+`--json` and report the total count and next offset. `issue history` remains
+the audit trail for edits and lifecycle events.
+
+Read a linked document with `hey-boss artifact view ID`, export its exact saved
+Markdown to stdout with `hey-boss artifact export ID`, or materialize a new
+private file with `hey-boss artifact export ID --output notes.md`. Existing
+files are never overwritten. Use the same `--project` and `--host` as the issue
+when reading across projects or devices.
+
 Attached PRs have a purpose: `unspecified` (the default for older links), `fix`,
 `prerequisite`, or `supporting-evidence`. Attach with
 `hey-boss issue pr add NUMBER URL --purpose fix`, or change an existing link with

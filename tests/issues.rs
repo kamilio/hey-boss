@@ -1365,6 +1365,49 @@ fn large_markdown_is_complete_and_history_pages_make_progress() {
 }
 
 #[test]
+fn issue_comments_page_independently_with_counts_and_stable_sort() {
+    let f = Fixture::new();
+    f.create();
+    for n in 0..23 {
+        f.run("session-a", &["comment", "1", "--body", &format!("Comment {n}")]);
+    }
+    let view = f.run("reader", &["view", "1"]);
+    assert_eq!(view["comment_count"], 23);
+    assert_eq!(view["comments"].as_array().unwrap().len(), 20);
+    assert_eq!(view["comments"][0]["body"], "Comment 3");
+    assert_eq!(view["next_comment_offset"], 20);
+    let newest = f.run("reader", &["comments", "1", "--limit", "2"]);
+    assert_eq!(newest["comment_count"], 23);
+    assert_eq!(newest["comments"][0]["body"], "Comment 22");
+    assert_eq!(newest["next_offset"], 2);
+    let oldest = f.run("reader", &["comments", "1", "--limit", "2", "--offset", "21", "--sort", "oldest"]);
+    assert_eq!(oldest["comments"][0]["body"], "Comment 21");
+    assert!(oldest["next_offset"].is_null());
+    let end = f.run("reader", &["comments", "1", "--offset", "23"]);
+    assert!(end["comments"].as_array().unwrap().is_empty());
+    f.fail("reader", &["comments", "999"], 3);
+}
+
+#[test]
+fn issue_comments_keep_resolution_and_advance_through_large_bodies() {
+    let f = Fixture::new();
+    f.create();
+    let body = vec![0_u8; 1024 * 1024];
+    for _ in 0..3 {
+        success(f.stdin(&["comment", "1", "--body", "-"], &body));
+    }
+    let first = f.run("reader", &["comments", "1"]);
+    let id = first["comments"][0]["id"].as_i64().unwrap().to_string();
+    f.run("session-a", &["resolve-comment", "1", &id]);
+    let resolved = f.run("reader", &["comments", "1"]);
+    assert_eq!(resolved["comments"][0]["resolved"], true);
+    let offset = resolved["next_offset"].as_u64().unwrap().to_string();
+    let next = f.run("reader", &["comments", "1", "--offset", &offset]);
+    assert_ne!(next["comments"][0]["id"], resolved["comments"][0]["id"]);
+    assert_eq!(next["comment_count"], 3);
+}
+
+#[test]
 fn pr_purposes_can_be_classified_without_reattaching_or_changing_lifecycle() {
     let f = Fixture::new();
     f.create();
