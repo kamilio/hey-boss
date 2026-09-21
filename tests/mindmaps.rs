@@ -998,25 +998,38 @@ fn repository_defaults_share_maps_across_worktrees_and_honor_worker_override() {
 }
 
 #[test]
-fn ambiguous_project_names_require_full_ids_for_maps_and_link_endpoints() {
+fn unique_project_names_reuse_maps_and_resolve_link_endpoints() {
     let f = Fixture::new();
     let first = "github.com/first/shared";
     let second = "github.com/second/shared";
     f.run(first, &["add", "First API", "--id", "api"]);
-    f.run(second, &["add", "Second API", "--id", "api"]);
-    f.run("Atlas", &["add", "Release", "--id", "release"]);
-    f.fail("shared", &["show"], 4);
-    f.fail("Atlas", &["link", "release", "shared::api"], 4);
+    f.fail(second, &["add", "Duplicate API", "--id", "api"], 4);
+    let added = f.run(second, &["add", "Second API", "--id", "other"]);
+    let shared = f.run("shared", &["show"]);
+    assert_eq!(shared["project"]["id"], first);
+    assert_eq!(nodes(&shared).len(), 2);
     assert!(
-        f.run("Atlas", &["show"])["links"]
+        added["project_warnings"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .iter()
+            .any(|w| w["rejected_id"] == second)
     );
-    f.run("Atlas", &["link", "release", &format!("{second}::api")]);
+    f.run("Atlas", &["add", "Release", "--id", "release"]);
+    f.run("Atlas", &["link", "release", "shared::api"]);
     assert_eq!(
         f.run("Atlas", &["show"])["external_nodes"][0]["title"],
-        "Second API"
+        "First API"
+    );
+    f.run("Atlas", &["link", "release", &format!("{second}::other")]);
+    let graph = f.run("Atlas", &["show"]);
+    assert_eq!(graph["links"].as_array().unwrap().len(), 2);
+    assert!(
+        graph["external_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["title"] == "Second API")
     );
 }
 
