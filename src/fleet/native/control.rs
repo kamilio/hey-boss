@@ -428,7 +428,35 @@ fn set_intent(saved: &mut Value, id: &Value, intent: &str) {
     for worker in saved["workers"].as_array_mut().into_iter().flatten() {
         if &worker["id"] == id {
             worker["intent"] = json!(intent);
+            worker["local_revision"] = json!(crate::issues::worker::now());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_intent_survives_supervisor_reconciliation() {
+        let mut main = json!({"workers":[{"id":"worker","intent":"stop"}]});
+        set_intent(&mut main, &json!("worker"), "running");
+        let mut desired =
+            json!({"machines":{"local":{"workers":[{"id":"worker","intent":"stop"}]}}});
+        // This is the supervisor's durable import boundary: without a local
+        // revision it restores the old desired stop on its next tick.
+        if main["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|worker| worker.get("local_revision").is_some())
+        {
+            desired["machines"]["local"]["workers"] = main["workers"].clone();
+        }
+        assert_eq!(
+            desired["machines"]["local"]["workers"][0]["intent"],
+            "running"
+        );
     }
 }
 pub(super) fn revision(node: &str, workers: &Value) -> String {
