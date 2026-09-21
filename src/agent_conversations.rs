@@ -883,12 +883,13 @@ mod tests {
             },
         )
         .unwrap();
+        let invocation_id = invocation.offset.to_string();
         assert!(
             page["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|m| m["id"] == invocation.offset.to_string())
+                .any(|m| m["id"] == invocation_id)
         );
         assert!(page["has_earlier"].as_bool().unwrap());
         assert!(page["has_more"].as_bool().unwrap());

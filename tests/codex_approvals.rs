@@ -8,7 +8,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -17,6 +17,7 @@ use std::{
 // A concurrent fork can inherit a writable copy descriptor until exec, making
 // Linux reject the new executable with ETXTBSY. Keep copies and launches apart.
 static EXECUTABLE_SETUP: Mutex<()> = Mutex::new(());
+static FIXTURE_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: PathBuf,
@@ -27,7 +28,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new(mode: &str) -> Self {
-        let root = PathBuf::from(format!("/tmp/hb61-{}-{mode}", std::process::id()));
+        let serial = FIXTURE_SERIAL.fetch_add(1, Ordering::Relaxed);
+        let root = PathBuf::from(format!("/tmp/hb61-{}-{mode}-{serial}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         // Pin the built inode across Cargo's atomic binary replacement. Unlike
         // copying in parallel tests, this opens no executable for writing that
