@@ -25,7 +25,9 @@ impl Fixture {
         let cwd = root.join("project");
         fs::create_dir_all(&cwd).unwrap();
         let binary = root.join("hey-boss");
-        fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
+        // Avoid writable executable descriptors being inherited by concurrent
+        // test launches, which Linux rejects with ETXTBSY.
+        fs::hard_link(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
         fs::write(root.join("hey-boss.state"), root.to_str().unwrap()).unwrap();
         let db = root.join("issues.db");
         Self {
