@@ -113,7 +113,20 @@
   .artifact-diagram-controls { width: 100%; justify-content: space-between; gap: 4px; }
   .artifact-diagram-stage { padding: 16px 10px; }
 }
-.artifact-reading table { font-size: 13px; }
+/* Tables need room for columns; keep prose-only documents at reading width.
+   :has also handles tables arriving through the progressive Markdown renderer. */
+#artifact-main[data-mode="reading"]:has(#artifact-reading table) { max-width: none; }
+.artifact-layout.comments-hidden:has(#artifact-reading table) { grid-template-columns: minmax(0, 1fr); }
+#artifact-document:has(#artifact-reading table) > .artifact-document-heading { max-width: none; }
+#artifact-document:has(#artifact-reading table) > .back-link { margin-left: 0; }
+.artifact-reading:has(table) > :is(p,ul,ol,blockquote) { max-width: 80ch; }
+.artifact-reading table { width: 100%; font-size: 13px; line-height: 1.6; overflow-wrap: normal; }
+.artifact-reading :is(td,th) { vertical-align: top; }
+.artifact-reading td { min-width: 16ch; }
+.artifact-reading td:last-child:nth-child(n+4) { min-width: 32ch; }
+.artifact-reading td:first-child, .artifact-reading td:has(> a:only-child) { min-width: 0; }
+.artifact-reading th { white-space: nowrap; }
+.artifact-reading td > a:only-child { white-space: nowrap; }
 .artifact-reading.artifact-large > :is(p,h1,h2,h3,h4,h5,h6,hr),
 .artifact-reading.artifact-large .markdown-task {
   content-visibility: auto;
