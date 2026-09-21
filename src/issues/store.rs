@@ -152,6 +152,70 @@ fn migrate_blocked(db: &Connection) -> Result<()> {
     Ok(())
 }
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
+
+fn comment_page(
+    db: &Connection,
+    project: &Project,
+    number: i64,
+    limit: u32,
+    offset: u32,
+    sort: super::CommentSort,
+    mut bytes: usize,
+) -> Result<Value> {
+    let total: i64 = db.query_row(
+        "SELECT count(*) FROM comments WHERE project_id=?1 AND issue_number=?2",
+        params![project.id, number],
+        |r| r.get(0),
+    )?;
+    let order = match sort {
+        super::CommentSort::Newest => "DESC",
+        super::CommentSort::Oldest => "ASC",
+    };
+    // Read bodies one at a time so a page of large comments stays bounded.
+    let mut stmt = db.prepare(&format!("SELECT id,author,body,created_at FROM comments WHERE project_id=?1 AND issue_number=?2 ORDER BY id {order} LIMIT ?3 OFFSET ?4"))?;
+    let mut rows = stmt.query(params![project.id, number, limit, offset])?;
+    let mut comments = Vec::new();
+    while let Some(row) = rows.next()? {
+        let comment = json!({"id":row.get::<_,i64>(0)?,"author":row.get::<_,String>(1)?,"body":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?});
+        bytes += serde_json::to_vec(&comment)?.len();
+        if bytes > PAGE_BYTES && !comments.is_empty() {
+            break;
+        }
+        comments.push(comment);
+    }
+    // Only scan resolution history when this page actually contains comments.
+    if !comments.is_empty() {
+        let visible: std::collections::HashSet<i64> =
+            comments.iter().map(|c| c["id"].as_i64().unwrap()).collect();
+        let mut stmt = db.prepare("SELECT json_extract(data,'$.comment_id'),action FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('comment_resolved','comment_unresolved') ORDER BY created_at DESC,id DESC")?;
+        let mut states = std::collections::HashMap::new();
+        let mut rows = stmt.query(params![project.id, number])?;
+        while let Some(row) = rows.next()? {
+            let id = row.get::<_, i64>(0)?;
+            if !visible.contains(&id) {
+                continue;
+            }
+            states
+                .entry(id)
+                .or_insert(row.get::<_, String>(1)? == "comment_resolved");
+            if states.len() == visible.len() {
+                break;
+            }
+        }
+        for comment in &mut comments {
+            comment["resolved"] = json!(
+                states
+                    .get(&comment["id"].as_i64().unwrap())
+                    .copied()
+                    .unwrap_or(false)
+            );
+        }
+    }
+    let next = u64::from(offset) + comments.len() as u64;
+    Ok(
+        json!({"ok":true,"project":project,"number":number,"comments":comments,"comment_count":total,"sort":sort,"next_offset":if next < total as u64 { Some(next) } else { None }}),
+    )
+}
 const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -447,7 +511,9 @@ fn validate(r: &Request) -> Result<()> {
             }
         }
         Operation::Status { comment, .. } => status::validate(comment)?,
-        Operation::History { limit, .. } | Operation::StatusHistory { limit, .. } => page(*limit)?,
+        Operation::History { limit, .. }
+        | Operation::StatusHistory { limit, .. }
+        | Operation::Comments { limit, .. } => page(*limit)?,
         _ => {}
     }
     match &r.operation {
@@ -1044,42 +1110,16 @@ impl Store {
                         json!({"ok":true,"project":project,"issue":issue,"moved_to":destination}),
                     );
                 }
-                let mut stmt = tx.prepare("SELECT id,author,body,created_at FROM comments WHERE project_id=?1 AND issue_number=?2 ORDER BY id DESC LIMIT 21")?;
-                let mut comments = stmt.query_map(params![project.id, number], |row|
-                    Ok(json!({"id":row.get::<_,i64>(0)?,"author":row.get::<_,String>(1)?,"body":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?})))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let mut more = comments.len() > 20;
-                comments.truncate(20);
-                let mut bytes = serde_json::to_vec(&issue)?.len();
-                let mut count = 0;
-                for comment in &comments {
-                    bytes += serde_json::to_vec(comment)?.len();
-                    if bytes > PAGE_BYTES {
-                        more = true;
-                        break;
-                    }
-                    count += 1;
-                }
-                comments.truncate(count);
-                comments.reverse();
-                // One indexed history scan serves all visible comments. Resolution
-                // events are immutable and use the existing fleet ID remapping.
-                let mut stmt = tx.prepare("SELECT json_extract(data,'$.comment_id'),action FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('comment_resolved','comment_unresolved') ORDER BY created_at DESC,id DESC")?;
-                let mut states = std::collections::HashMap::new();
-                let mut rows = stmt.query(params![project.id, number])?;
-                while let Some(row) = rows.next()? {
-                    states
-                        .entry(row.get::<_, i64>(0)?)
-                        .or_insert(row.get::<_, String>(1)? == "comment_resolved");
-                }
-                for comment in &mut comments {
-                    comment["resolved"] = json!(
-                        states
-                            .get(&comment["id"].as_i64().unwrap())
-                            .copied()
-                            .unwrap_or(false)
-                    );
-                }
+                let mut page = comment_page(
+                    &tx,
+                    &project,
+                    *number,
+                    20,
+                    0,
+                    super::CommentSort::Newest,
+                    serde_json::to_vec(&issue)?.len(),
+                )?;
+                page["comments"].as_array_mut().unwrap().reverse();
                 let assignee: Option<Actor> = if let Some(id) = &issue.assignee {
                     let raw: String =
                         tx.query_row("SELECT metadata FROM agents WHERE id=?1", [id], |r| {
@@ -1089,7 +1129,16 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"comments":comments,"more_comments":more,"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
+                json!({"ok":true,"project":project,"issue":issue,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
+            }
+            Operation::Comments {
+                number,
+                limit,
+                offset,
+                sort,
+            } => {
+                get_issue(&tx, &project.id, *number, true)?;
+                comment_page(&tx, &project, *number, *limit, *offset, *sort, 0)?
             }
             Operation::History {
                 number,
@@ -1181,7 +1230,10 @@ impl Store {
         }
         if !matches!(
             r.operation,
-            Operation::Attachment { .. } | Operation::Artifact { .. } | Operation::Batch { .. }
+            Operation::Attachment { .. }
+                | Operation::Artifact { .. }
+                | Operation::Batch { .. }
+                | Operation::Comments { .. }
         ) {
             subtasks::enrich(&tx, &response_project.id, &mut result)?;
         }

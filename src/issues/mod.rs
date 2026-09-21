@@ -332,6 +332,13 @@ pub enum Operation {
         limit: u32,
         offset: u32,
     },
+    Comments {
+        number: i64,
+        limit: u32,
+        offset: u32,
+        #[serde(default)]
+        sort: CommentSort,
+    },
     Create {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         draft: bool,
@@ -449,6 +456,7 @@ impl Operation {
                 | Self::View { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
+                | Self::Comments { .. }
                 | Self::StatusHistory { .. }
                 | Self::StatusView { .. }
                 | Self::Batch { dry_run: true, .. }
@@ -496,6 +504,7 @@ impl Operation {
             | Self::AddSubtask { number, .. }
             | Self::RemoveSubtask { number, .. }
             | Self::History { number, .. }
+            | Self::Comments { number, .. }
             | Self::Edit { number, .. }
             | Self::BindPlan { number, .. }
             | Self::Undraft { number }
@@ -514,6 +523,14 @@ impl Operation {
             | Self::Restore { number } => Some(*number),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentSort {
+    #[default]
+    Newest,
+    Oldest,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, clap::ValueEnum)]

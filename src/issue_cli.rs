@@ -231,6 +231,16 @@ enum Action {
     },
     /// Show the complete Markdown body and the latest 20 comments.
     View { number: i64 },
+    /// Read comments without audit events; newest first by default.
+    Comments {
+        number: i64,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        #[arg(long, value_enum, default_value = "newest")]
+        sort: issues::CommentSort,
+    },
     /// Show the audit trail, including every comment and previous body revisions.
     History {
         number: i64,
@@ -694,6 +704,17 @@ impl Options {
                 if_version: *if_version,
             },
             Action::View { number } => Operation::View { number: *number },
+            Action::Comments {
+                number,
+                limit,
+                offset,
+                sort,
+            } => Operation::Comments {
+                number: *number,
+                limit: *limit,
+                offset: *offset,
+                sort: *sort,
+            },
             Action::History {
                 number,
                 limit,
@@ -1049,6 +1070,20 @@ fn markdown(value: &Value) -> String {
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .collect()
 }
+fn command_context(value: &Value) -> String {
+    let quote = |v: &Value| format!("'{}'", line(v).replace('\'', "'\\''"));
+    let mut context = String::new();
+    if value["project"]["id"].is_string() {
+        context.push_str(&format!(" --project {}", quote(&value["project"]["id"])));
+    }
+    if let Some(host) = value["store"]["host"]
+        .as_str()
+        .filter(|host| *host != "local")
+    {
+        context.push_str(&format!(" --host {}", quote(&json!(host))));
+    }
+    context
+}
 pub(crate) fn print_text(value: &Value) {
     if let Some(destination) = value.get("moved_to") {
         println!(
@@ -1224,6 +1259,30 @@ pub(crate) fn print_text(value: &Value) {
                 issue["version"],
                 line(&issue["created_by"])
             );
+            println!(
+                "Created: {} · Updated: {}",
+                status_datetime(&issue["created_at"]),
+                status_datetime(&issue["updated_at"])
+            );
+            if let Some(labels) = issue["labels"]
+                .as_array()
+                .filter(|labels| !labels.is_empty())
+            {
+                println!(
+                    "Labels: {}",
+                    labels.iter().map(line).collect::<Vec<_>>().join(", ")
+                );
+            }
+            if let Some(origin) = issue["origin"].as_object() {
+                println!(
+                    "Origin: {} · {}",
+                    line(&origin["host"]),
+                    line(&origin["cwd"])
+                );
+                if origin["session_id"].is_string() {
+                    println!("Creator session: {}", line(&origin["session_id"]));
+                }
+            }
             if let Some(presence) = value.get("assignee_presence") {
                 println!(
                     "Assignee process: {} (claims persist until explicitly cleared)",
@@ -1248,12 +1307,43 @@ pub(crate) fn print_text(value: &Value) {
             print_issue_line(child);
         }
     }
+    if let Some(artifacts) = value["artifacts"]
+        .as_array()
+        .filter(|items| !items.is_empty())
+    {
+        println!("\nLinked artifacts:");
+        for artifact in artifacts {
+            println!(
+                "  {} · {}{}",
+                line(&artifact["id"]),
+                line(&artifact["title"]),
+                if artifact["archived"] == true {
+                    " · archived"
+                } else {
+                    ""
+                }
+            );
+        }
+        println!(
+            "Read: hey-boss artifact view ID{}\nSave Markdown: hey-boss artifact export ID --output PATH.md{}",
+            command_context(value),
+            command_context(value)
+        );
+    }
     if let Some(comments) = value["comments"].as_array() {
+        println!(
+            "\nComments: {} shown · {} total",
+            comments.len(),
+            value["comment_count"]
+                .as_u64()
+                .unwrap_or(comments.len() as u64)
+        );
         for comment in comments {
             println!(
-                "\nComment {} · {}{}\n{}",
+                "\nComment {} · {} · {}{}\n{}",
                 comment["id"],
                 line(&comment["author"]),
+                status_datetime(&comment["created_at"]),
                 if comment["resolved"] == true {
                     " · resolved"
                 } else {
@@ -1263,7 +1353,20 @@ pub(crate) fn print_text(value: &Value) {
             );
         }
         if value["more_comments"] == true {
-            println!("\nShowing recent comments; use history for earlier comments.");
+            println!(
+                "\nEarlier comments: hey-boss issue comments {}{} --offset {}",
+                value["issue"]["number"],
+                command_context(value),
+                value["next_comment_offset"]
+            );
+        }
+        if let Some(offset) = value["next_offset"].as_u64() {
+            println!(
+                "\nMore comments: hey-boss issue comments {}{} --offset {offset} --sort {}",
+                value["number"],
+                command_context(value),
+                line(&value["sort"])
+            );
         }
     }
     if let Some(updates) = value["updates"].as_array() {
@@ -1294,7 +1397,10 @@ pub(crate) fn print_text(value: &Value) {
             );
         }
     }
-    if let Some(offset) = value.get("next_offset").filter(|n| !n.is_null()) {
+    if let Some(offset) = value
+        .get("next_offset")
+        .filter(|n| !n.is_null() && value.get("comments").is_none())
+    {
         println!("More results: --offset {offset}");
     }
     if let Some(id) = value.get("comment_id").filter(|n| !n.is_null()) {

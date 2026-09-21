@@ -81,9 +81,12 @@ enum Action {
     View {
         id: String,
     },
-    /// Export the saved Markdown to stdout.
+    /// Export saved Markdown to stdout or a new file.
     Export {
         id: String,
+        /// Write a new Markdown file; existing files are never overwritten.
+        #[arg(long, conflicts_with = "json")]
+        output: Option<PathBuf>,
     },
     Create {
         #[arg(long)]
@@ -153,7 +156,7 @@ pub fn run(options: &Options) -> Result<()> {
             archived: *archived,
             offset: *offset,
         },
-        Action::View { id } | Action::Export { id } => Operation::View { id: id.clone() },
+        Action::View { id } | Action::Export { id, .. } => Operation::View { id: id.clone() },
         Action::Create {
             title,
             text,
@@ -256,7 +259,22 @@ pub fn run(options: &Options) -> Result<()> {
         None => Store::open(&issues::database_path()?)?.execute(&request)?,
     };
     if matches!(options.action, Action::Export { .. }) {
-        print!("{}", value["artifact"]["body"].as_str().unwrap());
+        let body = value["artifact"]["body"].as_str().unwrap();
+        if let Action::Export {
+            output: Some(path), ..
+        } = &options.action
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(body.as_bytes())?;
+        } else {
+            print!("{body}");
+        }
     } else if options.json {
         println!("{}", serde_json::to_string(&value)?);
     } else if let Some(doc) = value.get("artifact") {
