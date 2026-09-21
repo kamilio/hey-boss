@@ -236,8 +236,16 @@ fn event_loop(
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('p') => app.confirm(false),
             KeyCode::Char('s') => app.confirm(true),
-            KeyCode::PageDown => app.detail_scroll = app.detail_scroll.saturating_add(5),
-            KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(5),
+            KeyCode::PageDown => ui::scroll_activity(
+                app,
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                5,
+            ),
+            KeyCode::PageUp => ui::scroll_activity(
+                app,
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                -5,
+            ),
             _ => {}
         }
     }

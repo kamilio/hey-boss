@@ -300,7 +300,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
             run["goal"] = serde_json::from_str(s)?;
         }
         let mut events = db.prepare(
-            "SELECT created_at,text FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 3",
+            "SELECT created_at,text FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 12",
         )?;
         run["events"] = json!(
             events
@@ -1034,7 +1034,22 @@ mod tests {
             }
             db.execute("UPDATE worker_runs SET started_at=48 WHERE id='run-49'", [])
                 .unwrap();
+            for n in 1..=20 {
+                db.execute(
+                    "INSERT INTO worker_events(run_id,created_at,text) VALUES('run-24',?1,?2)",
+                    params![n, format!("Activity {n}")],
+                )
+                .unwrap();
+            }
             let s = status(db, Some("worker"), &p).unwrap();
+            let events = s["runs"][0]["events"].as_array().unwrap();
+            assert_eq!(
+                events.len(),
+                12,
+                "Status must retain a bounded, useful activity log"
+            );
+            assert_eq!(events[0]["text"], "Activity 20");
+            assert_eq!(events[11]["text"], "Activity 9");
             assert_eq!(s["active"], 24);
             assert_eq!(s["free"], 6);
             assert_eq!(s["runs"].as_array().unwrap().len(), 44);

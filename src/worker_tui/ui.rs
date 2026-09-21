@@ -9,7 +9,14 @@ use ratatui::{
 };
 use serde_json::Value;
 
-const ACCENT: Color = Color::Cyan;
+// Match the shared web app's dark palette, with explicit contrast on any terminal.
+const BACKGROUND: Color = Color::Rgb(17, 21, 29);
+const SURFACE: Color = Color::Rgb(32, 39, 51);
+const TEXT: Color = Color::Rgb(227, 233, 242);
+const MUTED: Color = Color::Rgb(162, 175, 193);
+const BORDER: Color = Color::Rgb(79, 94, 120);
+const ACCENT: Color = Color::Rgb(161, 175, 255);
+const SELECTED: Color = Color::Rgb(47, 59, 91);
 pub const MIN_WIDTH: u16 = 48;
 pub const MIN_HEIGHT: u16 = 12;
 
@@ -17,7 +24,9 @@ fn block(title: impl Into<String>, focused: bool) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", title.into()))
-        .border_style(Style::default().fg(if focused { ACCENT } else { Color::DarkGray }))
+        .style(Style::default().bg(SURFACE).fg(TEXT))
+        .border_style(Style::default().fg(if focused { ACCENT } else { BORDER }))
+        .title_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
 fn state(w: &Value) -> &'static str {
@@ -45,9 +54,10 @@ fn state(w: &Value) -> &'static str {
 
 fn color(state: &str) -> Color {
     match state {
-        "AVAILABLE" | "running" | "completed" | "succeeded" => Color::Green,
-        "failed" | "error" | "offline" => Color::Red,
-        _ => Color::Yellow,
+        "AVAILABLE" | "completed" | "succeeded" => Color::Rgb(128, 207, 176),
+        "running" | "BUSY" => ACCENT,
+        "failed" | "error" | "offline" => Color::Rgb(242, 152, 169),
+        _ => Color::Rgb(232, 197, 139),
     }
 }
 
@@ -125,6 +135,112 @@ fn elapsed(run: &Value, now_ms: i64) -> String {
     format!(" · {}m{:02}s", seconds / 60, seconds % 60)
 }
 
+// Preserve paragraph boundaries while keeping the same bounded, safe queue text.
+fn multiline(value: &Value) -> Vec<Line<'static>> {
+    let bounded: String = value
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .take(8192)
+        .collect();
+    bounded
+        .split('\n')
+        .map(|line| Line::from(text(&Value::String(line.into()))))
+        .collect()
+}
+
+fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "{} #{} · {}",
+            text(&run["project_name"]),
+            run["number"],
+            text(&run["title"])
+        ),
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    ))];
+    let status = text(&run["state"]);
+    lines.push(Line::from(Span::styled(
+        format!("{status}{}", elapsed(run, now_ms)),
+        Style::default().fg(color(&status)),
+    )));
+    if run["finished_at"].is_null()
+        && run["claimed_at"].is_null()
+        && let Some(expires) = run["reservation_expires"].as_i64()
+    {
+        let seconds = expires.saturating_sub(now_ms).max(0) / 1000;
+        lines.push(Line::from(Span::styled(
+            format!("Manual claim deadline: {seconds}s"),
+            Style::default().fg(color("waiting")),
+        )));
+    }
+    let goal = text(&run["goal"]["status"]);
+    if !goal.is_empty() {
+        lines[1].spans.push(Span::styled(
+            format!(" · Goal: {goal}"),
+            Style::default().fg(MUTED),
+        ));
+    }
+    let summary = text(&run["summary"]);
+    if !summary.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Result",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(multiline(&run["summary"]));
+    }
+    let events = run["events"].as_array();
+    let latest = text(&run["last_event"]);
+    // Status events arrive newest first. Render that order, without repeating
+    // last_event above the same event or substituting raw goal/session JSON.
+    if !latest.is_empty()
+        && !events.is_some_and(|events| events.iter().any(|event| text(&event["text"]) == latest))
+    {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Latest update",
+            Style::default().fg(MUTED),
+        )));
+        lines.extend(multiline(&run["last_event"]));
+    }
+    let mut has_events = false;
+    if let Some(events) = events {
+        for event in events
+            .iter()
+            .take(12)
+            .filter(|event| !text(&event["text"]).is_empty())
+        {
+            has_events = true;
+            lines.push(Line::default());
+            let age = event["at"]
+                .as_i64()
+                .map(|at| {
+                    let seconds = now_ms.saturating_sub(at).max(0) / 1000;
+                    if seconds < 60 {
+                        format!("{seconds}s ago")
+                    } else if seconds < 3600 {
+                        format!("{}m ago", seconds / 60)
+                    } else {
+                        format!("{}h ago", seconds / 3600)
+                    }
+                })
+                .unwrap_or_else(|| "Update".into());
+            lines.push(Line::from(Span::styled(age, Style::default().fg(MUTED))));
+            lines.extend(multiline(&event["text"]));
+        }
+    }
+    if !has_events && latest.is_empty() && summary.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(if run["finished_at"].is_null() {
+            "Waiting for agent activity…"
+        } else {
+            "No activity recorded for this attempt."
+        }));
+    }
+    lines
+}
+
 fn overlay(frame: &mut Frame, title: &str, message: &str) {
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(72);
@@ -144,8 +260,60 @@ fn overlay(frame: &mut Frame, title: &str, message: &str) {
     );
 }
 
+fn page_layout(size: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Min(5),
+        Constraint::Length(2),
+    ])
+    .areas(size)
+}
+
+fn body_layout(area: Rect) -> [Rect; 2] {
+    if area.height < 10 {
+        Layout::vertical([Constraint::Min(3), Constraint::Length(0)]).areas(area)
+    } else if area.width >= 100 {
+        Layout::horizontal([Constraint::Percentage(36), Constraint::Min(40)]).areas(area)
+    } else {
+        Layout::vertical([Constraint::Length(4), Constraint::Min(4)]).areas(area)
+    }
+}
+
+fn scroll_limit(paragraph: &Paragraph<'_>, inner: Rect) -> u16 {
+    paragraph
+        .line_count(inner.width)
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16
+}
+
+/// Clamp before moving too, so one Page Up always leaves the bottom of the log.
+pub fn scroll_activity(app: &mut Dashboard, size: Rect, delta: i16) {
+    let area = body_layout(page_layout(size)[1])[1];
+    if area.height == 0 {
+        return;
+    }
+    let Some(run) = app
+        .runs()
+        .into_iter()
+        .find(|run| run["id"].as_str() == app.run_id.as_deref())
+    else {
+        return;
+    };
+    let paragraph = Paragraph::new(activity(run, app.now_ms)).wrap(Wrap { trim: false });
+    let limit = scroll_limit(&paragraph, block("", false).inner(area));
+    app.detail_scroll = app
+        .detail_scroll
+        .min(limit)
+        .saturating_add_signed(delta)
+        .min(limit);
+}
+
 pub fn render(frame: &mut Frame, app: &Dashboard) {
     let size = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
+        size,
+    );
     if size.width < MIN_WIDTH || size.height < MIN_HEIGHT {
         frame.render_widget(
             Paragraph::new("Resize to at least 48 × 12.\nCtrl+C / q: quit")
@@ -154,12 +322,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         );
         return;
     }
-    let rows = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Min(5),
-        Constraint::Length(2),
-    ])
-    .split(size);
+    let rows = page_layout(size);
     let worker = app
         .workers()
         .into_iter()
@@ -170,7 +333,10 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         let active = w["active"].as_u64().unwrap_or(0);
         let slots = w["config"]["concurrency"].as_u64().unwrap_or(0);
         header.push(Line::from(vec![
-            Span::raw(" HEY BOSS "),
+            Span::styled(
+                " HEY BOSS ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 format!(
                     " {} · {}",
@@ -185,7 +351,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             Span::styled(
                 format!(" {status} "),
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(BACKGROUND)
                     .bg(color(status))
                     .add_modifier(Modifier::BOLD),
             ),
@@ -194,7 +360,10 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 slots.saturating_sub(active)
             )),
         ]));
-        header.push(Line::from(format!(" {}", checkout(w))));
+        header.push(Line::from(Span::styled(
+            format!(" {}", checkout(w)),
+            Style::default().fg(MUTED),
+        )));
     } else {
         header.push(Line::from(if app.pending {
             " Connecting to queue…"
@@ -223,9 +392,10 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         Span::styled(
             format!(" {connection_label}"),
             Style::default().fg(match connection {
-                "connected" | "local" => Color::Green,
-                "disconnected" => Color::Red,
-                _ => Color::Yellow,
+                "connected" | "local" => color("AVAILABLE"),
+                "disconnected" => color("offline"),
+                "standalone" => MUTED,
+                _ => color("unknown"),
             }),
         ),
         Span::raw(
@@ -251,7 +421,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             } else {
                 " [Active] "
             },
-            Style::default().fg(if app.history { Color::DarkGray } else { ACCENT }),
+            Style::default().fg(if app.history { MUTED } else { ACCENT }),
         ),
         Span::styled(
             if app.history {
@@ -259,16 +429,12 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             } else {
                 " History "
             },
-            Style::default().fg(if app.history { ACCENT } else { Color::DarkGray }),
+            Style::default().fg(if app.history { ACCENT } else { MUTED }),
         ),
         Span::raw(" · h switch"),
     ]));
     frame.render_widget(Paragraph::new(header), rows[0]);
-    let right = if rows[1].height < 10 {
-        Layout::vertical([Constraint::Min(3), Constraint::Length(0)]).split(rows[1])
-    } else {
-        Layout::vertical([Constraint::Percentage(45), Constraint::Min(3)]).split(rows[1])
-    };
+    let right = body_layout(rows[1]);
     let runs = app.runs();
     let compact_sessions = right[0].height < 8;
     let items: Vec<ListItem> = runs
@@ -325,47 +491,45 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             List::new(items)
                 .block(sessions_block)
                 .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(Color::DarkGray)),
+                .highlight_style(Style::default().bg(SELECTED).fg(TEXT)),
             right[0],
             &mut selection,
         );
     }
     let detail = selected
-        .map(|i| {
-            let run = runs[i];
-            let mut lines = vec![
-                Line::from(format!("Codex: {}", text(&run["session_id"]))),
-                Line::from(text(&run["last_event"])),
-                Line::from(text(&run["summary"])),
-            ];
-            if run["finished_at"].is_null()
-                && let Some(expires) = run["reservation_expires"].as_i64()
-            {
-                let seconds = expires.saturating_sub(app.now_ms).max(0) / 1000;
-                lines.insert(1, Line::from(format!("Manual claim deadline: {seconds}s")));
-            }
-            if let Some(events) = run["events"].as_array() {
-                lines.extend(events.iter().map(|event| Line::from(text(&event["text"]))));
-            }
-            if !run["goal"].is_null() {
-                lines.push(Line::from(text(&Value::String(run["goal"].to_string()))));
-            }
-            lines
-        })
+        .map(|i| activity(runs[i], app.now_ms))
         .unwrap_or_else(|| {
             vec![Line::from(
                 "Select a session to inspect its latest activity.",
             )]
         });
+    let activity_block = block("Activity · PgUp/PgDn", false);
+    let inner = activity_block.inner(right[1]);
+    let paragraph = Paragraph::new(detail).wrap(Wrap { trim: false });
+    let max_scroll = scroll_limit(&paragraph, inner);
+    let scroll = app.detail_scroll.min(max_scroll);
+    let position = if max_scroll == 0 {
+        " Latest ".to_owned()
+    } else {
+        format!(
+            " {} · {}/{} ",
+            if scroll == 0 { "Latest" } else { "Older" },
+            scroll + 1,
+            max_scroll + 1
+        )
+    };
     frame.render_widget(
-        Paragraph::new(detail)
-            .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0))
-            .block(block("Activity · PgUp/PgDn", false)),
+        paragraph
+            .scroll((scroll, 0))
+            .block(activity_block.title_bottom(Line::from(position).right_aligned())),
         right[1],
     );
     let status = if let Some(error) = &app.error {
         format!(" {}", text(&Value::String(error.clone())))
+    } else if size.width < 90 && app.owned_worker {
+        " Live · q / Ctrl+C stops worker + agents".into()
+    } else if size.width < 90 && !app.pending {
+        " Live · q exits; workers keep running".into()
     } else if app.owned_worker {
         " Live · refresh every 2s · q / Ctrl+C stops this worker and its sessions".into()
     } else if app.pending {
@@ -378,9 +542,9 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             Line::from(Span::styled(
                 status,
                 Style::default().fg(if app.error.is_some() {
-                    Color::Red
+                    color("error")
                 } else {
-                    Color::DarkGray
+                    MUTED
                 }),
             )),
             Line::from(if size.width >= 90 {
@@ -392,18 +556,26 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         rows[2],
     );
     if app.help {
-        overlay(
-            frame,
-            "Keyboard",
-            &format!(
+        let message = if size.width < 90 {
+            format!(
+                "↑↓ / j k  Select session\nh         Active / history\nPgUp/PgDn Scroll activity\nr         Refresh / retry\np         Pause pickup (confirm)\ns         Stop worker + agents (confirm)\nq / Ctrl+C {}\nEsc / ?   Close help",
+                if app.owned_worker {
+                    "Stop worker + agents"
+                } else {
+                    "Exit; workers keep running"
+                }
+            )
+        } else {
+            format!(
                 "↑/↓ or j/k  Select session\nh          Switch active work / completed history\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; existing sessions finish normally\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C {}\nEsc / ?    Close help",
                 if app.owned_worker {
                     "Stop this worker and its sessions"
                 } else {
                     "Quit dashboard; workers keep running"
                 }
-            ),
-        );
+            )
+        };
+        overlay(frame, "Keyboard", &message);
     }
     if let Some(c) = &app.confirmation {
         overlay(

@@ -1,7 +1,10 @@
 {
   "private": true,
   "type": "module",
-  "scripts": { "test:terminal": "node tests/terminal-smoke.mjs" },
+  "scripts": {
+    "test:terminal": "node tests/terminal-smoke.mjs",
+    "test:activity": "node tests/activity-terminal.mjs"
+  },
   "devDependencies": {
     "terminal-pilot": "0.0.62",
     "terminal-png": "0.1.8"

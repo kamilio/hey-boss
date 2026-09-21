@@ -8,7 +8,7 @@ description = "Responsive terminal dashboard and reusable UI library for hey-bos
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.28"
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 serde_json = "1"
 ctrlc = { version = "3.5", features = ["termination"] }
 libc = "0.2"
