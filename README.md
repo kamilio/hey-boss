@@ -832,15 +832,21 @@ Issue lists and details show each issue's worker agent launch count. Hover or fo
 In the issue list, the arrow beside an assigned agent opens that session's conversation in Agents, including its owning device and latest recorded attempt for the issue. The assignee badge still filters the list. Assignments without recent recorded history show an availability explanation.
 
 Quick add issues with **⌘⇧K** (Mac) or **Ctrl+Shift+K** from any web page,
-including over an open editor. On Mac, **Control+Option+Space** opens quick add
-from any application; the menu bar also has **Quick add issue…**. Enter a title
+including over an open editor. On Mac, **⌘⌃⌥⇧I** opens a native Spotlight-style
+panel from any application without opening the browser; the menu bar also has
+**Quick add issue…**. Enter a title
 and press Enter to create it; Escape preserves the draft for the next opening.
 The header's plus button works on touch screens.
 
 Type `@` anywhere in the title to select a known project. Browse suggestions
 with ↑/↓, then Enter, Tab, or a click selects a
 project without creating the issue. Escape dismisses suggestions first; press it
-again to close quick add. Suggestions also match project IDs and safely quote
+again to close quick add. The native panel remembers the last successfully used
+project; choose one with **@project** for the first issue. **⌘⇧B** toggles add to
+bottom; issues otherwise go to the top. Closing preserves an unsent draft, and
+failed submissions retain their request ID for safe retries. See
+[native Quick Add](docs/native-quick-issue.md) for details.
+Suggestions also match project IDs and safely quote
 names with spaces or use full IDs for ambiguous names. Mentions such as
 `@poe-code` resolve
 without case sensitivity; use `@"Design Team"` for spaces, or a full project ID
