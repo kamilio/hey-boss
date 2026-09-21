@@ -73,7 +73,6 @@ export default function Issues({api}){
     {state.projects.map(project=><option key={project.name} value={project.name}>{project.name}</option>)}
    </select>
    {!state.projects.length&&<p className="fine">Waiting for registered projects. Connect the supervisor to load them.</p>}
-   {state.projects.some(p=>p.name_collisions?.length>0)&&<details className="fine"><summary>Existing project names reused</summary><p>Another folder or repository matched an existing name. No new destination was created.</p></details>}
    <label htmlFor="issue-title">Title</label>
    <TextField.Root id="issue-title" required value={draft.title} disabled={draft.submitted} onChange={e=>change('title',e.target.value)} placeholder="What needs to happen?" size="3"/>
    <label htmlFor="issue-description">Description <span className="fine">optional</span></label>

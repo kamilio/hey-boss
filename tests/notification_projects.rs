@@ -201,7 +201,7 @@ fn notifications_share_git_project_across_subdirectories_and_worktrees() {
 }
 
 #[test]
-fn overrides_reuse_unique_names_warn_about_collisions_and_preserve_hidden_state() {
+fn overrides_reuse_unique_names_silently_and_preserve_hidden_state() {
     let f = Fixture::new();
     f.notify(
         f.alert(&f.cwd)
@@ -268,8 +268,7 @@ fn overrides_reuse_unique_names_warn_about_collisions_and_preserve_hidden_state(
         f.projects()["project_warnings"]
             .as_array()
             .unwrap()
-            .iter()
-            .any(|w| w["rejected_id"] == "github.com/other/Atlas")
+            .is_empty()
     );
     assert_eq!(
         f.notify(

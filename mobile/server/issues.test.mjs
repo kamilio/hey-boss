@@ -12,7 +12,7 @@ test('project names are unique destinations and accept name-based submissions',(
  try{
   store.setIssueProjects([project,{id:'named:hey-boss',name:'HEY-BOSS'}]);
   assert.equal(store.issueProjects().length,1);
-  assert.equal(store.issueProjects()[0].name_collisions.length,1);
+  assert.deepEqual(store.issueProjects(),[project]);
   const byName={...draft,project:'hey-boss'};
   const created=store.createIssue('phone',byName);
   assert.equal(created.project,'hey-boss');

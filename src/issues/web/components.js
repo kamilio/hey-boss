@@ -150,17 +150,6 @@ function date(at) {
     }
     update(projects, project) {
       this.projects = projects; this.project = project;
-      const warnings = projects.flatMap(p => p.name_collisions || []);
-      let notice = $("#project-name-notice");
-      if (warnings.length && !notice) {
-        notice = document.createElement("details"); notice.id = "project-name-notice"; notice.className = "project-name-notice";
-        $(".app-navigation").after(notice);
-      }
-      const signature = JSON.stringify(warnings);
-      if (notice && notice.dataset.warnings !== signature) {
-        notice.dataset.warnings = signature; notice.hidden = !warnings.length;
-        notice.innerHTML = `<summary>${icon("warning")}Existing project names reused<span>View details</span></summary><p>Project names are unique. Another folder or repository matched an existing name, so its destination was reused.</p><ul>${warnings.map(w => `<li><strong>${esc(w.name)}</strong><span>${esc(w.rejected_id)}</span>${w.legacy ? `<a href="${esc(location.pathname)}#${esc(new URLSearchParams({project:w.rejected_id, ...(new URLSearchParams(location.hash.slice(1)).get('host') ? {host:new URLSearchParams(location.hash.slice(1)).get('host')} : {})}))}">Open saved history</a>` : `<small>No new project created</small>`}</li>`).join("")}</ul>`;
-      }
       $("#project-name").textContent = project?.name || "Projects";
       if (project) {
         projectNavigation(project.id);

@@ -1008,13 +1008,7 @@ fn unique_project_names_reuse_maps_and_resolve_link_endpoints() {
     let shared = f.run("shared", &["show"]);
     assert_eq!(shared["project"]["id"], first);
     assert_eq!(nodes(&shared).len(), 2);
-    assert!(
-        added["project_warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w["rejected_id"] == second)
-    );
+    assert!(added.get("project_warnings").is_none());
     f.run("Atlas", &["add", "Release", "--id", "release"]);
     f.run("Atlas", &["link", "release", "shared::api"]);
     assert_eq!(

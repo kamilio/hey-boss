@@ -807,8 +807,6 @@ impl Store {
             .as_millis() as i64;
         tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3)
             ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)", params![project.id,project.name,now])?;
-        project_names::record(&tx, detected, &project)?;
-        project_names::record_override(&tx, override_id, &project)?;
         tx.commit()?;
         Ok(project)
     }
@@ -894,10 +892,6 @@ impl Store {
             .as_millis() as i64;
         if (write || register) && !home {
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
-        }
-        if write || register {
-            project_names::record(&tx, &r.project, &project)?;
-            project_names::record_override(&tx, r.project_override.as_deref(), &project)?;
         }
         if write {
             let actor = actor.unwrap();
@@ -1380,13 +1374,11 @@ impl Store {
             }
             identifier(&project.id, "project ID", 8192)?;
             identifier(&project.name, "project name", 1024)?;
-            let incoming = project;
             let project = project_names::canonical(&tx, project.clone())?;
             let at = (*activity).clamp(0, now);
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?4)
                 ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)
                 WHERE excluded.activity_at>projects.activity_at",params![project.id,project.name,now,at])?;
-            project_names::record(&tx, incoming, &project)?;
         }
         tx.commit()?;
         Ok(())
