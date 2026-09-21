@@ -4,6 +4,7 @@ mod caches;
 mod linux;
 #[cfg(target_os = "linux")]
 mod linux_harvest;
+mod logs;
 pub mod processes;
 pub mod remote;
 mod system;
@@ -33,12 +34,17 @@ pub struct Config {
     pub harvest_processes: bool,
     pub clean_worktrees: bool,
     pub clean_caches: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub trim_worker_logs: bool,
     pub interval_seconds: u64,
     pub process_min_age_seconds: u64,
     pub browser_min_age_seconds: u64,
     pub observation_seconds: u64,
     pub worktree_min_age_days: u64,
     pub workspace_roots: Vec<PathBuf>,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 impl Default for Config {
     fn default() -> Self {
@@ -64,6 +70,7 @@ impl Default for Config {
             harvest_processes: true,
             clean_worktrees: true,
             clean_caches: true,
+            trim_worker_logs: false,
             interval_seconds: 300,
             process_min_age_seconds: 3600,
             browser_min_age_seconds: 600,
@@ -74,6 +81,27 @@ impl Default for Config {
     }
 }
 impl Config {
+    fn for_observations(&self, previous: &Snapshot) -> Self {
+        // Timers skip overlapping checks. A large inventory makes the actual
+        // cadence slower than the configured interval, even with no interruption.
+        let duration = if previous.running {
+            0
+        } else {
+            // Read the last completion event when migrating older stored snapshots.
+            // A manual action with a newer observed_at cannot revive old observations.
+            let recorded = previous
+                .activity
+                .iter()
+                .rev()
+                .find(|event| event.category == "scan" && event.message.starts_with("Finished:"))
+                .map_or(0, |event| event.at.saturating_sub(previous.observed_at));
+            previous.cycle_duration_seconds.max(recorded).min(86400)
+        };
+        Self {
+            interval_seconds: self.interval_seconds.saturating_add(duration),
+            ..self.clone()
+        }
+    }
     pub fn validate(&self) -> io::Result<()> {
         if self.interval_seconds < 60
             || self.interval_seconds > 86400
@@ -130,6 +158,8 @@ pub struct Activity {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub observed_at: u64,
+    #[serde(default)]
+    pub cycle_duration_seconds: u64,
     pub last_cleanup_at: Option<u64>,
     pub metrics: Metrics,
     pub config: Config,
@@ -143,6 +173,8 @@ pub struct Snapshot {
     pub caches: Vec<Item>,
     #[serde(default)]
     pub removed_caches: usize,
+    #[serde(default)]
+    pub trimmed_logs: usize,
     /// Net volume free-space change, including concurrent filesystem activity.
     #[serde(default)]
     pub disk_available_change_bytes: Option<i64>,
@@ -355,8 +387,10 @@ impl Store {
     }
     pub fn cycle(&self, apply: bool) -> io::Result<Snapshot> {
         let _lock = self.lock()?;
+        let started = Instant::now();
         let config = self.config()?;
         let mut state = self.state()?;
+        let observation_config = config.for_observations(&state.snapshot);
         let mut snapshot = Snapshot {
             observed_at: now(),
             metrics: system::metrics(),
@@ -408,7 +442,7 @@ impl Store {
         };
         match processes::harvest(
             &process_table,
-            &config,
+            &observation_config,
             &mut state.processes,
             apply && config.harvest_processes,
         ) {
@@ -425,6 +459,42 @@ impl Store {
             snapshot.record("process", format!("{} — {}", item.name, item.detail));
         }
         snapshot.record("scan", format!("Inspected {} processes; {} candidate groups; stopped {} processes. Codex and normal services are protected.", process_table.len(), snapshot.processes.len(), snapshot.harvested_processes));
+        // Caches are cheap to inspect; do not put them behind hundreds of Git checks.
+        snapshot.phase = "Inspecting disposable caches".into();
+        self.checkpoint(&mut state, &snapshot)?;
+        match caches::clean(
+            &observation_config,
+            &mut state.caches,
+            apply && config.clean_caches,
+        ) {
+            Ok((items, count)) => {
+                snapshot.caches = items;
+                snapshot.removed_caches = count;
+            }
+            Err(error) => {
+                state.caches.clear();
+                snapshot.errors.push(format!("Cache cleaner: {error}"));
+            }
+        }
+        for item in snapshot.caches.clone() {
+            snapshot.record("cache", format!("{} — {}", item.name, item.detail));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            match logs::clean(&PathBuf::from(home), apply && config.trim_worker_logs) {
+                Ok((mut items, count)) => {
+                    snapshot.trimmed_logs = count;
+                    for item in &mut items {
+                        if !config.trim_worker_logs {
+                            item.eligible = false;
+                            item.detail = format!("Worker-log trimming disabled; {}", item.detail);
+                        }
+                        snapshot.record("log", format!("{} — {}", item.name, item.detail));
+                    }
+                    snapshot.caches.extend(items);
+                }
+                Err(error) => snapshot.errors.push(format!("Worker log cleanup: {error}")),
+            }
+        }
         snapshot.phase = "Inspecting worktrees".into();
         snapshot.record(
             "scan",
@@ -432,7 +502,7 @@ impl Store {
         );
         self.checkpoint(&mut state, &snapshot)?;
         match worktrees::clean(
-            &config,
+            &observation_config,
             &process_table,
             &mut state.worktrees,
             apply && config.clean_worktrees,
@@ -448,21 +518,6 @@ impl Store {
         }
         for item in snapshot.worktrees.clone() {
             snapshot.record("worktree", format!("{} — {}", item.name, item.detail));
-        }
-        snapshot.phase = "Inspecting disposable caches".into();
-        self.checkpoint(&mut state, &snapshot)?;
-        match caches::clean(&config, &mut state.caches, apply && config.clean_caches) {
-            Ok((items, count)) => {
-                snapshot.caches = items;
-                snapshot.removed_caches = count;
-            }
-            Err(error) => {
-                state.caches.clear();
-                snapshot.errors.push(format!("Cache cleaner: {error}"));
-            }
-        }
-        for item in snapshot.caches.clone() {
-            snapshot.record("cache", format!("{} — {}", item.name, item.detail));
         }
         if apply {
             let after = system::disk_available_bytes();
@@ -487,6 +542,7 @@ impl Store {
             snapshot.last_cleanup_at = Some(snapshot.observed_at);
         }
         snapshot.running = false;
+        snapshot.cycle_duration_seconds = started.elapsed().as_secs();
         snapshot.phase = if snapshot.errors.is_empty() {
             "Waiting for the next check"
         } else {
@@ -666,11 +722,13 @@ mod tests {
         fields.remove("activity");
         fields.remove("running");
         fields.remove("phase");
+        fields.remove("cycle_duration_seconds");
         fields.remove("caches");
         fields.remove("removed_caches");
         fields.remove("disk_available_change_bytes");
         let restored: Snapshot = serde_json::from_value(old).unwrap();
         assert!(restored.activity.is_empty() && !restored.running);
+        assert_eq!(restored.cycle_duration_seconds, 0);
         assert!(
             restored.caches.is_empty()
                 && restored.removed_caches == 0
@@ -684,6 +742,17 @@ mod tests {
         let config: Config =
             serde_json::from_value(serde_json::json!({"automatic": true})).unwrap();
         assert!(config.clean_caches && config.worktree_min_age_days == 7);
+        assert!(!config.trim_worker_logs);
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(serialized.get("trim_worker_logs").is_none());
+        let enabled = Config {
+            trim_worker_logs: true,
+            ..config
+        };
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["trim_worker_logs"],
+            true
+        );
     }
     #[test]
     fn status_recognizes_an_interrupted_check() {

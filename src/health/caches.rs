@@ -27,11 +27,40 @@ const CACHE_NAMES: &[&str] = &[
 struct Candidate {
     path: PathBuf,
     min_age: u64,
+    signing_copy: bool,
+}
+
+impl Candidate {
+    fn allows_root_file(&self) -> bool {
+        if !self.signing_copy
+            || !self
+                .path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("code_sign_clone."))
+            || !fs::symlink_metadata(&self.path)
+                .is_ok_and(|m| m.is_dir() && m.uid() == unsafe { libc::geteuid() })
+        {
+            return false;
+        }
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return false;
+        };
+        let Ok(children) = entries.take(2).collect::<Result<Vec<_>, _>>() else {
+            return false;
+        };
+        children.len() == 1
+            && children[0].file_name() == "Google Chrome.app.bundle"
+            && children[0].file_type().is_ok_and(|kind| kind.is_dir())
+    }
 }
 
 fn add(candidates: &mut Vec<Candidate>, path: PathBuf, min_age: u64) {
     if candidates.len() < 2048 && path.exists() {
-        candidates.push(Candidate { path, min_age });
+        candidates.push(Candidate {
+            path,
+            min_age,
+            signing_copy: false,
+        });
     }
 }
 
@@ -91,9 +120,15 @@ fn discover(home: &Path, temp: Option<&Path>) -> io::Result<Vec<Candidate>> {
                     let children: Vec<_> = fs::read_dir(entry.path())?
                         .take(2)
                         .collect::<Result<_, _>>()?;
-                    if children.len() == 1 && children[0].file_name() == "Google Chrome.app.bundle"
+                    if children.len() == 1
+                        && children[0].file_name() == "Google Chrome.app.bundle"
+                        && candidates.len() < 2048
                     {
-                        add(&mut candidates, entry.path(), 3600);
+                        candidates.push(Candidate {
+                            path: entry.path(),
+                            min_age: 3600,
+                            signing_copy: true,
+                        });
                     }
                 }
             }
@@ -132,6 +167,9 @@ fn fingerprint(candidate: &Candidate, active: &[PathBuf], at: u64) -> io::Result
         return Err(io::Error::other("Open in a process; preserved"));
     }
     let deadline = Instant::now() + Duration::from_secs(2);
+    // macOS keeps the copied Chrome executable owned by root. Only this exact,
+    // user-owned disposable container may include root-owned regular files.
+    let allow_root_files = candidate.allows_root_file();
     let mut pending = vec![root.clone()];
     let mut hash = Sha256::new();
     let mut count = 0;
@@ -143,7 +181,8 @@ fn fingerprint(candidate: &Candidate, active: &[PathBuf], at: u64) -> io::Result
             ));
         }
         let m = fs::symlink_metadata(&path)?;
-        if m.uid() != unsafe { libc::geteuid() }
+        if (m.uid() != unsafe { libc::geteuid() }
+            && !(allow_root_files && path != *root && m.uid() == 0 && m.is_file()))
             || (!m.is_dir() && !m.is_file() && !m.file_type().is_symlink())
         {
             return Err(io::Error::other("Unowned or special cache file; preserved"));
@@ -327,6 +366,107 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: AtomicU64 = AtomicU64::new(0);
 
+    #[test]
+    fn slow_completed_checks_still_produce_two_quiet_observations() {
+        let root = fixture();
+        let candidate = Candidate {
+            path: root.join("Cache"),
+            min_age: 0,
+            signing_copy: false,
+        };
+        let at = super::super::now() + 100;
+        let mut observations = BTreeMap::new();
+        run(
+            std::slice::from_ref(&candidate),
+            &mut observations,
+            &[],
+            at,
+            &config(),
+            false,
+            || Ok(vec![]),
+        )
+        .unwrap();
+        let mut stale = observations.clone();
+        assert_eq!(
+            run(
+                std::slice::from_ref(&candidate),
+                &mut stale,
+                &[],
+                at + 2100,
+                &config(),
+                true,
+                || Ok(vec![])
+            )
+            .unwrap()
+            .1,
+            0
+        );
+        let previous = super::super::Snapshot {
+            cycle_duration_seconds: 1800,
+            ..Default::default()
+        };
+        let cadence = config().for_observations(&previous);
+        let legacy = super::super::Snapshot {
+            observed_at: at,
+            activity: vec![super::super::Activity {
+                at: at + 1800,
+                category: "scan".into(),
+                message: "Finished: old-format check".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            config().for_observations(&legacy).interval_seconds,
+            cadence.interval_seconds
+        );
+        assert_eq!(
+            run(
+                &[candidate],
+                &mut observations,
+                &[],
+                at + 2100,
+                &cadence,
+                true,
+                || Ok(vec![])
+            )
+            .unwrap()
+            .1,
+            1
+        );
+        assert!(root.join("History").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn root_owned_executable_is_allowed_only_inside_an_owned_chrome_signing_copy() {
+        let root = fixture();
+        let mut candidate = Candidate {
+            path: root.join("code_sign_clone.test"),
+            min_age: 0,
+            signing_copy: false,
+        };
+        assert!(!candidate.allows_root_file());
+        candidate.signing_copy = true;
+        assert!(!candidate.allows_root_file());
+        fs::create_dir_all(candidate.path.join("Google Chrome.app.bundle")).unwrap();
+        assert!(candidate.allows_root_file());
+        fs::write(candidate.path.join("unrelated"), "keep").unwrap();
+        assert!(!candidate.allows_root_file());
+        fs::remove_file(candidate.path.join("unrelated")).unwrap();
+        fs::rename(
+            candidate.path.join("Google Chrome.app.bundle"),
+            root.join("saved"),
+        )
+        .unwrap();
+        symlink(
+            root.join("saved"),
+            candidate.path.join("Google Chrome.app.bundle"),
+        )
+        .unwrap();
+        assert!(!candidate.allows_root_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn config() -> super::super::Config {
         super::super::Config {
             observation_seconds: 60,
@@ -372,6 +512,7 @@ mod tests {
         let candidate = Candidate {
             path: root.join("Cache"),
             min_age: 0,
+            signing_copy: false,
         };
         let at = super::super::now() + 100;
         let mut observations = BTreeMap::new();
@@ -447,6 +588,7 @@ mod tests {
         let candidate = Candidate {
             path: root.join("Cache"),
             min_age: 0,
+            signing_copy: false,
         };
         let at = super::super::now() + 100;
         let mut observations = BTreeMap::new();
@@ -503,6 +645,7 @@ mod tests {
         let candidate = Candidate {
             path: root.join("Cache"),
             min_age: 86400,
+            signing_copy: false,
         };
         let mut observations = BTreeMap::new();
         let at = super::super::now();
