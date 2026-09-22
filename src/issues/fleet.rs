@@ -26,7 +26,11 @@ pub(crate) fn check_claim(
     project: &str,
     number: i64,
     machine: &str,
+    force: bool,
 ) -> Result<()> {
+    if force {
+        return Ok(());
+    }
     // Keep successful pickup cheap: host lookup and connection files are only
     // needed when explaining a denial, not while arbitrating ordinary claims.
     let blocked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?3) OR ((SELECT role FROM fleet_meta WHERE id=1)='agent' AND NOT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node=?3))", params![project,number,machine], |r|r.get(0))?;
@@ -42,7 +46,7 @@ pub(crate) fn check_claim(
     let mut error = Error::new(
         code,
         format!(
-            "{}\nInspect: {}\n{}\n--force takes session ownership only; it does not bypass fleet reservations.",
+            "{}\nInspect: {}\n{}\n--force is an explicit takeover override, not a synchronization or manual-resume step.",
             info["summary"].as_str().unwrap(),
             info["inspect_command"].as_str().unwrap(),
             info["recovery"].as_str().unwrap()

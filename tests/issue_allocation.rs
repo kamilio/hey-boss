@@ -117,15 +117,17 @@ fn missing_allocation_is_distinct_and_inspection_is_read_only() {
             .unwrap(),
         events
     );
+    // The pre-existing explicit takeover remains an override, never a sync.
+    f.json(&["claim", "1", "--force"]);
     assert_eq!(
-        f.denial(&["claim", "1", "--force"])["code"],
-        "fleet_allocation_missing"
+        f.json(&["allocation", "1"])["allocation"]["reserved_machine"],
+        Value::Null
     );
     assert_eq!(f.run(&["allocation", "999"]).status.code(), Some(3));
 }
 
 #[test]
-fn reservation_reports_machine_and_force_cannot_cross_fleet_boundary() {
+fn reservation_reports_machine_and_explicit_takeover_preserves_allocation() {
     let f = Fixture::new("reserved");
     let db = f.db("controller");
     db.execute(
@@ -142,10 +144,7 @@ fn reservation_reports_machine_and_force_cannot_cross_fleet_boundary() {
             .unwrap()
             .contains("remote-machine")
     );
-    assert_eq!(
-        f.denial(&["claim", "1", "--force"])["code"],
-        "fleet_reserved"
-    );
+    f.json(&["claim", "1", "--force"]);
     assert_eq!(
         f.json(&["view", "1"])["allocation"]["reserved_machine"],
         "remote-machine"

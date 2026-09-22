@@ -107,8 +107,9 @@ If unreserved or reserved for your machine, resume with
 claim reserves the caller's machine atomically. Companions sync automatically;
 there is no one-shot sync command. Wait for local allocation before offline work.
 For another device's reservation, resume there or ask Boss for a handoff.
-Never change worker controls to discover allocation. `--force` cannot bypass
-fleet reservations, including when a device is offline.
+Never change worker controls to discover allocation. `--force` is an explicit
+takeover override requiring authorization; never use it to resolve an allocation
+or synchronization denial. Ordinary claims protect offline reservations.
 
 The reserved `yolo` label is controlled only by Boss in the web UI's **Agent
 permissions** section. Do not add/remove it with CLI labels or batch triage.

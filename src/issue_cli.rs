@@ -299,7 +299,7 @@ enum Action {
     /// Atomically assign an open issue to this session.
     #[command(
         visible_alias = "assign-to-myself",
-        after_help = "To resume a released manual claim, retain its saved --agent ID.\nInspect first with `hey-boss issue allocation NUMBER` (add --json for structured reasons).\nCompanions sync automatically. With missing local allocation, inspect the supervisor using\n`hey-boss issue allocation NUMBER --host SUPERVISOR`; if unreserved or reserved for your\nmachine, claim using `hey-boss issue claim NUMBER --host SUPERVISOR --agent SAVED_ID`.\nThe supervisor reserves unallocated work atomically. Wait for local allocation before offline work.\nFor another machine's reservation, resume there or ask Boss for a handoff.\n--force never bypasses fleet allocations."
+        after_help = "To resume a released manual claim, retain its saved --agent ID.\nInspect first with `hey-boss issue allocation NUMBER` (add --json for structured reasons).\nCompanions sync automatically. With missing local allocation, inspect the supervisor using\n`hey-boss issue allocation NUMBER --host SUPERVISOR`; if unreserved or reserved for your\nmachine, claim using `hey-boss issue claim NUMBER --host SUPERVISOR --agent SAVED_ID`.\nThe supervisor reserves unallocated work atomically. Wait for local allocation before offline work.\nFor another machine's reservation, resume there or ask Boss for a handoff.\n--force is an explicit takeover override, never an allocation or synchronization recovery step."
     )]
     Claim {
         number: i64,
