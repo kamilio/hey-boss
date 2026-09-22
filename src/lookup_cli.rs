@@ -74,7 +74,12 @@ pub fn run(options: &Options) -> Result<()> {
                     state: route
                         .params
                         .get("state")
-                        .filter(|v| matches!(v.as_str(), "open" | "closed" | "deleted"))
+                        .filter(|v| {
+                            matches!(
+                                v.as_str(),
+                                "open" | "blocked" | "closed" | "deleted" | "all"
+                            )
+                        })
                         .cloned()
                         .unwrap_or_else(|| "open".into()),
                     mine: false,
