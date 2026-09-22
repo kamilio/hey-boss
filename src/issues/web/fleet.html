@@ -53,10 +53,10 @@
           <label><input type="radio" name="scope" value="issue"><span><strong>This issue</strong><small>Add to the issue’s requirements and send to this agent. Future attempts keep it.</small></span></label>
           <label><input type="radio" name="scope" value="project"><span><strong>This project</strong><small>Save in the project’s base instructions. Agents using them receive the update, including this agent.</small></span></label>
         </fieldset>
-        <label class="steer-label" for="steer-text">What should the agent know?</label>
-        <textarea id="steer-text" rows="4" required maxlength="32000" placeholder="Also check the keyboard navigation before shipping…" aria-describedby="steer-help"></textarea>
-        <p id="steer-help">The agent keeps working in its current session. Delivery confirmation appears in the conversation.</p>
         <p id="steer-error" class="error" role="alert" hidden></p>
+        <label class="steer-label" for="steer-text">What should the agent know?</label>
+        <textarea id="steer-text" rows="4" required maxlength="32000" placeholder="Also check the keyboard navigation before shipping…" aria-describedby="steer-help steer-error"></textarea>
+        <p id="steer-help">The agent keeps working in its current session. Delivery confirmation appears in the conversation.</p>
         <div class="takeover-dialog-actions"><button id="steer-cancel" class="button" type="button">Cancel</button><button id="steer-send" class="button primary" type="submit">Send to agent</button></div>
       </form>
     </dialog>
