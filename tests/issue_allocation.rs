@@ -156,6 +156,34 @@ fn reservation_reports_machine_and_explicit_takeover_preserves_allocation() {
 }
 
 #[test]
+fn cached_inventory_names_a_reserved_device_without_releasing_offline_work() {
+    let f = Fixture::new("inventory");
+    let db = f.db("controller");
+    db.execute_batch("CREATE TABLE fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'remote-machine');").unwrap();
+    let machines = serde_json::json!({"devbox":{"host":"devbox","hostname":"Remote device","node":"remote-machine","state":"disconnected"}});
+    db.execute(
+        "INSERT INTO fleet_state VALUES('machines',?1)",
+        [machines.to_string()],
+    )
+    .unwrap();
+    let info = f.json(&["allocation", "1"])["allocation"].clone();
+    assert_eq!(info["reserved_host"], "Remote device");
+    assert_eq!(info["reserved_ssh_host"], "devbox");
+    assert!(info["recovery"].as_str().unwrap().contains("ssh 'devbox'"));
+    assert_eq!(f.denial(&["claim", "1"])["code"], "fleet_reserved");
+    let unsafe_host = serde_json::json!({"devbox":{"host":"-oProxyCommand=bad","hostname":"Remote device","node":"remote-machine"}});
+    db.execute(
+        "UPDATE fleet_state SET value=?1 WHERE key='machines'",
+        [unsafe_host.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        f.json(&["allocation", "1"])["allocation"]["reserved_ssh_host"],
+        Value::Null
+    );
+}
+
+#[test]
 fn authoritative_manual_claim_allocates_atomically_and_can_resume_after_release() {
     let f = Fixture::new("resume");
     let db = f.db("controller");

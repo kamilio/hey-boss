@@ -86,7 +86,7 @@ pub(crate) fn allocation(
         None if role == "agent" => "allocation_missing",
         None => "unallocated",
     };
-    let reserved_host: Option<String> = if reserved.as_deref() == Some(node.as_str()) {
+    let mut reserved_host: Option<String> = if reserved.as_deref() == Some(node.as_str()) {
         Some(super::identity::host())
     } else if let Some(owner) = &reserved {
         // Bound lookup to this issue's participants; never scan all saved agents.
@@ -94,6 +94,23 @@ pub(crate) fn allocation(
     } else {
         None
     };
+    let mut reserved_ssh_host: Option<String> = None;
+    if let Some(owner) = &reserved
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_state')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        // Use the existing durable inventory, never a network request or a scan
+        // of saved conversations. Connectivity here may be stale.
+        let cached: Option<(Option<String>, Option<String>)> = db.query_row("SELECT json_extract(m.value,'$.hostname'),json_extract(m.value,'$.host') FROM fleet_state s,json_each(s.value) m WHERE s.key='machines' AND json_extract(m.value,'$.node')=?1 LIMIT 1", [owner], |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((hostname, host)) = cached {
+            reserved_host = hostname.or(reserved_host);
+            reserved_ssh_host =
+                host.filter(|h| h != "local" && crate::health::remote::valid_host(h));
+        }
+    }
     let command = format!(
         "hey-boss issue allocation {number} --project {}",
         quote(project)
@@ -114,7 +131,7 @@ pub(crate) fn allocation(
         "allocated_here" => format!("Issue #{number} is allocated to machine {machine}."),
         _ => format!("Issue #{number} has no fleet reservation in this store."),
     };
-    let recovery = match reason {
+    let mut recovery = match reason {
         "reserved_elsewhere" => format!(
             "{}Resume on the reserved machine: {claim} --agent '<saved-agent-id>'. Reservations remain protected while a device is offline. To move work to another machine, ask Boss for a handoff; do not force a claim or change worker controls.",
             if role == "agent" {
@@ -132,8 +149,16 @@ pub(crate) fn allocation(
             "Resume a released manual claim: {claim} --agent '<saved-agent-id>'. Session ownership and active worker reservations still apply."
         ),
     };
+    if reason == "reserved_elsewhere"
+        && let Some(host) = &reserved_ssh_host
+    {
+        recovery = format!(
+            "Connect to the reserved device: ssh {}. {recovery}",
+            quote(host)
+        );
+    }
     Ok(
-        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role),"summary":summary,"inspect_command":command,"recovery":recovery}),
+        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role),"summary":summary,"inspect_command":command,"recovery":recovery}),
     )
 }
 
