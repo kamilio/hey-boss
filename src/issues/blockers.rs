@@ -10,33 +10,43 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    if present {
+    let stale_capture: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%' AND instr(sql,'''blockers'',')=0)",
+        [], |r| r.get(0),
+    )?;
+    if present && !stale_capture {
         return Ok(());
     }
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if !tx.query_row(
+    let added = !tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name='blockers')",
         [],
         |r| r.get::<_, bool>(0),
-    )? {
+    )?;
+    if added {
         tx.execute_batch(
             "ALTER TABLE issues ADD COLUMN manual_blocked INTEGER NOT NULL DEFAULT 0;
             ALTER TABLE issues ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]';",
         )?;
-        // Existing capture triggers have a fixed column list. Replace them in
-        // this transaction before normalization writes enter the sync journal.
-        let triggers = tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%'")?
+    }
+    // Existing capture triggers have a fixed column list. Replace them in
+    // this transaction before normalization writes enter the sync journal.
+    let triggers = tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%'")?
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (name, sql) in triggers {
-            let sql = sql
+    for (name, sql) in triggers {
+        if sql.contains("'blockers',") {
+            continue;
+        }
+        let sql = sql
                 .replace("json_object('origin',NEW.", "json_object('manual_blocked',NEW.manual_blocked,'blockers',NEW.blockers,'origin',NEW.")
                 .replace("json_object('origin',OLD.", "json_object('manual_blocked',OLD.manual_blocked,'blockers',OLD.blockers,'origin',OLD.")
                 .replace("json_object('project_id',NEW.", "json_object('manual_blocked',NEW.manual_blocked,'blockers',NEW.blockers,'project_id',NEW.")
                 .replace("json_object('project_id',OLD.", "json_object('manual_blocked',OLD.manual_blocked,'blockers',OLD.blockers,'project_id',OLD.")
                 .replace(" AND NOT (", " AND NOT (OLD.manual_blocked IS NEW.manual_blocked AND OLD.blockers IS NEW.blockers AND ");
-            tx.execute_batch(&format!("DROP TRIGGER {name}; {sql}"))?;
-        }
+        tx.execute_batch(&format!("DROP TRIGGER {name}; {sql}"))?;
+    }
+    if added {
         tx.execute_batch("UPDATE issues SET manual_blocked=1 WHERE state='blocked';
             UPDATE issues SET state='blocked',manual_blocked=1,assignee=NULL,version=version+1
             WHERE state='open' AND deleted_at IS NULL
