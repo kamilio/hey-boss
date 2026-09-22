@@ -31,7 +31,7 @@ pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
         None
     }
 }
-pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for this issue. Create it before editing files and keep unrelated changes intact.";
+pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for this issue at `{{worktree_path}}`, with branch `{{worktree_name}}` matching the directory name. Reuse that worktree and branch if they already exist, including when resuming this task; otherwise create them before editing files. Keep unrelated changes intact.";
 pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checkout.";
 pub const DEFAULT_MAIN_PROMPT: &str =
     "Commit your changes. If a Git remote is configured, push to main.";
@@ -925,6 +925,49 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
         ))
     }
 }
+// Use portable Git branch / directory characters and bound component lengths.
+// Issue numbers distinguish tasks whose shortened titles happen to match.
+fn worktree_slug(text: &str, limit: usize, fallback: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() && slug.len() < limit {
+                slug.push('-');
+            }
+            if slug.len() == limit {
+                break;
+            }
+            slug.push((byte as char).to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        fallback.into()
+    } else {
+        slug.into()
+    }
+}
+fn worktree_name(job: &Job) -> String {
+    format!(
+        "{}-{}-{}",
+        worktree_slug(&job.project.name, 60, "project"),
+        worktree_slug(job.issue["title"].as_str().unwrap_or(""), 15, "issue"),
+        worktree_slug(&number_text(job), 20, "number"),
+    )
+}
+fn worktree_path(job: &Job) -> String {
+    Path::new(&job.config.cwd)
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(".."))
+        .join(worktree_name(job))
+        .to_string_lossy()
+        .into_owned()
+}
 fn template(text: &str, job: &Job) -> String {
     let mut output = String::new();
     let mut rest = text;
@@ -943,6 +986,8 @@ fn template(text: &str, job: &Job) -> String {
             "number" => number_text(job),
             "title" => job.issue["title"].as_str().unwrap().into(),
             "body" => job.issue["body"].as_str().unwrap().into(),
+            "worktree_name" => worktree_name(job),
+            "worktree_path" => worktree_path(job),
             "commit_instruction" => String::new(),
             _ => match key.split_once(char::is_whitespace) {
                 Some(("create_issue_command", project)) if !project.trim().is_empty() => {
@@ -1787,6 +1832,71 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worktree_variables_are_repeatable_safe_and_unique_per_issue() {
+        let config = ProjectConfig {
+            cwd: "/workspace/hey-boss".into(),
+            prompt: "{{worktree_name}} | {{worktree_path}}".into(),
+            ..Default::default()
+        };
+        let project = Project {
+            id: "repo:test".into(),
+            name: "Hey Boss".into(),
+        };
+        let task = json!({"number":79,"title":"Fix: Worktree / Naming!!!","body":""});
+        let first = preview(&config, &project, task.clone()).0;
+        assert!(
+            first.starts_with(
+                "hey-boss-fix-worktree-na-79 | /workspace/hey-boss-fix-worktree-na-79"
+            ),
+            "{first}"
+        );
+        assert_eq!(first, preview(&config, &project, task.clone()).0);
+        let mut other = task;
+        other["number"] = json!(80);
+        assert_ne!(first, preview(&config, &project, other).0);
+        for title in [
+            "../../$(touch nope)",
+            "你好 🌳",
+            "---",
+            "a very very very long title",
+            "éÉ Fix",
+        ] {
+            let task = json!({"number":79,"title":title,"body":""});
+            let text = preview(&config, &project, task).0;
+            let name = text.split(" | ").next().unwrap();
+            assert!(
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            );
+            assert!(name.starts_with("hey-boss-") && name.ends_with("-79"));
+            assert!(
+                name.trim_start_matches("hey-boss-")
+                    .trim_end_matches("-79")
+                    .len()
+                    <= 15
+            );
+        }
+    }
+    #[test]
+    fn default_worktree_prompt_instructs_agents_to_reuse_the_same_path_and_branch() {
+        let config = ProjectConfig {
+            cwd: "/workspace/repo".into(),
+            worktree_enabled: true,
+            ..Default::default()
+        };
+        let text = preview(&config, &project(), issue()).0;
+        assert!(
+            text.contains("/workspace/prompt-test-literal-body-7"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Reuse")
+                && text.contains("branch")
+                && text.contains("prompt-test-literal-body-7")
+        );
+        assert!(!text.contains("{{worktree_"));
+    }
     #[test]
     fn artifact_tasks_replace_implementation_and_delivery_prompts() {
         for label in ["task:plan", "task:research"] {

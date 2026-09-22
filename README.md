@@ -132,6 +132,7 @@ with a live assembled preview. Implementation instructions contain only the shar
 prompt and selected workspace and delivery branches; no extra cleanup or PR handoff
 paragraphs are appended. Each branch inherits a code default or uses a project override. `worker --worktree` selects a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
 See [automatic workers](docs/issues.md#automatic-codex-workers).
+Worktree prompts can use `{{worktree_name}}` and `{{worktree_path}}`. The default selects a sibling directory and matching branch named `<project>-<title-slug>-<number>` (title slug capped at 15 characters), and tells agents to reuse them on restart.
 
 The macOS menu-bar menu includes **Issues…**, which opens the interface in your
 default browser and starts its local service when needed. **Inbox…** opens a
