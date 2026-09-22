@@ -14,6 +14,7 @@ jobs:
       - run: node tools/test_quick_issue.js && node --check src/issues/web/quick-issue.js
       - run: node tools/test_fleet_view.js && node tools/test_assigned_agent.js && node --check src/issues/web/fleet.js
       - run: node tools/test_lookup_routes.cjs && node --check src/issues/web/routes.js
+      - run: node tools/test_issue_pr_labels.cjs && node --check src/issues/web/app.js
       - run: cargo fmt --check
       - run: node tools/test_mindmap_layout.js && node --check src/issues/web/mindmap-map.js && node --check src/issues/web/mindmap.js
       - run: cargo clippy --locked --all-targets -- -D warnings
