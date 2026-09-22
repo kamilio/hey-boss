@@ -1,0 +1,76 @@
+// Run against an isolated issue server seeded with one real fleet reservation.
+async page => {
+  const checks = [], errors = [];
+  const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
+  page.on('pageerror', error => errors.push(error.message));
+  await page.waitForSelector('.fleet-allocation');
+  const original = await page.evaluate(() => structuredClone(model.detail));
+  const card = page.locator('.fleet-allocation');
+  check(original.allocation.reason === 'reserved_elsewhere', 'Real reservation reaches issue details');
+  check((await card.innerText()).includes('Reserved device'), 'Unassigned issue identifies its reserved device');
+  check((await card.innerText()).includes(original.allocation.reserved_machine), 'Machine ID remains visible when no hostname is known');
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => { window.allocationCopy = text; }}}));
+  const copy = card.getByRole('button', {name: 'Copy inspection command'});
+  await copy.focus(); await page.keyboard.press('Enter');
+  check(await page.evaluate(() => window.allocationCopy) === original.allocation.inspect_command, 'Keyboard copies exact read-only project command');
+  check(!(await page.evaluate(() => window.allocationCopy)).includes('--force'), 'Inspection never suggests a forced claim');
+  await page.setViewportSize({width: 1440, height: 1000});
+  await page.emulateMedia({colorScheme: 'light'});
+  await page.screenshot({path: 'output/playwright/issue109/desktop-light.png'});
+  await page.emulateMedia({colorScheme: 'dark'});
+  await page.screenshot({path: 'output/playwright/issue109/desktop-dark.png'});
+  await page.setViewportSize({width: 390, height: 844});
+  await card.scrollIntoViewIfNeeded();
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Reserved machine fits phone width');
+  await page.screenshot({path: 'output/playwright/issue109/mobile-dark.png'});
+  await card.getByText('Safe resume steps', {exact: true}).click();
+  check((await card.innerText()).includes('Resume on the reserved machine'), 'Safe resume steps identify the handoff boundary');
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Expanded command guidance fits phone width');
+  // Additional states use the same render path without mutating any live fleet.
+  const render = async (allocation, issue = {}) => page.evaluate(({allocation, issue}) => renderDetail({...model.detail, issue: {...model.detail.issue, ...issue}, allocation}), {allocation, issue});
+  const missing = {...original.allocation, role:'agent', authoritative:false, reason:'allocation_missing', reserved_machine:null, reserved_host:null,
+    recovery:'Companions synchronize automatically. Inspect the authoritative supervisor with hey-boss issue allocation 1 --host SUPERVISOR. Keep the saved agent ID; do not force a claim.'};
+  await render(missing); await page.emulateMedia({colorScheme:'light'}); await card.scrollIntoViewIfNeeded();
+  check((await card.innerText()).includes('Allocation not synchronized') && (await card.innerText()).includes('may have a newer reservation'), 'Missing replica allocation is explained without assuming no supervisor reservation');
+  await card.getByText('Safe resume steps', {exact:true}).click();
+  await page.screenshot({path:'output/playwright/issue109/mobile-missing-light.png'});
+  const longHost = 'Remote device <safe & readable> ' + 'long-hostname-'.repeat(10);
+  await render({...original.allocation, reserved_host:longHost});
+  check(await card.locator('.fleet-device').textContent() === longHost, 'Device metadata is escaped as text');
+  await card.getByText('Machine ID', {exact:true}).click();
+  check((await card.innerText()).includes(original.allocation.reserved_machine), 'Hostname card preserves inspectable machine ID');
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Long hostname wraps on phone');
+  await page.screenshot({path:'output/playwright/issue109/mobile-long-device.png'});
+  await render({...original.allocation, reserved_machine:null, reserved_host:null, reason:'unallocated'});
+  check((await card.innerText()).includes('No fleet reservation'), 'Authoritative unallocated state is distinct');
+  await render({...original.allocation, role:'standalone'});
+  check(await card.count() === 0, 'Standalone issues omit irrelevant fleet card');
+  await render(original.allocation, {state:'closed'});
+  check(await card.count() === 0, 'Completed issues omit obsolete reservation guidance');
+  await render(original.allocation, {state:'open'});
+  await page.evaluate(() => { model.route.host = 'qa-host'; });
+  await card.getByRole('button', {name:'Copy inspection command'}).click();
+  check((await page.evaluate(() => window.allocationCopy)).endsWith(" --host 'qa-host'"), 'Copied inspection retains selected authoritative host');
+  await page.evaluate(() => { delete model.route.host; });
+  const comment = page.getByRole('textbox', {name:'Your comment'});
+  await comment.fill('Draft survives allocation refresh');
+  await comment.focus();
+  let nextAllocation = {...original.allocation, reserved_machine:'new-reserved-device'};
+  await page.route('**/api/action', async route => {
+    if (route.request().postDataJSON()?.operation?.action !== 'view') return route.continue();
+    const response = await route.fetch(); const value = await response.json();
+    value.allocation = nextAllocation;
+    await route.fulfill({response, json:value});
+  });
+  await page.evaluate(() => refresh(true));
+  check(await page.locator('#update-banner').count() === 1, 'Allocation changes announce fresh details even without issue version changes');
+  check(await comment.inputValue() === 'Draft survives allocation refresh' && await comment.evaluate(el => el === document.activeElement), 'Allocation refresh preserves comment draft and focus');
+  await page.locator('[data-reload]').click();
+  check((await card.innerText()).includes('new-reserved-device'), 'Reload shows changed reservation');
+  check(await comment.inputValue() === 'Draft survives allocation refresh', 'Reload preserves draft');
+  await page.unroute('**/api/action');
+  await comment.fill('');
+  await render(original.allocation);
+  check(errors.length === 0, 'No browser errors');
+  return {passed:checks.length, checks};
+}

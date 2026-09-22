@@ -1245,6 +1245,11 @@ impl Store {
                 before,
             } => status::history(&tx, &project, *number, *limit, *offset, *before)?,
             Operation::StatusView { number } => status::current(&tx, &project, *number)?,
+            Operation::Allocation { number, machine } => {
+                get_issue(&tx, &project.id, *number, true)?;
+                identifier(machine, "machine ID", 256)?;
+                json!({"ok":true,"project":project,"allocation":super::fleet::allocation(&tx,&project.id,*number,Some(machine))?})
+            }
             Operation::View { number } => {
                 let issue = get_issue(&tx, &project.id, *number, true)?;
                 if issue.deleted_at.is_some()
@@ -1274,7 +1279,7 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
+                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,None)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
             }
             Operation::Comments {
                 number,
@@ -1782,6 +1787,11 @@ fn mutate(
             if issue.draft {
                 return Err(Error::conflict("Undraft the issue before claiming it"));
             }
+            // Boss takeover is the existing explicit human handoff. Agent
+            // claims, including --force, must always retain fleet protection.
+            if matches!(operation, Operation::Claim { .. }) || !force {
+                super::fleet::check_claim(db, &project.id, number, &actor.machine)?;
+            }
             registry::claim_lock(db, project, number, actor, *force)?;
             if issue.state != "open" {
                 return Err(Error::conflict("Reopen the issue before claiming it"));
@@ -1793,6 +1803,9 @@ fn mutate(
             };
             if issue.assignee.as_deref() != Some(target) {
                 ownership(&issue, actor, *force)?;
+            }
+            if matches!(operation, Operation::Claim { .. }) {
+                super::fleet::reserve_manual_claim(db, &project.id, number, &actor.machine)?;
             }
             if target == "human:boss" {
                 let mut boss = actor.clone();

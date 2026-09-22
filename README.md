@@ -130,6 +130,26 @@ transaction journals sync on reconnect. Allocations do not expire when a machine
 disconnects, preventing another machine from starting the same task. Concurrent
 same-field edits are retained as conflicts rather than overwriting work.
 `hey-boss fleet status` shows the fleet without opening a browser.
+
+Use `hey-boss issue allocation NUMBER --json` to inspect a fleet reservation
+without claiming, syncing, or changing workers. Claim denials preserve exit 4
+and distinguish `fleet_reserved` from `fleet_allocation_missing`; their structured
+`details` include the reserved machine, last known hostname, caller/store machine,
+replica role, connectivity and safe recovery guidance. A missing companion
+allocation may be stale: it never proves the supervisor has no reservation.
+Issue details also show the reserved device and a copyable inspection command.
+
+To resume a released manual claim, keep its saved `--agent ID`. For missing local
+allocation, run `hey-boss issue allocation NUMBER --host SUPERVISOR` with the
+supervisor's SSH host. If that authoritative store has no reservation or reserves
+your machine, run `hey-boss issue claim NUMBER --host SUPERVISOR --agent SAVED_ID`.
+The supervisor reserves previously unallocated work for the caller's machine in
+the same transaction as ownership. Companions synchronize automatically while
+connected; there is no one-shot sync command. Wait until local allocation shows
+your machine before offline work. For another device's reservation, resume on
+that device or ask Boss for a handoff. Do not change worker controls to discover
+allocation. `--force` takes session ownership only and never bypasses fleet
+allocation; an offline device's reservation remains protected.
 The supervisor and companion run natively in Rust, including replication,
 allocation, worker controls, and the mobile bridge. Restarting either fleet
 service leaves independently running workers and agents alive. Python remains

@@ -98,6 +98,18 @@ Use `issue create --title TITLE --draft` for a persisted draft without files or 
 
 Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
 
+Fleet denials distinguish `fleet_reserved` and `fleet_allocation_missing` (exit 4).
+Inspect without changes: `hey-boss issue allocation NUMBER --json`; add the same
+`--project` / `--host` context as the claim. Missing companion allocation may be
+stale. Inspect the supervisor with `issue allocation NUMBER --host SUPERVISOR`.
+If unreserved or reserved for your machine, resume with
+`issue claim NUMBER --host SUPERVISOR --agent SAVED_ID`. A successful supervisor
+claim reserves the caller's machine atomically. Companions sync automatically;
+there is no one-shot sync command. Wait for local allocation before offline work.
+For another device's reservation, resume there or ask Boss for a handoff.
+Never change worker controls to discover allocation. `--force` cannot bypass
+fleet reservations, including when a device is offline.
+
 The reserved `yolo` label is controlled only by Boss in the web UI's **Agent
 permissions** section. Do not add/remove it with CLI labels or batch triage.
 YOLO grants full access without sandboxing or approval prompts to the next worker

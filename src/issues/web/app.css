@@ -1475,6 +1475,12 @@ dialog::backdrop {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.fleet-allocation strong { font-size: 12px; }
+.fleet-allocation .fleet-device { color: var(--text); font-weight: 500; }
+.fleet-allocation p, .fleet-allocation code { overflow-wrap: anywhere; }
+.fleet-allocation details { margin-top: 10px; font-size: 11px; }
+.fleet-allocation summary { cursor: pointer; color: var(--muted); }
+.fleet-allocation code { display: block; margin-top: 8px; }
 .assignee-actions {
   display: flex;
   flex-wrap: wrap;
