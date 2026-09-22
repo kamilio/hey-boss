@@ -464,6 +464,7 @@ fn remote_apply(
     let archive = output(
         Command::new("tar")
             .env("COPYFILE_DISABLE", "1")
+            .arg("--no-xattrs")
             .arg("-czf")
             .arg("-")
             .arg("-C")
@@ -970,6 +971,33 @@ mod tests {
         assert_eq!(source.build, build_id(&repo.0).unwrap());
         fs::write(repo.0.join("assets/fixture"), "changed").unwrap();
         assert_ne!(source.build, build_id(&repo.0).unwrap());
+    }
+
+    #[test]
+    fn snapshot_fingerprint_matches_real_build_script_with_shared_path_stems() {
+        let repo = Temp::new().unwrap();
+        fixture(&repo.0);
+        fs::write(repo.0.join("src/component.rs"), "module").unwrap();
+        fs::create_dir(repo.0.join("src/component")).unwrap();
+        fs::write(repo.0.join("src/component/nested.rs"), "nested module").unwrap();
+        let helper = Temp::new().unwrap();
+        let script = helper.0.join("build-script.rs");
+        let executable = helper.0.join("build-script");
+        fs::write(&script, include_str!("../build.rs")).unwrap();
+        output(
+            Command::new("rustc")
+                .arg(&script)
+                .arg("-o")
+                .arg(&executable),
+        )
+        .unwrap();
+        let bytes = output(Command::new(&executable).env("CARGO_MANIFEST_DIR", &repo.0)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let compiler_id = text
+            .lines()
+            .find_map(|line| line.strip_prefix("cargo:rustc-env=HEY_BOSS_BUILD_ID="))
+            .unwrap();
+        assert_eq!(build_id(&repo.0).unwrap(), compiler_id);
     }
     #[test]
     fn invalid_hosts_and_corrupt_receipts_fail_before_publication() {
