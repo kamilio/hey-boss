@@ -383,10 +383,27 @@ control does not reopen, claim, or retry an issue automatically.
 
 Run `hey-boss upgrade` on the Mac to update its CLI, desktop app, canonical agent
 skills, and every host in `~/.local/share/hey-boss/companion-hosts`. By default it
-fetches the latest upstream `main` into a managed checkout. For development,
+fetches the latest upstream `main` and archives that commit. For development,
 `hey-boss upgrade --source /path/to/hey-boss` installs a snapshot of that checkout,
-including uncommitted changes, and remembers the path for later upgrades. A
-remembered checkout is used as-is; pull it before upgrading to consume upstream changes.
+including uncommitted changes, and remembers the checkout location. Later upgrades
+without `--source` fetch and archive committed `main` from that location; dirty
+work is only installed when `--source` is explicitly supplied. A clean main checkout
+is recorded as committed main; other explicit snapshots are recorded as development.
+Automatic supervisor rollouts watch committed main and leave an explicit development
+installation in place until main advances beyond its base commit (or a normal
+upgrade is requested).
+
+Each machine queues installers behind its installation lock, then checks source
+ancestry against its last verified installation. Older or unrelated commits are
+refused, including with `--force`. Development snapshots also require the observed
+installation generation to remain unchanged while queued; retry explicitly to
+stage a fresh snapshot after an intervening upgrade. Previously unrecorded
+installations acquire provenance on their first successful upgrade. Receipts in
+`~/.local/share/hey-boss/upgrade-receipt.json` record commit, repository, source kind,
+build ID, generation and installation time. A fleet report includes the installation
+before the upgrade, the verified result, and a final audit of each host. If another
+rollout intervenes before that audit, it reports `superseded` and exits unsuccessfully
+instead of silently claiming the originally verified build is still installed.
 
 `hey-boss upgrade --check` reports current, outdated, and unreachable machines
 without installing. `--local-only` limits the operation to this machine; repeat
@@ -396,7 +413,7 @@ and 2 when a check finds an outdated machine.
 
 The source snapshot has a build ID shown by `hey-boss --version`, so matching
 machines skip compilation even when package versions are unchanged. Each host
-needs Python 3, Rust, and a working unattended SSH connection. Desktop upgrades
+needs Rust, Git, tar, and a working unattended SSH connection. Desktop upgrades
 also need the Xcode command-line tools. Builds use a persistent cache, replacements
 are staged beside the installed executable, and failed verification restores the
 previous binary. Before replacing the CLI or restarting services, the staged

@@ -811,9 +811,7 @@ impl Supervisor {
         } else {
             command.args(["--host", host]);
         }
-        if let Ok(source) = std::fs::read_to_string(self.ctx.state.join("upgrade-source")) {
-            command.args(["--source", source.trim()]);
-        }
+        // Remembered checkouts are locations, never implicit development opt-ins.
         let output = output_timeout(command, Duration::from_secs(1200))?;
         let report: Value = serde_json::from_slice(&output.stdout).unwrap_or(json!({}));
         let target = report["machines"]
@@ -921,10 +919,16 @@ impl Supervisor {
                 Err(e) => self.event("local", "signal", &format!("{}: {e}", pending["id"])),
             }
         }
-        if let Ok(source) = std::fs::read_to_string(self.ctx.state.join("upgrade-source")) {
+        if let Ok(source) = std::fs::read_to_string(self.ctx.state.join("upgrade-source"))
+            && !super::context::development_install_active(
+                &self.ctx.state,
+                std::path::Path::new(source.trim()),
+                &self.ctx.build()?,
+            )?
+        {
             {
                 let fingerprint =
-                    super::context::source_build(std::path::Path::new(source.trim()))?;
+                    super::context::committed_source_build(std::path::Path::new(source.trim()))?;
                 let build = &json!(fingerprint);
                 self.state.lock().unwrap().desired_build = build.clone();
                 let db = self.ctx.db()?;
@@ -934,7 +938,7 @@ impl Supervisor {
                     self.event(
                         "local",
                         "deployment",
-                        "Source changed; automatic deployment scheduled",
+                        "Committed main changed; automatic deployment scheduled",
                     );
                 }
                 let needle = format!(

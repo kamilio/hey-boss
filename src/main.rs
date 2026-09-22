@@ -10,6 +10,7 @@ mod lookup_cli;
 mod mindmap_cli;
 mod secret_cli;
 mod upgrade_cli;
+mod upgrade_provenance;
 mod worker_cli;
 use clap::{Args, Parser, Subcommand};
 use hey_boss::{Client, Request, Severity, resolve_icon_file};
