@@ -19,6 +19,7 @@ async page => {
   await page.goto(detailURL, {waitUntil:'domcontentloaded'});
   await page.waitForSelector('[data-pr-purpose]');
   check(await page.locator('[data-pr-purpose]').count() === 4, 'All four purposes appear on attached links');
+  check(await page.locator('[data-pr-purpose$="/15066"]').inputValue() === 'unspecified', 'Details retain the unspecified purpose selector');
   const evidence = page.locator('[data-pr-purpose$="/15006"]');
   check(await evidence.inputValue() === 'supporting-evidence', 'Investigation is clearly classified');
   const before = await page.evaluate(async ({project,number}) => (await api({action:'view',number},project)).issue, seed);
@@ -75,11 +76,16 @@ async page => {
   const issueLinks = page.locator(`.issue-row[data-issue-number="${seed.number}"] .issue-pr-link`);
   check((await issueLinks.allTextContents()).some(text => text.includes('Supporting evidence')), 'List keeps evidence visible with its purpose');
   check(await issueLinks.count() === 4, 'Every attached PR remains visible in list');
-  for (const [width,scheme] of [[1440,'light'],[390,'dark']]) {
+  const unspecifiedLink = page.locator(`.issue-row[data-issue-number="${seed.number}"] .issue-pr-link[href$="/15066"]`);
+  check((await unspecifiedLink.textContent()).trim() === 'example/runtime#15066', 'Unspecified PR shows only its identifier');
+  check(await unspecifiedLink.locator('.pr-purpose-label').count() === 0, 'Unspecified PR has no empty badge');
+  check(!(await unspecifiedLink.getAttribute('aria-label')).includes('Unspecified') && !(await unspecifiedLink.getAttribute('title')).includes('Unspecified'), 'Unspecified purpose is omitted from accessible name and tooltip');
+  check(await issueLinks.locator('.pr-purpose-label').count() === 3, 'Classified PRs retain their badges');
+  for (const [width,scheme] of [[1440,'light'],[1440,'dark'],[390,'light'],[390,'dark'],[320,'light'],[320,'dark']]) {
     await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:scheme});
     check(await page.evaluate(() => document.documentElement.scrollWidth<=innerWidth), `List ${width}px fits`);
     check(await issueLinks.locator('.pr-link-title').evaluateAll(els => els.every(el => {const range=document.createRange();range.selectNodeContents(el);return range.getClientRects().length===1;})), `List ${width}px keeps PR identifiers intact`);
-    await page.screenshot({path:`output/playwright/issue45/list-${width}.png`,fullPage:true});
+    await page.screenshot({path:`output/playwright/issue45/list-${width}-${scheme}.png`,fullPage:true});
   }
   const link = issueLinks.first();
   check(await link.getAttribute('target') === '_blank' && (await link.getAttribute('rel')).includes('noopener'), 'PR links open safely in another tab');
