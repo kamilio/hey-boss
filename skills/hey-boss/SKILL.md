@@ -67,9 +67,11 @@ missing transcripts and disconnected devices are reported without guessing.
 
 Project defaults to the repository across worktrees. Fleet companions keep durable local replicas and sync automatically with their supervisor. Standalone queues require the same `--host` / `HEY_BOSS_ISSUE_HOST` to target another machine.
 
-Automatic discovery ignores local temporary agent folders. Legacy empty temporary
-projects are omitted from the picker; saved issues, artifacts, mindmaps and project
-settings remain accessible. Worktrees share one repository project.
+Automatic discovery ignores local temporary agent folders and `.git` metadata
+directories. Legacy empty entries are omitted from the picker; empty metadata
+entries also release their project name. Saved issues, artifacts, mindmaps and
+project settings remain accessible. Worktrees share one repository project,
+including repositories without a remote.
 
 ```sh
 hey-boss issue list --unassigned --json

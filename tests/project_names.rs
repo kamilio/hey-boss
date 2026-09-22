@@ -47,6 +47,64 @@ fn registry(store: &mut Store, p: &Project) -> serde_json::Value {
 }
 
 #[test]
+fn repositories_without_remotes_reuse_saved_metadata_identities() {
+    let f = Fixture::new();
+    drop(f.store());
+    let db = Connection::open(&f.0).unwrap();
+    db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('local:remote:/workspace/offline/.git','offline',2);
+        INSERT INTO agents VALUES('human:test','{}',0);
+        INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+        VALUES('local:remote:/workspace/offline/.git',1,'Keep offline work','','open','human:test',0,0,1,'[]');").unwrap();
+    drop(db);
+    let mut store = f.store();
+    let detected = project("local:remote:/workspace/offline", "offline");
+    assert_eq!(
+        store.notification_project(&detected, None).unwrap().id,
+        "local:remote:/workspace/offline/.git"
+    );
+    let value = registry(&mut store, &detected);
+    assert_eq!(value["projects"][0]["open"], 1);
+    assert_eq!(value["projects"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn an_empty_metadata_name_slot_promotes_the_existing_workspace_without_data_loss() {
+    let f = Fixture::new();
+    drop(f.store());
+    let db = Connection::open(&f.0).unwrap();
+    db.execute_batch(
+        "DROP TRIGGER project_name_guard;
+        INSERT INTO projects(id,name,next_number,created_at) VALUES
+        ('local:remote:/workspace/hey-gh/.git','hey-gh',1,1),
+        ('local:remote:/workspace/hey-gh','hey-gh',1,2);",
+    )
+    .unwrap();
+    drop(db);
+    let first = project("local:remote:/workspace/hey-gh", "hey-gh");
+    let mut store = f.store();
+    let value = registry(&mut store, &first);
+    assert_eq!(value["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(value["projects"][0]["id"], first.id);
+    assert!(value["project_warnings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        store.notification_project(&first, Some("HEY-GH")).unwrap(),
+        first
+    );
+    assert_eq!(
+        Connection::open(&f.0)
+            .unwrap()
+            .query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(store);
+    assert_eq!(
+        registry(&mut f.store(), &first)["projects"][0]["id"],
+        first.id
+    );
+}
+
+#[test]
 fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() {
     let f = Fixture::new();
     let mut store = f.store();

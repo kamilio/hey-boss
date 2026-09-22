@@ -1,6 +1,91 @@
 //! Names select one destination; old storage IDs remain readable for history.
 use super::*;
 
+fn empty_git_metadata(db: &Connection, id: &str) -> Result<bool> {
+    if !super::super::identity::is_git_metadata_project(id) {
+        return Ok(false);
+    }
+    Ok(!db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1)
+        OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1)
+        OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=?1)
+        OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1)
+        OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=?1)",
+        [id],
+        |r| r.get::<_, bool>(0),
+    )?)
+}
+
+/// Release only empty metadata identities' name slots. Keep every storage row,
+/// and restore a slot if explicit full-ID access later saves work there.
+pub(super) fn reconcile_git_metadata(db: &Connection) -> Result<()> {
+    let projects = db.prepare("SELECT id,name FROM projects WHERE id LIKE 'local:%/.git' OR id LIKE 'local:%/.git/%' ORDER BY created_at,id")?
+        .query_map([], |r| Ok(Project { id:r.get(0)?, name:r.get(1)? }))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut repair_needed = false;
+    for p in &projects {
+        let key: Option<String> = db
+            .query_row(
+                "SELECT project_id FROM project_name_keys WHERE name=?1",
+                [&p.name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let empty = empty_git_metadata(db, &p.id)?;
+        if (empty && key.as_deref() == Some(&p.id)) || (!empty && key.is_none()) {
+            repair_needed = true;
+            break;
+        }
+    }
+    if !repair_needed {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    let mut released_names = Vec::new();
+    for p in &projects {
+        if empty_git_metadata(&tx, &p.id)?
+            && tx.execute("DELETE FROM project_name_keys WHERE project_id=?1", [&p.id])? > 0
+        {
+            released_names.push(p.name.clone());
+        }
+    }
+    for name in released_names {
+        let candidates = tx
+            .prepare(
+                "SELECT p.id,p.name FROM projects p WHERE p.name=?1 COLLATE NOCASE ORDER BY
+            (SELECT count(*) FROM issues i WHERE i.project_id=p.id AND i.deleted_at IS NULL) DESC,
+            (SELECT count(*) FROM artifacts a WHERE a.project_id=p.id) DESC,
+            (SELECT count(*) FROM mindmap_nodes m WHERE m.project_id=p.id) DESC,p.created_at,p.id",
+            )?
+            .query_map([name], |r| {
+                Ok(Project {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for p in candidates {
+            if !empty_git_metadata(&tx, &p.id)? {
+                tx.execute(
+                    "INSERT OR IGNORE INTO project_name_keys(name,project_id) VALUES(?1,?2)",
+                    params![p.name, p.id],
+                )?;
+                break;
+            }
+        }
+    }
+    for p in &projects {
+        if !empty_git_metadata(&tx, &p.id)? {
+            tx.execute(
+                "INSERT OR IGNORE INTO project_name_keys(name,project_id) VALUES(?1,?2)",
+                params![p.name, p.id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     if db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_name_keys')",
@@ -45,7 +130,11 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
 }
 
 pub(super) fn by_name(db: &Connection, name: &str) -> Result<Option<Project>> {
-    Ok(db.query_row("SELECT p.id,p.name FROM project_name_keys k JOIN projects p ON p.id=k.project_id WHERE k.name=?1", [name], |r| Ok(Project { id:r.get(0)?,name:r.get(1)? })).optional()?)
+    let project = db.query_row("SELECT p.id,p.name FROM project_name_keys k JOIN projects p ON p.id=k.project_id WHERE k.name=?1", [name], |r| Ok(Project { id:r.get(0)?,name:r.get(1)? })).optional()?;
+    match project {
+        Some(p) if empty_git_metadata(db, &p.id)? => Ok(None),
+        other => Ok(other),
+    }
 }
 
 pub(super) fn canonical(db: &Connection, project: Project) -> Result<Project> {
@@ -60,12 +149,17 @@ pub(super) fn warnings(db: &Connection) -> Result<Value> {
         Ok(json!({"name":name,"project_id":r.get::<_,String>(1)?,"rejected_id":r.get::<_,String>(2)?,"legacy":r.get::<_,bool>(3)?,
             "message":if legacy { format!("Project {name} had multiple identities. One destination is listed; saved history is preserved.") } else { format!("Project {name} already exists. Another identity was detected; no new project was created.") }}))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(json!(
-        rows.into_iter()
-            .filter(|w| !super::super::identity::is_home_project(&Project {
+    let mut visible = Vec::with_capacity(rows.len());
+    for w in rows {
+        if !empty_git_metadata(db, w["rejected_id"].as_str().unwrap())?
+            && !empty_git_metadata(db, w["project_id"].as_str().unwrap())?
+            && !super::super::identity::is_home_project(&Project {
                 id: w["rejected_id"].as_str().unwrap().into(),
-                name: w["name"].as_str().unwrap().into()
-            }))
-            .collect::<Vec<_>>()
-    ))
+                name: w["name"].as_str().unwrap().into(),
+            })
+        {
+            visible.push(w);
+        }
+    }
+    Ok(json!(visible))
 }
