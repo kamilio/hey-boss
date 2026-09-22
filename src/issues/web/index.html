@@ -24,6 +24,7 @@
     <script src="/inbox.js" defer></script>
     <script src="/global-settings.js" defer></script>
     <script src="/subtasks.js" defer></script>
+    <script src="/blockers.js" defer></script>
     <script src="/attachments.js" defer></script><script src="/artifacts.js" defer></script>
     <script src="/status.js" defer></script>
     <script src="/app.js" defer></script>
@@ -405,6 +406,11 @@
           </div>
         </div>
       </form>
+    </dialog>
+    <dialog id="blocker-picker-dialog" aria-labelledby="blocker-picker-title">
+      <div class="dialog-heading"><h2 id="blocker-picker-title">Add blocking issue</h2><button type="button" class="icon-button" id="blocker-picker-close" aria-label="Close blocker picker"><span data-icon="x"></span></button></div>
+      <div class="subtask-picker-body"><label class="field-label" for="blocker-picker-search">Find a blocking issue</label><input id="blocker-picker-search" class="text-input" type="search" placeholder="Search by title or number…" autocomplete="off"><p class="form-error" id="blocker-picker-error" role="alert" hidden></p><div id="blocker-picker-results" aria-label="Blocking project issues"></div></div>
+      <div class="dialog-footer"><button class="button" type="button" id="blocker-picker-cancel">Cancel</button></div>
     </dialog>
     <dialog id="subtask-picker-dialog" aria-labelledby="subtask-picker-title">
       <div class="dialog-heading">
