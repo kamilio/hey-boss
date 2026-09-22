@@ -148,8 +148,9 @@ the same transaction as ownership. Companions synchronize automatically while
 connected; there is no one-shot sync command. Wait until local allocation shows
 your machine before offline work. For another device's reservation, resume on
 that device or ask Boss for a handoff. Do not change worker controls to discover
-allocation. `--force` takes session ownership only and never bypasses fleet
-allocation; an offline device's reservation remains protected.
+allocation. `--force` is an explicit takeover override; never use it to resolve
+a synchronization or allocation denial. Ordinary claims protect an offline
+device's reservation.
 The supervisor and companion run natively in Rust, including replication,
 allocation, worker controls, and the mobile bridge. Restarting either fleet
 service leaves independently running workers and agents alive. Python remains

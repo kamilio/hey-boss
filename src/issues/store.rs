@@ -1787,11 +1787,6 @@ fn mutate(
             if issue.draft {
                 return Err(Error::conflict("Undraft the issue before claiming it"));
             }
-            // Boss takeover is the existing explicit human handoff. Agent
-            // claims, including --force, must always retain fleet protection.
-            if matches!(operation, Operation::Claim { .. }) || !force {
-                super::fleet::check_claim(db, &project.id, number, &actor.machine)?;
-            }
             registry::claim_lock(db, project, number, actor, *force)?;
             if issue.state != "open" {
                 return Err(Error::conflict("Reopen the issue before claiming it"));

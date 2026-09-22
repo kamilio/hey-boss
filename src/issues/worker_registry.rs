@@ -648,6 +648,7 @@ pub(super) fn claim_lock(
     actor: &Actor,
     force: bool,
 ) -> Result<()> {
+    crate::issues::fleet::check_claim(db, &p.id, n, &actor.machine, force)?;
     let expired: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 AND finished_at IS NULL AND claimed_at IS NULL AND reservation_expires<=?4)",params![p.id,n,actor.id,now()],|r|r.get(0))?;
     if expired {
         return Err(Error::conflict(
