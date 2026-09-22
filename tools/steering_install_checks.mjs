@@ -16,6 +16,7 @@ try {
  const assets=await Promise.all(['/agents/session','/fleet.js','/fleet.css'].map(async path=>{const r=await fetch(base+path);if(!r.ok)throw Error('Missing installed asset '+path);return r.text();}));
  for(const scope of ['session','issue','project'])if(!assets[0].includes('value="'+scope+'"'))throw Error('Missing installed scope '+scope);
  if(!assets[0].includes('id="steer-open"')||!assets[0].includes('id="steering-updates"')||!assets[1].includes('/api/fleet/steer')||!assets[1].includes('steerRequest.id')||!assets[2].includes('.steer-dialog'))throw Error('Installed steering UI is outdated');
+ if(!assets[1].includes('signal:controller.signal')||!assets[1].includes('Sending your instruction')||!assets[1].includes('scrollIntoView({block:\'center\'})')||!assets[0].includes('aria-describedby="steer-help steer-error"'))throw Error('Installed optimistic submission or recovery UI is outdated');
  const blocked=await fetch(base+'/api/fleet/steer',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(blocked.status!==403)throw Error('Installed steering endpoint does not enforce CSRF');
  console.log(JSON.stringify({status:'passed',version,scopes:['session','issue','project'],receipts:true,csrf:true,cleanup_root:root}));
 } finally {

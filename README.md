@@ -101,6 +101,9 @@ the update; worker overrides keep their own instructions. Messages are queued on
 the owning device and delivery confirmation appears in the conversation. Retries
 reuse the same request, so a connection interruption cannot duplicate a saved
 requirement. Completed and standalone saved conversations cannot be steered.
+Sending dismisses the instruction dialog immediately, so you can keep reading.
+If submission fails or remains unconfirmed for 15 seconds, the dialog returns
+with your text and scope preserved for a safe retry.
 
 Choose **Take over** in a live conversation to stop that agent and assign its issue
 to Boss. After it stops, **Copy command** gives you a terminal command to resume

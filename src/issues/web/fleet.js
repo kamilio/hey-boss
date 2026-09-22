@@ -324,11 +324,11 @@ if (typeof document !== 'undefined') (() => {
     const draft=steerDrafts.get(takeoverKey(selected))||{text:'',scope:'session'};
     $('steer-text').value=draft.text;$('steer-form').elements.scope.value=draft.scope;
     $('steer-task').textContent='Issue #'+selected.run.number+' · '+(selected.run.title||'Your task')+' · '+(selected.machine.hostname||selected.machine.host);
-    $('steer-error').hidden=true;$('steer-dialog').showModal();$('steer-text').focus();
+    $('steer-error').hidden=true;$('steer-dialog').showModal();$('steer-text').focus();$('steer-text').scrollIntoView({block:'center'});
   };
   $('steer-form').oninput=keepSteerDraft;
   $('steer-dialog').addEventListener('cancel',event=>{if(steerBusy)event.preventDefault();else keepSteerDraft();});
-  $('steer-dialog').addEventListener('close',()=>{if(!steerBusy&&!$('steer-open').hidden)$('steer-open').focus();});
+  $('steer-dialog').addEventListener('close',()=>{if(!steerBusy&&!$('steer-dialog').open&&!$('steer-open').hidden)$('steer-open').focus();});
   $('steer-cancel').onclick=()=>{keepSteerDraft();$('steer-dialog').close();};
   $('steer-form').onsubmit=async event=>{
     event.preventDefault();if(steerBusy||!steerTarget)return;
@@ -338,16 +338,31 @@ if (typeof document !== 'undefined') (() => {
     if(steerRequest?.payload!==payload)steerRequest={payload,id:crypto.randomUUID()};
     steerBusy=true;keepSteerDraft();$('steer-error').hidden=true;
     for(const control of $('steer-form').elements)control.disabled=true;
-    $('steer-send').textContent='Sending…';renderTakeover();
+    // Sending should never hold the conversation behind a modal. Keep the draft
+    // and request ID until acceptance, since a lost reply may already be saved.
+    $('steer-dialog').close();$('main').focus({preventScroll:true});
+    $('steer-note').hidden=false;$('steer-note').textContent='Sending your instruction… You can keep reading the conversation.';
+    renderTakeover();
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),15000);
     try{
-      const response=await fetch('/api/fleet/steer',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({...JSON.parse(payload),request_id:steerRequest.id})});
+      const response=await fetch('/api/fleet/steer',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({...JSON.parse(payload),request_id:steerRequest.id})});
       const result=await response.json();
       if(!response.ok||result.ok===false)throw Error(result.error?.message||result.error||'Could not send. Your instruction is preserved; retry when the device reconnects.');
       if(!['queued','delivered'].includes(result.state))throw Error(result.error||'Delivery is unconfirmed. Check the conversation before sending another instruction.');
       steerDrafts.delete(key);steerRequest=null;
-      if(token===generation&&!disposed){$('steer-text').value='';$('steer-dialog').close();$('steer-note').hidden=false;$('steer-note').textContent=result.state==='delivered'?'Instruction delivered to this agent.':({session:'Message queued for this agent.',issue:'Issue requirement saved. Message queued for this agent.',project:'Project instruction saved. Updates queued for agents using project instructions.'})[draft.scope]+' Watch the conversation for delivery confirmation.';}
-    }catch(error){if(token===generation&&!disposed){$('steer-error').textContent=error.message;$('steer-error').hidden=false;}}
-    finally{steerBusy=false;for(const control of $('steer-form').elements)control.disabled=false;$('steer-send').textContent='Send to agent';if(selected&&token===generation&&!disposed){renderTakeover();if(!$('steer-dialog').open)$('steer-open').focus();}}
+      if(token===generation&&!disposed){$('steer-text').value='';$('steer-note').textContent=result.state==='delivered'?'Instruction delivered to this agent.':({session:'Message queued for this agent.',issue:'Issue requirement saved. Message queued for this agent.',project:'Project instruction saved. Updates queued for agents using project instructions.'})[draft.scope]+' Watch the conversation for delivery confirmation.';}
+    }catch(error){
+      if(token===generation&&!disposed){
+        $('steer-note').hidden=true;
+        $('steer-text').value=draft.text;$('steer-form').elements.scope.value=draft.scope;
+        $('steer-error').textContent=controller.signal.aborted?'No confirmation yet. Your instruction is preserved. Retry to check the same submission without sending it twice.':error.message;
+        $('steer-error').hidden=false;
+        for(const control of $('steer-form').elements)control.disabled=false;
+        $('steer-dialog').showModal();$('steer-text').focus();$('steer-text').scrollIntoView({block:'center'});
+      }
+    }
+    finally{clearTimeout(timeout);steerBusy=false;for(const control of $('steer-form').elements)control.disabled=false;if(selected&&!disposed)renderTakeover();}
   };
   $('resume-copy').onclick=async()=>{const command=$('resume-command').textContent;try{await navigator.clipboard.writeText(command);$('copy-status').textContent='Command copied.';}catch{$('copy-status').textContent='Select the command and copy it with your keyboard.';const range=document.createRange();range.selectNodeContents($('resume-command'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}};
   $('refresh').onclick=async()=>{await refresh();if(detail)await loadConversation();};
