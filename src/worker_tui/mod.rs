@@ -20,6 +20,20 @@ pub fn text(value: &Value) -> String {
         .collect()
 }
 
+/// User-facing project identity; storage keys remain available in JSON.
+pub fn project_name(id: &str, snapshot: &Value) -> String {
+    if let Some(project) = snapshot["projects"]
+        .as_array()
+        .and_then(|projects| projects.iter().find(|project| project["id"] == id))
+    {
+        return text(&project["name"]);
+    }
+    let name = id
+        .strip_prefix("named:")
+        .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(id));
+    text(&Value::String(name.into()))
+}
+
 #[derive(Default)]
 pub struct Dashboard {
     pub snapshot: Value,

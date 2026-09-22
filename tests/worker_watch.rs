@@ -50,6 +50,54 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn worker_status_displays_unique_names_while_preserving_storage_keys() {
+    let fixture = Fixture::new("project-names");
+    fixture.add_worker("chosen");
+    let local = "local:machine:/workspace/hey-gh";
+    let db = rusqlite::Connection::open(fixture.0.join("issues.db")).unwrap();
+    db.execute(
+        "INSERT INTO projects(id,name,next_number) VALUES(?1,'hey-gh',1)",
+        [local],
+    )
+    .unwrap();
+    let config = serde_json::to_string(&Settings {
+        projects: vec![local.into()],
+        directories: [(local.into(), "/workspace/hey-gh".into())].into(),
+        ..Settings::default()
+    })
+    .unwrap();
+    db.execute(
+        "UPDATE issue_workers SET config=?1 WHERE id='chosen'",
+        [config],
+    )
+    .unwrap();
+    let output = fixture
+        .command()
+        .args(["--id", "chosen", "status"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let saved: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(saved["config"]["projects"][0], local);
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&fixture.0)
+        .env("HEY_BOSS_ISSUE_DB", fixture.0.join("issues.db"))
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
+        .args(["worker", "--id", "chosen", "status"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let human = String::from_utf8_lossy(&output.stdout);
+    assert!(human.contains("Projects: hey-gh"), "{human}");
+    assert!(
+        human.contains("Checkout: hey-gh · /workspace/hey-gh"),
+        "{human}"
+    );
+    assert!(!human.contains(local), "{human}");
+}
+
+#[test]
 fn watch_streams_fresh_inventory_then_exits_at_count_without_controls() {
     let fixture = Fixture::new("fresh");
     fixture.add_worker("first");

@@ -1606,11 +1606,31 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
             v["store"]["host"].as_str().unwrap_or("local")
         );
     }
-    println!("Projects: {}", v["config"]["projects"]);
+    let projects = v["config"]["projects"]
+        .as_array()
+        .map(|projects| {
+            projects
+                .iter()
+                .map(|project| {
+                    crate::worker_tui::project_name(project.as_str().unwrap_or_default(), v)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    println!(
+        "Projects: {}",
+        if projects.is_empty() {
+            "All projects"
+        } else {
+            &projects
+        }
+    );
     if let Some(directories) = v["config"]["directories"].as_object() {
         for (project, path) in directories {
             println!(
-                "Checkout: {project} · {}",
+                "Checkout: {} · {}",
+                crate::worker_tui::project_name(project, v),
                 path.as_str().unwrap_or_default()
             );
         }

@@ -5,6 +5,8 @@ worktree, notification or explicit project selector with an existing name reuses
 that project's destination instead of creating another project. Quick Issue
 submissions use names. Git origins and local paths remain compatibility storage
 IDs, not separate destinations with the same name.
+Worker dashboards, terminal titles and plain-text status show project names;
+JSON retains the storage keys for compatibility.
 
 The registry rejects duplicate names even when another process writes directly.
 Name reuse is silent: it creates neither another project nor a warning record.
