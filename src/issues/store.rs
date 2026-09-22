@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[path = "agent_launches.rs"]
 mod agent_launches;
 #[path = "chief.rs"]
@@ -40,6 +40,26 @@ use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
 const SCHEMA_VERSION: i64 = 13;
+const CONTENTION_BUDGET: Duration = Duration::from_secs(6);
+
+// Only repeat operations with no externally visible effects: opening a store,
+// reads, and acquiring a transaction before any mutation or file operation.
+fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    loop {
+        match operation() {
+            Err(error) if error.code == "database_busy" => {
+                if Instant::now() >= deadline {
+                    return Err(Error::new(
+                        "database_busy",
+                        "Issue database is busy after bounded retries; retry the command. For guarded edits, read the latest version before retrying. No concurrent edit was overwritten.",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
@@ -103,7 +123,7 @@ fn missing_additive_columns(
 }
 
 fn migration_error(error: Error, path: &Path) -> Error {
-    if error.code == "invalid_input" {
+    if matches!(error.code.as_str(), "invalid_input" | "database_busy") {
         return error;
     }
     Error::new(
@@ -675,6 +695,10 @@ pub struct Store {
 }
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        retry_contention(Instant::now() + CONTENTION_BUDGET, || Self::open_once(path))
+    }
+
+    fn open_once(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::DirBuilder::new()
                 .recursive(true)
@@ -695,7 +719,7 @@ impl Store {
             return Err(Error::invalid("Issue database must be a regular file"));
         }
         let mut db = Connection::open(path)?;
-        db.busy_timeout(Duration::from_secs(10))?;
+        db.busy_timeout(Duration::from_secs(2))?;
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -874,6 +898,17 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        let deadline = Instant::now() + CONTENTION_BUDGET;
+        if r.operation.writes() {
+            self.execute_once(r, deadline)
+        } else {
+            // Failed read transactions are rolled back before retrying with a
+            // fresh WAL snapshot. Never replay mutation or attachment effects.
+            retry_contention(deadline, || self.execute_once(r, deadline))
+        }
+    }
+
+    fn execute_once(&mut self, r: &Request, deadline: Instant) -> Result<Value> {
         validate(r)?;
         if let Operation::ReadPlan { plan } = &r.operation {
             return super::planning::read_plan(plan);
@@ -888,7 +923,9 @@ impl Store {
         let write = r.operation.writes();
         // Existing-project reads use a WAL snapshot and do not compete with
         // worker reservations, event writes, or replica synchronization.
-        let detected = resolve_project(&self.db, &r.project, r.project_override.as_deref())?;
+        let detected = retry_contention(deadline, || {
+            resolve_project(&self.db, &r.project, r.project_override.as_deref())
+        })?;
         let home = r.project_override.is_none() && super::identity::is_home_project(&r.project);
         if write
             && home
@@ -905,18 +942,26 @@ impl Store {
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
         ) && !home
-            && !self.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
-                [&detected.id],
-                |row| row.get::<_, bool>(0),
-            )?;
-        let legacy_runtime = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |row| row.get::<_, bool>(0))?;
+            && !retry_contention(deadline, || {
+                Ok(self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                    [&detected.id],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })?;
+        let legacy_runtime = retry_contention(deadline, || {
+            Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |row| row.get::<_, bool>(0))?)
+        })?;
         let behavior = if write || register || legacy_runtime {
             TransactionBehavior::Immediate
         } else {
             TransactionBehavior::Deferred
         };
-        let tx = self.db.transaction_with_behavior(behavior)?;
+        // BEGIN IMMEDIATE is the safe retry boundary: guards are evaluated only
+        // after this succeeds, and the mutation itself is executed exactly once.
+        let tx = retry_contention(deadline, || {
+            Ok(rusqlite::Transaction::new_unchecked(&self.db, behavior)?)
+        })?;
         if matches!(
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
@@ -1373,11 +1418,14 @@ impl Store {
                 actor.unwrap()
             )?);
         }
-        if (r.operation.number().is_some()
-            || matches!(
-                r.operation,
-                Operation::Create { .. } | Operation::Batch { .. } | Operation::Attachment { .. }
-            ))
+        if write
+            && (r.operation.number().is_some()
+                || matches!(
+                    r.operation,
+                    Operation::Create { .. }
+                        | Operation::Batch { .. }
+                        | Operation::Attachment { .. }
+                ))
             && result["changed"] == true
         {
             tx.execute(
