@@ -22,24 +22,25 @@ impl Fixture {
         command
             .current_dir(&self.0)
             .env("HEY_BOSS_ISSUE_DB", self.0.join("issues.db"))
+            .env("HEY_BOSS_CODEX", self.0.join("missing-codex"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .args(["worker", "--json"]);
         command
     }
     fn add_worker(&self, id: &str) {
-        Store::open(&self.0.join("issues.db"))
-            .unwrap()
-            .register_worker(
-                Some(id),
-                &Settings {
-                    name: format!("QA {id}"),
-                    enabled: true,
-                    ..Settings::default()
-                },
-                "watch-qa",
-            )
-            .unwrap();
+        // Observing workers must not require a Codex installation. Seed saved
+        // worker metadata without registering or launching a real worker.
+        let config = serde_json::to_string(&Settings {
+            name: format!("QA {id}"),
+            enabled: true,
+            ..Settings::default()
+        })
+        .unwrap();
+        rusqlite::Connection::open(self.0.join("issues.db")).unwrap().execute(
+            "INSERT INTO issue_workers(id,kind,config,version,owner_pid,updated_at) VALUES(?1,'cli',?2,1,?3,1)",
+            rusqlite::params![id, config, std::process::id()],
+        ).unwrap();
     }
 }
 impl Drop for Fixture {
