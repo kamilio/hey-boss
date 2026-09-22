@@ -130,6 +130,7 @@ fn change(
         return Ok(false);
     }
     if add {
+        super::super::blockers::validate_subtask(db, &project.id, number, child)?;
         db.execute("INSERT INTO issue_subtasks(project_id,parent_number,child_number,created_at,created_by) VALUES(?1,?2,?3,?4,?5)",params![project.id,number,child,now,actor.id]).map_err(relationship_error)?;
     } else {
         db.execute("DELETE FROM issue_subtasks WHERE project_id=?1 AND parent_number=?2 AND child_number=?3",params![project.id,number,child])?;

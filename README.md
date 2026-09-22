@@ -334,6 +334,25 @@ fields, so new fields need no parallel Markdown renderer. URL fragments select
 resources in these pages and are not sent to an HTTP `.md` endpoint. User-written
 resource bodies remain data, not agent instructions.
 
+## Blocking dependencies
+
+Waiting for unfinished subtasks is shown as **Blocked**. Issue lists and details
+show the linked issues preventing pickup. Add blockers in the issue sidebar, or
+from the CLI:
+
+```sh
+hey-boss issue block 12 --by 8 --by 9 --comment 'Needs both fixes'
+hey-boss issue blocked-by 12 8 9 --if-version 4
+hey-boss issue list --state blocked
+hey-boss issue blocked-by 12  # Remove explicit blocker links
+```
+
+Dependencies must belong to the same project and cannot form cycles. Closing or
+deleting all blockers reopens the dependent issue automatically; reopening or
+restoring a blocker blocks it again. Subtasks remain blocking until every reachable
+unfinished descendant closes. A manual block without linked issues requires
+explicit reopening. Pending agent approval requests also appear as Blocked.
+
 ## Upgrading every machine
 
 Run `hey-boss upgrade` on the Mac to update its CLI, desktop app, canonical agent

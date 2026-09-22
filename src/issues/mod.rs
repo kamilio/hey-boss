@@ -1,6 +1,7 @@
 //! Durable project issues. SQLite transactions arbitrate ownership; Markdown is text.
 mod discovery;
 use store::chief;
+pub(crate) mod blockers;
 mod fleet;
 mod global_settings;
 pub mod identity;
@@ -416,8 +417,18 @@ pub enum Operation {
         comment: Option<String>,
         force: bool,
     },
+    SetBlockers {
+        number: i64,
+        blockers: Vec<i64>,
+        #[serde(default)]
+        if_version: Option<i64>,
+        #[serde(default)]
+        force: bool,
+    },
     Block {
         number: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blockers: Option<Vec<i64>>,
         comment: Option<String>,
         force: bool,
     },
@@ -524,6 +535,7 @@ impl Operation {
             | Self::ResolveComment { number, .. }
             | Self::Close { number, .. }
             | Self::Block { number, .. }
+            | Self::SetBlockers { number, .. }
             | Self::Reopen { number, .. }
             | Self::Delete { number, .. }
             | Self::Restore { number } => Some(*number),

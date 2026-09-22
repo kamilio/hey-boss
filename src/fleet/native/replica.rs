@@ -130,6 +130,9 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         let m = row
             .as_object_mut()
             .ok_or_else(|| invalid("Invalid issue row"))?;
+        let manual = i64::from(m["state"] == "blocked");
+        m.entry("manual_blocked").or_insert(json!(manual));
+        m.entry("blockers").or_insert(json!("[]"));
         m.entry("draft").or_insert(json!(0));
         m.entry("plan").or_insert(Value::Null);
         if m.get("origin").is_none_or(Value::is_null) {
@@ -644,6 +647,20 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             for (k, v) in changed {
                 merged[k] = v.clone();
             }
+            if before["blockers"] != after["blockers"] {
+                let links: Vec<i64> = serde_json::from_str(
+                    merged["blockers"]
+                        .as_str()
+                        .ok_or_else(|| invalid("Invalid blocker links"))?,
+                )?;
+                crate::issues::blockers::validate_links(
+                    db,
+                    merged["project_id"].as_str().unwrap(),
+                    merged["number"].as_i64().unwrap(),
+                    &links,
+                )
+                .map_err(|e| invalid(&e.message))?;
+            }
             merged["version"] = json!(old["version"].as_i64().unwrap() + 1);
             merged["updated_at"] = json!(
                 old["updated_at"]
@@ -737,6 +754,12 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
         }
         receipt["seq"] = change["seq"].clone();
         results.push(receipt);
+    }
+    if changes
+        .iter()
+        .any(|c| matches!(c["table_name"].as_str(), Some("issues" | "issue_subtasks")))
+    {
+        crate::issues::blockers::reconcile_all(db)?;
     }
     // Project the final graph, including earlier receipts in the same batch.
     for (change, receipt) in changes.iter().zip(&mut results) {
@@ -1182,6 +1205,15 @@ pub(super) fn apply_pull(
         }
     }
     apply_graph(db, &pending, payload, acknowledged)?;
+    if payload["tables"]["issues"].is_array()
+        || payload["changes"].as_array().is_some_and(|changes| {
+            changes
+                .iter()
+                .any(|c| matches!(c["table_name"].as_str(), Some("issues" | "issue_subtasks")))
+        })
+    {
+        crate::issues::blockers::reconcile_all(db)?;
+    }
     db.execute("DELETE FROM fleet_allocations", [])?;
     for row in payload["allocations"]
         .as_array()
@@ -1428,6 +1460,30 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn blocker_migration_updates_existing_capture_triggers_before_normalizing() {
+        let main = Fixture::new();
+        main.db.execute_batch("ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
+        main.capture();
+        drop(Store::open(&main.path).unwrap());
+        main.db
+            .execute("UPDATE issues SET blockers='[2]' WHERE number=1", [])
+            .unwrap();
+        let change: String = main.db.query_row("SELECT after_json FROM fleet_outbox WHERE table_name='issues' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        let row: Value = serde_json::from_str(&change).unwrap();
+        assert_eq!(row["blockers"], "[2]");
+        assert_eq!(row["manual_blocked"], 0);
+        assert_eq!(row["title"], "Original");
+        main.db
+            .execute("UPDATE issues SET manual_blocked=1 WHERE number=1", [])
+            .unwrap();
+        let change: String = main.db.query_row("SELECT after_json FROM fleet_outbox WHERE table_name='issues' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&change).unwrap()["manual_blocked"],
+            1
+        );
+    }
 
     #[test]
     fn snapshots_preserve_legacy_project_rows_and_the_supervisors_unique_name_choice() {
@@ -2150,6 +2206,62 @@ mod tests {
             f.db.query_row("SELECT syncing FROM fleet_meta", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn blocker_links_and_automatic_lifecycle_converge_across_snapshots() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,blockers) VALUES('named:Native fleet',2,'Dependent','','open','human:fixture',0,0,1,'[]',2,'[1]');").unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT state,blockers FROM issues WHERE number=2",
+                &[]
+            )
+            .unwrap()[0],
+            json!({"state":"blocked","blockers":"[1]"})
+        );
+        main.db
+            .execute("UPDATE issues SET state='closed' WHERE number=1", [])
+            .unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT state FROM issues WHERE number=2", &[]).unwrap()[0]["state"],
+            "open"
+        );
+        main.db
+            .execute("UPDATE issues SET state='open' WHERE number=1", [])
+            .unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT state FROM issues WHERE number=2", &[]).unwrap()[0]["state"],
+            "blocked"
         );
     }
 }

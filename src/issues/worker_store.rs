@@ -500,7 +500,8 @@ impl Store {
                 }
             }
         }
-        if exhausted
+        let approval_hold = summary.starts_with("Codex needs input or approval:");
+        if (exhausted || approval_hold)
             && issue.state == "open"
             && issue.deleted_at.is_none()
             && (own || issue.assignee.is_none())
@@ -515,14 +516,25 @@ impl Store {
                 params![job.actor.id, serde_json::to_string(&job.actor)?, now()],
             )?;
             mutate(
-                &tx, &job.project, &job.actor,
+                &tx,
+                &job.project,
+                &job.actor,
                 &Operation::Block {
+                    blockers: None,
                     number: job.number(),
-                    comment: Some("Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup.".into()),
+                    comment: Some(if approval_hold {
+                        format!(
+                            "{summary}\n\nResolve this request, then reopen the issue to resume pickup."
+                        )
+                    } else {
+                        "Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup.".into()
+                    }),
                     force: false,
-                }, now(),
+                },
+                now(),
             )?;
         }
+        super::super::blockers::reconcile(&tx, &job.project.id, Some(&job.actor.id), now())?;
         tx.execute(
             "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
             params![job.id, state, summary, now()],
@@ -1354,5 +1366,24 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn approval_hold_blocks_the_issue_on_the_first_attempt() {
+        let mut f = HandoffFixture::new(true);
+        f.store
+            .worker_finish(
+                &f.job,
+                "blocked",
+                "Codex needs input or approval: Delete the temporary worktree?",
+            )
+            .unwrap();
+        assert_eq!(f.issue().state, "blocked");
+        assert!(f.issue().assignee.is_none());
+        f.apply(Operation::Reopen {
+            number: 1,
+            if_version: None,
+        });
+        assert_eq!(f.issue().state, "open");
     }
 }

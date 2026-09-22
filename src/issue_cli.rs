@@ -355,8 +355,20 @@ enum Action {
     },
     /// Block an issue and clear its claim. Use rarely: make every effort to resolve
     /// it first, ask the user for help via hey-boss ask, and describe the blocker.
+    /// Set the issues blocking this issue; omit blockers to remove all links.
+    BlockedBy {
+        number: i64,
+        blockers: Vec<i64>,
+        #[arg(long)]
+        if_version: Option<i64>,
+        #[arg(long)]
+        force: bool,
+    },
     Block {
         number: i64,
+        /// Issue that must close first; repeat for multiple blockers.
+        #[arg(long = "by")]
+        blockers: Vec<i64>,
         #[arg(long)]
         comment: Option<String>,
         #[arg(long)]
@@ -834,8 +846,20 @@ impl Options {
                 comment: comment.clone(),
                 force: *force,
             },
+            Action::BlockedBy {
+                number,
+                blockers,
+                if_version,
+                force,
+            } => Operation::SetBlockers {
+                number: *number,
+                blockers: blockers.clone(),
+                if_version: *if_version,
+                force: *force,
+            },
             Action::Block {
                 number,
+                blockers,
                 comment,
                 force,
             } => {
@@ -844,6 +868,11 @@ impl Options {
                 );
                 Operation::Block {
                     number: *number,
+                    blockers: if blockers.is_empty() {
+                        None
+                    } else {
+                        Some(blockers.clone())
+                    },
                     comment: comment.clone(),
                     force: *force,
                 }
@@ -1486,6 +1515,16 @@ fn print_issue_line(issue: &Value) {
             line(&status["level"]),
             line(&status["comment"])
         );
+    }
+    if let Some(blockers) = issue["blocked_by"].as_array() {
+        for blocker in blockers {
+            println!(
+                "  Blocked by: #{} {} [{}]",
+                blocker["number"],
+                line(&blocker["title"]),
+                line(&blocker["state"])
+            );
+        }
     }
     if let Some(number) = issue["parent"]["number"].as_i64() {
         println!(
