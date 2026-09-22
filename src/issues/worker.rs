@@ -1566,7 +1566,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
     }
     if let Some(queue) = v["queue"].as_object() {
         println!(
-            "Queue issues: {} open · {} assigned · {} eligible · {} excluded by tags · {} waiting",
+            "Queue issues: {} open · {} assigned · {} eligible · {} excluded by tags · {} reserved or held for pickup",
             queue["open"],
             queue["assigned"],
             queue["eligible"],
@@ -1575,7 +1575,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         );
         if queue["waiting"].as_i64().unwrap_or(0) > 0 {
             println!(
-                "Waiting issues have active reservations, unfinished subtasks, retry holds or fleet allocation requirements."
+                "Pickup holds are active reservations, retry delays or fleet allocation requirements. Unfinished dependencies appear as Blocked in issue lists."
             );
         }
     }
