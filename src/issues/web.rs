@@ -544,6 +544,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/tags.js"),
             )),
+            "/blockers.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/blockers.js"),
+            )),
             "/subtasks.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/subtasks.js"),
