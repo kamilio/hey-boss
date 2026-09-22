@@ -2,14 +2,72 @@
 use super::*;
 use crate::issues::worker::Job;
 
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_steering_migration_preserves_queued_messages_and_is_repeatable() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE worker_runs(id TEXT PRIMARY KEY);
+            INSERT INTO worker_runs VALUES('run');
+            CREATE TABLE agent_steering(request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES worker_runs(id),scope TEXT NOT NULL,text TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',error TEXT,created_at INTEGER NOT NULL);
+            INSERT INTO agent_steering VALUES('message','run','issue','Keep this instruction','queued',NULL,123);").unwrap();
+        migrate(&db).unwrap();
+        migrate(&db).unwrap();
+        let row = db.query_row("SELECT text,state,created_at,issue_body FROM agent_steering WHERE request_id='message'", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,Option<String>>(3)?))).unwrap();
+        assert_eq!(
+            row,
+            ("Keep this instruction".into(), "queued".into(), 123, None)
+        );
+        db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,created_at,issue_body) VALUES('new','run','issue','New instruction',124,'Saved issue body')", []).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT issue_body FROM agent_steering WHERE request_id='new'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "Saved issue body"
+        );
+        let store = Store {
+            db,
+            attachment_root: std::env::temp_dir(),
+        };
+        let queued = store.worker_steering("run").unwrap().unwrap();
+        assert_eq!(queued["request_id"], "message");
+        assert_eq!(queued["scope"], "issue");
+        assert_eq!(queued["text"], "Keep this instruction");
+        assert!(queued["issue_body"].is_null());
+        store
+            .worker_steering_result("message", "delivered", None)
+            .unwrap();
+        assert_eq!(
+            store.worker_steering("run").unwrap().unwrap()["issue_body"],
+            "Saved issue body"
+        );
+    }
+}
+
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='agent_steering' AND type='table')",
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_steering') WHERE name='issue_body')",
         [],
         |r| r.get::<_, bool>(0),
     )? {
-        db.execute_batch("CREATE TABLE IF NOT EXISTS agent_steering(request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES worker_runs(id),scope TEXT NOT NULL,text TEXT NOT NULL,issue_body TEXT,state TEXT NOT NULL DEFAULT 'queued',error TEXT,created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS agent_steering_pending ON agent_steering(run_id,created_at) WHERE state='queued'; CREATE INDEX IF NOT EXISTS agent_steering_history ON agent_steering(run_id,created_at);")?;
+        return Ok(());
     }
+    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS agent_steering(request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES worker_runs(id),scope TEXT NOT NULL,text TEXT NOT NULL,issue_body TEXT,state TEXT NOT NULL DEFAULT 'queued',error TEXT,created_at INTEGER NOT NULL);")?;
+    if !tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_steering') WHERE name='issue_body')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        tx.execute_batch("ALTER TABLE agent_steering ADD COLUMN issue_body TEXT;")?;
+    }
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS agent_steering_pending ON agent_steering(run_id,created_at) WHERE state='queued'; CREATE INDEX IF NOT EXISTS agent_steering_history ON agent_steering(run_id,created_at);")?;
+    tx.commit()?;
     Ok(())
 }
 impl Store {
