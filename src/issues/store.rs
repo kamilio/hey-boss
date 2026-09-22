@@ -834,6 +834,7 @@ impl Store {
         steering::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
+        project_names::reconcile_git_metadata(&db)?;
         super::blockers::migrate(&mut db)?;
         Ok(Self {
             db,
@@ -1020,10 +1021,10 @@ impl Store {
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
                     "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                // Older discovery registered temporary test/agent directories.
+                // Older discovery registered temporary and Git metadata directories.
                 // Omit only empty entries, without deleting data or changing the
                 // user's visibility choices. Indexed lookups run only for local
-                // temporary identities; repository listings need no filesystem IO.
+                // excluded local identities; repository listings need no filesystem IO.
                 let mut saved_work = tx.prepare(
                     "SELECT
                     EXISTS(SELECT 1 FROM issues WHERE project_id=?1)
@@ -1036,7 +1037,8 @@ impl Store {
                 let warnings = project_names::warnings(&tx)?;
                 for mut p in projects {
                     let id = p["id"].as_str().unwrap();
-                    if !super::identity::is_temporary_project(id)
+                    if !(super::identity::is_temporary_project(id)
+                        || super::identity::is_git_metadata_project(id))
                         || saved_work.query_row([id], |r| r.get::<_, bool>(0))?
                     {
                         p["name_collisions"] = json!(
@@ -1458,6 +1460,7 @@ impl Store {
         for (project, activity) in projects {
             if super::identity::is_home_project(project)
                 || super::identity::is_temporary_project(&project.id)
+                || super::identity::is_git_metadata_project(&project.id)
             {
                 continue;
             }

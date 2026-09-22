@@ -62,6 +62,126 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn automatic_discovery_rejects_git_metadata_before_registering_the_workspace() {
+    let f = Fixture::new();
+    let mut store = Store::open(&f.db()).unwrap();
+    for path in [
+        "/home/dev/workspace/hey-gh/.git",
+        "/home/dev/workspace/hey-gh/.git/worktrees/topic",
+    ] {
+        store
+            .discover_projects(&[(
+                Project {
+                    id: format!("local:remote:{path}"),
+                    name: "hey-gh".into(),
+                },
+                100,
+            )])
+            .unwrap();
+    }
+    assert_eq!(
+        Connection::open(f.db())
+            .unwrap()
+            .query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let real = Project {
+        id: "local:remote:/home/dev/workspace/hey-gh".into(),
+        name: "hey-gh".into(),
+    };
+    store.discover_projects(&[(real.clone(), 100)]).unwrap();
+    assert_eq!(f.run("hey-gh", &["projects"])["projects"][0]["id"], real.id);
+}
+
+#[test]
+fn legacy_empty_git_metadata_releases_its_name_but_preserves_saved_work() {
+    let f = Fixture::new();
+    let empty = "local:remote:/home/dev/workspace/hey-gh/.git";
+    drop(Store::open(&f.db()).unwrap());
+    Connection::open(f.db())
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES(?1,'hey-gh',1)",
+            [empty],
+        )
+        .unwrap();
+    assert!(
+        !f.run("Atlas", &["projects", "--all"])["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == empty)
+    );
+    f.run(
+        "local:remote:/home/dev/workspace/hey-gh",
+        &["create", "--title", "Real workspace"],
+    );
+    assert_eq!(
+        f.run("hey-gh", &["view", "1"])["issue"]["title"],
+        "Real workspace"
+    );
+    assert_eq!(
+        Connection::open(f.db())
+            .unwrap()
+            .query_row("SELECT count(*) FROM projects WHERE id=?1", [empty], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+
+    for (path, args) in [
+        ("issue", vec!["create", "--title", "Saved issue"]),
+        (
+            "artifact",
+            vec![
+                "artifact",
+                "create",
+                "--title",
+                "Saved artifact",
+                "--body",
+                "Keep this",
+            ],
+        ),
+        ("map", vec!["mm", "add", "Saved map"]),
+        (
+            "settings",
+            vec!["settings", "set", "--prompt", "Saved instructions"],
+        ),
+        ("deleted", vec!["create", "--title", "Restorable"]),
+    ] {
+        let id = format!("local:remote:/home/dev/.git/{path}");
+        f.run(&id, &args);
+        if path == "deleted" {
+            f.run(&id, &["delete", "1"]);
+        }
+        // Full IDs remain readable even if another legacy project owns the name.
+        assert!(
+            Connection::open(f.db())
+                .unwrap()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                    [&id],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        assert!(
+            f.run("Atlas", &["projects", "--all"])["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == id)
+        );
+    }
+    assert_eq!(
+        f.run("local:remote:/home/dev/.git/issue", &["view", "1"])["issue"]["title"],
+        "Saved issue"
+    );
+}
+
+#[test]
 fn automatic_discovery_does_not_register_temporary_agent_folders() {
     let f = Fixture::new();
     let mut store = Store::open(&f.db()).unwrap();

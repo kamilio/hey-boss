@@ -106,11 +106,22 @@ pub(crate) fn is_temporary_project(id: &str) -> bool {
     directory.starts_with(std::env::temp_dir())
 }
 
+pub(crate) fn is_git_metadata_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == ".git")
+}
+
+pub(crate) fn is_git_metadata_project(id: &str) -> bool {
+    id.strip_prefix("local:")
+        .and_then(|id| id.split_once(':'))
+        .is_some_and(|(_, path)| is_git_metadata_path(Path::new(path)))
+}
+
 pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> Project {
     let id = git
         .origin
         .clone()
-        .unwrap_or_else(|| format!("local:{machine}:{}", git.common_dir));
+        .unwrap_or_else(|| format!("local:{machine}:{}", git.repository_root));
     let name = git
         .origin
         .as_deref()
@@ -280,6 +291,25 @@ pub fn presence(actor: &Actor, local_machine: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn git_metadata_is_an_exact_local_path_component() {
+        for path in [
+            "/workspace/.git",
+            "/workspace/.git/objects",
+            "/workspace/.git/worktrees/topic",
+        ] {
+            assert!(is_git_metadata_project(&format!("local:remote:{path}")));
+        }
+        for id in [
+            "local:remote:/workspace/project",
+            "local:remote:/workspace/.github",
+            "local:remote:/workspace/repo.git",
+            "named:.git",
+            "github.com/example/.git",
+        ] {
+            assert!(!is_git_metadata_project(id));
+        }
+    }
     #[test]
     fn home_projects_are_ignored_across_machines_but_checkouts_are_kept() {
         for path in ["/home/remote", "/Users/remote", "/root"] {
