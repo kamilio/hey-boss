@@ -259,6 +259,11 @@ by default. `worker --worktree` selects worktrees only when the project allows t
 disabling permission prevents worktree use for new tasks, including saved workers.
 `--prs` / `--no-prs` override project delivery choices. Worktree mode
 instructs the agent to create a dedicated Git worktree before editing.
+Prompts can use `{{worktree_name}}` and `{{worktree_path}}` for a deterministic
+branch/directory name and its sibling checkout path. Names use the project,
+up to 15 characters of the title slug, and issue number. The default prompt
+reuses the same worktree and branch on retry or resume. Renaming a project or
+issue changes the suggested name.
 Without PRs, delivery commits and pushes main when a remote exists (commit only
 otherwise); PR mode opens and attaches every PR. `{{commit_instruction}}` is
 retired and stripped from legacy shared templates. A bare `/goal` uses default

@@ -365,7 +365,7 @@ the agent to create and use a worktree before editing; the worker itself stays
 in its configured checkout.
 
 Template variables include `{{issue_command}}`, `{{title}}`, `{{body}}`,
-`{{number}}`, and `{{project}}`, in shared and branch prompts. The retired
+`{{number}}`, `{{project}}`, `{{worktree_name}}`, and `{{worktree_path}}`, in shared and branch prompts. Worktree names use `<project>-<title-slug>-<number>`; the title slug is at most 15 ASCII characters, with punctuation replaced by dashes. The path is beside the worker's configured checkout, and the branch matches the directory name. The default worktree prompt tells agents to reuse an existing worktree and branch on retry or resume. Custom prompts can use either variable. The name is deterministic for the same project name, issue title, and number; renaming a project or issue changes the suggested name. The retired
 `{{commit_instruction}}` variable is removed from old saved shared prompts;
 delivery instructions are always assembled from the selected branch.
 Prefix shared instructions with `/goal` to use a native Codex goal. A bare

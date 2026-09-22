@@ -2333,6 +2333,33 @@ fn worker_worktree_choice_requires_project_permission() {
                 .unwrap()
                 .contains(expected)
         );
+        if project_enabled && flag == "--worktree" {
+            let text = turn["params"]["input"][0]["text"].as_str().unwrap();
+            assert!(text.contains("Reuse that worktree and branch"), "{text}");
+            assert!(!text.contains("{{worktree_"), "{text}");
+            assert!(
+                text.contains("branch `worker-fixture-fixture-issue-1`"),
+                "{text}"
+            );
+            assert!(
+                text.contains(
+                    f.root
+                        .parent()
+                        .unwrap()
+                        .join("worker-fixture-fixture-issue-1")
+                        .to_str()
+                        .unwrap()
+                ),
+                "{text}"
+            );
+            let preview = f.cli(&["settings", "show"]);
+            assert!(
+                preview["prompt_defaults"]["worktree"]
+                    .as_str()
+                    .unwrap()
+                    .contains("{{worktree_path}}")
+            );
+        }
         worker.stop();
     }
 }
