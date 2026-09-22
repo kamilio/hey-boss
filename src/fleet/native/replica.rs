@@ -158,21 +158,19 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         m.entry("chief_enabled").or_insert(json!(0));
         m.entry("chief_prompt").or_insert(Value::Null);
     }
-    if table == "issue_pull_requests" {
-        if row.get("purpose").is_none() {
-            // Older peers cannot classify links; omitted metadata must not
-            // reset a purpose already known by this replica.
-            let existing = current_row(db, table, &row)?;
-            row.as_object_mut()
-                .ok_or_else(|| invalid("Invalid PR row"))?
-                .insert(
-                    "purpose".into(),
-                    existing
-                        .get("purpose")
-                        .cloned()
-                        .unwrap_or(json!("unspecified")),
-                );
-        }
+    if table == "issue_pull_requests" && row.get("purpose").is_none() {
+        // Older peers cannot classify links; omitted metadata must not
+        // reset a purpose already known by this replica.
+        let existing = current_row(db, table, &row)?;
+        row.as_object_mut()
+            .ok_or_else(|| invalid("Invalid PR row"))?
+            .insert(
+                "purpose".into(),
+                existing
+                    .get("purpose")
+                    .cloned()
+                    .unwrap_or(json!("unspecified")),
+            );
     }
     let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
         .iter()
