@@ -17,30 +17,34 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  app.get('/api/agent-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects()}));
  app.get('/api/fleet/status',auth,(req,res)=>{if(!snapshot)return res.status(503).json({error:'Connect your supervisor to see agents.'});const value=filtered();if(now()-seen>15000)for(const m of value.machines)m.state='disconnected';res.json(value);});
  function requestAgent(req,res,action){
-  const input=action==='conversation'?req.query:req.body;
+  const input=['conversation','assignment'].includes(action)?req.query:req.body;
+  const issue=Number(input.issue),agent=input.agent;
   const {scope,text,request_id}=input;
   if(action==='steer'&&(!['session','issue','project'].includes(scope)||typeof text!=='string'||!text.trim()||Buffer.byteLength(text)>32000||typeof request_id!=='string'||!/^[a-zA-Z0-9_-]{1,128}$/.test(request_id)))throw new HubError(400,'Choose a scope and enter an instruction of up to 32000 bytes.');
   const cursor=Number(input.cursor??0),before=input.before==null?null:Number(input.before),at=input.at==null?null:Number(input.at),latest=input.latest==='1',host=input.host,run=input.run;
-  if((before!==null&&(!Number.isSafeInteger(before)||before<0))||(req.query.latest!=null&&!['0','1'].includes(req.query.latest))||!Number.isSafeInteger(cursor)||cursor<0||typeof host!=='string'||typeof run!=='string')throw new HubError(400,'Invalid conversation request');
+  if(action==='assignment'){
+   if(!Number.isSafeInteger(issue)||issue<=0||typeof agent!=='string'||!agent.startsWith('codex:')||agent.length>128)throw new HubError(400,'Invalid assignment request');
+  }else if((before!==null&&(!Number.isSafeInteger(before)||before<0))||(req.query.latest!=null&&!['0','1'].includes(req.query.latest))||!Number.isSafeInteger(cursor)||cursor<0||typeof host!=='string'||typeof run!=='string')throw new HubError(400,'Invalid conversation request');
   if(at!==null&&(!Number.isSafeInteger(at)||at<0))throw new HubError(400,'Invalid invocation cursor');
   const entry=filtered().machines.find(m=>m.host===host||m.hostname===host)?.workers.flatMap(w=>w.runs).find(r=>r.id===run);
   // Historical origin references are validated by the authoritative supervisor.
-  const project=entry?.project_id||(action==='conversation'&&visible().has(input.project)?input.project:null);
+  const project=entry?.project_id||(['conversation','assignment'].includes(action)&&visible().has(input.project)?input.project:null);
   if(!project)throw new HubError(404,'This conversation is no longer available');
   if(now()-seen>15000)throw new HubError(503,'Connect your supervisor to load this conversation.');
   if(pending.size>=32||[...pending.values()].filter(p=>p.device===req.device.id).length>=2)throw new HubError(429,'Wait for your current conversation to load.');
   const id=randomUUID();const timer=setTimeout(()=>{pending.delete(id);if(!res.destroyed)res.status(504).json({error:'The device did not respond. Try again when it reconnects.'});},20000);timer.unref();
-  pending.set(id,{id,action,host,run,cursor,before,latest,at,project,scope,text,request_id,device:req.device.id,res,timer});
+  pending.set(id,{id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,device:req.device.id,res,timer});
   res.on('close',()=>{clearTimeout(timer);pending.delete(id);});
  }
  app.get('/api/fleet/conversation',auth,(req,res)=>requestAgent(req,res,'conversation'));
+ app.get('/api/fleet/assignment',auth,(req,res)=>requestAgent(req,res,'assignment'));
  app.post('/api/fleet/takeover',auth,(req,res)=>requestAgent(req,res,'takeover'));
  app.post('/api/fleet/steer',auth,(req,res)=>requestAgent(req,res,'steer'));
  app.post('/api/bridge/agents/status',bridge,(req,res)=>{
   if(!Array.isArray(req.body.machines)||req.body.machines.length>100)throw new HubError(400,'Invalid agent snapshot');
   snapshot=req.body;seen=now();res.json({ok:true});
  });
- app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,at,project,scope,text,request_id})=>({id,action,host,run,cursor,before,latest,at,project,scope,text,request_id}))}));
+ app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id})=>({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id}))}));
  app.post('/api/bridge/agents/:id/result',bridge,(req,res)=>{
   const request=pending.get(req.params.id);
   if(request){
