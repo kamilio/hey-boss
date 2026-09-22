@@ -365,6 +365,11 @@ pub enum Operation {
         remove_labels: Vec<String>,
         if_version: Option<i64>,
     },
+    SetYolo {
+        number: i64,
+        enabled: bool,
+        if_version: i64,
+    },
     BindPlan {
         number: i64,
         plan: planning::Plan,
@@ -523,6 +528,7 @@ impl Operation {
             | Self::History { number, .. }
             | Self::Comments { number, .. }
             | Self::Edit { number, .. }
+            | Self::SetYolo { number, .. }
             | Self::BindPlan { number, .. }
             | Self::Undraft { number }
             | Self::Claim { number, .. }

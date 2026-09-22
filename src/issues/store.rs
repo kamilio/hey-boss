@@ -392,6 +392,53 @@ fn validate(r: &Request) -> Result<()> {
     if r.operation.number().is_some_and(|n| n <= 0) {
         return Err(Error::invalid("Issue number must be positive"));
     }
+    let reserved = |values: &[String]| -> Result<()> {
+        if values
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("yolo"))
+        {
+            return Err(Error::new(
+                "forbidden",
+                "YOLO mode can only be changed by Boss using the issue's Agent permissions control in the web UI",
+            ));
+        }
+        Ok(())
+    };
+    match &r.operation {
+        Operation::Create { labels, .. } | Operation::CreateSubtask { labels, .. } => {
+            reserved(labels)?
+        }
+        Operation::Edit {
+            add_labels,
+            remove_labels,
+            ..
+        } => {
+            reserved(add_labels)?;
+            reserved(remove_labels)?;
+        }
+        Operation::Batch { edits, .. } => {
+            for edit in edits {
+                reserved(&edit.add_labels)?;
+                reserved(&edit.remove_labels)?;
+            }
+        }
+        Operation::SetYolo { if_version, .. } => {
+            if !r.actor.as_ref().is_some_and(|actor| {
+                actor.id == "human:boss"
+                    && actor.kind == "human"
+                    && matches!(actor.source.as_str(), "web interface" | "phone")
+            }) {
+                return Err(Error::new(
+                    "forbidden",
+                    "Only Boss in the web UI can change YOLO mode",
+                ));
+            }
+            if *if_version < 1 {
+                return Err(Error::invalid("Issue version must be positive"));
+            }
+        }
+        _ => {}
+    }
     match &r.operation {
         Operation::Batch { edits, dry_run } => {
             batch::validate(edits)?;
@@ -1566,6 +1613,29 @@ fn mutate(
     let mut data = json!({});
     let mut comment_id = None;
     match operation {
+        Operation::SetYolo {
+            enabled,
+            if_version,
+            ..
+        } => {
+            if *if_version != issue.version {
+                return Err(Error::conflict(format!(
+                    "Issue changed; current version is {}. Refresh and retry.",
+                    issue.version
+                )));
+            }
+            let was_enabled = issue.labels.iter().any(|label| label == "yolo");
+            if was_enabled != *enabled {
+                issue.labels.retain(|label| label != "yolo");
+                if *enabled {
+                    issue.labels.push("yolo".into());
+                }
+                issue.labels.sort();
+                labels(&issue.labels)?;
+                action = "edited";
+                data = json!({"before":{"labels":before["labels"]},"after":{"labels":issue.labels},"yolo":enabled});
+            }
+        }
         Operation::Edit {
             draft,
             title,

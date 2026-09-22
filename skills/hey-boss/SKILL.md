@@ -96,6 +96,12 @@ Use `issue create --title TITLE --draft` for a persisted draft without files or 
 
 Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
 
+The reserved `yolo` label is controlled only by Boss in the web UI's **Agent
+permissions** section. Do not add/remove it with CLI labels or batch triage.
+YOLO grants full access without sandboxing or approval prompts to the next worker
+attempt, including resumed sessions. Boss can disable it to restore Auto on the
+next attempt; running agents keep their current permissions.
+
 While you own an issue, publish a short status after claiming, when the next step
 or risk changes, and at least every ten minutes during active work:
 `hey-boss issue status NUMBER green --comment 'The fix passes tests. Checking the phone layout next.'`

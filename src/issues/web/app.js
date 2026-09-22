@@ -120,6 +120,7 @@ function labelTone(name) {
   );
 }
 function label(name) {
+  if (name === "yolo") return `<span class="label yolo-badge" title="YOLO: no sandbox or approval prompts on the next agent attempt">${icon("bolt")}YOLO</span>`;
   if (["task:plan", "task:research"].includes(name)) return `<span class="label task-kind-badge" title="Produces linked artifacts">Plan</span>`;
   return `<span class="label tone-${labelTone(name)}" title="${esc(name)}">${esc(name)}</span>`;
 }
@@ -1314,7 +1315,7 @@ function openEditor(issue = null, options = {}) {
     toast(error.message, true);
   });
   editorTags.set(
-    taskLabels.filter(label => !["task:plan", "task:research"].includes(label)),
+    taskLabels.filter(label => !["task:plan", "task:research", "yolo"].includes(label)),
   );
   $("#editor-submit").innerHTML =
     `${issue ? "Save changes" : options.parent ? "Create subtask" : "Create issue"}${icon("arrow-right")}`;
@@ -1463,7 +1464,7 @@ $("#editor-form").onsubmit = async (e) => {
         title: values.title,
         body: values.body,
         add_labels: labels.filter((l) => !ctx.original.labels.includes(l)),
-        remove_labels: ctx.original.labels.filter((l) => !labels.includes(l)),
+        remove_labels: ctx.original.labels.filter((l) => l !== "yolo" && !labels.includes(l)),
         if_version: ctx.version,
         ...(values.draft !== ctx.original.draft ? {draft: values.draft} : {}),
       }
