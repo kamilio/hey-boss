@@ -159,10 +159,20 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         m.entry("chief_prompt").or_insert(Value::Null);
     }
     if table == "issue_pull_requests" {
-        row.as_object_mut()
-            .ok_or_else(|| invalid("Invalid PR row"))?
-            .entry("purpose")
-            .or_insert(json!("unspecified"));
+        if row.get("purpose").is_none() {
+            // Older peers cannot classify links; omitted metadata must not
+            // reset a purpose already known by this replica.
+            let existing = current_row(db, table, &row)?;
+            row.as_object_mut()
+                .ok_or_else(|| invalid("Invalid PR row"))?
+                .insert(
+                    "purpose".into(),
+                    existing
+                        .get("purpose")
+                        .cloned()
+                        .unwrap_or(json!("unspecified")),
+                );
+        }
     }
     let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
         .iter()
@@ -1891,6 +1901,104 @@ mod tests {
                 3
             );
         }
+    }
+
+    #[test]
+    fn upgraded_pr_capture_preserves_classification_and_history_across_later_syncs() {
+        for partial in [false, true] {
+            let main = Fixture::new();
+            main.capture();
+            main.db
+                .execute(
+                    "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                    [],
+                )
+                .unwrap();
+            main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123)", []).unwrap();
+            let agent = Fixture::new();
+            agent
+                .db
+                .execute_batch("ALTER TABLE issue_pull_requests DROP COLUMN purpose")
+                .unwrap();
+            install_capture(&agent.db, "agent", "agent").unwrap();
+            if partial {
+                agent.db.execute_batch("ALTER TABLE issue_pull_requests ADD COLUMN purpose TEXT NOT NULL DEFAULT 'unspecified'").unwrap();
+            }
+            let mut store = Store::open(&agent.path).unwrap();
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &[],
+            )
+            .unwrap();
+            let mut request: Request = serde_json::from_value(json!({
+                "version":1,"project":{"id":"named:Native fleet","name":"Native fleet"},
+                "project_override":null,"request_id":null,
+                "actor":{"id":"human:fixture","kind":"human","session_id":null,"machine":"agent","host":"fixture","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},
+                "operation":{"action":"classify_pull_request","number":1,"url":"https://github.com/example/repo/pull/1","purpose":"fix"}
+            })).unwrap();
+            store.execute(&request).unwrap();
+            let changes = journal(&agent.db, 0).unwrap();
+            assert!(
+                changes
+                    .iter()
+                    .any(|c| c["table_name"] == "issue_pull_requests"),
+                "An upgraded trigger must capture a purpose-only update"
+            );
+            let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+            assert!(receipts.iter().all(|r| r["state"] == "applied"));
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &receipts,
+            )
+            .unwrap();
+            agent
+                .db
+                .execute("UPDATE issues SET title='Unrelated edit'", [])
+                .unwrap();
+            let receipts =
+                accept_changes(&main.db, "agent", &journal(&agent.db, 0).unwrap()).unwrap();
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &receipts,
+            )
+            .unwrap();
+            for db in [&main.db, &agent.db] {
+                assert_eq!(
+                    rows(db, "SELECT purpose FROM issue_pull_requests", &[]).unwrap()[0]["purpose"],
+                    "fix"
+                );
+                assert_eq!(rows(db, "SELECT json_extract(data,'$.purpose') AS purpose FROM events WHERE action='pr_classified'", &[]).unwrap()[0]["purpose"], "fix");
+            }
+            request.operation =
+                serde_json::from_value(json!({"action":"pull_requests","number":1})).unwrap();
+            assert_eq!(
+                store.execute(&request).unwrap()["pull_requests"][0]["purpose"],
+                "fix"
+            );
+            request.operation =
+                serde_json::from_value(json!({"action":"view","number":1})).unwrap();
+            assert_eq!(
+                store.execute(&request).unwrap()["issue"]["pull_requests"][0]["purpose"],
+                "fix"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_pr_snapshot_does_not_erase_a_known_purpose() {
+        let f = Fixture::new();
+        f.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'supporting-evidence')", []).unwrap();
+        put_row(&f.db, "issue_pull_requests", &json!({"project_id":"named:Native fleet","issue_number":1,"url":"https://github.com/example/repo/pull/1","added_by":"human:fixture","created_at":123})).unwrap();
+        assert_eq!(
+            rows(&f.db, "SELECT purpose FROM issue_pull_requests", &[]).unwrap()[0]["purpose"],
+            "supporting-evidence"
+        );
     }
 
     #[test]

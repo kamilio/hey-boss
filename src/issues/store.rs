@@ -710,9 +710,10 @@ impl Store {
         // Healthy opens never take a writer lock. Recheck under the lock before
         // repairing, since another startup may have completed the migration.
         let needs_repair = version >= 10
-            && !missing_additive_columns(&db)
+            && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
-                .is_empty();
+                .is_empty()
+                || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?);
         if version < SCHEMA_VERSION || needs_repair {
             db.pragma_update(None, "foreign_keys", false)?;
             let mut migrate = || -> Result<()> {
@@ -789,6 +790,7 @@ impl Store {
                 if version > 0 && version < 13 {
                     migrate_blocked(&tx)?;
                 }
+                registry::repair_pr_capture(&tx)?;
                 tx.execute_batch(include_str!("subtask-readiness.sql"))?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.commit()?;
