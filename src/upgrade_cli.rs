@@ -214,7 +214,8 @@ fn build_id(root: &Path) -> io::Result<String> {
     for name in INPUTS {
         collect(root, &root.join(name), &mut files)?;
     }
-    files.sort();
+    // build.rs sorts complete relative names, rather than Path components.
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
     let mut value = 0xcbf29ce484222325u64;
     for file in files {
         for byte in file
@@ -791,6 +792,13 @@ pub fn run(options: &Options) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_identity_matches_compiler_identity() {
+        assert_eq!(
+            build_id(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap(),
+            env!("HEY_BOSS_BUILD_ID")
+        );
+    }
     use std::sync::mpsc;
 
     fn source(commit: &str, ancestors: &[&str], kind: &str) -> Source {
