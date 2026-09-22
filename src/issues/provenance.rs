@@ -73,15 +73,13 @@ pub(crate) fn referenced(db: &Connection, host: &str, run: &str) -> Result<Optio
             .optional()?
             .flatten(),
     };
-    if let Some(session) = session {
-        if let Some(assigned) = assigned_session(db, &session)? {
-            if assigned["id"] == run
-                && (assigned["host"] == host
-                    || (host == "local" && assigned["machine"] == super::identity::machine()?))
-            {
-                return Ok(Some(assigned));
-            }
-        }
+    if let Some(session) = session
+        && let Some(assigned) = assigned_session(db, &session)?
+        && assigned["id"] == run
+        && (assigned["host"] == host
+            || (host == "local" && assigned["machine"] == super::identity::machine()?))
+    {
+        return Ok(Some(assigned));
     }
     Ok(None)
 }
