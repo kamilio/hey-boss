@@ -18,7 +18,7 @@ async page => {
   };
   const ready = async prs => page.waitForFunction(prs => {
     const el = document.querySelector('#project-instructions-preview');
-    return el.getAttribute('aria-busy') === 'false' && el.textContent.includes('PR handoff:') === prs;
+    return el.getAttribute('aria-busy') === 'false' && el.textContent.includes(prs ? 'attach every PR' : 'push to main');
   }, prs);
   await page.setViewportSize({width:1440, height:1000});
   await open();
@@ -27,32 +27,31 @@ async page => {
   check(!(await page.locator('#project-instructions-preview').innerText()).includes('assign-to-boss'), 'Main delivery has no PR handoff');
   await page.locator('#project-prs').check();
   await ready(true);
-  check(await page.locator('#project-pr-handoff-help').isVisible(), 'PR lifecycle explained beside delivery instructions');
+  check(await page.locator('#project-pr-handoff-help').count() === 0, 'No forced PR instructions in editor');
   await page.locator('#project-prompt-prs').fill('Publish the fix PR for {{number}}.');
   await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent.includes('Publish the fix PR for 1.'));
   const text = await page.locator('#project-instructions-preview').innerText();
-  for (const content of ['Keep the issue open until the actual fix PR is merged','CI passing and a ready-for-review handoff are not a merge','hey-boss issue assign-to-boss 1','supporting evidence PRs','source/group closure']) {
-    check(text.includes(content), `Custom PR preview includes: ${content}`);
-  }
-  check(await page.locator('#project-prompt-prs').getAttribute('aria-describedby') === 'project-source-prs project-pr-handoff-help', 'Lifecycle help is associated with PR editor');
+  check(text.endsWith('Publish the fix PR for 1.'), 'Custom delivery ends the preview');
+  check(!text.includes('PR handoff:') && !text.includes('Record delivery and verification evidence'), 'No hidden prompt additions');
+  check(await page.locator('#project-prompt-prs').getAttribute('aria-describedby') === 'project-source-prs', 'Source help is associated with PR editor');
   await page.getByRole('button', {name:'Save', exact:true}).click();
   await page.locator('#project-settings-dialog').waitFor({state:'hidden'});
   await open();
   check(await page.locator('#project-prompt-prs').inputValue() === 'Publish the fix PR for {{number}}.', 'Custom delivery instructions persist');
-  check((await page.locator('#project-instructions-preview').innerText()).includes('assign-to-boss 1'), 'Saved settings preserve handoff preview');
+  check((await page.locator('#project-instructions-preview').innerText()).endsWith('Publish the fix PR for 1.'), 'Saved preview preserves custom delivery exactly');
   for (const scheme of ['light','dark']) {
     await page.emulateMedia({colorScheme:scheme});
     for (const width of [1440,768,390,320]) {
       await page.setViewportSize({width, height:width===1440?1000:844});
       check(await page.locator('#project-settings-dialog').evaluate(el => el.scrollWidth<=el.clientWidth && el.getBoundingClientRect().right<=innerWidth), `Settings fit ${scheme} ${width}`);
-      await page.locator('#project-pr-handoff-help').evaluate(el => el.scrollIntoView({block:'center'}));
-      check(await page.locator('#project-pr-handoff-help').evaluate(el => {
+      await page.locator('#project-prompt-prs').evaluate(el => el.scrollIntoView({block:'center'}));
+      check(await page.locator('#project-prompt-prs').evaluate(el => {
         const r=el.getBoundingClientRect(), form=el.closest('form');
         return r.top>=form.querySelector('.dialog-heading').getBoundingClientRect().bottom && r.bottom<=form.querySelector('.dialog-footer').getBoundingClientRect().top;
-      }), `Lifecycle help readable above footer ${scheme} ${width}`);
+      }), `PR editor readable above footer ${scheme} ${width}`);
       await page.screenshot({path:`${prefix}-help-${scheme}-${width}.png`});
       await page.locator('#project-instructions-preview').scrollIntoViewIfNeeded();
-      check(await page.locator('.settings-preview').evaluate(el => el.scrollWidth<=el.clientWidth), `Handoff preview fits ${scheme} ${width}`);
+      check(await page.locator('.settings-preview').evaluate(el => el.scrollWidth<=el.clientWidth), `Preview fits ${scheme} ${width}`);
       check(await page.getByRole('button', {name:'Save', exact:true}).isVisible(), `Settings footer accessible ${scheme} ${width}`);
       await page.screenshot({path:`${prefix}-preview-${scheme}-${width}.png`});
     }

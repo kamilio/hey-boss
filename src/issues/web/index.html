@@ -360,8 +360,7 @@
  <div class="settings-section-heading"><div><h3 id="settings-delivery-title">Delivery</h3><p class="field-help">Choose how agents publish their changes.</p></div>
  <label class="workflow-toggle"><input type="checkbox" id="project-prs" /><span>Use pull requests</span></label></div>
  <div class="workflow-branches"><div class="workflow-branch" data-branch="prs"><div class="branch-heading"><label for="project-prompt-prs"><small>If pull requests are enabled</small><strong>Open pull requests</strong></label><span class="branch-state">Inactive</span></div>
-  <p class="field-help" id="project-pr-handoff-help">Keep issues open until the fix is merged. Resolve CI, reviews, feedback, and conflicts, then hand the issue to Boss. Applies to custom PR instructions too.</p>
-  <textarea class="text-input workflow-prompt" id="project-prompt-prs" rows="3" maxlength="32000" aria-describedby="project-source-prs project-pr-handoff-help"></textarea>
+  <textarea class="text-input workflow-prompt" id="project-prompt-prs" rows="3" maxlength="32000" aria-describedby="project-source-prs"></textarea>
   <div class="branch-footer"><span id="project-source-prs">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="prs">Use default</button></div></div><div class="workflow-branch" data-branch="main"><div class="branch-heading"><label for="project-prompt-main"><small>Otherwise</small><strong>Push to main</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-main" rows="3" maxlength="32000" aria-describedby="project-source-main"></textarea>
   <div class="branch-footer"><span id="project-source-main">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="main">Use default</button></div></div></div></section>

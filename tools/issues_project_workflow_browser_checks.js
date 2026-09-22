@@ -32,7 +32,7 @@ async page => {
     await page.locator('#project-preview-workspace').selectOption(worktree ? 'worktree' : 'checkout');
     await ready(prs ? 'Publish a PR' : 'Publish main');
     const text=await preview();
-    check(text.startsWith('Implement hey-boss issue view 1.'),`Shared instructions ${worktree}/${prs}`);
+    check(text === 'Implement hey-boss issue view 1.\n\n' + (worktree ? 'Isolate 1 in a worktree.' : 'Use the existing checkout for 1.') + '\n\n' + (prs ? 'Publish a PR for 1.' : 'Publish main for 1.'),`Shared instructions ${worktree}/${prs}`);
     check(text.includes(worktree?'Isolate 1':'Use the existing checkout for 1'),`Workspace branch ${worktree}/${prs}`);
     check(!text.includes(worktree?'Use the existing checkout':'Isolate'),`Inactive workspace excluded ${worktree}/${prs}`);
     check(!text.includes(prs?'Publish main':'Publish a PR'),`Inactive delivery excluded ${worktree}/${prs}`);
