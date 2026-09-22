@@ -2011,7 +2011,11 @@ func auditSecretInput() {
     let disconnected = Reply(peers[1]); shutdown(peers[0], SHUT_WR)
     prompts.handle(request, disconnected); let pending = prompts.active.values.first!
     pending.entries[1].masked.stringValue = long
-    Darwin.close(peers[0]); RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    Darwin.close(peers[0])
+    let disconnectDeadline = Date().addingTimeInterval(2)
+    while !prompts.active.isEmpty && Date() < disconnectDeadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
     precondition(prompts.active.isEmpty && pending.entries.allSatisfy { $0.value.isEmpty })
     let ui = Interface(present: false)
     let item = Record(taskID: UUID().uuidString, kind: "prompt", question: "Enter a long answer", project: "Synthetic test", title: "Long text", description: "", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
