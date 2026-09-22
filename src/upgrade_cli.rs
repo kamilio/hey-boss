@@ -462,6 +462,7 @@ fn remote_apply(
 ) -> io::Result<Installation> {
     let archive = output(
         Command::new("tar")
+            .env("COPYFILE_DISABLE", "1")
             .arg("-czf")
             .arg("-")
             .arg("-C")
