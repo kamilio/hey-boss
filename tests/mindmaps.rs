@@ -2108,8 +2108,9 @@ fn batch_preview_atomic_commit_retry_and_resource_preservation() {
         "Atlas",
         &["subtask", "create", "1", "--title", "Child issue"],
     );
-    f.issue("Atlas", &["claim", "1"]);
+    f.issue("Atlas", &["claim", "2"]);
     let resource = f.issue("Atlas", &["view", "1"]);
+    assert_eq!(resource["issue"]["state"], "blocked");
     let before = f.run("Atlas", &["show"]);
     let version = before["version"].to_string();
     let file = batch_file(
