@@ -414,11 +414,13 @@ final class MobileHub {
         if failure != nil { throw StorageError(description: "Mobile service unavailable. The request remains open; try again when connected.") }
         guard let response else { throw StorageError(description: "No mobile response") }; return response
     }
+    func payload(_ row: Record) -> [String: Any] {
+        ["taskID":row.taskID,"kind":row.kind,"title":String((row.title ?? "Update").prefix(256)),"project":String((row.project ?? "Workspace").prefix(256)),"question":row.question,"description":row.description,"options":row.options,"sourceHost":row.sourceLabel,"severity":row.severity ?? "info","createdAt":row.createdAt,"linkURL":row.linkURL as Any? ?? NSNull(),"linkLabel":row.linkLabel as Any? ?? NSNull(),"commentsEnabled":row.commentsEnabled ?? false,"issue":row.issue.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull()]
+    }
     func publish(_ row: Record, presenceAlreadyPublished: Bool = false) throws -> [String: Any] {
         // Publish presence first so a new item cannot race an outdated away state.
         if !presenceAlreadyPublished { try publishPresence() }
-        let payload: [String: Any] = ["taskID":row.taskID,"kind":row.kind,"title":String((row.title ?? "Update").prefix(256)),"project":String((row.project ?? "Workspace").prefix(256)),"question":row.question,"description":row.description,"options":row.options,"sourceHost":row.sourceLabel,"severity":row.severity ?? "info","createdAt":row.createdAt,"linkURL":row.linkURL as Any? ?? NSNull(),"linkLabel":row.linkLabel as Any? ?? NSNull(),"commentsEnabled":row.commentsEnabled ?? false,"issue":row.issue.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull()]
-        let (status, json) = try call("/api/bridge/tasks/" + row.taskID, method: "PUT", body: payload)
+        let (status, json) = try call("/api/bridge/tasks/" + row.taskID, method: "PUT", body: payload(row))
         guard status == 200, let task = json["task"] as? [String: Any] else { throw StorageError(description: json["error"] as? String ?? "Mobile service rejected this request") }
         return task
     }
@@ -435,21 +437,30 @@ final class MobileHub {
         guard [200,409].contains(status), let resolved = json["task"] as? [String: Any] else { throw StorageError(description: json["error"] as? String ?? "Mobile service rejected the answer") }
         return resolved
     }
-    func clear(_ rows: [Record]) throws {
+    func clear(_ rows: [Record], apply: ([[String: Any]]) throws -> Void) throws {
         // Bound response size and network work even for a large native history.
-        for start in stride(from:0,to:rows.count,by:100) {
-            let batch = Array(rows[start..<min(start+100,rows.count)])
+        var start = 0
+        while start < rows.count {
+            var batch: [Record] = [], tasks: [[String: Any]] = [], bytes = 0
+            while start < rows.count && batch.count < 100 {
+                let task = payload(rows[start])
+                let size = try JSONSerialization.data(withJSONObject: task).count
+                // Stay below the relay's 16 MiB body limit even for documents.
+                if !batch.isEmpty && bytes + size > 8 * 1024 * 1024 { break }
+                batch.append(rows[start]); tasks.append(task); bytes += size; start += 1
+            }
             let ids = batch.map { $0.taskID }
-            let body: [String:Any] = ["taskIDs":ids]
+            let body: [String:Any] = ["taskIDs":ids, "tasks":tasks]
             var (status,json) = try call("/api/bridge/tasks/clear",method:"POST",body:body)
             if status == 404 {
-                for row in batch { _ = try publish(row) }
+                try publishPresence()
+                for row in batch { _ = try publish(row, presenceAlreadyPublished: true) }
                 (status,json) = try call("/api/bridge/tasks/clear",method:"POST",body:body)
             }
             guard status == 200, let tasks = json["tasks"] as? [[String:Any]], tasks.count == ids.count,
                   Set(tasks.compactMap { $0["taskID"] as? String }) == Set(ids) else { throw StorageError(description:json["error"] as? String ?? "Mobile service could not clear Inbox; refresh and retry") }
             // Apply each acknowledged batch before another network call can fail.
-            for task in tasks { try store.applyMobile(task) }
+            try apply(tasks)
         }
     }
     func sync() {
@@ -490,6 +501,9 @@ final class MobileHub {
 
 final class Store {
     let queue = DispatchQueue(label: "hey-boss.store", qos: .userInitiated)
+    // Native bulk dismissal must not wait behind periodic sync or block the
+    // database queue while the relay is responding.
+    let dismissalQueue = DispatchQueue(label: "hey-boss.dismissal", qos: .userInitiated)
     let database: Database
     var mobile: MobileHub?
     var mobileRequired = false
@@ -585,7 +599,7 @@ final class Store {
             defer { refreshPendingCount() }
             for start in stride(from:0,to:pending.count,by:100) {
                 let batch = Array(pending[start..<min(start+100,pending.count)])
-                if let mobile { try mobile.clear(batch.map { try database.get($0) }) }
+                if let mobile { try mobile.clear(batch.map { try database.get($0) }, apply: applyMobileMany) }
                 else { try dismissRecords(batch) }
             }
             let cleared = try pending.filter { try database.status($0) != "pending" }.count
@@ -678,24 +692,50 @@ final class Store {
         remove(id)
     }
     func dismiss(_ ids: [String]) {
-        do { try dismissRecords(ids) } catch { reportFailure(error) }
+        do {
+            guard let mobile else { try dismissRecords(ids); return }
+            let snapshot = Array(Set(ids))
+            dismissalQueue.async {
+                do {
+                    // Keep large documents bounded in memory; decode only the
+                    // next batch on the database queue, never the whole stack.
+                    for start in stride(from: 0, to: snapshot.count, by: 100) {
+                        let batch = Array(snapshot[start..<min(start + 100, snapshot.count)])
+                        let rows = try self.queue.sync { try batch.map { try self.database.get($0) }.filter { $0.status == "pending" } }
+                        try mobile.clear(rows) { tasks in try self.queue.sync { try self.applyMobileMany(tasks) } }
+                    }
+                }
+                catch { reportFailure(error) } // Unacknowledged notices remain available for retry.
+            }
+        } catch { reportFailure(error) }
     }
     func applyMobile(_ task: [String: Any]) throws {
+        try applyMobileMany([task])
+    }
+    func applyMobileMany(_ tasks: [[String: Any]]) throws {
         defer { refreshPendingCount() }
-        guard let id = task["taskID"] as? String, let status = task["status"] as? String, ["ok", "cancelled"].contains(status) else { throw StorageError(description: "Invalid mobile outcome") }
-        var row = try database.get(id)
-        if row.status == "pending" {
-            row.status = status; row.result = task["result"] as? String; row.completedAt = Date().timeIntervalSince1970
-            try database.save(row)
-            for reply in (waiters.removeValue(forKey: id) ?? []) + (feedbackWaiters.removeValue(forKey: id) ?? []) { reply.send(row.response) }
-            remove(id)
+        var changed: [Record] = []
+        try database.transaction {
+            for task in tasks {
+                guard let id = task["taskID"] as? String, let status = task["status"] as? String, ["ok", "cancelled"].contains(status) else { throw StorageError(description: "Invalid mobile outcome") }
+                var row = try database.get(id)
+                guard row.status == "pending" else { continue }
+                row.status = status; row.result = task["result"] as? String; row.completedAt = Date().timeIntervalSince1970
+                try database.save(row); changed.append(row)
+            }
         }
+        for row in changed {
+            let id = row.taskID
+            for reply in (waiters.removeValue(forKey: id) ?? []) + (feedbackWaiters.removeValue(forKey: id) ?? []) { reply.send(row.response) }
+        }
+        if !changed.isEmpty { removeMany(changed.map(\.taskID)) }
     }
     func dismissRecords(_ ids: [String]) throws {
         defer { refreshPendingCount() }
         if mobileRequired && mobile == nil { throw StorageError(description: "Mobile configuration is invalid; requests remain open.") }
         if let mobile {
-            for id in Set(ids) { let row = try database.get(id); if row.status == "pending" { try applyMobile(mobile.resolve(row, result: nil, cancel: true)) } }
+            let rows = try Set(ids).map { try database.get($0) }.filter { $0.status == "pending" }
+            try mobile.clear(rows, apply: applyMobileMany)
             return
         }
 

@@ -65,18 +65,18 @@ func auditMobile() {
         let clearRows=try clearIDs.map { try row($0) }
         for item in clearRows { try store.database.save(item); _ = try hub.publish(item) }
         _ = try hub.call("/test/phone/"+clearIDs[0],method:"POST",body:["result":"Approve"])
-        try hub.clear(clearRows)
+        try hub.clear(clearRows, apply: store.applyMobileMany)
         for id in clearIDs {
             let item=try store.database.get(id)
             precondition(id==clearIDs[0] ? item.result=="Approve" && item.status=="ok" : item.status=="cancelled" && item.result==nil)
         }
         let (_,clearCounts)=try hub.call("/test/counts")
         precondition((clearCounts["counts"] as! [String:Any])["POST /api/bridge/tasks/clear"] as? Int==2)
-        let unpublished=try row("clear-unpublished");try store.database.save(unpublished);try hub.clear([unpublished])
+        let unpublished=try row("clear-unpublished");try store.database.save(unpublished);try hub.clear([unpublished], apply: store.applyMobileMany)
         let unpublishedResult=try store.database.get(unpublished.taskID);precondition(unpublishedResult.status=="cancelled")
         print("Passed: native bulk clear uses bounded batches, preserves phone winners, cancels without approval, and publishes unknown tasks")
         let offline = try row("offline");try store.database.save(offline);server.terminate();server.waitUntilExit()
-        do { try hub.clear([offline]);throw StorageError(description:"Offline clear was incorrectly accepted") }
+        do { try hub.clear([offline], apply: store.applyMobileMany);throw StorageError(description:"Offline clear was incorrectly accepted") }
         catch { precondition((try! store.database.get(offline.taskID)).status=="pending") }
         do { try store.finish(offline.taskID, "Approve");throw StorageError(description:"Offline answer was incorrectly accepted") }
         catch { let offlineResult = try store.database.get(offline.taskID);precondition(offlineResult.status == "pending") }

@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CLOSE_ALL_HUB"] { auditCloseAllPerformance(endpoint: endpoint); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ISSUES_SHORTCUT_ONLY"] == "1" { auditIssuesShortcut(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_NATIVE_QUICK_ISSUE_PREVIEW"] == "1" {
         let prefs = UserDefaults(suiteName: "hey-boss-issue66-preview")!
@@ -617,6 +618,115 @@ func auditCloseAll(root: URL) {
         precondition(ui.current == nil && ui.questions.isEmpty)
     }
     print("Passed: global Close all, grouped/multi-project dismissal, active/queued cancellation, waiter completion, history/readers preserved, concurrent arrivals retained")
+}
+
+// Real delayed HTTP responses expose both serialized network work and repeated
+// AppKit layout. Run with tools/close_all_fixture.mjs, using disposable state.
+func auditCloseAllPerformance(endpoint: String) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-close-all-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    auditCloseAll(root: root)
+    let store = try! Store(root.appendingPathComponent("history.db").path)
+    let hub = try! MobileHub(store: store, configuration: .init(url: endpoint, token: String(repeating: "x", count: 32)))
+    store.mobile = hub
+    let ui = Interface(present: true)
+    ui.coalescesArrivalLayout = true
+    var removals = 0
+    store.removeMany = { ids in onMain { removals += 1; ui.remove(ids) } }
+    store.remove = { id in onMain { ui.remove(id) } }
+    ui.onDismissMany = { ids in store.queue.async { store.dismiss(ids) } }
+    let rows = (0..<205).map { index -> Record in
+        var row = Record(taskID: "bulk-\(index)", kind: index % 5 == 0 ? "approval" : "alert", question: "Ready for review", project: index % 2 == 0 ? "Atlas" : "Orion", title: "Review \(index)", description: "Checks passed", options: ["Approve", "Reject"], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Double(index), presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+        row.sourceHost = "This Mac"; row.sourceKnown = true
+        return row
+    }
+    try! store.database.transaction { for row in rows { try store.database.save(row) } }
+    // No partial persistence or UI removal on a malformed acknowledgement.
+    do {
+        try store.applyMobileMany([["taskID": "bulk-1", "status": "ok"], ["taskID": "bulk-2", "status": "pending"]])
+        preconditionFailure("Invalid acknowledgement must fail")
+    } catch { precondition((try! store.database.get("bulk-1")).status == "pending" && removals == 0) }
+    var fds: [Int32] = [0, 0]
+    precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+    let waiter = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+    store.waiters["bulk-5"] = [Reply(fds[1])]
+    for row in rows { ui.add(row) }
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    func snapshot(_ name: String, window: NSWindow) {
+        guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"] else { return }
+        try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        window.contentView!.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+        // Compositor-hosted glass controls are absent from cacheDisplay.
+        let capture = Process(); capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        capture.arguments = ["-x", "-o", "-l", String(window.windowNumber), URL(fileURLWithPath: directory).appendingPathComponent(name + ".png").path]
+        try! capture.run(); capture.waitUntilExit()
+        precondition(capture.terminationStatus == 0, "Native visual audit requires Screen Recording access")
+    }
+    ui.stack.appearance = NSAppearance(named: .aqua)
+    snapshot("close-all-light", window: ui.stack)
+    ui.stack.appearance = NSAppearance(named: .darkAqua)
+    snapshot("close-all-dark", window: ui.stack)
+    ui.expandedProjects.insert("Atlas"); ui.layout()
+    snapshot("close-all-expanded", window: ui.stack)
+    ui.expandedProjects.removeAll(); ui.layout()
+    snapshot("close-all-question", window: ui.question)
+    let start = ProcessInfo.processInfo.systemUptime
+    ui.closeAll.performClick(nil)
+    let queueStart = ProcessInfo.processInfo.systemUptime // Exclude AppKit's simulated button highlight delay.
+    var queueDelay: Double = -1
+    store.queue.async { let delay = (ProcessInfo.processInfo.systemUptime - queueStart) * 1000; onMain { queueDelay = delay } }
+    // A notice arriving after the click must survive the whole operation.
+    let arrival = Record(taskID: "new-arrival", kind: "alert", question: "Arrived after the click", project: "New arrival", title: "New arrival", description: "Keep this notice", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 300, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+    let arriving = arrival
+    store.queue.async { try! store.database.save(arriving) }
+    ui.add(arrival)
+    while ui.cards.count > 1 || ui.current != nil || ui.dismissalAnimations > 0 || queueDelay < 0 {
+        precondition(ProcessInfo.processInfo.systemUptime - start < 8, "Close all exceeded its time budget")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    let elapsed = (ProcessInfo.processInfo.systemUptime - start) * 1000
+    print("Close all metrics: elapsed_ms=\(elapsed), store_queue_ms=\(queueDelay), removals=\(removals), cards=\(ui.cards.count), questions=\(ui.questions.count)")
+    precondition(queueDelay < 100, "Close all must not block the store queue on HTTP")
+    precondition(elapsed < 2000, "Three delayed bulk requests should finish within two seconds")
+    precondition(removals == 3, "One removal per 100-item acknowledgement, not per card")
+    precondition(ui.cards.map { $0.row.taskID } == [arrival.taskID])
+    let cancelled = try! JSONDecoder().decode([String: String].self, from: waiter.readToEnd()!)
+    precondition(cancelled["status"] == "cancelled" && cancelled["result"] == nil)
+    store.queue.sync {
+        for row in rows {
+            let saved = try! store.database.get(row.taskID)
+            if saved.status != (row.taskID == "bulk-0" ? "ok" : row.kind == "approval" ? "cancelled" : "ok") || saved.result != (row.taskID == "bulk-0" ? "Approve" : nil) { print("Unexpected saved outcome: \(saved.taskID) \(saved.status) \(String(describing: saved.result))") }
+            precondition(saved.status == (row.taskID == "bulk-0" ? "ok" : row.kind == "approval" ? "cancelled" : "ok"))
+            precondition(saved.result == (row.taskID == "bulk-0" ? "Approve" : nil))
+        }
+    }
+    snapshot("close-all-arrival", window: ui.stack)
+    let (_, metrics) = try! hub.call("/metrics")
+    precondition(metrics["clearCalls"] as? Int == 3 && metrics["resolveCalls"] as? Int == 0 && metrics["publishCalls"] as? Int == 0)
+    print("Passed: 205 notices, three bulk requests/removals, remote answer preserved, concurrent arrival retained; elapsed_ms=\(elapsed), store_queue_ms=\(queueDelay), disposable_state=\(root.path)")
+    _ = try! hub.call("/fail", method: "POST")
+    ui.closeAll.performClick(nil)
+    store.queue.sync {} // Ensure the native callback has enqueued network work.
+    var failed = false
+    store.dismissalQueue.async { onMain { failed = true } }
+    let failureStart = ProcessInfo.processInfo.systemUptime
+    while !failed {
+        precondition(ProcessInfo.processInfo.systemUptime - failureStart < 3)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    precondition(ui.cards.count == 1 && ui.stack.isVisible)
+    precondition(try! store.queue.sync { try store.database.get(arrival.taskID).status } == "pending")
+    snapshot("close-all-failure", window: ui.stack)
+    ui.closeAll.performClick(nil)
+    while !ui.cards.isEmpty || ui.dismissalAnimations > 0 {
+        precondition(ProcessInfo.processInfo.systemUptime - failureStart < 5)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    precondition(!ui.stack.isVisible)
+    print("Passed: failed bulk response preserves pending notice and visible retry; retry clears and hides empty stack")
+    ui.stack.orderOut(nil); ui.question.orderOut(nil)
 }
 
 func auditAppearance(root: URL, sample: Record) {

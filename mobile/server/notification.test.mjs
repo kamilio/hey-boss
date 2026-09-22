@@ -42,6 +42,23 @@ test('Inbox summaries include every unread notice beyond the Activity limit',()=
  assert.equal(store.summaries().length,300);assert.equal(store.list().length,300);store.close();
 });
 
+test('bulk clear carries unpublished native notices in one atomic authenticated request',async t=>{
+ const store=new HubStore(),app=createApp({store,hubToken:'x'.repeat(32),origin:'http://127.0.0.1',secure:false});
+ const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>{app.locals.close();server.close();store.close();});
+ const base='http://127.0.0.1:'+server.address().port;
+ const row=(id,kind='alert')=>({taskID:id,kind,title:'Ready',question:'Report',description:'Ready for review',options:['Approve']});
+ store.upsert(row('winner','approval'));store.resolve('winner','Approve','phone');const winner=store.get('winner');
+ const post=body=>fetch(base+'/api/bridge/tasks/clear',{method:'POST',headers:{Authorization:'Bearer '+'x'.repeat(32),'Content-Type':'application/json'},body:JSON.stringify(body)});
+ assert.equal((await post({taskIDs:['unpublished','missing'],tasks:[row('unpublished')]})).status,404);
+ assert.throws(()=>store.get('unpublished'));
+ assert.equal((await post({taskIDs:['unpublished'],tasks:[{...row('unpublished'),kind:'invalid'}]})).status,400);
+ assert.equal((await post({taskIDs:['unpublished'],tasks:[row('unrelated')]})).status,400);
+ const result=await post({taskIDs:['unpublished','question','winner'],tasks:[row('unpublished'),row('question','approval'),row('winner','approval')]});
+ assert.equal(result.status,200);assert.equal((await result.json()).cleared,2);
+ assert.equal(store.get('unpublished').status,'ok');assert.equal(store.get('question').status,'cancelled');assert.deepEqual(store.get('winner'),winner);
+ assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0); // Dismissed notices never generate push notifications.
+});
+
 test('push previews preserve readable Markdown structure without raw syntax',()=>{
  assert.equal(markdownText('# Ready\n\n**Migration** is _complete_. [Review PR](https://example.com) and `ship()`.'),'Ready\n\nMigration is complete. Review PR and ship().');
  assert.equal(markdownText('- [x] Build\n- [ ] Review'),'• ✓ Build\n• ☐ Review');

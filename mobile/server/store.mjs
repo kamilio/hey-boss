@@ -44,9 +44,14 @@ export class HubStore{
  list(){return this.db.prepare('SELECT id FROM tasks ORDER BY version DESC LIMIT 300').all().map(r=>this.get(r.id));}
  summaries(){return this.db.prepare("SELECT json_set(body,'$.description',substr(json_extract(body,'$.description'),1,4096),'$.question',substr(json_extract(body,'$.question'),1,4096)) AS body,status,answer,actor,version FROM tasks WHERE status='pending' OR id IN (SELECT id FROM tasks WHERE status!='pending' ORDER BY version DESC LIMIT 300) ORDER BY version DESC").all().map(r=>({...JSON.parse(r.body),status:r.status,result:r.answer,handledBy:r.actor,version:r.version}));}
  outcomes(){return this.db.prepare("SELECT id AS taskID,status,answer AS result,actor AS handledBy,version FROM tasks WHERE status!='pending' AND delivered=0 LIMIT 20").all();}
- clear(ids,actor='phone'){return this.transaction(()=>{
+ clear(ids,actor='phone',rows=[]){return this.transaction(()=>{
   if(!Array.isArray(ids)||!ids.length||ids.length>10000||new Set(ids).size!==ids.length||ids.some(id=>typeof id!=='string'||!id.trim()||Buffer.byteLength(id)>256||/[\p{Cc}]/u.test(id)))throw new HubError(400,'Select 1–10000 unique notice IDs');
   const find=this.db.prepare('SELECT status FROM tasks WHERE id=?');
+  // Seed only this explicit snapshot, in the same transaction as dismissal.
+  // Existing outcomes win; there is no intermediate pending push notification.
+  const selected=new Set(ids);
+  if(new Set(rows.map(row=>row.taskID)).size!==rows.length||rows.some(row=>!selected.has(row.taskID)))throw new HubError(400,'Native notices must match the selected snapshot');
+  for(const row of rows)if(!find.get(row.taskID))this.insertTask(row);
   for(const id of ids)if(!find.get(id))throw new HubError(404,'This request is no longer available');
   const update=this.db.prepare("UPDATE tasks SET status=CASE WHEN json_extract(body,'$.kind') IN ('approval','prompt') OR json_extract(body,'$.commentsEnabled')=1 THEN 'cancelled' ELSE 'ok' END,answer=NULL,actor=?,version=?,delivered=0,body=json_set(body,'$.completedAt',?) WHERE id=? AND status='pending'");
   let cleared=0;const completedAt=Date.now()/1000;
@@ -62,10 +67,13 @@ export class HubStore{
  upsert(row){return this.transaction(()=>{
   const existing=this.db.prepare('SELECT status FROM tasks WHERE id=?').get(row.taskID);
   if(existing)return {task:this.get(row.taskID),created:false};
-  this.ensureRoom(Buffer.byteLength(JSON.stringify(row)));
-  const version=this.next();this.db.prepare('INSERT INTO tasks(id,body,status,answer,actor,version,delivered) VALUES(?,?,?,?,?,?,1)').run(row.taskID,JSON.stringify(row),'pending',null,null,version);
+  this.insertTask(row);
   return {task:this.get(row.taskID),created:true};
  });}
+ insertTask(row){
+  const body=JSON.stringify(row);this.ensureRoom(Buffer.byteLength(body));
+  this.db.prepare('INSERT INTO tasks(id,body,status,answer,actor,version,delivered) VALUES(?,?,?,?,?,?,1)').run(row.taskID,body,'pending',null,null,this.next());
+ }
  resolve(id,result,actor,cancel=false){return this.transaction(()=>{
   const task=this.get(id);if(task.status!=='pending')throw new HubError(409,'Already handled on '+(task.handledBy==='mac'?'your Mac':'another device'));
   if(!cancel){
