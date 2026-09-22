@@ -3,6 +3,42 @@ use super::*;
 use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
 use std::collections::HashMap;
 pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
+
+pub(super) fn stale_pr_capture(db: &Connection) -> Result<bool> {
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name IN ('fleet_capture_issue_pull_requests_INSERT','fleet_capture_issue_pull_requests_UPDATE','fleet_capture_issue_pull_requests_DELETE') AND (instr(sql,'''purpose'',')=0 OR (name='fleet_capture_issue_pull_requests_UPDATE' AND instr(sql,'OLD.\"purpose\" IS NEW.\"purpose\"')=0)))", [], |r| r.get(0))?)
+}
+
+// Run inside the additive migration's write transaction. Existing fleet
+// triggers retain their fixed column lists across ALTER TABLE and restart.
+pub(super) fn repair_pr_capture(db: &Connection) -> Result<()> {
+    let triggers = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('fleet_capture_issue_pull_requests_INSERT','fleet_capture_issue_pull_requests_UPDATE','fleet_capture_issue_pull_requests_DELETE')")?
+        .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (name, original) in triggers {
+        let mut sql = original.clone();
+        if !sql.contains("'purpose',") {
+            sql = sql
+                .replace(
+                    "json_object('project_id',NEW.",
+                    "json_object('purpose',NEW.\"purpose\",'project_id',NEW.",
+                )
+                .replace(
+                    "json_object('project_id',OLD.",
+                    "json_object('purpose',OLD.\"purpose\",'project_id',OLD.",
+                );
+        }
+        if name.ends_with("_UPDATE") && !sql.contains("OLD.\"purpose\" IS NEW.\"purpose\"") {
+            sql = sql.replace(
+                " AND NOT (",
+                " AND NOT (OLD.\"purpose\" IS NEW.\"purpose\" AND ",
+            );
+        }
+        if sql != original {
+            db.execute_batch(&format!("DROP TRIGGER {name}; {sql}"))?;
+        }
+    }
+    Ok(())
+}
 pub(super) const SCHEMA: &str = "
 CREATE TABLE issue_workers(id TEXT PRIMARY KEY,kind TEXT NOT NULL,config TEXT NOT NULL,version INTEGER NOT NULL,owner_pid INTEGER,owner_start TEXT,machine TEXT,stop_requested INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
 ALTER TABLE worker_runs ADD COLUMN worker_id TEXT REFERENCES issue_workers(id);
