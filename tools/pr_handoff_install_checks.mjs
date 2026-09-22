@@ -69,7 +69,10 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.equal(view.issue.state,'open');assert.equal(view.issue.assignee,'human:boss');assert.equal(view.issue.closed_at,null);
   assert.equal(view.comments.length,2);
   assert.deepEqual(cli(['pr','list','1']).pull_requests.map(p=>p.purpose),['fix','supporting-evidence']);
-  assert(readFileSync(join(root,'prompt.txt'),'utf8').includes('hey-boss issue assign-to-boss 1'));
+  const prompt=readFileSync(join(root,'prompt.txt'),'utf8');
+  assert(!prompt.includes('PR handoff:'));
+  assert(!prompt.includes('Record delivery and verification evidence'));
+  assert(prompt.includes('attach every PR'));
   cli(['create','--title','Direct main completion']);await worker(false,2);
   assert.equal(cli(['view','2']).issue.state,'closed');
   cli(['create','--title','Agent explicitly hands to Boss']);writeFileSync(join(root,'handoff'),'');
@@ -88,7 +91,8 @@ createInterface({input:process.stdin}).on('line',line=>{
     });
     request.on('error',no);request.setTimeout(10000,()=>request.destroy(Error('Installed web request timed out')));
   });
-  assert(html.includes('id="project-pr-handoff-help"'));
+  assert(!html.includes('id="project-pr-handoff-help"'));
+  assert(html.includes('aria-describedby="project-source-prs"'));
   await stop();
   console.log(JSON.stringify({status:'passed',version,open_boss_handoff:true,pickup_excluded:true,links_and_history_preserved:true,explicit_agent_handoff:true,non_pr_closure:true,installed_ui:true}));
 }finally{await stop();rmSync(root,{recursive:true,force:true});}

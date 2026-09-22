@@ -128,8 +128,9 @@ implementation is retained only as a regression-test reference.
 Standalone workers still use their local queue. `worker --host HOST --directory
 /remote/checkout` runs a worker and its Codex agents on that host.
 **Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,
-with a live assembled preview. Each branch inherits a code default or uses a
-project override. `worker --worktree` selects a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
+with a live assembled preview. Implementation instructions contain only the shared
+prompt and selected workspace and delivery branches; no extra cleanup or PR handoff
+paragraphs are appended. Each branch inherits a code default or uses a project override. `worker --worktree` selects a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
 See [automatic workers](docs/issues.md#automatic-codex-workers).
 
 The macOS menu-bar menu includes **Issues…**, which opens the interface in your

@@ -586,8 +586,10 @@ fn completed_pr_worker_keeps_fix_open_and_hands_it_to_boss() {
         .find(|v| v["method"] == "turn/start")
         .unwrap();
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
-    assert!(text.contains("Keep the issue open until the actual fix PR is merged"));
-    assert!(text.contains("hey-boss issue assign-to-boss 1"));
+    assert_eq!(
+        text,
+        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add 1 '<pr-url>'`."
+    );
     worker.stop();
     assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "open");
 }
@@ -621,12 +623,9 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
         .unwrap();
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
     assert_eq!(
-        text.split("\n\nRecord delivery and verification evidence")
-            .next()
-            .unwrap(),
+        text,
         "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
     );
-    assert!(text.contains("hey-boss issue comment 1"));
     w.stop();
 }
 
@@ -702,13 +701,9 @@ fn custom_prompt_slash_goal_preserves_all_lines() {
     let goal = t.iter().find(|v| v["method"] == "thread/goal/set").unwrap();
     let objective = goal["params"]["objective"].as_str().unwrap();
     assert_eq!(
-        objective
-            .split("\n\nRecord delivery and verification evidence")
-            .next()
-            .unwrap(),
+        objective,
         "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
     );
-    assert!(objective.contains("hey-boss issue comment 1"));
     let turn = t.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(
         turn["params"]["input"][0]["text"]
