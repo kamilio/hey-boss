@@ -87,10 +87,11 @@ fn issue_lists_keep_null_and_populated_origins_with_filters_and_pagination() {
         .collect();
     for (filter, expected) in [
         (json!({"state":"all"}), vec![4, 1, 2, 3]),
-        (json!({"state":"open"}), vec![4, 1, 2]),
+        (json!({"state":"open"}), vec![4, 1]),
+        (json!({"state":"blocked"}), vec![2]),
         (json!({"state":"closed"}), vec![3]),
-        (json!({"state":"all","unassigned":true}), vec![1, 3]),
-        (json!({"state":"all","assignee":"codex:other"}), vec![2]),
+        (json!({"state":"all","unassigned":true}), vec![1, 2, 3]),
+        (json!({"state":"all","assignee":"codex:other"}), vec![]),
         (json!({"state":"all","mine":true}), vec![4]),
         (json!({"state":"all","assignee":"human:boss"}), vec![4]),
         (

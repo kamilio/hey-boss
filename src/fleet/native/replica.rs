@@ -1463,26 +1463,31 @@ mod tests {
 
     #[test]
     fn blocker_migration_updates_existing_capture_triggers_before_normalizing() {
-        let main = Fixture::new();
-        main.db.execute_batch("ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
-        main.capture();
-        drop(Store::open(&main.path).unwrap());
-        main.db
-            .execute("UPDATE issues SET blockers='[2]' WHERE number=1", [])
-            .unwrap();
-        let change: String = main.db.query_row("SELECT after_json FROM fleet_outbox WHERE table_name='issues' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        let row: Value = serde_json::from_str(&change).unwrap();
-        assert_eq!(row["blockers"], "[2]");
-        assert_eq!(row["manual_blocked"], 0);
-        assert_eq!(row["title"], "Original");
-        main.db
-            .execute("UPDATE issues SET manual_blocked=1 WHERE number=1", [])
-            .unwrap();
-        let change: String = main.db.query_row("SELECT after_json FROM fleet_outbox WHERE table_name='issues' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&change).unwrap()["manual_blocked"],
-            1
-        );
+        for partial in [false, true] {
+            let main = Fixture::new();
+            main.db.execute_batch("ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
+            main.capture();
+            if partial {
+                main.db.execute_batch("ALTER TABLE issues ADD COLUMN manual_blocked INTEGER NOT NULL DEFAULT 0; ALTER TABLE issues ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]';").unwrap();
+            }
+            drop(Store::open(&main.path).unwrap());
+            main.db
+                .execute("UPDATE issues SET blockers='[2]' WHERE number=1", [])
+                .unwrap();
+            let change: String = main.db.query_row("SELECT after_json FROM fleet_outbox WHERE table_name='issues' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+            let row: Value = serde_json::from_str(&change).unwrap();
+            assert_eq!(row["blockers"], "[2]");
+            assert_eq!(row["manual_blocked"], 0);
+            assert_eq!(row["title"], "Original");
+            main.db
+                .execute("UPDATE issues SET manual_blocked=1 WHERE number=1", [])
+                .unwrap();
+            let change: String = main.db.query_row("SELECT after_json FROM fleet_outbox WHERE table_name='issues' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&change).unwrap()["manual_blocked"],
+                1
+            );
+        }
     }
 
     #[test]
