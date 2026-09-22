@@ -62,6 +62,12 @@ pub struct Options {
 enum Action {
     #[command(visible_alias = "list")]
     Status,
+    /// Observe existing workers every two seconds; never start or control them.
+    Watch {
+        /// Stop after this many snapshots; omit to watch until Ctrl-C.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        count: Option<u32>,
+    },
     /// Queue a durable restart through the fleet supervisor; keep the supervisor alive.
     Restart {
         id: String,
@@ -137,7 +143,7 @@ pub fn run(o: &Options) -> Result<()> {
     let actor_id = format!("worker-control:{machine}:{}", std::process::id());
     let actor = issues::identity::resolve(Some(&actor_id), &machine, &cwd)?;
     let path = issues::database_path()?;
-    let mut store = if o.action.is_none() {
+    let mut store = if o.action.is_none() || matches!(o.action, Some(Action::Watch { .. })) {
         issues::worker::retry_database_busy(|| Store::open(&path))?
     } else {
         Store::open(&path)?
@@ -150,11 +156,59 @@ pub fn run(o: &Options) -> Result<()> {
         operation,
         request_id: None,
     };
+    if let Some(Action::Watch { count }) = &o.action {
+        use std::io::Write;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        issues::worker::install_signals(cancelled.clone())?;
+        let mut output = std::io::stdout().lock();
+        let mut emitted = 0u32;
+        while !cancelled.load(Ordering::Relaxed) {
+            let value = watch_snapshot(o.id.clone(), o.history as usize, |id| {
+                issues::worker::retry_database_busy(|| {
+                    store.execute(&request(
+                        Operation::Workers {
+                            worker_id: id.clone(),
+                        },
+                        None,
+                    ))
+                })
+            })?;
+            let result = if o.json {
+                writeln!(output, "{value}")
+            } else {
+                write!(output, "{}", watch_text(&value))
+            }
+            .and_then(|_| output.flush());
+            if let Err(error) = result {
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
+            emitted = emitted.saturating_add(1);
+            if count.is_some_and(|limit| emitted >= limit) {
+                break;
+            }
+            // Short waits make cancellation responsive without busy polling.
+            for _ in 0..20 {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        return Ok(());
+    }
     if let Some(action) = &o.action {
         let operation = match action {
             Action::Restart { .. } => {
                 unreachable!("Restart is routed through the fleet supervisor")
             }
+            Action::Watch { .. } => unreachable!("Watch is handled before one-shot actions"),
             Action::Status => Operation::Workers {
                 worker_id: o.id.clone(),
             },
@@ -177,7 +231,7 @@ pub fn run(o: &Options) -> Result<()> {
             Action::Pause { id } => {
                 hey_boss::fleet::record_local_worker(id, None, "pause")?;
             }
-            Action::Status | Action::Restart { .. } => {}
+            Action::Status | Action::Restart { .. } | Action::Watch { .. } => {}
         }
         value["store"] = serde_json::json!({"host":issues::identity::host(),"database":issues::database_path()?});
         if o.json {
@@ -292,7 +346,145 @@ pub fn run(o: &Options) -> Result<()> {
 
 fn dashboard_enabled(o: &Options) -> bool {
     use std::io::IsTerminal;
-    !o.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    !matches!(o.action, Some(Action::Watch { .. }))
+        && !o.json
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+}
+
+fn watch_snapshot(
+    id: Option<String>,
+    history: usize,
+    mut fetch: impl FnMut(Option<String>) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    use serde_json::json;
+    let inventory = fetch(id.clone())?;
+    let ids: Vec<String> = if let Some(id) = id {
+        vec![id]
+    } else {
+        inventory["workers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w["id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let mut snapshots = Vec::new();
+    for id in ids {
+        let mut value = if inventory["worker_id"].as_str() == Some(&id) {
+            inventory.clone()
+        } else {
+            fetch(Some(id))?
+        };
+        // Keep every active agent and only the requested finished history.
+        let mut finished = 0;
+        if let Some(runs) = value["runs"].as_array_mut() {
+            runs.retain(|run| {
+                if run["finished_at"].is_null() {
+                    true
+                } else {
+                    finished += 1;
+                    finished <= history
+                }
+            });
+        }
+        // Inventory is emitted once rather than repeated for every worker.
+        value.as_object_mut().unwrap().remove("workers");
+        snapshots.push(value);
+    }
+    let observed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::new("clock_error", e.to_string()))?
+        .as_millis() as u64;
+    Ok(json!({"ok":true,"observed_at":observed_at,
+        "store":{"host":issues::identity::host(),"database":issues::database_path()?},
+        "workers":inventory["workers"],"snapshots":snapshots}))
+}
+
+fn watch_text(value: &serde_json::Value) -> String {
+    use hey_boss::worker_tui::text;
+    use std::fmt::Write;
+    let seconds = value["observed_at"].as_u64().unwrap_or(0) / 1000;
+    let mut output = format!(
+        "\nWorkers · {} · {:02}:{:02}:{:02} UTC · refresh 2s · Ctrl-C to exit\n",
+        text(&value["store"]["host"]),
+        seconds / 3600 % 24,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    let snapshots = value["snapshots"].as_array().unwrap();
+    if snapshots.is_empty() {
+        output.push_str("No workers registered.\n");
+    }
+    for snapshot in snapshots {
+        let id = text(&snapshot["worker_id"]);
+        let worker = value["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["id"] == id);
+        let state = worker
+            .map(|w| {
+                if w["upgrading"] == true {
+                    "update drain"
+                } else if w["pid"].is_null() {
+                    "offline"
+                } else if w["config"]["enabled"] != true {
+                    "paused"
+                } else {
+                    "pickup on"
+                }
+            })
+            .unwrap_or("unknown");
+        let _ = writeln!(
+            output,
+            "{} · {} · {} · {}/{} busy · {} eligible",
+            text(&snapshot["config"]["name"]),
+            id,
+            state,
+            snapshot["active"],
+            snapshot["config"]["concurrency"],
+            snapshot["eligible"]
+        );
+        let runs = snapshot["runs"].as_array().unwrap();
+        if !runs.iter().any(|run| run["finished_at"].is_null()) {
+            output.push_str("  No active agents.\n");
+        }
+        for run in runs {
+            let _ = writeln!(
+                output,
+                "  {} #{} · {} · {}{}",
+                text(&run["project_name"]),
+                run["number"],
+                text(&run["title"]),
+                text(&run["state"]),
+                if run["finished_at"].is_null() {
+                    ""
+                } else {
+                    " (history)"
+                }
+            );
+            let _ = writeln!(
+                output,
+                "    {}",
+                text(
+                    if run["last_event"].as_str().is_some_and(|s| !s.is_empty()) {
+                        &run["last_event"]
+                    } else {
+                        &run["summary"]
+                    }
+                )
+            );
+            if let Some(session) = run["session_id"].as_str() {
+                let _ = writeln!(
+                    output,
+                    "    Session: {}",
+                    text(&serde_json::Value::String(session.into()))
+                );
+            }
+        }
+    }
+    output
 }
 
 fn configure_scope(
@@ -380,6 +572,12 @@ fn remote_arguments(o: &Options) -> Vec<String> {
     }
     match &o.action {
         Some(Action::Status) => args.push("status".into()),
+        Some(Action::Watch { count }) => {
+            args.push("watch".into());
+            if let Some(count) = count {
+                args.extend(["--count".into(), count.to_string()]);
+            }
+        }
         Some(Action::Restart { id }) => args.extend(["restart".into(), id.clone()]),
         Some(Action::Stop { id }) => args.extend(["stop".into(), id.clone()]),
         Some(Action::Pause { id }) => args.extend(["pause".into(), id.clone()]),
@@ -416,7 +614,10 @@ fn run_remote(o: &Options, host: &str) -> Result<()> {
     }
     let status = std::process::Command::new("ssh")
         .args([
-            if std::io::stdin().is_terminal() {
+            if std::io::stdin().is_terminal()
+                && !o.json
+                && !matches!(o.action, Some(Action::Watch { .. }))
+            {
                 "-t"
             } else {
                 "-T"
@@ -635,5 +836,81 @@ mod tests {
     fn json_status_does_not_enable_the_dashboard() {
         let cli = TestCli::parse_from(["worker", "--json", "status"]);
         assert!(!dashboard_enabled(&cli.options));
+    }
+
+    #[test]
+    fn watch_is_bounded_on_request_and_forwarded_without_starting_a_worker() {
+        let cli = TestCli::try_parse_from([
+            "worker", "--host", "devbox", "--id", "saved", "--json", "watch", "--count", "2",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.options.action,
+            Some(Action::Watch { count: Some(2) })
+        ));
+        assert_eq!(
+            &remote_arguments(&cli.options)[remote_arguments(&cli.options).len() - 3..],
+            ["watch", "--count", "2"]
+        );
+        assert!(!dashboard_enabled(&cli.options));
+        assert!(TestCli::try_parse_from(["worker", "watch", "--count", "0"]).is_err());
+    }
+
+    #[test]
+    fn watch_collects_all_workers_preserves_active_runs_and_limits_history() {
+        use serde_json::json;
+        let mut calls = Vec::new();
+        let value = watch_snapshot(None, 1, |id| {
+            calls.push(id.clone());
+            Ok(json!({"ok":true,"worker_id":id.unwrap_or("first".into()),
+                "workers":[{"id":"first"},{"id":"second"}],
+                "runs":[{"id":"old1","finished_at":1},
+                        {"id":"active","finished_at":null},
+                        {"id":"old2","finished_at":2}]}))
+        })
+        .unwrap();
+        assert_eq!(calls, [None, Some("second".into())]);
+        assert_eq!(value["snapshots"].as_array().unwrap().len(), 2);
+        for snapshot in value["snapshots"].as_array().unwrap() {
+            assert_eq!(snapshot["runs"].as_array().unwrap().len(), 2);
+            assert_eq!(snapshot["runs"][1]["id"], "active");
+            assert!(snapshot.get("workers").is_none());
+        }
+    }
+
+    #[test]
+    fn watch_selection_empty_inventory_and_errors_are_explicit() {
+        use serde_json::json;
+        let selected = watch_snapshot(Some("chosen".into()), 0, |id| {
+            assert_eq!(id.as_deref(), Some("chosen"));
+            Ok(json!({"worker_id":"chosen","workers":[{"id":"chosen"}],
+                "runs":[{"finished_at":1},{"finished_at":null}]}))
+        })
+        .unwrap();
+        assert_eq!(
+            selected["snapshots"][0]["runs"].as_array().unwrap().len(),
+            1
+        );
+        let empty = watch_snapshot(None, 0, |_| Ok(json!({"workers":[],"runs":[]}))).unwrap();
+        assert!(watch_text(&empty).contains("No workers registered."));
+        assert!(watch_snapshot(None, 0, |_| Err(Error::invalid("disconnected"))).is_err());
+    }
+
+    #[test]
+    fn watch_text_distinguishes_history_offline_and_empty_and_strips_controls() {
+        use serde_json::json;
+        let value = json!({"observed_at":0,"store":{"host":"test"},
+            "workers":[{"id":"one","pid":null,"config":{"enabled":true}}],
+            "snapshots":[{"worker_id":"one","config":{"name":"Demo\u{001b}[2J\nspoof",
+                "concurrency":2},"active":0,"eligible":3,
+                "runs":[{"project_name":"Atlas","number":7,"title":"Repair",
+                    "state":"completed","finished_at":1,"last_event":"","summary":"Verified"}]}]});
+        let text = watch_text(&value);
+        assert!(text.contains("offline · 0/2 busy · 3 eligible"));
+        assert!(text.contains("No active agents."));
+        assert!(text.contains("completed (history)"));
+        assert!(text.contains("Verified"));
+        assert!(!text.contains('\u{001b}'));
+        assert!(!text.contains("\nspoof"));
     }
 }

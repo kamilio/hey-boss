@@ -216,7 +216,7 @@ Use `worker --host HOST --directory /remote/checkout` (or set `HEY_BOSS_ISSUE_HO
 to run the worker and its Codex sessions on the authoritative SSH host. New remote
 workers require a remote checkout path (or `--all-projects` to discover known
 checkouts); remote status/stop/pause also work. Every worker owns its slots and
-filters, without shared project/global caps. `worker status` shows slots, pipeline, runtimes and
+filters, without shared project/global caps. `worker watch` observes all existing workers on a machine every two seconds without starting or controlling them; `worker --json watch --count 3` emits three newline-delimited JSON records with `observed_at`, `workers`, and per-worker `snapshots` containing queue counts, active runs and recent events. Use `--id ID`, `--history 5` or `--host HOST` before `watch` to select a worker, include finished attempts, or observe an SSH companion. Ctrl-C ends continuous watches. Disconnections fail without local fallback. `worker status` shows slots, pipeline, runtimes and
 activity. Active agents and recent history are separate; `--history 0` hides
 finished attempts. Open, unassigned unsuccessful issues retry automatically after
 a delay of 30 seconds to five minutes. Codex command/network/file/permission

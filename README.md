@@ -10,6 +10,16 @@ continue using Codex; worker/task agent selection is deferred.
 The [worker terminal dashboard](worker-tui/README.md) shows the current worker, live sessions,
 activity, queue state, and worker controls. Run `hey-boss worker` to start a worker
 with the dashboard, or `hey-boss worker status` to watch existing workers.
+For a live log in scripts or agent sessions, use `hey-boss worker watch`.
+It observes every registered worker on the selected machine every two seconds,
+showing slots, pickup state, active issues, latest activity and session IDs.
+It never starts or controls workers. Stop with Ctrl-C, or use
+`hey-boss worker --json watch --count 3` for three newline-delimited JSON snapshots.
+Each JSON record contains `observed_at` (Unix milliseconds), the worker inventory,
+and per-worker `snapshots` with queue counts, active runs and recent events.
+Use `--id ID` to watch one worker, `--history 5` to include up to five finished
+attempts per worker (default: active only), or `--host HOST` for an SSH companion.
+Disconnected hosts fail explicitly; they never fall back to this Mac's queue.
 It is included in normal installations and SSH companion upgrades. The dashboard
 opens automatically in an interactive terminal; use `--json` for scripts. Quitting a started worker stops its
 sessions; quitting a status dashboard leaves workers running.
