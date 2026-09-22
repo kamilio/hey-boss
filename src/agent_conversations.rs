@@ -120,12 +120,8 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
         .flatten()
         .flat_map(|w| w["runs"].as_array().into_iter().flatten())
         .any(|r| r["id"] == run);
-    let referenced = crate::issues::provenance::referenced(
-        &database(&crate::issues::database_path()?)?,
-        host,
-        run,
-    )?
-    .is_some();
+    let db = database(&crate::issues::database_path()?)?;
+    let referenced = referenced_device(&db, machine, run)?;
     if !known && !referenced {
         return Err(Error::invalid("This agent is no longer available"));
     }
@@ -167,6 +163,18 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
         &mut result,
     )?;
     Ok(result)
+}
+
+fn referenced_device(db: &Connection, machine: &Value, run: &str) -> Result<bool> {
+    for host in [machine["host"].as_str(), machine["hostname"].as_str()]
+        .into_iter()
+        .flatten()
+    {
+        if crate::issues::provenance::referenced(db, host, run)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn assignment(project: &str, number: i64, agent: &str) -> Result<Value> {
@@ -754,6 +762,22 @@ mod tests {
             [actor.to_string()],
         )
         .unwrap();
+        assert!(
+            referenced_device(
+                &f.db,
+                &json!({"host":"ssh-mac","hostname":"mac.local"}),
+                "session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )
+            .unwrap()
+        );
+        assert!(
+            !referenced_device(
+                &f.db,
+                &json!({"host":"other","hostname":"other.local"}),
+                "session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            )
+            .unwrap()
+        );
         std::fs::write(
             &f.path,
             Fixture::line("assistant", "Saved repair conversation"),
