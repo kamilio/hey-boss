@@ -941,7 +941,7 @@ function mountIssueProgress(issue) {
 }
 function allocationSignature(value) {
   const a = value.allocation;
-  return JSON.stringify(a && [a.role, a.reason, a.reserved_machine, a.reserved_host]);
+  return JSON.stringify(a && [a.role, a.reason, a.reserved_machine, a.reserved_host, a.reserved_ssh_host]);
 }
 function renderAllocation(value) {
   const a = value.allocation;
