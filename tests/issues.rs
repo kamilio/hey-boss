@@ -10,6 +10,35 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn even_a_boss_cli_identity_cannot_enable_yolo() {
+    let f = Fixture::new();
+    f.create();
+    for actor in ["session-a", "human:boss"] {
+        for args in [
+            vec!["create", "--title", "Unsafe label", "--label", "yolo"],
+            vec!["edit", "1", "--label", "YOLO"],
+        ] {
+            let output = f.cmd(actor, &args).output().unwrap();
+            assert!(!output.status.success());
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(response["error"]["code"], "forbidden");
+        }
+        let project = f.run(actor, &["view", "1"])["project"].clone();
+        let identity = f.run(actor, &["whoami"])["agent"].clone();
+        let request = json!({"version":1,"project":project,"actor":identity,
+            "operation":{"action":"set_yolo","number":1,"enabled":true,"if_version":1}});
+        let output = f.stdin(&["rpc"], request.to_string().as_bytes());
+        assert!(!output.status.success());
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "forbidden");
+    }
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["labels"],
+        json!([])
+    );
+}
+
+#[test]
 fn native_quick_issue_creates_atomically_at_top_and_retries_once() {
     let f = Fixture::new();
     let first = f.create()["issue"]["number"].as_i64().unwrap();

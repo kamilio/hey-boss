@@ -109,7 +109,7 @@ class TagInput {
   renderOptions() {
     const query = this.input.value.trim();
     const available = [...new Set(this.candidates())].filter(
-      (tag) => !this.selected.includes(tag),
+      (tag) => tag !== "yolo" && !this.selected.includes(tag),
     );
     const matches = available
       .filter((tag) =>
@@ -139,16 +139,55 @@ class TagInput {
 }
 
 let issueTagPicker = null;
+function renderAgentPermissions(issue) {
+  const enabled = issue.labels.includes("yolo");
+  return `<section class="side-section agent-permissions${enabled ? " yolo-enabled" : ""}" aria-label="Agent permissions"><h2 class="side-heading">Agent permissions${enabled ? label("yolo") : '<span class="permission-auto">Auto</span>'}</h2><p>${enabled ? "No sandbox or approval prompts. The agent has full access to this machine." : "The agent uses a workspace sandbox and Auto approval review."}</p><p class="field-help">Applies to the next worker attempt, including a resumed session. Running agents keep their current permissions.</p>${!issue.deleted_at && model.actor.id === "human:boss" ? `<button type="button" class="button small" data-yolo-toggle aria-pressed="${enabled}">${enabled ? "Disable YOLO" : "Enable YOLO…"}</button><p class="form-error" id="yolo-error" role="alert" hidden></p>` : ""}</section>`;
+}
+
+document.addEventListener("click", async event => {
+  const button = event.target.closest("[data-yolo-toggle]");
+  if (!button || button.disabled) return;
+  const context = {project:model.project.id, host:model.route.host, issue:model.detail.issue};
+  const enabled = !context.issue.labels.includes("yolo");
+  button.disabled = true;
+  try {
+    if (enabled && !await confirmDialog("Enable YOLO for this issue?", "The next worker attempt will run without a sandbox or approval prompts, including if it resumes a saved session. It can change files and run commands with full access to the machine. This stays enabled until Boss disables it. Running agents are unchanged.", "Enable YOLO")) return;
+    if (model.project.id !== context.project || model.detail?.issue.number !== context.issue.number || model.route.host !== context.host) return;
+    const value = await mutate({action:"set_yolo",number:context.issue.number,enabled,if_version:context.issue.version}, context.project);
+    if (model.project.id !== context.project || model.detail?.issue.number !== context.issue.number || model.route.host !== context.host) return;
+    model.detail.issue = value.issue;
+    $(".agent-permissions").outerHTML = renderAgentPermissions(value.issue);
+    $(".side-labels").innerHTML = renderIssueTagChips(value.issue);
+    $("[data-issue-version]").textContent = `Revision ${value.issue.version}`;
+    await refreshProjects(context.project);
+    $("[data-yolo-toggle]")?.focus();
+  } catch (error) {
+    if (model.project.id === context.project && model.detail?.issue.number === context.issue.number && model.route.host === context.host) {
+      if (error.code === "conflict") {
+        const latest = await api({action:"view",number:context.issue.number}, context.project, null, context.host).catch(() => null);
+        if (latest && model.project.id === context.project && model.detail?.issue.number === context.issue.number && model.route.host === context.host) {
+          model.detail.issue = latest.issue;
+          $(".agent-permissions").outerHTML = renderAgentPermissions(latest.issue);
+          $(".side-labels").innerHTML = renderIssueTagChips(latest.issue);
+          $("[data-issue-version]").textContent = `Revision ${latest.issue.version}`;
+        }
+      }
+      const target = $("#yolo-error");
+      if (target) { target.textContent = error.message; target.hidden = false; }
+    }
+  } finally { button.disabled = false; }
+});
+
 function renderTagSidebar(issue) {
   const deleted = !!issue.deleted_at;
-  return `<div class="side-section tag-section"><h2 class="side-heading">Tags${deleted ? "" : `<button class="icon-button" type="button" data-tag-picker aria-label="Assign tags" aria-haspopup="dialog">${icon("plus")}</button>`}</h2><div class="side-labels">${renderIssueTagChips(issue)}</div>${deleted ? "" : '<button class="button small link-button" type="button" data-tag-picker>Add tags</button>'}</div>`;
+  return `${renderAgentPermissions(issue)}<div class="side-section tag-section"><h2 class="side-heading">Tags${deleted ? "" : `<button class="icon-button" type="button" data-tag-picker aria-label="Assign tags" aria-haspopup="dialog">${icon("plus")}</button>`}</h2><div class="side-labels">${renderIssueTagChips(issue)}</div>${deleted ? "" : '<button class="button small link-button" type="button" data-tag-picker>Add tags</button>'}</div>`;
 }
 function renderIssueTagChips(issue) {
   return issue.labels.length
     ? issue.labels
         .map(
           (tag) =>
-            `<span class="tag-chip">${label(tag)}${issue.deleted_at ? "" : `<button type="button" data-remove-issue-tag="${esc(tag)}" aria-label="Remove ${esc(tag)} tag">${icon("x")}</button>`}</span>`,
+            `<span class="tag-chip">${label(tag)}${issue.deleted_at || tag === "yolo" ? "" : `<button type="button" data-remove-issue-tag="${esc(tag)}" aria-label="Remove ${esc(tag)} tag">${icon("x")}</button>`}</span>`,
         )
         .join("")
     : '<span class="muted-text">No tags yet</span>';
@@ -186,7 +225,7 @@ function renderIssueTagOptions() {
   const ctx = issueTagPicker;
   if (!ctx) return;
   const query = $("#issue-tag-search").value.trim();
-  const tags = [...new Set([...model.labels, ...ctx.issue.labels])].sort();
+  const tags = [...new Set([...model.labels, ...ctx.issue.labels])].filter(tag => tag !== "yolo").sort();
   $("#issue-tag-options").innerHTML =
     tags
       .filter((tag) =>

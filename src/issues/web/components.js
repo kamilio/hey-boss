@@ -5,6 +5,7 @@ const HeyBossUI = (() => {
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const paths = {
+  bolt: '<path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z"/>',
   info: '<circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="M12 11v6M12 7v.5" stroke="var(--solid)" stroke-width="2"/>',
   success:
     '<circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m7 12 3 3 7-7" stroke="var(--solid)" stroke-width="2"/>',

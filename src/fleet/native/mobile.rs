@@ -47,7 +47,12 @@ impl Mobile {
         };
         match Store::open(&self.ctx.path)?.execute(&request) {
             Ok(value) => Ok(value),
-            Err(e) if matches!(e.code.as_str(), "invalid_input" | "not_found" | "conflict") => {
+            Err(e)
+                if matches!(
+                    e.code.as_str(),
+                    "invalid_input" | "not_found" | "conflict" | "forbidden"
+                ) =>
+            {
                 Ok(json!({"ok":false,"error":e}))
             }
             Err(_) => Err("Issue store temporarily unavailable".into()),
@@ -601,6 +606,10 @@ mod web_tests {
         assert_eq!(hidden["error"]["code"], "not_found");
         let read = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","operation":{"action":"view","number":1}}}), &projects, &visible).unwrap();
         assert_eq!(read["issue"]["title"], "Phone issue");
+        let yolo = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","request_id":"yolo-enable","operation":{"action":"set_yolo","number":1,"enabled":true,"if_version":1}}}), &projects, &visible).unwrap();
+        assert_eq!(yolo["issue"]["labels"], json!(["yolo"]));
+        let denied = mobile.web_request(&json!({"kind":"action","payload":{"project":"named:Phone","request_id":"ordinary-label","operation":{"action":"edit","number":1,"add_labels":["yolo"],"remove_labels":[]}}}), &projects, &visible).unwrap();
+        assert_eq!(denied["error"]["code"], "forbidden");
         let db = mobile.ctx.db().unwrap();
         db.execute_batch(
             "UPDATE fleet_meta SET syncing=1;

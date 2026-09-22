@@ -765,6 +765,62 @@ fn unfinished_unassigned_issues_are_reserved_again_after_retry_delay() {
     }
 }
 #[test]
+fn yolo_applies_to_new_and_resumed_attempts_and_can_be_revoked() {
+    let f = Fixture::new("yolo-policy");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    let mut session = Value::Null;
+    for (index, enabled) in [true, true, false].into_iter().enumerate() {
+        // Seed Boss-authorized state; no agent or CLI can grant this label.
+        db.execute(
+            "UPDATE issues SET labels=?1",
+            [if enabled { "[\"yolo\"]" } else { "[]" }],
+        )
+        .unwrap();
+        let mut worker = f.worker();
+        let status = f.wait(|s| {
+            s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number()
+        });
+        if index == 0 {
+            session = status["runs"][0]["session_id"].clone();
+        }
+        assert_eq!(status["runs"][0]["session_id"], session);
+        worker.stop();
+        let protocol = f.transcript();
+        let thread = protocol
+            .iter()
+            .rev()
+            .find(|v| matches!(v["method"].as_str(), Some("thread/start" | "thread/resume")))
+            .unwrap();
+        assert_eq!(
+            thread["method"],
+            if index == 0 {
+                "thread/start"
+            } else {
+                "thread/resume"
+            }
+        );
+        assert_eq!(
+            thread["params"]["approvalPolicy"],
+            if enabled { "never" } else { "on-request" }
+        );
+        assert_eq!(
+            thread["params"]["sandbox"],
+            if enabled {
+                "danger-full-access"
+            } else {
+                "workspace-write"
+            }
+        );
+        assert_eq!(
+            thread["params"]["approvalsReviewer"],
+            if enabled { "user" } else { "auto_review" }
+        );
+    }
+}
+
+#[test]
 fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
     let f = Fixture::new("stop-releases-claim");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();

@@ -632,7 +632,11 @@ impl Codex {
             &std::env::var_os("PATH").unwrap_or_default(),
         ));
         let mut command = Command::new(binary);
-        crate::codex_permissions::apply(&mut command);
+        if yolo(&job.issue) {
+            crate::codex_permissions::apply_yolo(&mut command);
+        } else {
+            crate::codex_permissions::apply(&mut command);
+        }
         command
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(&job.config.cwd)
@@ -1081,6 +1085,12 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
 fn turn_params(session: &str, text: &str) -> Value {
     json!({"threadId":session,"input":[{"type":"text","text":text}],"outputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["completed","blocked"]},"summary":{"type":"string"}},"required":["status","summary"],"additionalProperties":false}})
 }
+fn yolo(issue: &Value) -> bool {
+    issue["labels"]
+        .as_array()
+        .is_some_and(|labels| labels.iter().any(|label| label.as_str() == Some("yolo")))
+}
+
 fn run_codex(
     path: &Path,
     store: &mut Store,
@@ -1095,7 +1105,15 @@ fn run_codex(
         Codex::check(store, job, stop)?;
         let mut c = Codex::spawn(path, job)?;
         store.worker_process(&job.id, c.process.pid())?;
-        store.worker_event(&job.id, "Launching Codex", None)?;
+        store.worker_event(
+            &job.id,
+            if yolo(&job.issue) {
+                "Launching Codex in YOLO mode (no sandbox or approvals)"
+            } else {
+                "Launching Codex"
+            },
+            None,
+        )?;
         match c.rpc("initialize",json!({"clientInfo":{"name":"hey_boss_worker","title":"Hey Boss issue worker","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),store,job,stop) {
             Ok(_) => break c,
             Err(error) if error.message.contains("failed to initialize sqlite state runtime") => {
@@ -1152,7 +1170,11 @@ fn run_thread(
     };
     let result = c.rpc(
         method,
-        crate::codex_permissions::thread(params),
+        if yolo(&job.issue) {
+            crate::codex_permissions::yolo_thread(params)
+        } else {
+            crate::codex_permissions::thread(params)
+        },
         store,
         job,
         stop,

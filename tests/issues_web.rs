@@ -179,6 +179,45 @@ impl Drop for Web {
 }
 
 #[test]
+fn yolo_is_a_versioned_boss_web_action_and_not_an_ordinary_label() {
+    let web = Web::start();
+    let created =
+        web.ok(json!({"action":"create","title":"Permission retry","body":"","labels":[]}));
+    let number = created["issue"]["number"].as_i64().unwrap();
+    for operation in [
+        json!({"action":"create","title":"No CLI escape","body":"","labels":["yolo"]}),
+        json!({"action":"create_subtask","number":number,"title":"Child","body":"","labels":["YOLO"]}),
+        json!({"action":"edit","number":number,"title":null,"body":null,"add_labels":["yolo"],"remove_labels":[]}),
+        json!({"action":"batch","dry_run":true,"edits":[{"number":number,"if_version":1,"expected_assignee":null,"add_labels":["yolo"]}]}),
+    ] {
+        let denied = web.action(&web.project, operation, None);
+        assert_eq!(denied.json()["error"]["code"], "forbidden");
+    }
+    let enable = json!({"action":"set_yolo","number":number,"enabled":true,"if_version":1});
+    let enabled = web
+        .action(&web.project, enable.clone(), Some("enable-yolo"))
+        .json();
+    assert_eq!(enabled["issue"]["labels"], json!(["yolo"]));
+    assert_eq!(enabled["issue"]["version"], 2);
+    assert_eq!(enabled["issue"]["state"], "open");
+    assert!(enabled["issue"]["assignee"].is_null());
+    assert_eq!(
+        web.action(&web.project, enable, Some("enable-yolo")).json(),
+        enabled
+    );
+    let stale = web.action(
+        &web.project,
+        json!({"action":"set_yolo","number":number,"enabled":false,"if_version":1}),
+        None,
+    );
+    assert_eq!(stale.json()["error"]["code"], "conflict");
+    let disabled =
+        web.ok(json!({"action":"set_yolo","number":number,"enabled":false,"if_version":2}));
+    assert_eq!(disabled["issue"]["labels"], json!([]));
+    assert_eq!(disabled["issue"]["version"], 3);
+}
+
+#[test]
 fn mobile_proxy_uses_the_authoritative_database_and_preserves_origin_and_csrf_checks() {
     let origin = "https://mac.example.ts.net:8443";
     let host = "mac.example.ts.net:8443";

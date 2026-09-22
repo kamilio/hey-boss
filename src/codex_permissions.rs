@@ -1,6 +1,5 @@
-//! Hardcoded Auto permission policy for every Codex session Hey Boss launches.
-//! Keep approvals interactive so Codex's reviewer can approve or deny requests.
-//! Never rewrite the user's global config or silently fall back to Full Access.
+//! Auto is the default. Only Boss's issue-level web control grants YOLO
+//! for a worker attempt; new and resumed threads use the same explicit policy.
 use serde_json::Value;
 use std::process::Command;
 
@@ -22,5 +21,23 @@ pub(crate) fn thread(mut params: Value) -> Value {
     params["approvalPolicy"] = "on-request".into();
     params["approvalsReviewer"] = "auto_review".into();
     params["sandbox"] = "workspace-write".into();
+    params
+}
+
+pub(crate) fn apply_yolo(command: &mut Command) -> &mut Command {
+    command.args([
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "approvals_reviewer=\"user\"",
+        "-c",
+        "sandbox_mode=\"danger-full-access\"",
+    ])
+}
+
+pub(crate) fn yolo_thread(mut params: Value) -> Value {
+    params["approvalPolicy"] = "never".into();
+    params["approvalsReviewer"] = "user".into();
+    params["sandbox"] = "danger-full-access".into();
     params
 }
