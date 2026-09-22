@@ -6,6 +6,10 @@ import webpush from 'web-push';
 import {fileURLToPath} from 'node:url';
 import {HubStore,HubError,equal,token} from './store.mjs';
 import {pushContent,preview} from './markdown-text.mjs';
+function validateTask(r){
+ if(!r||typeof r.taskID!=='string'||r.taskID.length>128||!['alert','update','approval','prompt'].includes(r.kind)||typeof r.title!=='string'||typeof r.question!=='string'||!Array.isArray(r.options)||r.options.length>20||r.options.some(x=>typeof x!=='string'||x.length>512))throw new HubError(400,'Invalid task');
+ if(typeof r.description!=='string'||Buffer.byteLength(r.description)>(r.kind==='update'?65536:1048576)||Buffer.byteLength(r.question)>(r.kind==='update'?1048576:65536))throw new HubError(400,'Document must be at most 1 MiB, with a summary of at most 64 KiB');
+}
 export function createApp({store=new HubStore(),hubToken,origin,secure=true,push=webpush,vapid,now=Date.now,checkpoint=false}={}){
  if(!hubToken||hubToken.length<32)throw Error('HUB_TOKEN must contain at least 32 characters');
  const app=express();app.disable('x-powered-by');app.use('/api/bridge/checkpoint',express.json({limit:'64mb'}));app.use('/api/bridge/artifacts',express.json({limit:'32mb'}));app.use('/api/artifact-requests',express.json({limit:'16mb'}));app.use(express.json({limit:'16mb'}));let bridgeSeen=0;const listeners=new Set();const attempts=new Map();
@@ -61,12 +65,16 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.post('/api/logout',auth,(req,res)=>{store.db.prepare('DELETE FROM devices WHERE id=?').run(req.device.id);res.set('Set-Cookie','hb_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secure?'; Secure':''));res.json({ok:true});});
  app.get('/api/events',auth,(req,res)=>{if(listeners.size>=100)throw new HubError(503,'Connection limit reached');res.set('Content-Type','text/event-stream');res.flushHeaders();listeners.add(res);res.write('data: {}\n\n');req.on('close',()=>listeners.delete(res));});
  app.put('/api/bridge/tasks/:id',bridge,(req,res)=>{
-  const r=req.body;if(r.taskID!==req.params.id||typeof r.taskID!=='string'||r.taskID.length>128||!['alert','update','approval','prompt'].includes(r.kind)||typeof r.title!=='string'||typeof r.question!=='string'||!Array.isArray(r.options)||r.options.length>20||r.options.some(x=>typeof x!=='string'||x.length>512))throw new HubError(400,'Invalid task');
-  if(typeof r.description!=='string'||Buffer.byteLength(r.description)>(r.kind==='update'?65536:1048576)||Buffer.byteLength(r.question)>(r.kind==='update'?1048576:65536))throw new HubError(400,'Document must be at most 1 MiB, with a summary of at most 64 KiB');
+  const r=req.body;validateTask(r);if(r.taskID!==req.params.id)throw new HubError(400,'Invalid task');
   const {task,created}=store.upsert(r);if(created){store.enqueue({id:task.taskID,...pushContent(task),kind:task.kind},now());change();}res.json({task:outcome(task)});
  });
  app.get('/api/bridge/tasks',bridge,(req,res)=>res.json({tasks:store.outcomes()}));
- app.post('/api/bridge/tasks/clear',bridge,(req,res)=>{const cleared=store.clear(req.body.taskIDs,'mac');change();res.json({cleared,tasks:req.body.taskIDs.map(id=>outcome(store.get(id)))});});
+ app.post('/api/bridge/tasks/clear',bridge,(req,res)=>{
+  const tasks=req.body.tasks??[];
+  if(!Array.isArray(tasks)||tasks.length>100)throw new HubError(400,'Supply at most 100 native notices');
+  tasks.forEach(validateTask);
+  const cleared=store.clear(req.body.taskIDs,'mac',tasks);change();res.json({cleared,tasks:req.body.taskIDs.map(id=>outcome(store.get(id)))});
+ });
  app.post('/api/bridge/tasks/:id/ack',bridge,(req,res)=>{store.ack(req.params.id,req.body.version);res.json({ok:true});});
  app.post('/api/bridge/tasks/:id/resolve',bridge,(req,res)=>{try{const task=store.resolve(req.params.id,req.body.result,'mac',req.body.cancel===true);change();res.json({task:outcome(task)});}catch(e){if(e.status===409)return res.status(409).json({error:e.message,task:outcome(store.get(req.params.id))});throw e;}});
  app.use(express.static(fileURLToPath(new URL('../dist/',import.meta.url)),{index:'index.html',setHeaders(res,path){if(path.includes('/assets/'))res.setHeader('Cache-Control','public, max-age=31536000, immutable');}}));
