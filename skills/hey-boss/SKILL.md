@@ -308,11 +308,18 @@ Do not combine checkout paths with `--all-projects` or select two checkouts of t
 same project for one worker.
 
 `hey-boss upgrade` updates this installation and every registered SSH companion.
-Use `--source /path/to/hey-boss` to install and remember a development checkout;
-without a configured checkout it fetches upstream main. `--check` only reports
+Use `--source /path/to/hey-boss` to explicitly install a development snapshot and
+remember its checkout location. Without `--source`, upgrades archive committed
+main, fetching upstream even for remembered checkouts; dirty changes are never
+implicitly installed. Installers queue per machine, refuse older or unrelated
+commits, and reject development snapshots superseded while queued. `--force`
+never bypasses ordering. Reports include source/build receipts and final fleet
+verification; `superseded` means an intervening upgrade changed a verified host.
+`--check` only reports
 build mismatches; `--local-only` or repeatable `--host HOST` limits targets.
-Matching source build IDs skip compilation. Failed hosts are reported separately;
-rerun after reconnecting. Python 3 and Rust must be available on each target.
+Matching source build IDs with matching provenance skip compilation. Failed hosts
+are reported separately; rerun after reconnecting. Rust, Git and tar must be
+available on each target.
 
 `hey-boss COMMAND --help`; companions may need `~/.local/bin/hey-boss`.
 Edit only the repository skill; rebuild/install the Mac CLI, then `hey-boss companion sync-skill`. Existing chats must reload.
