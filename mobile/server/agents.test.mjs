@@ -15,6 +15,17 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal((await call('/api/bridge/agents/status',snapshot,bridge)).status,200);
  const status=await(await call('/api/fleet/status',null,headers)).json();assert.equal(status.machines[0].workers[0].runs.length,1);
  assert.equal((await call('/api/fleet/conversation?host=local&run=private',null,headers)).status,404);
+ assert.equal((await call('/api/fleet/assignment?project=named%3AAtlas&issue=4&agent=codex%3Aexact')).status,401);
+ assert.equal((await call('/api/fleet/assignment?project=named%3AHidden&issue=4&agent=codex%3Aexact',null,headers)).status,404);
+ assert.equal((await call('/api/fleet/assignment?project=named%3AAtlas&issue=0&agent=codex%3Aexact',null,headers)).status,400);
+ const assignment=call('/api/fleet/assignment?project=named%3AAtlas&issue=4&agent=codex%3Aexact',null,headers);
+ let assignmentRequests;
+ for(let i=0;i<20;i++){assignmentRequests=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(assignmentRequests.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(assignmentRequests[0].action,'assignment');
+ assert.equal(assignmentRequests[0].issue,4);
+ assert.equal(assignmentRequests[0].agent,'codex:exact');
+ await call('/api/bridge/agents/'+assignmentRequests[0].id+'/result',{ok:true,machine:{host:'local'},run:{id:'session:exact',project_id:'named:Atlas',number:4,standalone:true}},bridge);
+ assert.equal((await(await assignment).json()).run.id,'session:exact');
  assert.equal((await call('/api/fleet/conversation?host=local&run=run&cursor=-1',null,headers)).status,400);
  const reading=call('/api/fleet/conversation?host=local&run=run&cursor=0&latest=1&before=100',null,headers);
  let pending;for(let i=0;i<20;i++){pending=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(pending.length)break;await new Promise(r=>setTimeout(r,10));}

@@ -62,7 +62,68 @@ pub(crate) fn referenced(db: &Connection, host: &str, run: &str) -> Result<Optio
             return Ok(Some(serde_json::from_str(&origin)?));
         }
     }
+    let session = match run.strip_prefix("session:") {
+        Some(session) => Some(session.to_owned()),
+        None => db
+            .query_row(
+                "SELECT session_id FROM worker_runs WHERE id=?1",
+                [run],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten(),
+    };
+    if let Some(session) = session {
+        if let Some(assigned) = assigned_session(db, &session)? {
+            if assigned["id"] == run
+                && (assigned["host"] == host
+                    || (host == "local" && assigned["machine"] == super::identity::machine()?))
+            {
+                return Ok(Some(assigned));
+            }
+        }
+    }
     Ok(None)
+}
+
+/// Resolve only the exact current assignment, independently of recent activity.
+pub(crate) fn assigned_run(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    agent: &str,
+) -> Result<Option<Value>> {
+    let saved = db.query_row("SELECT i.title,p.name,a.metadata FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=i.assignee WHERE i.project_id=?1 AND i.number=?2 AND i.assignee=?3 AND i.deleted_at IS NULL AND p.hidden_at IS NULL", params![project,number,agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+    let Some((title, name, metadata)) = saved else {
+        return Ok(None);
+    };
+    let actor: Actor = serde_json::from_str(&metadata)?;
+    if actor.kind != "codex" {
+        return Ok(None);
+    }
+    let Some(session) = actor.session_id.as_deref() else {
+        return Ok(None);
+    };
+    let run: Option<String> = db.query_row("SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND session_id=?3 ORDER BY started_at DESC LIMIT 1",params![project,number,session],|r|r.get(0)).optional()?;
+    if let Some(run) = run {
+        let mut saved = saved_run(db, &run)?
+            .ok_or_else(|| super::Error::invalid("Saved assignment is unavailable"))?;
+        saved["host"] = json!(actor.host);
+        saved["machine"] = json!(actor.machine);
+        return Ok(Some(saved));
+    }
+    let stale = super::identity::presence(&actor, &super::identity::machine()?) == "stale";
+    Ok(Some(
+        json!({"id":format!("session:{session}"),"project_id":project,"project_name":name,"number":number,"title":title,"session_id":session,"actor_id":agent,"host":actor.host,"machine":actor.machine,"state":if stale {"stopped"} else {"running"},"started_at":null,"finished_at":if stale {Some(0)} else {None},"standalone":true}),
+    ))
+}
+
+fn assigned_session(db: &Connection, session: &str) -> Result<Option<Value>> {
+    let assignment = db.query_row("SELECT i.project_id,i.number,i.assignee FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=i.assignee WHERE json_extract(a.metadata,'$.session_id')=?1 AND i.deleted_at IS NULL AND p.hidden_at IS NULL ORDER BY i.project_id,i.number LIMIT 1",[session],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?))).optional()?;
+    match assignment {
+        Some((project, number, agent)) => assigned_run(db, &project, number, &agent),
+        None => Ok(None),
+    }
 }
 
 pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
@@ -73,6 +134,9 @@ pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
     let Some(session) = run.strip_prefix("session:") else {
         return Ok(None);
     };
+    if let Some(assigned) = assigned_session(db, session)? {
+        return Ok(Some(assigned));
+    }
     for table in ["issues", "artifacts"] {
         let saved: Option<Value> = db.query_row(&format!("SELECT r.project_id,p.name,r.title,r.origin FROM {table} r JOIN projects p ON p.id=r.project_id WHERE json_extract(origin,'$.session_id')=?1 AND p.hidden_at IS NULL LIMIT 1"),[session],|r|{
             let raw:String=r.get(3)?;
@@ -132,6 +196,67 @@ pub(super) fn capture(db: &Connection, actor: &Actor, now: i64) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn assignment_resolves_standalone_session_without_recent_runs() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE projects(id TEXT,name TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas','Atlas',NULL); CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); CREATE TABLE agents(id TEXT,metadata TEXT); CREATE TABLE worker_runs(id TEXT,project_id TEXT,issue_number INTEGER,session_id TEXT,started_at INTEGER,job TEXT,state TEXT,finished_at INTEGER,actor_id TEXT); INSERT INTO issues VALUES('Atlas',4,'Repair','codex:exact',NULL,NULL);").unwrap();
+        let actor = json!({"id":"codex:exact","kind":"codex","session_id":"exact","machine":"remote","host":"mac.local","pid":null,"process_start":null,"cwd":"/work","source":"test"});
+        db.execute(
+            "INSERT INTO agents VALUES('codex:exact',?1)",
+            [actor.to_string()],
+        )
+        .unwrap();
+        let run = assigned_run(&db, "Atlas", 4, "codex:exact")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run["id"], "session:exact");
+        assert_eq!(run["number"], 4);
+        assert_eq!(run["standalone"], true);
+        assert!(
+            assigned_run(&db, "Atlas", 4, "codex:other")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            assigned_run(&db, "Atlas", 5, "codex:exact")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            referenced(&db, "mac.local", "session:exact")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            referenced(&db, "other.local", "session:exact")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            saved_run(&db, "session:exact").unwrap().unwrap()["actor_id"],
+            "codex:exact"
+        );
+        db.execute_batch("INSERT INTO worker_runs VALUES('old','Atlas',4,'exact',1,'{}','completed',2,'worker:old'); INSERT INTO worker_runs VALUES('latest','Atlas',4,'exact',3,'{}','running',NULL,'worker:latest');").unwrap();
+        assert_eq!(
+            assigned_run(&db, "Atlas", 4, "codex:exact")
+                .unwrap()
+                .unwrap()["id"],
+            "latest"
+        );
+        assert!(referenced(&db, "mac.local", "latest").unwrap().is_some());
+        assert!(referenced(&db, "other.local", "latest").unwrap().is_none());
+        db.execute("UPDATE projects SET hidden_at=1", []).unwrap();
+        assert!(
+            assigned_run(&db, "Atlas", 4, "codex:exact")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            referenced(&db, "mac.local", "session:exact")
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn old_capture_triggers_migrate_atomically_without_inventing_origins() {
         let db = Connection::open_in_memory().unwrap();

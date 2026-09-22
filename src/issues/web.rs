@@ -642,6 +642,14 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             }
             return Ok((200, kind, data.to_vec()));
         }
+        if path == "/api/fleet/assignment" {
+            let query = parse_query(request.url())?;
+            return json_response(crate::agent_conversations::assignment(
+                query.get("project").map(String::as_str).unwrap_or(""),
+                query.get("issue").and_then(|n| n.parse().ok()).unwrap_or(0),
+                query.get("agent").map(String::as_str).unwrap_or(""),
+            )?);
+        }
         if path == "/api/fleet/conversation" {
             let query = parse_query(request.url())?;
             let cursor = query

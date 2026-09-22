@@ -49,6 +49,11 @@ function assignedAgentEntry(data, query) {
       (e.run.actor_id === agent || (agent.startsWith('codex:') && e.run.session_id === agent.slice(6))))
     .sort((a,b) => (b.run.started_at || 0) - (a.run.started_at || 0))[0];
 }
+async function resolveAssignedAgent(data, query, read) {
+  const recent=assignedAgentEntry(data,query);
+  if(recent)return recent;
+  return read('/api/fleet/assignment?'+new URLSearchParams({project:query.get('project'),issue:query.get('issue'),agent:query.get('agent')}));
+}
 function deviceView(data, project, now = Date.now()) {
   return (data.machines || []).map(machine => {
     const workers = (machine.workers || []).filter(w => !project || !w.config?.projects?.length || w.config.projects.includes(project));
@@ -59,7 +64,7 @@ function deviceView(data, project, now = Date.now()) {
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView, assignedAgentEntry};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView, assignedAgentEntry, resolveAssignedAgent};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -68,7 +73,7 @@ if (typeof document !== 'undefined') (() => {
   const base = '/agents';
   const route = () => new URLSearchParams(location.hash.slice(1));
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
-  let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical;
+  let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical, assignmentLoading=false;
   const seen = new Set();
   let takeoverBusy=false, takeoverTarget;
   let steerBusy=false, steerTarget, steerRequest;
@@ -185,6 +190,13 @@ if (typeof document !== 'undefined') (() => {
     if (assignment) {
       const entry = assignedAgentEntry(data, route());
       if (entry) history.replaceState(null, '', link(entry));
+      else {
+        selected=undefined;
+        $('session-title').textContent='Loading conversation';
+        $('session-status').textContent='Finding the saved session for this assignment…';
+        resolveAssignment();
+        return;
+      }
     }
     const resource=HeyBossRoutes.resolve();
     selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&(e.machine.host===resource.host||e.machine.hostname===resource.host)&&e.run.id===resource.id);
@@ -205,6 +217,26 @@ if (typeof document !== 'undefined') (() => {
     if(!loaded&&!loading)loadConversation();
   }
   function render(data) {last=data;if(detail)renderDetail(data);else renderOverview(data);}
+  async function resolveAssignment() {
+    if(assignmentLoading)return;
+    assignmentLoading=true;const token=generation;
+    try {
+      const query=route();
+      const entry=await resolveAssignedAgent(last,query,read);
+      if(token!==generation||disposed)return;
+      historical=entry;
+      const params=new URLSearchParams(link(entry).split('#')[1]);
+      if(query.has('at'))params.set('at',query.get('at'));
+      history.replaceState(null,'',base+'/session#'+params);
+      renderDetail(last);
+    } catch(e) {
+      if(token!==generation||disposed)return;
+      $('session-title').textContent='Conversation unavailable';
+      $('session-status').textContent=e.message;
+      $('conversation-empty').textContent='The saved session could not be loaded.';
+      fail(e);
+    } finally {assignmentLoading=false;}
+  }
   async function read(path) {
     const response=await fetch(path,{cache:'no-store'});const data=await response.json();
     if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not connect. Try again.');return data;

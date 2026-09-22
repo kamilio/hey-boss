@@ -169,6 +169,29 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
     Ok(result)
 }
 
+pub fn assignment(project: &str, number: i64, agent: &str) -> Result<Value> {
+    let run = crate::issues::provenance::assigned_run(
+        &database(&crate::issues::database_path()?)?,
+        project,
+        number,
+        agent,
+    )?
+    .ok_or_else(|| Error::invalid("This assignment no longer has a saved Codex session"))?;
+    let status = overview()?;
+    let local = run["machine"] == crate::issues::identity::machine()?;
+    let machine = status["machines"]
+        .as_array()
+        .and_then(|ms| {
+            ms.iter().find(|m| {
+                (local && m["host"] == "local")
+                    || (!local && (m["host"] == run["host"] || m["hostname"] == run["host"]))
+            })
+        })
+        .ok_or_else(|| Error::invalid("The assignment's device is no longer available"))?;
+    let device = json!({"host":machine["host"],"hostname":machine["hostname"],"state":machine["state"],"heartbeat":machine["heartbeat"]});
+    Ok(json!({"ok":true,"machine":device,"run":run,"online":machine["state"] == "connected"}))
+}
+
 pub fn local_window(run: &str, window: &Window) -> Result<Value> {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -629,6 +652,12 @@ fn bridge(path: &Path) -> Result<()> {
             crate::fleet::call(
                 &json!({"kind":request["action"],"host":request["host"],"run":request["run"],"scope":request["scope"],"text":request["text"],"request_id":request["request_id"]}),
             )
+        } else if request["action"] == "assignment" {
+            assignment(
+                request["project"].as_str().unwrap_or(""),
+                request["issue"].as_i64().unwrap_or(0),
+                request["agent"].as_str().unwrap_or(""),
+            )
         } else {
             conversation(
                 request["host"].as_str().unwrap_or(""),
@@ -714,6 +743,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[test]
+    fn assigned_standalone_session_reads_saved_messages_without_worker_history() {
+        let f = Fixture::new();
+        f.db.execute_batch("CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); CREATE TABLE agents(id TEXT,metadata TEXT); DELETE FROM worker_runs; INSERT INTO issues VALUES('Atlas',4,'Repair','codex:exact',NULL,NULL);").unwrap();
+        let actor = json!({"id":"codex:exact","kind":"codex","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","machine":"remote","host":"mac.local","pid":null,"process_start":null,"cwd":"/work","source":"test"});
+        f.db.execute(
+            "INSERT INTO agents VALUES('codex:exact',?1)",
+            [actor.to_string()],
+        )
+        .unwrap();
+        std::fs::write(
+            &f.path,
+            Fixture::line("assistant", "Saved repair conversation"),
+        )
+        .unwrap();
+        let page = window_page(
+            &f.db,
+            &f.root,
+            "session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &Window {
+                latest: true,
+                ..Window::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page["messages"][0]["text"], "Saved repair conversation");
+        assert_eq!(page["run"]["number"], 4);
+        assert_eq!(page["run"]["standalone"], true);
     }
     #[test]
     fn roles_tools_markdown_and_no_duplicate_events() {
