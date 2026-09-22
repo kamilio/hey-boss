@@ -113,7 +113,15 @@ Use ordinary **comments** for lasting findings, decisions, essential questions,
 and final verification. Keep routine progress in status so comments stay useful.
 
 `issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
-its claim; `list --state blocked` finds paused work. Blocking should be rare:
+its claim; `list --state blocked` finds paused work. Add repeatable `--by NUMBER`
+to link the issues that must close first. `issue blocked-by NUMBER BLOCKER...`
+sets these links on an existing issue; omit BLOCKERs to remove them. Use
+`--if-version N` to guard concurrent edits. Lists and details expose `blocked_by`
+and clickable links. Dependency cycles and links outside the project are refused.
+Unfinished subtasks use the same Blocked state. Dependency blocks reopen
+automatically when all blockers finish or are unlinked, and return if a blocker
+is reopened. Manual blocks still require explicit reopening. Approval holds
+also appear as Blocked. Blocking should be rare:
 make every effort to resolve the issue, raise questions via `hey-boss ask`, and
 ask the user for help before giving up. Explain the blocker and what enables
 progress. `issue reopen NUMBER` resumes eligibility with a fresh retry budget.
@@ -303,10 +311,10 @@ ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
 A child has one parent in the same project; cycles are rejected. Relationships
 support eight levels and 100 direct children. Each issue keeps its Markdown,
-labels, ownership, PRs and lifecycle; changes never cascade. Siblings follow the
-shared queue order. Workers wait for unfinished reachable descendants, even
-through closed children, while deleted subtrees do not block pickup. Manual claims
-remain available. Use parent/child version checks and identical request IDs for
+labels, ownership and PRs; closing or deleting a parent never closes its children. Siblings follow the
+shared queue order. Parents are Blocked by unfinished reachable descendants, even
+through closed children, while deleted subtrees do not block pickup. Blocked
+parents cannot be claimed; closing the last descendant resumes eligibility. Use parent/child version checks and identical request IDs for
 uncertain retries. Fleet journals retain offline edits and conflicting payloads.
 
 ## Mindmaps

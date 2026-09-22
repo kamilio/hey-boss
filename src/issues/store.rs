@@ -220,7 +220,7 @@ fn comment_page(
         json!({"ok":true,"project":project,"number":number,"comments":comments,"comment_count":total,"sort":sort,"next_offset":if next < total as u64 { Some(next) } else { None }}),
     )
 }
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
@@ -246,10 +246,18 @@ struct Issue {
     status: Option<Value>,
     #[serde(default, flatten)]
     creation_context: origin_reader::Metadata,
+    #[serde(default)]
+    manual_blocked: bool,
+    #[serde(default)]
+    blocker_numbers: Vec<i64>,
 }
 fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
+        manual_blocked: row.get("manual_blocked")?,
+        blocker_numbers: serde_json::from_str(&row.get::<_, String>("blockers")?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(20, rusqlite::types::Type::Text, Box::new(e))
+        })?,
         creation_context: origin_reader::Metadata::read(row)?,
         agent_launch_count: row.get(16)?,
         status: row
@@ -777,6 +785,7 @@ impl Store {
         steering::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
+        super::blockers::migrate(&mut db)?;
         Ok(Self {
             db,
             attachment_root: path.with_extension("attachments"),
@@ -1243,6 +1252,33 @@ impl Store {
         } else {
             project.clone()
         };
+        if matches!(
+            r.operation,
+            Operation::Create { .. }
+                | Operation::CreateSubtask { .. }
+                | Operation::AddSubtask { .. }
+                | Operation::RemoveSubtask { .. }
+                | Operation::Block { .. }
+                | Operation::SetBlockers { .. }
+                | Operation::Close { .. }
+                | Operation::Reopen { .. }
+                | Operation::Delete { .. }
+                | Operation::Restore { .. }
+                | Operation::Transfer { .. }
+        ) {
+            super::blockers::reconcile(
+                &tx,
+                &response_project.id,
+                actor.map(|a| a.id.as_str()),
+                now,
+            )?;
+            for key in ["issue", "parent_issue", "child_issue"] {
+                if let Some(number) = result[key]["number"].as_i64() {
+                    result[key] =
+                        serde_json::to_value(get_issue(&tx, &response_project.id, number, true)?)?;
+                }
+            }
+        }
         result["drafts_enabled"] =
             registry::project_settings(&tx, &response_project)?["drafts_enabled"].clone();
         let settings = super::global_settings::read(&tx)?;
@@ -1277,6 +1313,7 @@ impl Store {
         ) {
             subtasks::enrich(&tx, &response_project.id, &mut result)?;
         }
+        super::blockers::enrich(&tx, &response_project.id, &mut result)?;
         if matches!(r.operation, Operation::Claim { .. }) {
             result["instructions"] = json!(registry::claim_instructions(
                 &tx,
@@ -1458,7 +1495,7 @@ fn create_issue(
     Ok(issue)
 }
 
-fn event(
+pub(super) fn event(
     db: &Connection,
     project: &str,
     number: i64,
@@ -1716,9 +1753,33 @@ fn mutate(
                 issue.closed_at = Some(now);
             }
         }
+        Operation::SetBlockers {
+            blockers,
+            if_version,
+            force,
+            ..
+        } => {
+            ownership(&issue, actor, *force)?;
+            if if_version.is_some_and(|v| v != issue.version) {
+                return Err(Error::conflict(
+                    "Issue changed. Refresh before changing its blockers.",
+                ));
+            }
+            super::blockers::validate_links(db, &project.id, number, blockers)?;
+            if issue.blocker_numbers != *blockers {
+                action = "blockers_changed";
+                data = json!({"previous_blockers":issue.blocker_numbers,"blockers":blockers});
+                issue.blocker_numbers = blockers.clone();
+                // Linking a manual block gives it a concrete resolution condition.
+                if !blockers.is_empty() {
+                    issue.manual_blocked = false;
+                }
+            }
+        }
         Operation::Block {
             comment: text,
             force,
+            blockers,
             ..
         } => {
             ownership(&issue, actor, *force)?;
@@ -1727,24 +1788,44 @@ fn mutate(
                     "Reopen the closed issue before blocking it",
                 ));
             }
-            if issue.state == "blocked" && text.is_some() {
+            if let Some(links) = blockers {
+                if links.is_empty() {
+                    return Err(Error::invalid("Use blocked-by to remove blocker links"));
+                }
+                super::blockers::validate_links(db, &project.id, number, links)?;
+            }
+            if issue.state == "blocked" && text.is_some() && blockers.is_none() {
                 return Err(Error::conflict(
                     "Issue is already blocked; use comment to add further findings",
                 ));
             }
-            if issue.state != "blocked" {
+            let manual = blockers.is_none();
+            let changed_links = blockers
+                .as_ref()
+                .is_some_and(|links| issue.blocker_numbers != *links);
+            if issue.state != "blocked" || issue.manual_blocked != manual || changed_links {
                 if let Some(body) = text {
                     comment_id = Some(comment(db, &project.id, number, actor, body, now)?);
                 }
                 action = "blocked";
-                data = json!({"previous_assignee":issue.assignee,"forced":force});
+                data =
+                    json!({"previous_assignee":issue.assignee,"forced":force,"blockers":blockers});
                 issue.state = "blocked".into();
+                issue.manual_blocked = manual;
+                if let Some(links) = blockers {
+                    issue.blocker_numbers = links.clone();
+                }
                 issue.assignee = None;
                 issue.closed_at = None;
                 issue.closed_by = None;
             }
         }
         Operation::Reopen { if_version, .. } => {
+            if super::blockers::has_dependencies(db, &project.id, number)? {
+                return Err(Error::conflict(
+                    "This issue is blocked by unfinished issues. Resolve or unlink its blockers before reopening.",
+                ));
+            }
             if if_version.is_some_and(|v| v != issue.version) {
                 return Err(Error::conflict(format!(
                     "Issue changed; current version is {}",
@@ -1759,6 +1840,7 @@ fn mutate(
                 }
                 action = "reopened";
                 data = json!({"previous_state":issue.state,"previous_closed_by":issue.closed_by,"previous_closed_at":issue.closed_at});
+                issue.manual_blocked = false;
                 issue.state = "open".into();
                 issue.assignee = None;
                 issue.closed_by = None;
@@ -1786,8 +1868,8 @@ fn mutate(
     if changed {
         issue.version += 1;
         issue.updated_at = now;
-        db.execute("UPDATE issues SET title=?3,body=?4,state=?5,assignee=?6,closed_by=?7,updated_at=?8,closed_at=?9,deleted_at=?10,version=?11,labels=?12,draft=?13,plan=?14 WHERE project_id=?1 AND number=?2",
-            params![project.id,number,issue.title,issue.body,issue.state,issue.assignee,issue.closed_by,now,issue.closed_at,issue.deleted_at,issue.version,serde_json::to_string(&issue.labels)?,issue.draft,issue.plan.as_ref().map(serde_json::to_string).transpose()?])?;
+        db.execute("UPDATE issues SET title=?3,body=?4,state=?5,assignee=?6,closed_by=?7,updated_at=?8,closed_at=?9,deleted_at=?10,version=?11,labels=?12,draft=?13,plan=?14,manual_blocked=?15,blockers=?16 WHERE project_id=?1 AND number=?2",
+            params![project.id,number,issue.title,issue.body,issue.state,issue.assignee,issue.closed_by,now,issue.closed_at,issue.deleted_at,issue.version,serde_json::to_string(&issue.labels)?,issue.draft,issue.plan.as_ref().map(serde_json::to_string).transpose()?,issue.manual_blocked,serde_json::to_string(&issue.blocker_numbers)?])?;
         if !action.is_empty() {
             event(db, &project.id, number, &actor.id, action, now, &data)?;
         }

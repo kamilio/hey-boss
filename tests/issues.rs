@@ -307,7 +307,7 @@ fn batch_preserves_relationships_noops_and_serializes_competing_groups() {
     let before = f.run("session-a", &["view", "1"]);
     let version = before["issue"]["version"].as_i64().unwrap();
     let edits = json!([
-        {"number":1,"if_version":version,"expected_assignee":null,"add_labels":["PR ready"],"assignment":"boss"},
+        {"number":1,"if_version":version,"expected_assignee":null,"add_labels":["needs review"],"assignment":"keep"},
         {"number":2,"if_version":before["subtasks"][0]["version"],"expected_assignee":null,"assignment":"unassign"}
     ]).to_string();
     let path = f.root.join("triage.json");
@@ -366,7 +366,7 @@ fn batch_preserves_relationships_noops_and_serializes_competing_groups() {
         )
         .unwrap();
     assert_eq!(events, 1);
-    let noop = json!([{"number":1,"if_version":version+1,"expected_assignee":"human:boss","add_labels":["PR ready"],"assignment":"boss"}]).to_string();
+    let noop = json!([{"number":1,"if_version":version+1,"expected_assignee":null,"add_labels":["needs review"],"assignment":"keep"}]).to_string();
     let result = success(f.stdin(
         &["batch", "--file", "-", "--request-id", "noop"],
         noop.as_bytes(),
@@ -2481,8 +2481,7 @@ fn worker_readiness_follows_nested_open_descendants_and_ignores_deleted_subtrees
         1
     );
     assert_eq!(f.run("session-a", &["worker", "status"])["eligible"], 1);
-    f.run("session-a", &["claim", "1"]);
-    f.run("session-a", &["unassign", "1"]);
+    f.fail("session-a", &["claim", "1"], 4);
     f.run("session-a", &["delete", "2"]);
     assert_eq!(ready(), vec![1, 3]);
     f.run("session-a", &["restore", "2"]);
@@ -2545,8 +2544,8 @@ fn schema_seven_subtask_migration_preserves_existing_issue_and_global_profile() 
         &["subtask", "create", "1", "--title", "Migrated child"],
     );
     assert_eq!(
-        f.run("session-a", &["view", "1"])["issue"]["assignee"],
-        "session-a"
+        f.run("session-a", &["view", "1"])["issue"]["state"],
+        "blocked"
     );
 }
 
@@ -2699,7 +2698,8 @@ fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss()
         assert_eq!(listed["issues"].as_array().unwrap().len(), 2);
         let viewed = f.run("session-a", &["view", "1"]);
         assert_eq!(viewed["issue"]["title"], "Preserved");
-        assert_eq!(viewed["issue"]["assignee"], "session-a");
+        assert_eq!(viewed["issue"]["state"], "blocked");
+        assert!(viewed["issue"]["assignee"].is_null());
         assert_eq!(viewed["issue"]["labels"], json!(["ready"]));
         assert_eq!(viewed["issue"]["draft"], false);
         assert!(viewed["issue"]["plan"].is_null());
@@ -2920,4 +2920,146 @@ fn workflow_additive_migration_repairs_missing_columns_without_losing_settings()
     assert_eq!(settings["worktree_enabled"], false);
     assert!(settings["prompt_overrides"]["worktree"].is_null());
     assert_eq!(settings["version"], 1);
+}
+
+#[test]
+fn dependency_waiting_is_blocked_and_reopens_after_the_last_descendant() {
+    let f = Fixture::new();
+    f.create();
+    f.run("session-a", &["subtask", "create", "1", "--title", "Child"]);
+    f.run(
+        "session-a",
+        &["subtask", "create", "2", "--title", "Grandchild"],
+    );
+    let parent = f.run("session-a", &["view", "1"]);
+    assert_eq!(parent["issue"]["state"], "blocked");
+    assert_eq!(parent["issue"]["blocked_by"][0]["number"], 2);
+    assert_eq!(
+        f.run("session-a", &["list", "--state", "blocked"])["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    f.fail("session-a", &["reopen", "1"], 4);
+    f.run("session-a", &["close", "2"]);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["state"],
+        "blocked"
+    );
+    f.run("session-a", &["close", "3"]);
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["state"], "open");
+    f.run("session-a", &["reopen", "3"]);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["state"],
+        "blocked"
+    );
+    f.run("session-a", &["delete", "2"]);
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["state"], "open");
+    f.run("session-a", &["restore", "2"]);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["state"],
+        "blocked"
+    );
+    f.run("session-a", &["subtask", "remove", "1", "2"]);
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["state"], "open");
+}
+
+#[test]
+fn linked_blockers_are_guarded_cycle_safe_and_visible_in_the_cli() {
+    let f = Fixture::new();
+    for _ in 0..3 {
+        f.create();
+    }
+    let blocked = f.run(
+        "session-a",
+        &[
+            "block",
+            "1",
+            "--by",
+            "2",
+            "--by",
+            "3",
+            "--comment",
+            "Needs both fixes",
+        ],
+    );
+    assert_eq!(blocked["issue"]["state"], "blocked");
+    assert_eq!(blocked["issue"]["blocked_by"].as_array().unwrap().len(), 2);
+    let printed = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&f.cwd)
+        .env("HEY_BOSS_ISSUE_DB", &f.db)
+        .env("GIT_CEILING_DIRECTORIES", &f.root)
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
+        .args([
+            "issue",
+            "--agent",
+            "session-a",
+            "list",
+            "--state",
+            "blocked",
+        ])
+        .output()
+        .unwrap();
+    assert!(printed.status.success());
+    assert!(String::from_utf8_lossy(&printed.stdout).contains("Blocked by: #2 Reconnect [open]"));
+    f.fail("session-a", &["blocked-by", "2", "1"], 2);
+    f.fail("session-a", &["subtask", "add", "2", "1"], 2);
+    f.fail("session-a", &["blocked-by", "1", "999"], 3);
+    f.fail(
+        "session-a",
+        &["blocked-by", "1", "2", "--if-version", "1"],
+        4,
+    );
+    f.run("session-a", &["close", "2"]);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["blocked_by"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.run("session-a", &["close", "3"]);
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["state"], "open");
+    f.run("session-a", &["reopen", "2"]);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["state"],
+        "blocked"
+    );
+    f.run("session-a", &["blocked-by", "1"]);
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["state"], "open");
+    f.run("session-a", &["block", "1"]);
+    f.run("session-a", &["subtask", "add", "1", "2"]);
+    f.run("session-a", &["close", "2"]);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["state"],
+        "blocked",
+        "Resolving a dependency cannot clear a manual block"
+    );
+}
+
+#[test]
+fn dependency_migration_normalizes_legacy_parents_and_preserves_manual_blocks() {
+    let f = Fixture::new();
+    for _ in 0..3 {
+        f.create();
+    }
+    f.run("session-a", &["subtask", "add", "1", "2"]);
+    f.run(
+        "session-a",
+        &["block", "3", "--comment", "Access unavailable"],
+    );
+    f.sql()
+        .execute_batch(
+            "UPDATE issues SET state='open',assignee='session-a' WHERE number=1;
+        ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
+        )
+        .unwrap();
+    let parent = f.run("reader", &["view", "1"]);
+    assert_eq!(parent["issue"]["state"], "blocked");
+    assert!(parent["issue"]["assignee"].is_null());
+    f.run("session-a", &["close", "2"]);
+    assert_eq!(f.run("reader", &["view", "1"])["issue"]["state"], "open");
+    assert_eq!(f.run("reader", &["view", "3"])["issue"]["state"], "blocked");
 }
