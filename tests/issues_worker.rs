@@ -1086,7 +1086,7 @@ fn worker_queue_distinguishes_open_issues_from_pickup_eligibility() {
 }
 
 #[test]
-fn worker_queue_accounts_for_tags_and_waiting_subtasks() {
+fn worker_queue_accounts_for_tags_and_excludes_blocked_subtasks() {
     let f = Fixture::new("queue-filters");
     f.setup(&[]);
     f.cli(&["edit", "1", "--label", "ready"]);
@@ -1114,9 +1114,10 @@ fn worker_queue_accounts_for_tags_and_waiting_subtasks() {
     assert_eq!(
         status["queue"],
         serde_json::json!({
-            "open": 4, "assigned": 1, "tag_filtered": 1, "waiting": 1, "eligible": 1
+            "open": 3, "assigned": 1, "tag_filtered": 1, "waiting": 0, "eligible": 1
         })
     );
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "blocked");
     db.execute(
         "UPDATE issue_workers SET config=json_set(config,'$.projects',json('[\"named:Other\"]'))",
         [],
@@ -1146,6 +1147,9 @@ fn approval_hold_is_not_retried_automatically_even_after_delay() {
     assert_eq!(status["eligible"], 0, "{status}");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.control("retry", &id);
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "blocked");
+    assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
+    f.cli(&["reopen", "1"]);
     f.wait(|s| s["active"] == 1 && s["runs"][0]["state"] == "running");
     worker.stop();
 }
