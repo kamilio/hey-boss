@@ -202,6 +202,19 @@ fn lookup_collections_keep_web_issue_filters() {
 }
 
 #[test]
+fn lookup_collections_preserve_blocked_and_all_state_filters() {
+    let f = Fixture::new("blocked-collections");
+    f.execute(json!({"action":"create","title":"Runnable","body":"","labels":[]}));
+    f.execute(json!({"action":"create","title":"Blocked","body":"","labels":[]}));
+    f.execute(json!({"action":"block","number":2,"comment":"Needs external access","force":false}));
+    let blocked = f.value("http://127.0.0.1:4781/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&inbox_state=unread&state=blocked&owner=all");
+    assert_eq!(blocked["issues"].as_array().unwrap().len(), 1);
+    assert_eq!(blocked["issues"][0]["number"], 2);
+    assert_eq!(blocked["issues"][0]["state"], "blocked");
+    assert_eq!(f.value("http://localhost/#project=github.com%2Fpoe-platform%2Fpoe-code&state=all")["issues"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn lookup_agent_links_load_real_saved_conversation_and_filter_overview() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
