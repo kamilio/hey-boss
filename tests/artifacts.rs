@@ -13,6 +13,101 @@ fn run(store: &mut Store, operation: Value) -> Value {
 }
 
 #[test]
+fn guarded_edits_bound_contention_and_preserve_concurrent_versions() {
+    let path = std::env::temp_dir().join(format!("hey-boss-contention-{}.db", std::process::id()));
+    let mut store = Store::open(&path).unwrap();
+    let created = run(
+        &mut store,
+        json!({"command":"create","title":"Contention","body":"Original"}),
+    );
+    let id = created["artifact"]["id"].as_str().unwrap();
+    store
+        .execute(&request(
+            json!({"action":"create","title":"Preview","body":"","labels":[]}),
+        ))
+        .unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let error = store.execute(&request(json!({"action":"artifact","operation":{"command":"edit","id":id,"body":"Pending","if_version":1}}))).unwrap_err();
+    assert_eq!(error.code, "database_busy");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(8),
+        "Contention must have a short bounded wait"
+    );
+    assert!(
+        error.message.contains("retry"),
+        "Busy errors must explain recovery"
+    );
+    // WAL readers and batch previews must remain responsive during a writer.
+    assert_eq!(
+        run(&mut store, json!({"command":"view","id":id}))["artifact"]["body"],
+        "Original"
+    );
+    store.execute(&request(json!({"action":"batch","edits":[{"number":1,"if_version":1,"expected_assignee":null,"add_labels":["verified"]}],"dry_run":true}))).unwrap();
+    writer.execute_batch("ROLLBACK").unwrap();
+    drop(writer);
+
+    // Release after the first busy timeout, with a newer committed version.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let lock_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        let db = rusqlite::Connection::open(lock_path).unwrap();
+        db.execute_batch(
+            "BEGIN IMMEDIATE; UPDATE artifacts SET body='Concurrent',version=version+1",
+        )
+        .unwrap();
+        ready_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2300));
+        db.execute_batch("COMMIT").unwrap();
+    });
+    ready_rx.recv().unwrap();
+    let error = store.execute(&request(json!({"action":"artifact","operation":{"command":"edit","id":id,"body":"Stale","if_version":1}}))).unwrap_err();
+    assert_eq!(error.code, "conflict");
+    writer.join().unwrap();
+    let view = run(&mut store, json!({"command":"view","id":id}));
+    assert_eq!(view["artifact"]["body"], "Concurrent");
+    assert_eq!(view["artifact"]["version"], 2);
+    run(
+        &mut store,
+        json!({"command":"edit","id":id,"body":"Fresh","if_version":2}),
+    );
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn store_open_retries_transient_read_locks() {
+    let path = std::env::temp_dir().join(format!(
+        "hey-boss-read-contention-{}.db",
+        std::process::id()
+    ));
+    drop(Store::open(&path).unwrap());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let lock_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        let db = rusqlite::Connection::open(lock_path).unwrap();
+        db.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE")
+            .unwrap();
+        ready_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2300));
+        db.execute_batch("COMMIT").unwrap();
+    });
+    ready_rx.recv().unwrap();
+    let started = std::time::Instant::now();
+    let mut store = Store::open(&path).unwrap();
+    store
+        .execute(&request(
+            json!({"action":"projects","include_hidden":false}),
+        ))
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    writer.join().unwrap();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn artifacts_keep_comments_links_and_conflicted_edits() {
     let path = std::env::temp_dir().join(format!("hey-boss-artifacts-{}.db", std::process::id()));
     let mut store = Store::open(&path).unwrap();

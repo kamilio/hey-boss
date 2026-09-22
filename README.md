@@ -322,6 +322,13 @@ Stopping a worker stops its owned Chief too. Passes have a thirty-minute limit.
 
 ## URL lookup
 
+Issue-store reads, store opening, and transaction acquisition retry transient
+SQLite contention within a six-second window (an in-progress SQLite wait may
+take up to two additional seconds). Exhaustion returns `database_busy`, including
+in JSON output, with retry guidance. Mutations are never replayed automatically;
+guarded edits check `--if-version` after acquiring the writer lock and still
+reject a newer revision. Read the latest revision before retrying a guarded edit.
+
 Read an item from a copied web link with `hey-boss lookup 'URL'`. For example:
 
 ```sh
