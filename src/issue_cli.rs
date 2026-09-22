@@ -234,6 +234,8 @@ enum Action {
     },
     /// Show the complete Markdown body and the latest 20 comments.
     View { number: i64 },
+    /// Inspect fleet allocation without claiming, synchronizing, or changing workers.
+    Allocation { number: i64 },
     /// Read comments without audit events; newest first by default.
     Comments {
         number: i64,
@@ -295,7 +297,10 @@ enum Action {
     /// Show the calling session identity and resolved project.
     Whoami,
     /// Atomically assign an open issue to this session.
-    #[command(visible_alias = "assign-to-myself")]
+    #[command(
+        visible_alias = "assign-to-myself",
+        after_help = "To resume a released manual claim, retain its saved --agent ID.\nInspect first with `hey-boss issue allocation NUMBER` (add --json for structured reasons).\nCompanions sync automatically. With missing local allocation, inspect the supervisor using\n`hey-boss issue allocation NUMBER --host SUPERVISOR`; if unreserved or reserved for your\nmachine, claim using `hey-boss issue claim NUMBER --host SUPERVISOR --agent SAVED_ID`.\nThe supervisor reserves unallocated work atomically. Wait for local allocation before offline work.\nFor another machine's reservation, resume there or ask Boss for a handoff.\n--force never bypasses fleet allocations."
+    )]
     Claim {
         number: i64,
         /// Explicitly take over another session's claim.
@@ -723,6 +728,10 @@ impl Options {
                 if_version: *if_version,
             },
             Action::View { number } => Operation::View { number: *number },
+            Action::Allocation { number } => Operation::Allocation {
+                number: *number,
+                machine: issues::identity::machine()?,
+            },
             Action::Comments {
                 number,
                 limit,
@@ -1037,7 +1046,19 @@ pub fn run(options: &Options) -> Result<()> {
                 .filter(|s| !s.is_empty())
         });
         let mut value = match &host {
-            Some(host) => issues::remote::call(host, &request)?,
+            Some(host) => issues::remote::call(host, &request).map_err(|mut error| {
+                if let Some(info) = &mut error.details {
+                    let original = info["inspect_command"].as_str().map(str::to_owned);
+                    scope_allocation(info, host);
+                    if let Some(original) = original {
+                        error.message = error.message.replace(
+                            &format!("Inspect: {original}\n"),
+                            &format!("Inspect: {}\n", info["inspect_command"].as_str().unwrap()),
+                        );
+                    }
+                }
+                error
+            })?,
             None => Store::open(&issues::database_path()?)?.execute(&request)?,
         };
         if interactive {
@@ -1064,6 +1085,11 @@ pub fn run(options: &Options) -> Result<()> {
                 _ => None,
             };
             value = issues::planning::interactive(&request, host.as_deref(), value, file, pending)?;
+        }
+        if let Some(host) = &host
+            && let Some(info) = value.get_mut("allocation")
+        {
+            scope_allocation(info, host);
         }
         value["store"] = if let Some(host) = host {
             json!({"host":host})
@@ -1121,6 +1147,21 @@ fn command_context(value: &Value) -> String {
     }
     context
 }
+fn scope_allocation(info: &mut Value, host: &str) {
+    let scope = format!(" --host '{}'", host.replace('\'', "'\\''"));
+    if let Some(command) = info["inspect_command"].as_str() {
+        info["inspect_command"] = json!(format!("{command}{scope}"));
+    }
+    if matches!(
+        info["reason"].as_str(),
+        Some("allocated_here" | "unallocated")
+    ) && let Some(recovery) = info["recovery"].as_str()
+    {
+        info["recovery"] = json!(recovery.replace(" --agent ", &format!("{scope} --agent ")));
+    }
+    info["store_host"] = json!(host);
+}
+
 pub(crate) fn print_text(value: &Value) {
     if let Some(warning) = value["ownership_warning"].as_str() {
         eprintln!("Warning: {}", line(&json!(warning)));
@@ -1146,6 +1187,19 @@ pub(crate) fn print_text(value: &Value) {
     let project = &value["project"];
     if value["scope"] != "global" {
         println!("{} ({})", line(&project["name"]), line(&project["id"]));
+    }
+    if value.get("issue").is_none()
+        && let Some(allocation) = value.get("allocation")
+    {
+        println!(
+            "{}\nStore: {} · machine {}\nInspect: {}\n{}",
+            line(&allocation["summary"]),
+            line(&allocation["role"]),
+            line(&allocation["store_machine"]),
+            line(&allocation["inspect_command"]),
+            line(&allocation["recovery"])
+        );
+        return;
     }
     if let Some(results) = value["results"].as_array() {
         println!(

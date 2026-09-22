@@ -50,7 +50,12 @@ impl Mobile {
             Err(e)
                 if matches!(
                     e.code.as_str(),
-                    "invalid_input" | "not_found" | "conflict" | "forbidden"
+                    "invalid_input"
+                        | "not_found"
+                        | "conflict"
+                        | "fleet_reserved"
+                        | "fleet_allocation_missing"
+                        | "forbidden"
                 ) =>
             {
                 Ok(json!({"ok":false,"error":e}))

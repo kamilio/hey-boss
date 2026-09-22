@@ -1,6 +1,7 @@
 //! Additive fleet metadata. No network filesystem or schema-version coupling.
 use super::{Error, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 
 pub(crate) const INDEXES: &str =
     "CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);";
@@ -25,17 +26,122 @@ pub(crate) fn check_claim(
     project: &str,
     number: i64,
     machine: &str,
-    force: bool,
 ) -> Result<()> {
-    if force {
+    // Keep successful pickup cheap: host lookup and connection files are only
+    // needed when explaining a denial, not while arbitrating ordinary claims.
+    let blocked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?3) OR ((SELECT role FROM fleet_meta WHERE id=1)='agent' AND NOT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node=?3))", params![project,number,machine], |r|r.get(0))?;
+    if !blocked {
         return Ok(());
     }
-    let blocked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?3) OR ((SELECT role FROM fleet_meta WHERE id=1)='agent' AND NOT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node=?3))", params![project,number,machine], |r|r.get(0))?;
-    if blocked {
-        return Err(Error::conflict(
-            "This issue is reserved for another fleet machine, or has not been allocated to this machine. Synchronize before pickup.",
-        ));
-    }
+    let info = allocation(db, project, number, Some(machine))?;
+    let code = match info["reason"].as_str() {
+        Some("reserved_elsewhere") => "fleet_reserved",
+        Some("allocation_missing") => "fleet_allocation_missing",
+        _ => return Ok(()),
+    };
+    let mut error = Error::new(
+        code,
+        format!(
+            "{}\nInspect: {}\n{}\n--force takes session ownership only; it does not bypass fleet reservations.",
+            info["summary"].as_str().unwrap(),
+            info["inspect_command"].as_str().unwrap(),
+            info["recovery"].as_str().unwrap()
+        ),
+    );
+    error.details = Some(info);
+    Err(error)
+}
+
+fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+/// A snapshot of fleet permission, separate from session ownership and worker locks.
+/// Missing local allocation is not proof that the supervisor has no reservation.
+pub(crate) fn allocation(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    caller: Option<&str>,
+) -> Result<Value> {
+    let (role, node): (String, String) =
+        db.query_row("SELECT role,node FROM fleet_meta WHERE id=1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    let machine = caller.unwrap_or(&node);
+    let reserved: Option<String> = db
+        .query_row(
+            "SELECT node FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
+            params![project, number],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let reason = match reserved.as_deref() {
+        Some(owner) if owner != machine => "reserved_elsewhere",
+        Some(_) => "allocated_here",
+        None if role == "agent" => "allocation_missing",
+        None => "unallocated",
+    };
+    let reserved_host: Option<String> = if reserved.as_deref() == Some(node.as_str()) {
+        Some(super::identity::host())
+    } else if let Some(owner) = &reserved {
+        // Bound lookup to this issue's participants; never scan all saved agents.
+        db.query_row("SELECT json_extract(metadata,'$.host') FROM agents WHERE id IN (SELECT assignee FROM issues WHERE project_id=?1 AND number=?2 UNION SELECT created_by FROM issues WHERE project_id=?1 AND number=?2) AND json_extract(metadata,'$.machine')=?3 ORDER BY last_seen DESC LIMIT 1", params![project,number,owner], |r|r.get(0)).optional()?.flatten()
+    } else {
+        None
+    };
+    let command = format!(
+        "hey-boss issue allocation {number} --project {}",
+        quote(project)
+    );
+    let claim = format!("hey-boss issue claim {number} --project {}", quote(project));
+    let summary = match reason {
+        "reserved_elsewhere" => format!(
+            "Issue #{number} is reserved for fleet machine {}{}; caller machine is {machine}.",
+            reserved.as_deref().unwrap(),
+            reserved_host
+                .as_ref()
+                .map(|host| format!(" ({host})"))
+                .unwrap_or_default()
+        ),
+        "allocation_missing" => format!(
+            "Issue #{number} has no allocation in this companion's local replica (machine {machine}). The supervisor may have a newer allocation."
+        ),
+        "allocated_here" => format!("Issue #{number} is allocated to machine {machine}."),
+        _ => format!("Issue #{number} has no fleet reservation in this store."),
+    };
+    let recovery = match reason {
+        "reserved_elsewhere" => format!(
+            "{}Resume on the reserved machine: {claim} --agent '<saved-agent-id>'. Reservations remain protected while a device is offline. To move work to another machine, ask Boss for a handoff; do not force a claim or change worker controls.",
+            if role == "agent" {
+                format!(
+                    "This is a replica snapshot; check the supervisor for newer allocation: {command} --host '<supervisor-ssh-host>'. "
+                )
+            } else {
+                String::new()
+            }
+        ),
+        "allocation_missing" => format!(
+            "Companions synchronize automatically while connected; there is no one-shot sync command. Inspect the authoritative supervisor: {command} --host '<supervisor-ssh-host>'. If it has no reservation or reserves this machine, resume through it: {claim} --host '<supervisor-ssh-host>' --agent '<saved-agent-id>'. A successful supervisor claim reserves this machine atomically. Wait for automatic synchronization and re-run the local inspection before offline work. If it reserves another machine, resume there or ask Boss for a handoff."
+        ),
+        _ => format!(
+            "Resume a released manual claim: {claim} --agent '<saved-agent-id>'. Session ownership and active worker reservations still apply."
+        ),
+    };
+    Ok(
+        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role),"summary":summary,"inspect_command":command,"recovery":recovery}),
+    )
+}
+
+/// Only an authoritative claim can reserve previously unallocated work. The
+/// caller holds the issue write transaction, so allocation and ownership commit together.
+pub(crate) fn reserve_manual_claim(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    machine: &str,
+) -> Result<()> {
+    db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,?3 FROM fleet_meta WHERE id=1 AND role='controller'", params![project,number,machine])?;
     Ok(())
 }
 

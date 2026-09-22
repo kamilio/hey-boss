@@ -45,12 +45,15 @@ impl PrPurpose {
 pub struct Error {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 impl Error {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
+            details: None,
         }
     }
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -63,7 +66,7 @@ impl Error {
         match self.code.as_str() {
             "invalid_input" | "identity_unavailable" => 2,
             "not_found" => 3,
-            "conflict" => 4,
+            "conflict" | "fleet_reserved" | "fleet_allocation_missing" => 4,
             _ => 1,
         }
     }
@@ -308,6 +311,10 @@ pub enum Operation {
     View {
         number: i64,
     },
+    Allocation {
+        number: i64,
+        machine: String,
+    },
     Subtasks {
         number: i64,
         #[serde(default)]
@@ -476,6 +483,7 @@ impl Operation {
                 | Self::List { .. }
                 | Self::ReadPlan { .. }
                 | Self::View { .. }
+                | Self::Allocation { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
                 | Self::Comments { .. }
@@ -521,6 +529,7 @@ impl Operation {
             | Self::Move { number, .. }
             | Self::Transfer { number, .. }
             | Self::View { number }
+            | Self::Allocation { number, .. }
             | Self::Subtasks { number, .. }
             | Self::CreateSubtask { number, .. }
             | Self::AddSubtask { number, .. }
