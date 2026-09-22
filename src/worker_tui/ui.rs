@@ -1,5 +1,5 @@
 //! Pure responsive rendering; usable with any Ratatui backend.
-use super::{Dashboard, text};
+use super::{Dashboard, project_name, text};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -67,18 +67,7 @@ fn scope(worker: &Value, snapshot: &Value) -> String {
         .map(|projects| {
             projects
                 .iter()
-                .map(|p| {
-                    let id = text(p);
-                    if let Some(project) = snapshot["projects"]
-                        .as_array()
-                        .and_then(|projects| projects.iter().find(|project| project["id"] == *p))
-                    {
-                        return text(&project["name"]);
-                    }
-                    id.strip_prefix("named:")
-                        .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(&id))
-                        .to_owned()
-                })
+                .map(|p| project_name(p.as_str().unwrap_or_default(), snapshot))
                 .collect()
         })
         .unwrap_or_default();
@@ -89,19 +78,13 @@ fn scope(worker: &Value, snapshot: &Value) -> String {
     }
 }
 
-fn checkout(worker: &Value) -> String {
+fn checkout(worker: &Value, snapshot: &Value) -> String {
     if let Some(directories) = worker["config"]["directories"].as_object()
         && !directories.is_empty()
     {
         return directories
             .iter()
-            .map(|(project, path)| {
-                format!(
-                    "{}: {}",
-                    project.strip_prefix("named:").unwrap_or(project),
-                    text(path)
-                )
-            })
+            .map(|(project, path)| format!("{}: {}", project_name(project, snapshot), text(path)))
             .collect::<Vec<_>>()
             .join(" · ");
     }
@@ -122,7 +105,7 @@ pub fn worker_title(snapshot: &Value, worker_id: Option<&str>) -> Option<String>
     Some(format!(
         "hey-boss · {} · {}",
         scope(worker, snapshot),
-        checkout(worker)
+        checkout(worker, snapshot)
     ))
 }
 
@@ -362,7 +345,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             )),
         ]));
         header.push(Line::from(Span::styled(
-            format!(" {}", checkout(w)),
+            format!(" {}", checkout(w, &app.snapshot)),
             Style::default().fg(MUTED),
         )));
     } else {
@@ -603,6 +586,31 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn multi_project_checkout_labels_use_registered_names() {
+        let local = "local:machine:/workspace/hey-gh";
+        let snapshot = serde_json::json!({
+            "projects": [
+                {"id": "github.com/kamilio/ashby-mcp", "name": "ashby-mcp"},
+                {"id": local, "name": "hey-gh"}
+            ],
+            "workers": [{"id": "worker", "config": {
+                "projects": ["github.com/kamilio/ashby-mcp", local],
+                "directories": {
+                    "github.com/kamilio/ashby-mcp": "/workspace/ashby-mcp",
+                    local: "/workspace/hey-gh"
+                }
+            }}]
+        });
+        let title = worker_title(&snapshot, Some("worker")).unwrap();
+        assert_eq!(
+            title,
+            "hey-boss · ashby-mcp, hey-gh · ashby-mcp: /workspace/ashby-mcp · hey-gh: /workspace/hey-gh"
+        );
+        let mut loading = snapshot.clone();
+        loading["projects"] = serde_json::json!([]);
+        assert_eq!(worker_title(&loading, Some("worker")), Some(title));
+    }
     #[test]
     fn claim_deadline_is_only_shown_when_the_agent_is_awaiting_claim() {
         for state in ["reserved", "awaiting_model", "awaiting_claim", "running"] {
