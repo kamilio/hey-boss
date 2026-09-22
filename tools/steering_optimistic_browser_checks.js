@@ -11,8 +11,8 @@ async page => {
  }
  for(const [base,mobile] of [['http://127.0.0.1:59682',false],['http://127.0.0.1:59782',true]]){
   await open(base,mobile);
-  for(const [width,scheme] of [[1440,'light'],[390,'light'],[320,'dark'],[1440,'dark']]){
-   await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme:scheme});await page.evaluate(()=>scrollTo(0,0));
+  for(const [width,height,scheme] of [[1440,900,'light'],[390,844,'light'],[320,568,'dark'],[1440,900,'dark']]){
+   await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:scheme});await page.evaluate(()=>scrollTo(0,0));
    let release,payload,count=0;
    const gate=new Promise(resolve=>release=resolve);
    await page.route('**/api/fleet/steer',async route=>{count++;payload=route.request().postDataJSON();await gate;await route.fulfill({status:503,json:{ok:false,error:'Device disconnected. Retry your saved instruction.'}});});
