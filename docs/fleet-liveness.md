@@ -5,6 +5,8 @@ maintenance into fixed loops. Worker reconciliation, signal application, journal
 pruning, and deployment admission stay in the maintenance loop. A slow collection
 does not delay scheduling another companion connection, and slow maintenance does
 not prevent a successful fresh collection from becoming visible.
+Maintenance copies only worker definitions from the observation, leaving agent
+histories in the live snapshot.
 
 The local heartbeat advances only after worker collection succeeds. Failed
 observations leave the last known snapshot and its timestamp intact. Companion
