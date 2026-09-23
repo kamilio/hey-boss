@@ -259,6 +259,7 @@ const ELIGIBLE:&str="i.state='open' AND i.deleted_at IS NULL AND i.assignee IS N
 // still need explicit retry; other failures back off from 30 seconds to 5 minutes.
 pub(super) const PICKUP_READY: &str = "
  AND i.draft=0
+ AND NOT EXISTS(SELECT 1 FROM fleet_allocation_deadlines d WHERE d.project_id=i.project_id AND d.issue_number=i.number AND d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000)
  AND NOT EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node<>(SELECT node FROM fleet_meta WHERE id=1))
  AND ((SELECT role FROM fleet_meta WHERE id=1)<>'agent' OR EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node=(SELECT node FROM fleet_meta WHERE id=1)))
  AND EXISTS(SELECT 1 FROM issue_pickup_ready ready WHERE ready.project_id=i.project_id AND ready.number=i.number)";

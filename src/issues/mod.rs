@@ -66,7 +66,10 @@ impl Error {
         match self.code.as_str() {
             "invalid_input" | "identity_unavailable" => 2,
             "not_found" => 3,
-            "conflict" | "fleet_reserved" | "fleet_allocation_missing" => 4,
+            "conflict"
+            | "fleet_reserved"
+            | "fleet_allocation_missing"
+            | "fleet_allocation_expired" => 4,
             _ => 1,
         }
     }

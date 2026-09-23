@@ -656,6 +656,14 @@ impl Supervisor {
                                 .as_array()
                                 .ok_or_else(|| invalid("Missing companion journal"))?,
                         )?;
+                        replica::refresh_allocation_deadlines(
+                            &db,
+                            node,
+                            message["workers"]
+                                .as_array()
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
+                        )?;
                         replica::allocate(&db, node, workers.as_array().unwrap())?;
                         db.execute_batch("COMMIT; BEGIN")?;
                         let mut payload = match message["cursor"].as_i64() {

@@ -18,7 +18,7 @@ async page => {
   await card.locator('.fleet-allocation-label').focus();
   check(await tooltip.isVisible(), 'Keyboard focus reveals reservation explanation');
   const help = await tooltip.innerText();
-  check(help.includes('waits for its claim') && help.includes('no automatic timeout') && help.includes('offline'), 'Tooltip explains pending claims and protected offline reservations without expiry');
+  check(help.includes('waits for its claim') && help.includes('15 minutes') && help.includes('claim deadline') && help.includes('offline'), 'Tooltip explains startup and claim deadlines and protects claimed offline work');
   await page.getByRole('button', {name:'Edit',exact:true}).focus();
   check(!await tooltip.isVisible(), 'Explanation hides after leaving the label');
   await page.setViewportSize({width:1440,height:1000});
@@ -34,6 +34,9 @@ async page => {
   check(await card.getByRole('button',{name:'Release reservation',exact:true}).count() === 0, 'Replica directs release to supervisor');
   await render({...original.allocation,role:'agent',authoritative:false,reserved_machine:null,reserved_host:null});
   check(await card.locator('.readiness-status').innerText() === 'Waiting for supervisor', 'Unsynchronized replica does not claim readiness');
+  await render({...original.allocation,reason:'allocation_expired'});
+  check(await card.locator('.readiness-status').innerText() === 'Reservation expired', 'Expired reservation does not imply protected pickup');
+  check(await card.locator('.fleet-allocation').count() === 0, 'Expired device reservation is hidden');
   await render(original.allocation,{assignee:'codex:working'});
   check(await card.locator('.readiness-status').innerText() === 'Assigned', 'Assigned work retains its readiness state');
   check(await card.getByRole('button',{name:'Release reservation',exact:true}).isDisabled(), 'Assigned work cannot be released in UI');
