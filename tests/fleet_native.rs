@@ -570,10 +570,19 @@ fn streamed_snapshot_survives_disconnect_and_preserves_edits_made_during_transfe
         &mut input,
         serde_json::json!({"version":1,"kind":"pull_end","transfer":"test","parts":parts.len(),"bytes":compressed.len(),"sha256":hash}),
     );
-    let mut line = String::new();
-    output.read_line(&mut line).unwrap();
-    let ack: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(ack["kind"], "ack");
+    let ack: Value = loop {
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let ack: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ack["kind"], "ack");
+        if ack["progress"] != "pull" {
+            break ack;
+        }
+        assert!(
+            ack.get("cursor").is_none(),
+            "Progress must not acknowledge durable application"
+        );
+    };
     assert_eq!(ack["cursor"], cursor);
     let db = rusqlite::Connection::open(target.root.join("issues.db")).unwrap();
     assert_eq!(
