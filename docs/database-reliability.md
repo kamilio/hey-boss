@@ -113,10 +113,17 @@ projects beside 10,000 unrelated issues fell from 123,300 to fewer than 2,300
 SQLite VM steps. Selecting three early ready issues in a 10,000-issue project
 stays below 1,400 steps.
 
+Workers without required tags skip JSON label-membership subqueries. Queue
+aggregates also avoid rechecking open, live and visible-project conditions that
+their outer query already guarantees. A 10,000-issue unrestricted queue count
+fell from about 1.72 million to fewer than 1.40 million SQLite VM steps. Assigned,
+draft, closed, deleted and hidden-project behavior, tagged filtering and pickup
+order remain unchanged. The fresh 34-worker backup had no tagged workers.
+
 ## Ongoing verification
 
 The eight-hour September 23 reliability audit uses a private database with four
-writer processes, a reader and periodic integrity/foreign-key checks. An
+writer processes, a reader and periodic quick-check/foreign-key checks. An
 isolated supervisor adds concurrent same-process store opens and journal
 maintenance, with no workers or SSH inventory. These soaks remain in progress
 until their scheduled deadline; intermediate clean checks are not final soak

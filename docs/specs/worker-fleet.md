@@ -77,6 +77,9 @@ recent history MUST remain compatible with older peers.
 Chief status for a selected worker SHOULD use an indexed worker lookup rather
 than scan unrelated project chiefs. It MUST preserve hidden-project filtering,
 running-first ordering and existing lifecycle fields.
+Workers without required tags SHOULD skip JSON label-membership filtering.
+Queue counts and pickup MUST preserve existing lifecycle, visibility, allocation
+and dependency rules whether tags are configured or empty.
 
 ## Configuration
 
