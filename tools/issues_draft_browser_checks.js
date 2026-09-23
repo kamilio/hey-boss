@@ -154,9 +154,8 @@ async page => {
   await page.unroute('**/api/action', delay);
   await action({action:'assign_boss',number,force:false});
   await page.reload({waitUntil:'domcontentloaded'});
-  await page.locator('[data-draft-action="draft"]').waitFor();
-  check(await page.locator('[data-draft-action="draft"]').isDisabled(), 'Assigned issue cannot be drafted');
-  check((await page.locator('#readiness-help').innerText()).includes('Unassign'), 'Assignment restriction explains recovery');
+  await page.locator('.issue-readiness').waitFor();
+  check(await page.locator('[data-draft-action="draft"]').count() === 0, 'Assigned issue omits inactive draft action');
   await page.getByRole('button',{name:'Edit',exact:true}).click();
   await page.waitForFunction(() => document.querySelector('#editor-draft-help').textContent.includes('Unassign'));
   check(await page.locator('#editor-draft').isDisabled(), 'Assigned editor keeps draft choice disabled');
@@ -164,8 +163,8 @@ async page => {
   await action({action:'unassign',number,force:false});
   await action({action:'close',number,force:false});
   await page.reload({waitUntil:'domcontentloaded'});
-  await page.locator('[data-draft-action="draft"]').waitFor();
-  check(await page.locator('[data-draft-action="draft"]').isDisabled(), 'Closed issue cannot be drafted');
+  await page.locator('.issue-readiness').waitFor();
+  check(await page.locator('[data-draft-action="draft"]').count() === 0, 'Closed issue omits inactive draft action');
   check((await page.locator('#readiness-help').innerText()).includes('Reopen'), 'Closed restriction explains recovery');
   check(errors.length === 0, `No runtime errors: ${errors.join(', ')}`);
   const result = {passed:checks.length,checks};
