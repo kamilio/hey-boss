@@ -11,9 +11,12 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal((await call('/api/bridge/agents')).status,401);
  const pair=await call('/api/pair',{code:store.pairing()});const headers={Cookie:pair.headers.get('set-cookie').split(';')[0]},bridge={Authorization:'Bearer '+key};
  assert.equal((await call('/api/fleet/status',null,headers)).status,503);
- const snapshot={ok:true,machines:[{host:'local',state:'connected',heartbeat:Date.now()/1000,workers:[{pid:1,runs:[{id:'run',project_id:'named:Atlas',title:'Fix reconnect'},{id:'private',project_id:'named:Hidden'}]}]}]};
+ const snapshot={ok:true,machines:[{host:'local',state:'connected',heartbeat:Date.now()/1000,workers:[{pid:1,chiefs:[{id:'chief:local:named:Atlas',kind:'chief',project_id:'named:Atlas',state:'idle',next_at:123},{id:'chief:private',project_id:'named:Hidden'}],runs:[{id:'run',project_id:'named:Atlas',title:'Fix reconnect'},{id:'private',project_id:'named:Hidden'}]}]}]};
  assert.equal((await call('/api/bridge/agents/status',snapshot,bridge)).status,200);
  const status=await(await call('/api/fleet/status',null,headers)).json();assert.equal(status.machines[0].workers[0].runs.length,1);
+ assert.equal(status.machines[0].workers[0].chiefs.length,1);
+ assert.equal(status.machines[0].workers[0].chiefs[0].next_at,123);
+ assert.equal((await call('/api/fleet/takeover',{host:'local',run:'chief:local:named:Atlas'},headers)).status,400);
  assert.equal((await call('/api/fleet/conversation?host=local&run=private',null,headers)).status,404);
  assert.equal((await call('/api/fleet/assignment?project=named%3AAtlas&issue=4&agent=codex%3Aexact')).status,401);
  assert.equal((await call('/api/fleet/assignment?project=named%3AHidden&issue=4&agent=codex%3Aexact',null,headers)).status,404);

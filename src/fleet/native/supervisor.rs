@@ -189,6 +189,28 @@ impl Supervisor {
                     })
                     .collect::<Vec<_>>();
                 w["runs"] = json!(runs);
+                w["chiefs"] = json!(
+                    w["chiefs"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| visible.contains(r["project_id"].as_str().unwrap_or("")))
+                        .map(|r| {
+                            let mut v = r.clone();
+                            for key in ["summary", "last_event"] {
+                                v[key] = json!(
+                                    r[key]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .chars()
+                                        .take(1000)
+                                        .collect::<String>()
+                                );
+                            }
+                            v
+                        })
+                        .collect::<Vec<_>>()
+                );
             }
         }
         status["events"] = json!([]);
@@ -220,7 +242,11 @@ impl Supervisor {
             .as_array()
             .into_iter()
             .flatten()
-            .flat_map(|w| w["runs"].as_array().into_iter().flatten())
+            .flat_map(|w| {
+                ["runs", "chiefs"]
+                    .into_iter()
+                    .flat_map(move |key| w[key].as_array().into_iter().flatten())
+            })
             .find(|r| r["id"] == run_id)
             .cloned();
         let run = if let Some(run) = run {
@@ -238,6 +264,9 @@ impl Supervisor {
         } else {
             return Err(invalid("This agent is no longer available"));
         };
+        if mutation && run["kind"] == "chief" {
+            return Err(invalid("Chief conversations are read-only"));
+        }
         let host = machine["host"]
             .as_str()
             .ok_or_else(|| invalid("Missing device"))?;

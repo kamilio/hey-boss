@@ -15,6 +15,12 @@ latest activity. Other workers on the same machine do not start or display a
 second Chief. Ownership stays with that worker between passes; if it is stopped,
 another worker can resume the saved conversation.
 
+The web Agents page keeps Chief above Active agents, with its owning worker and
+device, running or waiting status, minutes until the next pass, and the last
+pass's result and time. Its saved conversation is readable on desktop and paired
+devices, including earlier passes in the same thread. Chief does not count toward
+issue agent slots and has no issue takeover or steering controls.
+
 The registry rejects duplicate names even when another process writes directly.
 Name reuse is silent: it creates neither another project nor a warning record.
 Upgrades discard old warnings about aliases that never became projects. Paired

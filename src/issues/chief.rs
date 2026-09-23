@@ -172,7 +172,7 @@ pub(in crate::issues) fn status(
     db: &rusqlite::Connection,
     worker: Option<&str>,
 ) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare("SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id FROM project_chiefs c JOIN projects p ON p.id=c.project_id WHERE c.worker_id=?1 ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine")?;
+    let mut stmt = db.prepare("SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0) FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine")?;
     Ok(stmt.query_map([worker], |r| {
         let project: String = r.get(0)?;
         let machine: String = r.get(2)?;
@@ -184,7 +184,7 @@ pub(in crate::issues) fn status(
             "id":format!("chief:{machine}:{project}"),"kind":"chief",
             "project_id":project,"project_name":r.get::<_,String>(1)?,
             "machine":machine,"worker_id":r.get::<_,Option<String>>(11)?,
-            "title":"Organizing project","state":state,"pid":r.get::<_,Option<u32>>(4)?,
+            "enabled":r.get::<_,bool>(12)?,"title":"Organizing project","state":state,"pid":r.get::<_,Option<u32>>(4)?,
             "session_id":r.get::<_,Option<String>>(5)?,"started_at":r.get::<_,Option<i64>>(6)?,
             "finished_at":if running { None } else { Some(finished.unwrap_or(next-INTERVAL_MS)) },
             "next_at":next,"summary":r.get::<_,String>(9)?,"last_event":r.get::<_,String>(10)?

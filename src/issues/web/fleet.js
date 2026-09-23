@@ -27,17 +27,26 @@ function projectView(data, now = Date.now()) {
   const groups = new Map();
   for (const machine of data.machines || []) {
     const online = machine.state === 'connected' && now / 1000 - (machine.heartbeat || 0) <= 15;
-    for (const worker of machine.workers || []) for (const run of worker.runs || []) {
+    for (const worker of machine.workers || []) for (const run of [...(worker.runs || []), ...(worker.chiefs || [])]) {
       const id = run.project_id;
-      if (!groups.has(id)) groups.set(id, {id, name: run.project_name || id || 'Project', active: [], history: []});
+      if (!groups.has(id)) groups.set(id, {id, name: run.project_name || id || 'Project', active: [], history: [], chiefs: []});
       const entry = {run, machine, worker, online: online && worker.pid > 0};
-      groups.get(id)[run.finished_at == null ? 'active' : 'history'].push(entry);
+      groups.get(id)[run.kind === 'chief' ? 'chiefs' : run.finished_at == null ? 'active' : 'history'].push(entry);
     }
   }
   return [...groups.values()].sort((a,b) => Number(b.active.length > 0) - Number(a.active.length > 0) || a.name.localeCompare(b.name));
 }
+function chiefState(entry, now = Date.now()) {
+  if (!entry.online) return entry.worker.pid > 0 ? 'Device disconnected' : 'Worker stopped';
+  if (entry.run.state === 'running') return 'Running';
+  if (entry.run.enabled === false) return 'Disabled';
+  if (entry.worker.config?.enabled === false) return 'Paused';
+  const minutes = Math.max(0, Math.ceil((entry.run.next_at - now) / 60000));
+  return 'Waiting · ' + (minutes ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left` : 'Due now');
+}
 function agentState(entry) {
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
+  if (entry.run.kind === 'chief') return entry.run.state === 'running' ? 'Running' : entry.run.state === 'idle' ? 'Completed' : entry.run.state === 'failed' ? 'Needs attention' : 'Stopped';
   return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
 }
 // Assignment links resolve once, then use the normal device/run conversation URL.
@@ -64,7 +73,7 @@ function deviceView(data, project, now = Date.now()) {
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView, assignedAgentEntry, resolveAssignedAgent};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -119,7 +128,26 @@ if (typeof document !== 'undefined') (() => {
       title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':'Recent work'));
       const issues=element('a','project-issues','View issues →');issues.href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:group.id});
       heading.append(title,issues);section.append(heading);
+      for(const entry of group.chiefs){
+        const {run,machine,worker}=entry;
+        const chief=element('section','chief-panel');
+        const top=element('div','chief-heading');
+        top.append(element('h3','','Chief'),element('span','agent-state '+(entry.online&&run.state==='running'?'is-live':'is-quiet'),chiefState(entry)));
+        const owner=element('p','chief-owner',(worker.config?.name||'Worker '+worker.id.slice(0,8))+' · '+(machine.hostname||machine.host));
+        chief.append(top,owner);
+        if(run.started_at!=null){
+          const last=element('div','chief-last-pass');
+          const outcome=run.state==='running'?'Current pass':run.state==='idle'?'Last pass · Completed':run.state==='failed'?'Last pass · Needs attention':'Last pass · '+run.state;
+          const time=element('time','',new Date(run.finished_at??run.started_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}));time.dateTime=new Date(run.finished_at??run.started_at).toISOString();
+          last.append(element('span','',outcome),time);chief.append(last);
+          if(run.summary||run.last_event)chief.append(element('p','agent-preview',run.summary||run.last_event));
+        }
+        if(run.session_id){const a=element('a','chief-conversation',run.state==='running'?'Open conversation →':'Read last conversation →');a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;chief.append(a);}
+        section.append(chief);
+      }
+      if(group.active.length||group.chiefs.length)section.append(element('h3','agents-section-label','Active agents'));
       const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);
+      if(!group.active.length&&group.chiefs.length)section.append(element('p','chief-owner','No active issue agents.'));
       if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id);section.append(history);}
       return section;
     });
@@ -199,7 +227,7 @@ if (typeof document !== 'undefined') (() => {
       }
     }
     const resource=HeyBossRoutes.resolve();
-    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&(e.machine.host===resource.host||e.machine.hostname===resource.host)&&e.run.id===resource.id);
+    selected=projectView(data).flatMap(p=>[...p.active,...p.history,...p.chiefs]).find(e=>resource?.entity==='agent'&&(e.machine.host===resource.host||e.machine.hostname===resource.host)&&e.run.id===resource.id);
     if(!selected&&resource?.entity==='agent'&&resource.project){
       selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
     }
@@ -207,7 +235,7 @@ if (typeof document !== 'undefined') (() => {
     if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
-    $('session-title').textContent=run.title||'Preparing your task';
+    $('session-title').textContent=run.kind==='chief'?'Chief · '+(run.project_name||'Organizing project'):run.title||'Preparing your task';
     $('session-context').textContent=(run.project_name||'Project')+' · '+(machine.hostname||machine.host);
     $('session-state').replaceChildren(stateBadge(selected));
     $('session-issue').hidden=!run.number;
@@ -245,10 +273,10 @@ if (typeof document !== 'undefined') (() => {
   function renderTakeover() {
     if(!selected)return;
     const state=savedTakeover(selected), button=$('takeover-open');
-    button.hidden=selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
+    button.hidden=selected.run.kind==='chief'||selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
     button.disabled=takeoverBusy||steerBusy||!selected.online;
     button.textContent=state?.pending?'Check takeover':'Take over';
-    $('steer-open').hidden=selected.run.standalone||runEnded()||Boolean(state?.pending||state?.stopped)||selected.run.stop_requested===true;
+    $('steer-open').hidden=selected.run.kind==='chief'||selected.run.standalone||runEnded()||Boolean(state?.pending||state?.stopped)||selected.run.stop_requested===true;
     $('steer-open').disabled=steerBusy||!selected.online;
     $('steer-open').title=selected.online?'Add an instruction while this agent keeps working':'Reconnect this device to steer its agent';
     $('takeover-note').hidden=!state?.pending;

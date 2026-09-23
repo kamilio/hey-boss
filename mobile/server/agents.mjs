@@ -10,7 +10,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  let snapshot=null,seen=0;const pending=new Map();
  const visible=()=>new Set(store.issueProjects().map(p=>p.id));
  const filtered=()=>{
-  const projects=visible();return {...snapshot,signals:[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
+  const projects=visible();return {...snapshot,signals:[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,config:{name:w.config?.name,enabled:w.config?.enabled},chiefs:(w.chiefs||[]).filter(r=>projects.has(r.project_id)),runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
  };
  const page=fileURLToPath(new URL('../dist/agent-web/fleet.html',import.meta.url));
  for(const route of ['/agents','/agents/session'])app.get(route,auth,(req,res)=>res.sendFile(page));
@@ -26,7 +26,8 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
    if(!Number.isSafeInteger(issue)||issue<=0||typeof agent!=='string'||!agent.startsWith('codex:')||agent.length>128)throw new HubError(400,'Invalid assignment request');
   }else if((before!==null&&(!Number.isSafeInteger(before)||before<0))||(req.query.latest!=null&&!['0','1'].includes(req.query.latest))||!Number.isSafeInteger(cursor)||cursor<0||typeof host!=='string'||typeof run!=='string')throw new HubError(400,'Invalid conversation request');
   if(at!==null&&(!Number.isSafeInteger(at)||at<0))throw new HubError(400,'Invalid invocation cursor');
-  const entry=filtered().machines.find(m=>m.host===host||m.hostname===host)?.workers.flatMap(w=>w.runs).find(r=>r.id===run);
+  const entry=filtered().machines.find(m=>m.host===host||m.hostname===host)?.workers.flatMap(w=>[...w.runs,...w.chiefs]).find(r=>r.id===run);
+  if(entry?.kind==='chief'&&!['conversation','assignment'].includes(action))throw new HubError(400,'Chief conversations are read-only');
   // Historical origin references are validated by the authoritative supervisor.
   const project=entry?.project_id||(['conversation','assignment'].includes(action)&&visible().has(input.project)?input.project:null);
   if(!project)throw new HubError(404,'This conversation is no longer available');
