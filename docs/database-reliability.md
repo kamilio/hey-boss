@@ -75,6 +75,13 @@ selected issues beside 10,000 unrelated open issues fell from 123,800 to fewer
 than 3,800 SQLite VM steps. Duplicate project IDs do not double counts; empty
 project filters retain unrestricted status behavior.
 
+Worker pickup reads an ordered prefix from each selected project, then merges
+the prefixes in global issue order while retaining only the requested batch.
+A partial index covers those project queues. Selecting three issues from small
+projects beside 10,000 unrelated issues fell from 123,300 to fewer than 2,300
+SQLite VM steps. Selecting three early ready issues in a 10,000-issue project
+stays below 1,400 steps.
+
 ## Ongoing verification
 
 The eight-hour September 23 reliability audit uses a private database with four
