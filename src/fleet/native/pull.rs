@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
     os::unix::fs::OpenOptionsExt,
 };
 
@@ -49,9 +49,13 @@ pub(super) fn send_pull(
         bytes: 0,
         hash: Sha256::new(),
     };
-    let mut gzip = GzEncoder::new(chunks, Compression::fast());
+    // JSON emits many tiny writes. Buffer them before invoking compression.
+    let mut gzip = BufWriter::new(GzEncoder::new(chunks, Compression::fast()));
     serde_json::to_writer(&mut gzip, &frame)?;
-    let mut chunks = gzip.finish()?;
+    let mut chunks = gzip
+        .into_inner()
+        .map_err(|error| error.into_error())?
+        .finish()?;
     chunks.emit()?;
     send(
         chunks.writer,
