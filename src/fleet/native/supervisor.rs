@@ -924,7 +924,14 @@ impl Supervisor {
     }
     fn tick(self: &Arc<Self>) -> Result<()> {
         let hosts = self.ctx.inventory()?;
-        let observed = self.state.lock().unwrap().local.clone();
+        let observed: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .local
+            .iter()
+            .map(definition)
+            .collect();
         let main = read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?;
         let mut desired = {
             let _configuration = self.configuration.lock().unwrap();
@@ -960,7 +967,7 @@ impl Supervisor {
                 .iter()
                 .any(|w| w["id"] == discovered["id"])
             {
-                desired.as_array_mut().unwrap().push(definition(discovered));
+                desired.as_array_mut().unwrap().push(discovered.clone());
             }
         }
         let main = json!({"role":"controller","workers":desired,"revision":hash(&desired)});
