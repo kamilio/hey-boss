@@ -839,6 +839,8 @@ fn identities(db: &Connection) -> Result<BTreeMap<(String, i64), (String, i64)>>
 }
 fn allocation_payload(db: &Connection, node: &str, mut payload: Value) -> Result<Value> {
     payload["allocations"] = json!(rows(db, "SELECT * FROM fleet_allocations", &[])?);
+    payload["allocation_deadlines"] =
+        json!(rows(db, "SELECT * FROM fleet_allocation_deadlines", &[])?);
     payload["ranges"] = json!(rows(
         db,
         "SELECT project_id,first_number,last_number FROM fleet_ranges WHERE node=?",
@@ -1265,6 +1267,21 @@ pub(super) fn apply_pull(
             ],
         )?;
     }
+    for row in payload["allocation_deadlines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        execute(
+            db,
+            "UPDATE fleet_allocation_deadlines SET expires_at=? WHERE project_id=? AND issue_number=?",
+            &[
+                row["expires_at"].clone(),
+                row["project_id"].clone(),
+                row["issue_number"].clone(),
+            ],
+        )?;
+    }
     for r in payload["ranges"]
         .as_array()
         .ok_or_else(|| invalid("Missing fleet number ranges"))?
@@ -1342,12 +1359,45 @@ fn matches(labels: &Value, wanted: &BTreeSet<String>) -> Result<bool> {
     )?;
     Ok(wanted.iter().all(|t| labels.contains(t)))
 }
+/// The lease bridges worker startup and its manual claim; heartbeats carry the
+/// absolute deadline, so retries never extend the same attempt indefinitely.
+pub(super) fn refresh_allocation_deadlines(
+    db: &Connection,
+    node: &str,
+    workers: &[Value],
+) -> Result<()> {
+    for run in workers
+        .iter()
+        .flat_map(|w| w["runs"].as_array().into_iter().flatten())
+    {
+        if run["finished_at"].is_null()
+            && run["claimed_at"].is_null()
+            && let Some(expires) = run["reservation_expires"].as_i64()
+            && let (Some(project), Some(number)) =
+                (run["project_id"].as_str(), run["number"].as_i64())
+        {
+            execute(
+                db,
+                "UPDATE fleet_allocation_deadlines SET expires_at=?1 WHERE project_id=?2 AND issue_number=?3 AND EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=?2 AND a.issue_number=?3 AND a.node=?4)",
+                &[json!(expires), json!(project), json!(number), json!(node)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result<()> {
     let tx = if db.is_autocommit() {
         Some(db.unchecked_transaction()?)
     } else {
         None
     };
+    refresh_allocation_deadlines(db, node, workers)?;
+    execute(
+        db,
+        "DELETE FROM fleet_allocations WHERE (project_id,issue_number) IN (SELECT d.project_id,d.issue_number FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.expires_at<=? AND i.assignee IS NULL)",
+        &[json!((super::context::now() * 1000.0) as i64)],
+    )?;
     let mut pools: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     for worker in workers {
         let config = &worker["config"];
@@ -2373,6 +2423,84 @@ mod tests {
             0
         );
     }
+    #[test]
+    fn unclaimed_allocations_expire_and_another_machine_can_pick_up() {
+        let f = Fixture::new();
+        f.capture();
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"enabled":true}}),
+        ];
+        allocate(&f.db, "agent", &workers).unwrap();
+        f.db.execute("UPDATE fleet_allocation_deadlines SET expires_at=0", [])
+            .unwrap();
+        allocate(&f.db, "other", &workers).unwrap();
+        assert_eq!(
+            rows(&f.db, "SELECT node FROM fleet_allocations", &[]).unwrap()[0]["node"],
+            "other"
+        );
+    }
+
+    #[test]
+    fn allocation_tracks_the_agent_claim_deadline_and_preserves_claimed_work() {
+        let f = Fixture::new();
+        f.capture();
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"enabled":true}}),
+        ];
+        allocate(&f.db, "agent", &workers).unwrap();
+        let deadline = (super::super::context::now() * 1000.0) as i64 + 123_000;
+        refresh_allocation_deadlines(&f.db, "agent", &[json!({"runs":[{"project_id":"named:Native fleet","number":1,"state":"awaiting_claim","finished_at":null,"claimed_at":null,"reservation_expires":deadline}]})]).unwrap();
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT expires_at FROM fleet_allocation_deadlines",
+                &[]
+            )
+            .unwrap()[0]["expires_at"],
+            deadline
+        );
+        f.db.execute("UPDATE issues SET assignee=created_by", [])
+            .unwrap();
+        f.db.execute("UPDATE fleet_allocation_deadlines SET expires_at=0", [])
+            .unwrap();
+        allocate(&f.db, "other", &workers).unwrap();
+        assert_eq!(
+            rows(&f.db, "SELECT node FROM fleet_allocations", &[]).unwrap()[0]["node"],
+            "agent"
+        );
+    }
+
+    #[test]
+    fn pulling_allocations_keeps_the_supervisors_deadline() {
+        let main = Fixture::new();
+        main.capture();
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"enabled":true}}),
+        ];
+        allocate(&main.db, "agent", &workers).unwrap();
+        main.db
+            .execute("UPDATE fleet_allocation_deadlines SET expires_at=1234", [])
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT expires_at FROM fleet_allocation_deadlines",
+                &[]
+            )
+            .unwrap()[0]["expires_at"],
+            1234
+        );
+    }
+
     #[test]
     fn allocations_preserve_ownership_and_exclude_drafts() {
         let f = Fixture::new();

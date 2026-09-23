@@ -19,6 +19,13 @@ CREATE TABLE IF NOT EXISTS fleet_conflicts(id TEXT PRIMARY KEY,node TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS fleet_subtask_receipts(node TEXT NOT NULL,seq INTEGER NOT NULL,project_id TEXT NOT NULL,child_number INTEGER NOT NULL,parent_number INTEGER NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(node,seq));
 CREATE INDEX IF NOT EXISTS fleet_subtask_receipt_key ON fleet_subtask_receipts(node,project_id,child_number,seq DESC);
 CREATE TABLE IF NOT EXISTS fleet_deferred_subtasks(project_id TEXT NOT NULL,child_number INTEGER NOT NULL,row_json TEXT,PRIMARY KEY(project_id,child_number));
+CREATE TABLE IF NOT EXISTS fleet_allocation_deadlines(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,expires_at INTEGER NOT NULL,PRIMARY KEY(project_id,issue_number));
+CREATE INDEX IF NOT EXISTS fleet_allocation_expiry ON fleet_allocation_deadlines(expires_at);
+INSERT OR IGNORE INTO fleet_allocation_deadlines SELECT project_id,issue_number,CAST(strftime('%s','now') AS INTEGER)*1000+900000 FROM fleet_allocations;
+CREATE TRIGGER IF NOT EXISTS fleet_allocation_started AFTER INSERT ON fleet_allocations BEGIN INSERT OR REPLACE INTO fleet_allocation_deadlines VALUES(NEW.project_id,NEW.issue_number,CAST(strftime('%s','now') AS INTEGER)*1000+900000); END;
+CREATE TRIGGER IF NOT EXISTS fleet_allocation_removed AFTER DELETE ON fleet_allocations BEGIN DELETE FROM fleet_allocation_deadlines WHERE project_id=OLD.project_id AND issue_number=OLD.issue_number; END;
+CREATE TRIGGER IF NOT EXISTS fleet_worker_deadline_started AFTER INSERT ON worker_runs WHEN NEW.claimed_at IS NULL AND NEW.finished_at IS NULL AND NEW.reservation_expires IS NOT NULL BEGIN UPDATE fleet_allocation_deadlines SET expires_at=NEW.reservation_expires WHERE project_id=NEW.project_id AND issue_number=NEW.issue_number AND EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=NEW.project_id AND a.issue_number=NEW.issue_number AND a.node=NEW.machine); END;
+CREATE TRIGGER IF NOT EXISTS fleet_worker_deadline_updated AFTER UPDATE OF reservation_expires ON worker_runs WHEN NEW.claimed_at IS NULL AND NEW.finished_at IS NULL AND NEW.reservation_expires IS NOT NULL BEGIN UPDATE fleet_allocation_deadlines SET expires_at=NEW.reservation_expires WHERE project_id=NEW.project_id AND issue_number=NEW.issue_number AND EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=NEW.project_id AND a.issue_number=NEW.issue_number AND a.node=NEW.machine); END;
 ";
 
 pub(crate) fn check_claim(
@@ -31,16 +38,19 @@ pub(crate) fn check_claim(
     if force {
         return Ok(());
     }
+    db.execute("DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND (SELECT role FROM fleet_meta WHERE id=1)='controller' AND EXISTS(SELECT 1 FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.project_id=?1 AND d.issue_number=?2 AND d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000 AND i.assignee IS NULL)", params![project,number])?;
     // Keep successful pickup cheap: host lookup and connection files are only
     // needed when explaining a denial, not while arbitrating ordinary claims.
     let blocked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?3) OR ((SELECT role FROM fleet_meta WHERE id=1)='agent' AND NOT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node=?3))", params![project,number,machine], |r|r.get(0))?;
-    if !blocked {
+    let expired: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.project_id=?1 AND d.issue_number=?2 AND d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000 AND i.assignee IS NULL)", params![project,number], |r|r.get(0))?;
+    if !blocked && !expired {
         return Ok(());
     }
     let info = allocation(db, project, number, Some(machine))?;
     let code = match info["reason"].as_str() {
         Some("reserved_elsewhere") => "fleet_reserved",
         Some("allocation_missing") => "fleet_allocation_missing",
+        Some("allocation_expired") => "fleet_allocation_expired",
         _ => return Ok(()),
     };
     let mut error = Error::new(
@@ -80,7 +90,11 @@ pub(crate) fn allocation(
             |r| r.get(0),
         )
         .optional()?;
+    let expires: Option<i64> = db.query_row("SELECT d.expires_at FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.project_id=?1 AND d.issue_number=?2 AND i.assignee IS NULL", params![project,number], |r|r.get(0)).optional()?;
     let reason = match reserved.as_deref() {
+        Some(_) if expires.is_some_and(|deadline| deadline <= super::worker::now()) => {
+            "allocation_expired"
+        }
         Some(owner) if owner != machine => "reserved_elsewhere",
         Some(_) => "allocated_here",
         None if role == "agent" => "allocation_missing",
@@ -117,6 +131,9 @@ pub(crate) fn allocation(
     );
     let claim = format!("hey-boss issue claim {number} --project {}", quote(project));
     let summary = match reason {
+        "allocation_expired" => format!(
+            "Issue #{number}'s fleet reservation expired before an agent claimed it. Reconnect to the supervisor for a new reservation."
+        ),
         "reserved_elsewhere" => format!(
             "Issue #{number} is reserved for fleet machine {}{}; caller machine is {machine}.",
             reserved.as_deref().unwrap(),
@@ -133,7 +150,7 @@ pub(crate) fn allocation(
     };
     let mut recovery = match reason {
         "reserved_elsewhere" => format!(
-            "{}Resume on the reserved machine: {claim} --agent '<saved-agent-id>'. Reservations remain protected while a device is offline. To move work to another machine, ask Boss for a handoff; do not force a claim or change worker controls.",
+            "{}Resume on the reserved machine: {claim} --agent '<saved-agent-id>'. Unclaimed reservations expire with the worker startup or claim deadline. Claimed work remains protected. To move active work to another machine, ask Boss for a handoff; do not force a claim or change worker controls.",
             if role == "agent" {
                 format!(
                     "This is a replica snapshot; check the supervisor for newer allocation: {command} --host '<supervisor-ssh-host>'. "
@@ -158,7 +175,7 @@ pub(crate) fn allocation(
         );
     }
     Ok(
-        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role),"summary":summary,"inspect_command":command,"recovery":recovery}),
+        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role),"summary":summary,"inspect_command":command,"recovery":recovery}),
     )
 }
 

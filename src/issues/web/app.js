@@ -926,12 +926,13 @@ function draftUnavailable(issue, enabled) {
 function renderReadiness(value) {
   const i = value.issue, a = value.allocation;
   if (i.deleted_at) return "";
-  const reserved = !!a?.reserved_machine && i.state !== "closed";
+  const expired = a?.reason === "allocation_expired";
+  const reserved = !!a?.reserved_machine && !expired && i.state !== "closed";
   const missing = a?.role === "agent" && !a.reserved_machine;
   const reason = draftUnavailable(i, value.drafts_enabled);
-  const status = i.state === "blocked" ? "Blocked · pickup paused" : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
-  const help = "Resume on the reserved device. The supervisor reserves the issue while a worker prepares an agent and waits for its claim. A reservation stays protected when the device is offline, because an agent may still be working. It has no automatic timeout. Release it when that work has stopped to let another device pick it up.";
-  const label = reserved ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
+  const status = i.state === "blocked" ? "Blocked · pickup paused" : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
+  const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
+  const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
   const note = i.state === "blocked" ? "Resolve linked blocking issues to resume automatically, or reopen after resolving a manual blocker." : i.state === "closed" ? reason : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
   return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${renderAllocation(value)}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${i.draft || i.state === "blocked" ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
 }
@@ -959,7 +960,7 @@ function allocationSignature(value) {
 }
 function renderAllocation(value) {
   const a = value.allocation;
-  if (!a?.reserved_machine || a.role === "standalone" || value.issue.deleted_at || value.issue.state === "closed") return "";
+  if (!a?.reserved_machine || a.reason === "allocation_expired" || a.role === "standalone" || value.issue.deleted_at || value.issue.state === "closed") return "";
   const release = a.authoritative ? `<button type="button" class="button danger" data-action="release_allocation"${value.issue.assignee ? ' disabled title="Unassign the issue before releasing its reservation"' : ""}>Release reservation</button>${value.issue.assignee ? '<p>Stop any active worker attempt and unassign this issue before releasing its reservation.</p>' : ""}` : '<p>Open this issue on the supervisor to release its reservation.</p>';
   return `<div class="fleet-allocation" aria-label="Fleet allocation"><p class="fleet-device">Reserved for <strong>${esc(a.reserved_host || a.reserved_machine)}</strong></p>${a.reserved_host ? `<details><summary>Machine ID</summary><code>${esc(a.reserved_machine)}</code></details>` : ""}${release}</div>`;
 }

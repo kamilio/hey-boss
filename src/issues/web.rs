@@ -390,7 +390,10 @@ fn respond(mut request: tiny_http::Request, app: &App) {
             let status = match error.code.as_str() {
                 "forbidden" => 403,
                 "not_found" => 404,
-                "conflict" | "fleet_reserved" | "fleet_allocation_missing" => 409,
+                "conflict"
+                | "fleet_reserved"
+                | "fleet_allocation_missing"
+                | "fleet_allocation_expired" => 409,
                 "invalid_input" | "identity_unavailable" => 400,
                 _ => 503,
             };

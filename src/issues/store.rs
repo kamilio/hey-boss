@@ -865,9 +865,9 @@ impl Store {
             db.pragma_update(None, "journal_mode", "WAL")?;
         }
         db.pragma_update(None, "synchronous", "FULL")?;
-        // The additive fleet schema is installed as one batch. Its final table
+        // The additive fleet schema is installed as one batch. Its final trigger
         // marks completion; repeated opens must not acquire the writer lock.
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_deferred_subtasks' AND type='table')", [], |r| r.get::<_, bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
         if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect')", [], |r| r.get::<_, i64>(0))? < 5 {

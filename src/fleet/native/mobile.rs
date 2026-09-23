@@ -55,6 +55,7 @@ impl Mobile {
                         | "conflict"
                         | "fleet_reserved"
                         | "fleet_allocation_missing"
+                        | "fleet_allocation_expired"
                         | "forbidden"
                 ) =>
             {
