@@ -45,7 +45,9 @@ enum GlobalSettingsAction {
     Show,
     Set {
         #[arg(long)]
-        boss_name: String,
+        boss_name: Option<String>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        auto_close_merged_prs: Option<bool>,
         #[arg(long)]
         if_version: Option<i64>,
     },
@@ -55,9 +57,11 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
         GlobalSettingsAction::Show => Operation::GlobalSettings,
         GlobalSettingsAction::Set {
             boss_name,
+            auto_close_merged_prs,
             if_version,
         } => Operation::ConfigureGlobal {
             boss_name: boss_name.clone(),
+            auto_close_merged_prs: *auto_close_merged_prs,
             if_version: *if_version,
         },
     };

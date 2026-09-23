@@ -474,6 +474,13 @@ function emptyState() {
         : "Create an issue, add some context, and let the work begin.";
   return `<div class="empty-state"><div class="empty-icon">${icon(filtered ? "search" : state === "blocked" ? "blocked" : state === "closed" ? "closed" : state === "deleted" ? "trash" : "issue")}</div><h2>${title}</h2><p>${description}</p>${filtered ? '<button class="button" data-empty="clear">Clear filters</button>' : state === "open" ? `<button class="button primary" data-empty="create">${icon("plus")}Create your first issue</button>` : ""}</div>`;
 }
+function prStatus(pr, label = false) {
+  const status = ["open", "closed", "merged"].includes(pr.status) ? pr.status : "unknown";
+  const stale = status !== "merged" && (!!pr.error || (pr.checked_at && Date.now() - pr.checked_at > 180000));
+  const name = {open:"Open",closed:"Closed without merge",merged:"Merged",unknown:"Status pending"}[status];
+  const title = name + (stale ? " · Update delayed" : "") + (pr.checked_at ? " · Checked " + new Date(pr.checked_at).toLocaleString() : "");
+  return `<span class="pr-status pr-status-${status}${stale ? " pr-status-stale" : ""}" role="img" aria-label="${esc(title)}" title="${esc(title)}">${icon(stale ? "clock" : {open:"pull-request",closed:"pr-closed",merged:"pr-merged",unknown:"clock"}[status])}${label ? `<span>${esc(name)}${stale ? " · Update delayed" : ""}</span>` : ""}</span>`;
+}
 function listPullRequests(issue) {
   return (issue.pull_requests || [])
     .filter(pr => !["prerequisite", "supporting-evidence"].includes(pr.purpose))
@@ -490,8 +497,9 @@ function listPullRequests(issue) {
       }
       const purpose = prPurposeLabel(pr.purpose);
       const classified = purpose !== PR_PURPOSES.unspecified;
-      const suffix = classified ? ` · ${purpose}` : "";
-      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}${suffix}" aria-label="Open pull request ${esc(title)}${suffix}">${icon("link")}<span class="pr-link-title">${esc(title)}</span>${classified ? `<span class="pr-purpose-label">${purpose}</span>` : ""}</a>`;
+      const statusLabel = {open:"Open",closed:"Closed without merge",merged:"Merged"}[pr.status];
+      const suffix = (classified ? ` · ${purpose}` : "") + (statusLabel ? ` · ${statusLabel}` : "");
+      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}${suffix}" aria-label="Open pull request ${esc(title)}${suffix}">${prStatus(pr)}<span class="pr-link-title">${esc(title)}</span>${classified ? `<span class="pr-purpose-label">${purpose}</span>` : ""}</a>`;
     })
     .join("");
 }
@@ -805,7 +813,7 @@ async function refresh(quiet = true) {
         else renderDetail(result);
       } else if (
         model.detail &&
-        (result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+        (JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
       ) {
         if (quiet) showUpdate();
         else renderDetail(result);
@@ -1901,7 +1909,7 @@ function prPurposeOptions(purpose = "unspecified") {
   return Object.entries(PR_PURPOSES).map(([value, label]) => `<option value="${value}"${value === purpose ? " selected" : ""}>${label}</option>`).join("");
 }
 function renderPullRequests(issue) {
-  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><p class="field-help pr-purpose-help">Link fixes, prerequisites, or supporting evidence.</p><div class="pr-links">${(issue.pull_requests || []).map((pr) => `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</div>`;
+  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><p class="field-help pr-purpose-help">Link fixes, prerequisites, or supporting evidence.</p><div class="pr-links">${(issue.pull_requests || []).map((pr) => `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</div>`;
 }
 async function changePullRequest(action, url, purpose, control) {
   const project = model.project.id,

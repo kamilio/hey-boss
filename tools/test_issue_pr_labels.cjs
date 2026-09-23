@@ -9,7 +9,7 @@ const context = vm.createContext({
   icon: () => '',
 });
 vm.runInContext(
-  source.slice(source.indexOf('function listPullRequests('), source.indexOf('function renderList(')) +
+  source.slice(source.indexOf('function prStatus('), source.indexOf('function renderList(')) +
   source.slice(source.indexOf('const PR_PURPOSES ='), source.indexOf('function prPurposeOptions(')),
   context,
 );
@@ -34,3 +34,9 @@ for (const [purpose, label] of [['prerequisite', 'Prerequisite'], ['supporting-e
 assert.equal(context.prPurposeLabel('unspecified'), 'Unspecified', 'Details retain the purpose label');
 assert.equal(context.listPullRequests({}), '');
 console.log('Issue list PR labels passed');
+for (const status of ['open', 'closed', 'merged', 'unknown']) {
+  const html = context.listPullRequests({pull_requests:[{url:'https://github.com/o/r/pull/1',status,checked_at:Date.now()}]});
+  assert.ok(html.includes(`pr-status-${status}`), `Show a tiny ${status} icon`);
+}
+const stale = context.listPullRequests({pull_requests:[{url:'https://github.com/o/r/pull/1',status:'open',error:'GitHub unavailable',checked_at:1}]});
+assert.ok(stale.includes('pr-status-stale'));

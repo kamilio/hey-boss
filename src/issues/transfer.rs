@@ -143,7 +143,7 @@ pub(super) fn execute(
         }
         event(db, &target.id, next, &author, &action, created, &data)?;
     }
-    db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) SELECT ?3,?4,url,added_by,created_at,purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
+    db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at,error) SELECT ?3,?4,url,added_by,created_at,purpose,status,checked_at,error FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     // Opaque file IDs and disk locations survive a project transfer; only access
     // metadata follows the issue. Source-project access is revoked atomically.
     db.execute("UPDATE file_attachments SET project_id=?3,target=CAST(?4 AS TEXT) WHERE project_id=?1 AND kind='issue' AND target=CAST(?2 AS TEXT)",params![source.id,number,target.id,next])?;

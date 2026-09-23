@@ -2890,3 +2890,11 @@ button.avatar.self:hover {
 #project-chief-instructions summary { cursor: pointer; font-weight: 600; }
 #project-chief-instructions .field-label { margin-top: 16px; }
 #project-chief-instructions .branch-footer { flex-wrap: wrap; }
+
+.pr-status { display:inline-flex; align-items:center; gap:5px; flex-shrink:0; vertical-align:middle; }
+.pr-status svg { width:12px; height:12px; stroke:currentColor; fill:none; stroke-width:2; }
+.pr-status-open { color:#238636; }
+.pr-status-merged { color:#a371f7; }
+.pr-status-closed { color:#da3633; }
+.pr-status-unknown, .pr-status-stale { color:var(--muted); }
+.pr-link-heading .pr-status { font-size:11px; margin-right:4px; }

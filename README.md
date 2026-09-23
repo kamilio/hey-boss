@@ -1011,3 +1011,22 @@ unchanged, and `\@poe-code` keeps literal `@poe-code` text in the title.
 Persistent project Markdown documents, revision-checked editing, comments and issue/mindmap links are available through **Artifacts** in the web menu and `hey-boss artifact`. See [Project artifacts](docs/artifacts.md).
 
 Issues, mindmap nodes and artifacts also support disk-backed files, drag-and-drop upload and remote CLI downloads through `hey-boss attachment`. See [File attachments](docs/attachments.md).
+
+### PR status and automatic completion
+
+The fleet supervisor checks attached GitHub PRs every minute using the embedded
+[hey-gh package](packages/hey-gh). It reads only PR metadata, deduplicates shared
+URLs, and uses conditional requests with rate-limit backoff. Merged PRs retain
+their final status without further polling; closed PRs are checked for reopening.
+The PR list and task index show status icons, with delayed updates marked stale.
+
+**Settings → Close tasks when their fix PRs merge** is enabled by default. A task
+closes only after every PR classified as **Fix** is confirmed merged. Unspecified,
+prerequisite, and supporting-evidence links never trigger completion. Closing
+adds a history comment and releases dependent tasks through the normal workflow.
+Disable automatic completion with `hey-boss settings set --auto-close-merged-prs false`;
+status polling continues. The supervisor uses its existing `gh auth login`.
+
+The standalone `hey-gh` CLI remains available. Source and companion upgrades
+install it beside `hey-boss` and update an existing `~/.cargo/bin/hey-gh`. To
+install it alone, run `cargo install --path packages/hey-gh --locked`.

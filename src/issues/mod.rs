@@ -242,7 +242,9 @@ pub enum Operation {
     },
     GlobalSettings,
     ConfigureGlobal {
-        boss_name: String,
+        boss_name: Option<String>,
+        #[serde(default)]
+        auto_close_merged_prs: Option<bool>,
         if_version: Option<i64>,
     },
     ProjectSettings,

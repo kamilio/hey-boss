@@ -4,6 +4,7 @@ mod context;
 mod control;
 mod conversation;
 mod mobile;
+mod pr_monitor;
 mod pull;
 mod replica;
 mod service;

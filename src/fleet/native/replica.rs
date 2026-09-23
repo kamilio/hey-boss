@@ -173,6 +173,24 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
                     .unwrap_or(json!("unspecified")),
             );
     }
+    if matches!(table, "issue_pull_requests" | "global_settings") {
+        let existing = current_row(db, table, &row)?;
+        let defaults = if table == "issue_pull_requests" {
+            vec![
+                ("status", json!("unknown")),
+                ("checked_at", Value::Null),
+                ("error", Value::Null),
+            ]
+        } else {
+            vec![("auto_close_merged_prs", json!(1))]
+        };
+        for (column, default) in defaults {
+            row.as_object_mut()
+                .ok_or_else(|| invalid("Invalid settings or PR row"))?
+                .entry(column)
+                .or_insert_with(|| existing.get(column).cloned().unwrap_or(default));
+        }
+    }
     let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
         .iter()
         .map(|r| r["name"].as_str().unwrap().to_string())
@@ -453,10 +471,26 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| invalid("Invalid replicated table"))?;
     keys(table)?;
-    let before = row_json(change, "before_json")?;
-    let after = row_json(change, "after_json")?;
+    let mut before = row_json(change, "before_json")?;
+    let mut after = row_json(change, "after_json")?;
     let key = if after.is_null() { &before } else { &after };
     let old = current_row(db, table, key)?;
+    if table == "issue_pull_requests" {
+        // Observation fields belong to the supervisor. Offline purpose edits
+        // neither conflict with polling nor overwrite newer GitHub evidence.
+        for (column, default) in [
+            ("status", json!("unknown")),
+            ("checked_at", Value::Null),
+            ("error", Value::Null),
+        ] {
+            let current = old.get(column).cloned().unwrap_or(default);
+            for row in [&mut before, &mut after] {
+                if let Some(row) = row.as_object_mut() {
+                    row.insert(column.into(), current.clone());
+                }
+            }
+        }
+    }
     let mut result = json!({"state":"applied"});
     if table == "issue_subtasks" && !after.is_null() {
         let collision = rows(
@@ -2835,6 +2869,12 @@ mod tests {
             rows(&agent.db, "SELECT purpose FROM issue_pull_requests", &[]).unwrap()[0]["purpose"],
             "fix"
         );
+        main.db
+            .execute(
+                "UPDATE issue_pull_requests SET status='open',checked_at=456",
+                [],
+            )
+            .unwrap();
         agent
             .db
             .execute(
@@ -2854,9 +2894,57 @@ mod tests {
         for db in [&main.db, &agent.db] {
             let pr = &rows(db, "SELECT * FROM issue_pull_requests", &[]).unwrap()[0];
             assert_eq!(pr["purpose"], "supporting-evidence");
+            assert_eq!(pr["status"], "open");
+            assert_eq!(pr["checked_at"], 456);
             assert_eq!(pr["added_by"], "human:fixture");
             assert_eq!(pr["created_at"], 123);
         }
+    }
+
+    #[test]
+    fn pr_status_and_merge_setting_survive_fleet_snapshots() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'fix','merged',456)",[]).unwrap();
+        main.db
+            .execute("UPDATE global_settings SET auto_close_merged_prs=0", [])
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let pr = &rows(&agent.db, "SELECT * FROM issue_pull_requests", &[]).unwrap()[0];
+        assert_eq!(pr["status"], "merged");
+        assert_eq!(pr["checked_at"], 456);
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT auto_close_merged_prs FROM global_settings",
+                &[]
+            )
+            .unwrap()[0]["auto_close_merged_prs"],
+            0
+        );
+        let mut legacy = pr.clone();
+        for key in ["status", "checked_at", "error"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        put_row(&agent.db, "issue_pull_requests", &legacy).unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT status FROM issue_pull_requests", &[]).unwrap()[0]["status"],
+            "merged"
+        );
     }
 
     #[test]

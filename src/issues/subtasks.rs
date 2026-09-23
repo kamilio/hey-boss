@@ -199,8 +199,8 @@ impl Graph {
             if let Some(parent)=graph.parents.get(&number) {graph.children.entry(*parent).or_default().push(number);}
             graph.issues.insert(number,issue);
         }
-        let mut statement=db.prepare("SELECT issue_number,url,added_by,created_at,purpose FROM issue_pull_requests WHERE project_id=?1 ORDER BY created_at,url")?;
-        for pr in statement.query_map([project],|r|Ok((r.get::<_,i64>(0)?,json!({"url":r.get::<_,String>(1)?,"added_by":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"purpose":r.get::<_,String>(4)?}))))? {
+        let mut statement=db.prepare("SELECT issue_number,url,added_by,created_at,purpose,status,checked_at,error FROM issue_pull_requests WHERE project_id=?1 ORDER BY created_at,url")?;
+        for pr in statement.query_map([project],|r|Ok((r.get::<_,i64>(0)?,json!({"url":r.get::<_,String>(1)?,"added_by":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"purpose":r.get::<_,String>(4)?,"status":r.get::<_,String>(5)?,"checked_at":r.get::<_,Option<i64>>(6)?,"error":r.get::<_,Option<String>>(7)?}))))? {
             let (number,pr)=pr?;
             if let Some(issue)=graph.issues.get_mut(&number){issue["pull_requests"].as_array_mut().unwrap().push(pr);}
         }
