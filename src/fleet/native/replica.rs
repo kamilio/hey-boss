@@ -849,6 +849,52 @@ fn allocation_payload(db: &Connection, node: &str, mut payload: Value) -> Result
     )?);
     Ok(payload)
 }
+pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
+    // Companions need every unacknowledged mutation; only the canonical history
+    // can be recovered by a snapshot. Keep 10,000 changes, deleting at most
+    // 1,000 per maintenance pass so ordinary writers are not stalled by cleanup.
+    let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    if role != "controller" {
+        return Ok(0);
+    }
+    let tx = if db.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    let cutoff: Option<i64> = db.query_row(
+        "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=(SELECT seq FROM fleet_outbox ORDER BY seq DESC LIMIT 1 OFFSET 10000) ORDER BY seq LIMIT 1000)",
+        [],
+        |r| r.get(0),
+    )?;
+    let deleted = if let Some(cutoff) = cutoff {
+        let deleted = db.execute("DELETE FROM fleet_outbox WHERE seq<=?1", [cutoff])?;
+        let floor = state_get(db, "journal_floor", json!(0))?
+            .as_i64()
+            .unwrap_or(0);
+        state_set(db, "journal_floor", &json!(floor.max(cutoff)))?;
+        deleted
+    } else {
+        0
+    };
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(deleted)
+}
+
+fn journal_head(db: &Connection) -> Result<i64> {
+    // AUTOINCREMENT's durable high watermark survives deletion of history.
+    Ok(db.query_row(
+        "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='fleet_outbox'),0)",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
     let tx = if db.is_autocommit() {
         Some(db.unchecked_transaction()?)
@@ -876,9 +922,7 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
             json!(rows(db, &format!("SELECT * FROM {table}"), &[])?),
         );
     }
-    let cursor: i64 = db.query_row("SELECT coalesce(max(seq),0) FROM fleet_outbox", [], |r| {
-        r.get(0)
-    })?;
+    let cursor = journal_head(db)?;
     let result = allocation_payload(db, node, json!({"tables":tables,"cursor":cursor}))?;
     if let Some(tx) = tx {
         tx.commit()?;
@@ -886,6 +930,26 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
     Ok(result)
 }
 pub(super) fn incremental(db: &Connection, node: &str, cursor: i64) -> Result<Value> {
+    let tx = if db.is_autocommit() {
+        Some(db.unchecked_transaction()?)
+    } else {
+        None
+    };
+    let floor = state_get(db, "journal_floor", json!(0))?
+        .as_i64()
+        .unwrap_or(0);
+    let payload = if cursor < floor || cursor > journal_head(db)? {
+        snapshot(db, node)?
+    } else {
+        incremental_retained(db, node, cursor)?
+    };
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(payload)
+}
+
+fn incremental_retained(db: &Connection, node: &str, cursor: i64) -> Result<Value> {
     let own: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     let mut changes = journal(db, cursor)?;
     let mut ids = BTreeMap::new();
@@ -941,20 +1005,39 @@ fn pending_key(table: &str, row: &Value) -> Result<String> {
         )
     ))
 }
+// None protects a whole pending creation/deletion. Updates protect only fields
+// present in their saved deltas, retaining the original journal for arbitration.
+type Pending = BTreeMap<String, Option<BTreeSet<String>>>;
+
 fn apply_row(
     db: &Connection,
-    pending: &BTreeSet<String>,
+    pending: &Pending,
     table: &str,
     row: &Value,
     origin: &str,
 ) -> Result<()> {
-    if table == "issue_subtasks" || pending.contains(&pending_key(table, row)?) {
+    if table == "issue_subtasks" {
         return Ok(());
     }
     if append(table) {
+        if pending.contains_key(&pending_key(table, row)?) {
+            return Ok(());
+        }
         append_row(db, origin, table, row, false)?;
     } else {
         let mut row = row.clone();
+        if let Some(fields) = pending.get(&pending_key(table, &row)?) {
+            let Some(fields) = fields else {
+                return Ok(());
+            };
+            let local = current_row(db, table, &row)?;
+            if local.is_null() {
+                return Ok(());
+            }
+            for field in fields {
+                row[field] = local[field].clone();
+            }
+        }
         if table == "projects" {
             let old = current_row(db, table, &row)?;
             if !old.is_null() {
@@ -978,7 +1061,7 @@ fn graph_key(row: &Value) -> Result<(String, i64)> {
 }
 fn apply_graph(
     db: &Connection,
-    pending: &BTreeSet<String>,
+    pending: &Pending,
     payload: &Value,
     acknowledged: BTreeMap<(String, i64), Value>,
 ) -> Result<()> {
@@ -1024,7 +1107,7 @@ fn apply_graph(
     desired.extend(acknowledged);
     for (project, child) in desired.keys() {
         let key = json!({"project_id":project,"child_number":child});
-        if !pending.contains(&pending_key("issue_subtasks", &key)?) {
+        if !pending.contains_key(&pending_key("issue_subtasks", &key)?) {
             execute(
                 db,
                 "DELETE FROM issue_subtasks WHERE project_id=? AND child_number=?",
@@ -1049,7 +1132,7 @@ fn apply_graph(
                 ],
             )
         };
-        if pending.contains(&pending_key("issue_subtasks", &key)?) {
+        if pending.contains_key(&pending_key("issue_subtasks", &key)?) {
             defer(&row)?;
             continue;
         }
@@ -1154,19 +1237,28 @@ pub(super) fn apply_pull(
             &[receipt["seq"].clone()],
         )?;
     }
-    let mut pending = BTreeSet::new();
+    let mut pending = Pending::new();
     for c in rows(
         db,
         "SELECT table_name,before_json,after_json FROM fleet_outbox",
         &[],
     )? {
         let after = row_json(&c, "after_json")?;
-        let row = if after.is_null() {
-            row_json(&c, "before_json")?
-        } else {
-            after
-        };
-        pending.insert(pending_key(c["table_name"].as_str().unwrap(), &row)?);
+        let before = row_json(&c, "before_json")?;
+        let row = if after.is_null() { &before } else { &after };
+        let key = pending_key(c["table_name"].as_str().unwrap(), row)?;
+        if before.is_null() || after.is_null() {
+            pending.insert(key, None);
+        } else if let Some(fields) = pending.entry(key).or_insert_with(|| Some(BTreeSet::new())) {
+            for (field, value) in after
+                .as_object()
+                .ok_or_else(|| invalid("Invalid pending row"))?
+            {
+                if before[field] != *value {
+                    fields.insert(field.clone());
+                }
+            }
+        }
     }
     // Apply endpoints before edges and history, regardless of JSON object order.
     for (table, _) in TABLES {
@@ -1236,7 +1328,7 @@ pub(super) fn apply_pull(
                 apply_row(db, &pending, table, &after, "")?;
             } else {
                 let row = row_json(change, "before_json")?;
-                if table != "issue_subtasks" && !pending.contains(&pending_key(table, &row)?) {
+                if table != "issue_subtasks" && !pending.contains_key(&pending_key(table, &row)?) {
                     let (clause, args) = key_where(table, &row)?;
                     execute(db, &format!("DELETE FROM {table} WHERE {clause}"), &args)?;
                 }
@@ -1547,6 +1639,353 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    fn grow_journal(f: &Fixture, count: i64) {
+        let row = current_row(
+            &f.db,
+            "issues",
+            &json!({"project_id":"named:Native fleet","number":1}),
+        )
+        .unwrap();
+        f.db.execute("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<?1) INSERT INTO fleet_outbox(table_name,after_json,created_at) SELECT 'issues',?2,0 FROM n", rusqlite::params![count,row.to_string()]).unwrap();
+    }
+
+    fn journal_count(f: &Fixture) -> i64 {
+        f.db.query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "Profiles pruning and compaction of an explicitly supplied private backup"]
+    fn profile_journal_retention() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("HEY_BOSS_RETENTION_PROFILE_DB")
+                .expect("Set HEY_BOSS_RETENTION_PROFILE_DB to a disposable backup"),
+        );
+        drop(Store::open(&path).unwrap());
+        let db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        db.pragma_update(None, "synchronous", "FULL").unwrap();
+        let before: i64 = db
+            .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
+            .unwrap();
+        let cursor = journal_head(&db).unwrap();
+        let started = std::time::Instant::now();
+        let mut deleted = 0;
+        let mut maximum = std::time::Duration::ZERO;
+        loop {
+            let pass = std::time::Instant::now();
+            let count = prune_journal(&db).unwrap();
+            maximum = maximum.max(pass.elapsed());
+            deleted += count;
+            if count == 0 {
+                break;
+            }
+        }
+        let elapsed = started.elapsed();
+        let free: i64 = db
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap();
+        let retained: i64 = db
+            .query_row(
+                "SELECT sum(pgsize) FROM dbstat WHERE name='fleet_outbox'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(journal_head(&db).unwrap(), cursor);
+        let started = std::time::Instant::now();
+        db.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            rows(&db, "PRAGMA foreign_key_check", &[])
+                .unwrap()
+                .is_empty()
+        );
+        eprintln!(
+            "Retention: {before} before; {deleted} deleted in {elapsed:?}; slowest 1000-row pass {maximum:?}; {free} free pages; {retained} outbox bytes retained; vacuum/check {:?}; {} compacted database bytes",
+            started.elapsed(),
+            std::fs::metadata(&path).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn journal_retention_is_bounded_and_stale_cursors_receive_a_current_snapshot() {
+        let f = Fixture::new();
+        f.capture();
+        grow_journal(&f, 12_080);
+        let head = snapshot(&f.db, "agent").unwrap()["cursor"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(prune_journal(&f.db).unwrap(), 1_000);
+        assert_eq!(journal_count(&f), 11_080);
+        assert_eq!(prune_journal(&f.db).unwrap(), 1_000);
+        assert_eq!(prune_journal(&f.db).unwrap(), 80);
+        assert_eq!(prune_journal(&f.db).unwrap(), 0);
+        assert_eq!(journal_count(&f), 10_000);
+        let floor = state_get(&f.db, "journal_floor", Value::Null)
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        assert_eq!(floor, head - 10_000);
+        assert_eq!(snapshot(&f.db, "agent").unwrap()["cursor"], head);
+        for cursor in [0, floor - 1, head + 1] {
+            let pull = incremental(&f.db, "agent", cursor).unwrap();
+            assert!(
+                pull["tables"].is_object(),
+                "Cursor {cursor} must trigger recovery"
+            );
+            assert_eq!(pull["cursor"], head);
+            assert_eq!(pull["tables"]["issues"][0]["title"], "Original");
+        }
+        let boundary = incremental(&f.db, "agent", floor).unwrap();
+        assert!(boundary["changes"].is_array());
+        assert_eq!(boundary["changes"][0]["seq"], floor + 1);
+        assert_eq!(
+            incremental(&f.db, "agent", head - 2).unwrap()["changes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            incremental(&f.db, "agent", head).unwrap()["changes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // Deletion must never make a snapshot cursor go backward.
+        f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+        assert_eq!(snapshot(&f.db, "agent").unwrap()["cursor"], head);
+    }
+
+    #[test]
+    fn pulls_merge_canonical_fields_while_preserving_pending_local_field_changes() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        agent
+            .db
+            .execute("UPDATE issues SET body='Offline edit'", [])
+            .unwrap();
+        main.db
+            .execute("UPDATE issues SET title='Online edit'", [])
+            .unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let key = json!({"project_id":"named:Native fleet","number":1});
+        let row = current_row(&agent.db, "issues", &key).unwrap();
+        assert_eq!(row["body"], "Offline edit");
+        assert_eq!(row["title"], "Online edit");
+        agent
+            .db
+            .execute("UPDATE issues SET body='Offline second edit'", [])
+            .unwrap();
+        main.db
+            .execute(
+                "UPDATE issues SET title='Online second edit',body='Conflicting online edit'",
+                [],
+            )
+            .unwrap();
+        let cursor = state_get(&agent.db, "cursor", Value::Null)
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &incremental(&main.db, "agent", cursor).unwrap(),
+            &[],
+        )
+        .unwrap();
+        let row = current_row(&agent.db, "issues", &key).unwrap();
+        assert_eq!(row["body"], "Offline second edit");
+        assert_eq!(row["title"], "Online second edit");
+        let pending = journal(&agent.db, 0).unwrap();
+        assert_eq!(pending.len(), 2);
+        let receipts = accept_changes(&main.db, "agent", &pending).unwrap();
+        assert!(receipts.iter().all(|r| r["state"] == "conflict"));
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &receipts,
+        )
+        .unwrap();
+        assert_eq!(
+            current_row(&agent.db, "issues", &key).unwrap()["body"],
+            "Conflicting online edit"
+        );
+        assert_eq!(journal_count(&agent), 0);
+        assert_eq!(
+            rows(&agent.db, "SELECT * FROM fleet_conflicts", &[])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn retention_recovery_preserves_offline_edits_and_receipts_after_ack_loss() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        agent
+            .db
+            .execute("UPDATE issues SET body='Offline edit'", [])
+            .unwrap();
+        main.db
+            .execute("UPDATE issues SET title='Online edit'", [])
+            .unwrap();
+        grow_journal(&main, 10_080);
+        assert!(prune_journal(&main.db).unwrap() > 0);
+        let old_cursor = state_get(&agent.db, "cursor", Value::Null)
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        let pull = incremental(&main.db, "agent", old_cursor).unwrap();
+        assert!(pull["tables"].is_object());
+        apply_pull(&agent.db, "agent", &pull, &[]).unwrap();
+        let row = current_row(
+            &agent.db,
+            "issues",
+            &json!({"project_id":"named:Native fleet","number":1}),
+        )
+        .unwrap();
+        assert_eq!(row["body"], "Offline edit");
+        assert_eq!(row["title"], "Online edit");
+        let changes = journal(&agent.db, 0).unwrap();
+        assert!(!changes.is_empty());
+        let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+        assert!(
+            receipts.iter().all(|r| r["state"] == "applied"),
+            "{receipts:?}"
+        );
+        // Lose the acknowledgment, then prune the canonical mutation from history.
+        grow_journal(&main, 10_080);
+        while prune_journal(&main.db).unwrap() > 0 {}
+        assert_eq!(
+            accept_changes(&main.db, "agent", &changes).unwrap(),
+            receipts
+        );
+        let cursor = state_get(&agent.db, "cursor", Value::Null)
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &incremental(&main.db, "agent", cursor).unwrap(),
+            &receipts,
+        )
+        .unwrap();
+        assert_eq!(journal_count(&agent), 0);
+        assert_eq!(
+            current_row(&agent.db, "issues", &row).unwrap()["body"],
+            "Offline edit"
+        );
+        assert_eq!(
+            current_row(&agent.db, "issues", &row).unwrap()["title"],
+            "Online edit"
+        );
+        assert_eq!(
+            agent
+                .db
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            rows(&agent.db, "PRAGMA foreign_key_check", &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retention_respects_existing_wal_readers_and_persists_recovery_across_reopen() {
+        let f = Fixture::new();
+        f.capture();
+        grow_journal(&f, 10_080);
+        f.db.execute_batch("BEGIN; SELECT count(*) FROM fleet_outbox")
+            .unwrap();
+        let writer = Connection::open(&f.path).unwrap();
+        assert_eq!(prune_journal(&writer).unwrap(), 80);
+        let old_view = incremental(&f.db, "agent", 0).unwrap();
+        assert!(old_view["changes"].is_array());
+        assert_eq!(old_view["changes"][0]["seq"], 1);
+        f.db.execute_batch("COMMIT").unwrap();
+        drop(writer);
+        let restarted = Connection::open(&f.path).unwrap();
+        let new_view = incremental(&restarted, "agent", 0).unwrap();
+        assert!(new_view["tables"].is_object());
+        assert_eq!(new_view["cursor"], 10_080);
+        assert_eq!(
+            state_get(&restarted, "journal_floor", Value::Null).unwrap(),
+            80
+        );
+    }
+
+    #[test]
+    fn retention_never_prunes_companion_changes_and_rolls_back_with_its_floor() {
+        let f = Fixture::new();
+        install_capture(&f.db, "agent", "agent").unwrap();
+        grow_journal(&f, 10_080);
+        assert_eq!(prune_journal(&f.db).unwrap(), 0);
+        assert_eq!(journal_count(&f), 10_080);
+        assert_eq!(
+            state_get(&f.db, "journal_floor", Value::Null).unwrap(),
+            Value::Null
+        );
+        f.capture();
+        f.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(prune_journal(&f.db).unwrap(), 80);
+        assert_eq!(state_get(&f.db, "journal_floor", Value::Null).unwrap(), 80);
+        f.db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(journal_count(&f), 10_080);
+        assert_eq!(
+            state_get(&f.db, "journal_floor", Value::Null).unwrap(),
+            Value::Null
+        );
+    }
 
     #[test]
     fn incremental_sync_work_is_bounded_by_the_changed_rows() {

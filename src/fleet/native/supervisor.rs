@@ -904,6 +904,7 @@ impl Supervisor {
             }
         }
         control::reconcile(&self.ctx, &main)?;
+        replica::prune_journal(&self.ctx.db()?)?;
         {
             let mut state = self.state.lock().unwrap();
             state.local = observed;
