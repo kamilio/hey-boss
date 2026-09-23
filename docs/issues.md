@@ -759,6 +759,12 @@ The supervisor pulls changes every five seconds, after accepting local journals,
 and redeploys software when the source fingerprint changes. Active work drains
 before a worker reloads an updated executable.
 
+Fresh replicas receive compressed snapshots in bounded chunks, including rows
+larger than the ordinary 16 MiB frame limit. The companion verifies the complete
+transfer before applying it in one transaction. Disconnects leave its previous
+data and cursor intact; local edits made during the download remain pending.
+Older companions must be upgraded if their initial snapshot exceeds the limit.
+
 The **Workers** view at `/workers` shows every configured machine, heartbeat,
 connection, configuration, build, slots, tasks, events, and saved conflicts.
 Pause preserves active jobs, resume enables pickup, stop cancels owned jobs, and

@@ -1,13 +1,13 @@
 use super::{
     Result,
     context::{Context, atomic_json, now, read_frame, read_json, send},
-    control, conversation,
+    control, conversation, pull,
     replica::{self, invalid},
     takeover,
 };
 use serde_json::{Value, json};
 use std::{
-    io::BufReader,
+    io::{BufReader, Write},
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
@@ -24,6 +24,43 @@ fn local_config(ctx: &Context) -> Result<Vec<Value>> {
 }
 fn reply(output: &Arc<Mutex<std::io::Stdout>>, value: Value) -> Result<()> {
     send(&mut *output.lock().unwrap(), value)
+}
+
+// Verification and atomic application can outlast a heartbeat interval. This
+// reports liveness only: the durable cursor acknowledgment still follows commit.
+struct PullProgress {
+    done: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl PullProgress {
+    fn start<W: Write + Send + 'static>(output: Arc<Mutex<W>>) -> Self {
+        let (done, wait) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            while matches!(
+                wait.recv_timeout(Duration::from_secs(5)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                if send(
+                    &mut *output.lock().unwrap(),
+                    json!({"kind":"ack","progress":"pull"}),
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            done: Some(done),
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for PullProgress {
+    fn drop(&mut self) {
+        drop(self.done.take());
+        let _ = self.thread.take().unwrap().join();
+    }
 }
 pub(super) fn stdio(ctx: Context) -> Result<()> {
     // Register fleet identity before journaling and exporting the first hello.
@@ -70,7 +107,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
     let output = Arc::new(Mutex::new(std::io::stdout()));
     reply(
         &output,
-        json!({"kind":"hello","node":ctx.node,"hostname":crate::issues::identity::host(),"build":ctx.build()?,"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"workers":ctx.workers()?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
+        json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":ctx.build()?,"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"workers":ctx.workers()?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
     )?;
     let (tx, rx) = mpsc::sync_channel::<Value>(100);
     let signals = ctx.clone();
@@ -86,6 +123,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
         }
     });
     let mut input = BufReader::new(std::io::stdin());
+    let mut pulls = pull::PullReader::default();
     while !ctx.stopped() {
         let Some(message) = read_frame(&mut input)? else {
             break;
@@ -93,6 +131,11 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
         if message["version"] != 1 {
             return Err(invalid("Unsupported fleet protocol version"));
         }
+        let _progress = matches!(message["kind"].as_str(), Some("pull" | "pull_end"))
+            .then(|| PullProgress::start(output.clone()));
+        let Some(message) = pulls.receive(message)? else {
+            continue;
+        };
         match message["kind"].as_str() {
             Some("configure") => reply(&output, control::configure_companion(&ctx, &message)?)?,
             Some("pull") => {
@@ -197,4 +240,47 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
         ctx.wait(Duration::from_secs(5));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Recording {
+        bytes: Vec<u8>,
+        frames: mpsc::Sender<Value>,
+    }
+    impl Write for Recording {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            let frame = serde_json::from_slice(&self.bytes).unwrap();
+            self.bytes.clear();
+            self.frames.send(frame).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn slow_pull_reports_liveness_without_acknowledging_a_cursor_and_stops_on_drop() {
+        let (frames, received) = mpsc::channel();
+        let output = Arc::new(Mutex::new(Recording {
+            bytes: Vec::new(),
+            frames,
+        }));
+        let progress = PullProgress::start(output.clone());
+        let frame = received.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(frame, json!({"version":1,"kind":"ack","progress":"pull"}));
+        assert!(frame.get("cursor").is_none());
+        let stopped = std::time::Instant::now();
+        drop(progress);
+        assert!(stopped.elapsed() < Duration::from_secs(1));
+        drop(output);
+        assert!(matches!(
+            received.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
 }

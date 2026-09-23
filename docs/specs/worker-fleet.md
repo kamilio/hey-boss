@@ -40,6 +40,27 @@ older clients. Worker stop/restart MUST leave the fleet supervisor running.
 
 The transport MUST authenticate with configured SSH credentials and validate host keys. Protocol version 1 uses newline-delimited JSON over a persistent, bidirectional SSH channel. Frames MUST be bounded to 16 MiB. A companion sends `hello`, `heartbeat`, and `ack` messages. Heartbeats include durable outgoing changes, worker activity, configuration revision, and the pull cursor. The supervisor sends `configure`, `ping`, `pull`, and `signal` messages. Pulls carry journal receipts and a full initial snapshot or incremental canonical changes. Every signal has a stable request ID; replay MUST NOT apply it twice. Events have monotonic sequence numbers within a supervisor epoch. Connections MUST use a five-second heartbeat and become disconnected after fifteen seconds without a valid response.
 
+Companions supporting streamed pulls MUST advertise `pull_gzip_chunks` in
+`hello.capabilities`. The supervisor MAY send `pull_begin`, ordered `pull_chunk`
+frames and `pull_end` for these peers. The transfer uses gzip-compressed JSON
+and base64 chunks; each chunk contains at most 4 MiB of compressed bytes.
+Every frame MUST remain within the 16 MiB limit, including a single domain row
+larger than that limit. Small incremental pulls MUST retain the ordinary `pull`
+format. For peers without the capability, an oversized pull MUST fail with an
+upgrade error before any partial frame is sent.
+
+The companion MUST stage a streamed pull privately and verify its transfer ID,
+chunk order, byte and chunk counts, SHA-256 digest, and complete gzip stream
+before applying it. A malformed, interrupted or overlapping pull MUST leave
+the replica and its cursor unchanged. Complete pulls MUST apply atomically and
+preserve local edits made while the transfer was in progress. Temporary transfer
+data MUST be removed when the connection closes. Transfer verification MUST NOT
+be treated as acknowledgment of a committed replica cursor.
+While verification or atomic application takes longer than a heartbeat interval,
+the companion MUST send progress responses every five seconds. These responses
+MUST NOT advance the acknowledged cursor. The supervisor MUST measure companion
+silence after completing its own outgoing transfer.
+
 ## Configuration
 
 The supervisor MUST derive its inventory from the existing machine configuration and distribute the supervisor identity, companion role, configuration revision, desired worker settings, and software build. Invalid configuration MUST leave the previous valid configuration active and expose an error. Companions MUST persist configuration atomically. The supervisor MUST reconcile reachable machines on startup, reconnect, configuration changes, and source changes. Deployment failures MUST be visible and retried with backoff. Explicit deployment MUST remain available.
@@ -72,6 +93,7 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 | Durable offline changes | Disconnect, mutate and restart, reconnect, verify exactly one canonical result |
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique |
+| Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation |
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |
 | Configuration | Revision change reaches companion, survives restart, and queues offline |
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |

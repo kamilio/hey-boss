@@ -428,6 +428,181 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
 }
 
 #[test]
+fn streamed_snapshot_survives_disconnect_and_preserves_edits_made_during_transfer() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest, Sha256};
+    let source = Fixture::new();
+    source.issue();
+    let database = |request: Value| {
+        let mut child = source
+            .command(&[
+                "fleet",
+                "database",
+                "--path",
+                source.root.join("issues.db").to_str().unwrap(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response
+    };
+    database(serde_json::json!({"replica":"capture","role":"controller","node":"source"}));
+    let db = rusqlite::Connection::open(source.root.join("issues.db")).unwrap();
+    db.execute_batch("BEGIN;
+        WITH RECURSIVE n(number) AS (VALUES(2) UNION ALL SELECT number+1 FROM n WHERE number<101)
+        INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+        SELECT 'named:Worker fixture',number,'Imported issue',hex(zeroblob(100000)),'open','human:fixture',1,1,1,'[]' FROM n;
+        UPDATE issues SET title='Canonical title' WHERE number=1;
+        UPDATE projects SET next_number=102;
+        COMMIT;").unwrap();
+    drop(db);
+    let snapshot = database(serde_json::json!({"replica":"snapshot","node":"target"}));
+    let payload: Value = serde_json::from_str(snapshot["rows"][0][0].as_str().unwrap()).unwrap();
+    let cursor = payload["cursor"].clone();
+    let frame = serde_json::json!({"version":1,"kind":"pull","payload":payload,"receipts":[]});
+    let encoded = serde_json::to_vec(&frame).unwrap();
+    assert!(encoded.len() > hey_boss::issues::WIRE_LIMIT);
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+    gzip.write_all(&encoded).unwrap();
+    let compressed = gzip.finish().unwrap();
+    let hash = format!("{:x}", Sha256::digest(&compressed));
+    let parts: Vec<_> = compressed
+        .chunks(16384)
+        .map(|chunk| STANDARD.encode(chunk))
+        .collect();
+    assert!(parts.len() > 2);
+    let target = Fixture::new();
+    target.issue();
+    let db = rusqlite::Connection::open(target.root.join("issues.db")).unwrap();
+    db.execute("UPDATE fleet_meta SET role='agent'", [])
+        .unwrap();
+    drop(db);
+    let spawn = || {
+        let mut child = Service(
+            target
+                .command(&["fleet", "companion", "--stdio"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let mut output = BufReader::new(child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let hello: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(hello["capabilities"]["pull_gzip_chunks"], true);
+        let input = child.0.stdin.take().unwrap();
+        (child, input, output)
+    };
+    let send = |input: &mut std::process::ChildStdin, frame: Value| {
+        writeln!(input, "{frame}").unwrap();
+        input.flush().unwrap();
+    };
+    let begin = serde_json::json!({"version":1,"kind":"pull_begin","transfer":"test","encoding":"gzip-base64"});
+    let part = |index: usize| serde_json::json!({"version":1,"kind":"pull_chunk","transfer":"test","index":index,"data":parts[index]});
+    let (mut interrupted, mut input, _) = spawn();
+    send(&mut input, begin.clone());
+    send(&mut input, part(0));
+    drop(input);
+    assert!(interrupted.0.wait().unwrap().success());
+    let db = rusqlite::Connection::open(target.root.join("issues.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT title FROM issues WHERE number=1", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Keep running"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM fleet_state WHERE key='cursor'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(db);
+    let (mut resumed, mut input, mut output) = spawn();
+    send(&mut input, begin);
+    send(&mut input, part(0));
+    let db = rusqlite::Connection::open(target.root.join("issues.db")).unwrap();
+    db.execute(
+        "UPDATE issues SET title='Edit during transfer',version=version+1 WHERE number=1",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    for index in 1..parts.len() {
+        send(&mut input, part(index));
+    }
+    send(
+        &mut input,
+        serde_json::json!({"version":1,"kind":"pull_end","transfer":"test","parts":parts.len(),"bytes":compressed.len(),"sha256":hash}),
+    );
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let ack: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ack["kind"], "ack");
+    assert_eq!(ack["cursor"], cursor);
+    let db = rusqlite::Connection::open(target.root.join("issues.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        101
+    );
+    assert_eq!(
+        db.query_row("SELECT title FROM issues WHERE number=1", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Edit during transfer"
+    );
+    assert_eq!(
+        db.query_row("SELECT length(body) FROM issues WHERE number=2", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap(),
+        200000
+    );
+    assert!(
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fleet_outbox WHERE table_name='issues')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        0
+    );
+    drop(db);
+    drop(input);
+    assert!(resumed.0.wait().unwrap().success());
+}
+
+#[test]
 fn companion_protocol_runs_without_python_and_eof_leaves_execution_independent() {
     let f = Fixture::new();
     f.issue();
