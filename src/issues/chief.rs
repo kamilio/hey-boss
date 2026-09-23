@@ -24,6 +24,8 @@ pub(in crate::issues) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS project_c
  worker_id TEXT REFERENCES issue_workers(id),started_at INTEGER,finished_at INTEGER,
  last_event TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(project_id,machine));";
+pub(in crate::issues) const ACTIVITY_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS project_chiefs_worker ON project_chiefs(worker_id);";
 const INTERVAL_MS: i64 = 60 * 60 * 1000;
 type Reservation = (
     i64,
@@ -168,11 +170,13 @@ impl Store {
     }
 }
 
+const STATUS_QUERY: &str = "SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0) FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine";
+
 pub(in crate::issues) fn status(
     db: &rusqlite::Connection,
     worker: Option<&str>,
 ) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare("SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0) FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine")?;
+    let mut stmt = db.prepare(STATUS_QUERY)?;
     Ok(stmt.query_map([worker], |r| {
         let project: String = r.get(0)?;
         let machine: String = r.get(2)?;
@@ -400,6 +404,55 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chief_status_reads_only_the_selected_workers_projects() {
+        let root =
+            std::env::temp_dir().join(format!("hb-chief-status-{}", worker::random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('selected','cli','{}',1,0),('other','cli','{}',1,0);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                INSERT INTO projects(id,name,next_number) SELECT 'project:'||x,'Project '||x,1 FROM n;
+                UPDATE projects SET hidden_at=1 WHERE id='project:4';
+                INSERT INTO project_settings(project_id,prompt,version,chief_enabled) VALUES('project:3','Work',1,1);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                INSERT INTO project_chiefs(project_id,machine,cwd,worker_id,state,started_at,finished_at,next_at)
+                SELECT 'project:'||x,'unit','/workspace',CASE WHEN x<=4 THEN 'selected' ELSE 'other' END,
+                    CASE WHEN x IN (2,3,4) THEN 'running' ELSE 'idle' END,
+                    CASE x WHEN 1 THEN 30 WHEN 2 THEN 10 WHEN 3 THEN 20 WHEN 4 THEN 50 ELSE x END,40,3600040 FROM n;").unwrap();
+            let chiefs = status(&store.db, Some("selected")).unwrap();
+            assert_eq!(
+                chiefs
+                    .iter()
+                    .map(|c| c["project_id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["project:3", "project:2", "project:1"]
+            );
+            assert_eq!(chiefs[0]["enabled"], true);
+            assert_eq!(chiefs[1]["enabled"], false);
+            assert!(chiefs[0]["finished_at"].is_null());
+            assert_eq!(chiefs[2]["finished_at"], 40);
+            assert!(status(&store.db, None).unwrap().is_empty());
+            let mut stmt = store.db.prepare(STATUS_QUERY).unwrap();
+            let projects = stmt
+                .query_map(["selected"], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(projects, ["project:3", "project:2", "project:1"]);
+            let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+            eprintln!(
+                "Selected Chief status used {steps} SQLite VM steps beside 9,996 unrelated project chiefs"
+            );
+            assert!(
+                steps < 1000,
+                "Chief status scanned unrelated projects: {steps} VM steps"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn another_worker_cannot_take_over_the_next_chief_pass() {
         let root =

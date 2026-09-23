@@ -94,6 +94,13 @@ reports identify their loaded code rather than a replacement executable on disk.
 Startup connection errors also retain the bounded SSH error tail, so a transport
 failure before the first hello remains distinguishable from an application error.
 
+A fresh September 23 backup with 34 workers measured the current coherent poll
+at a 32 ms median, versus 189 ms for repeated current public-status calls, with
+identical activity results. These are separate measurements from the earlier
+checkpoint. Chief status also uses a worker lookup index: selecting three visible
+chiefs beside 9,996 unrelated records fell from 110,138 to 181 SQLite VM steps,
+preserving running-first ordering, hidden-project filtering and lifecycle fields.
+
 Explicit project queue filters use the existing project index. Counting 20
 selected issues beside 10,000 unrelated open issues fell from 123,800 to fewer
 than 3,800 SQLite VM steps. Duplicate project IDs do not double counts; empty
