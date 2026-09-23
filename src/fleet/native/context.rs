@@ -552,6 +552,7 @@ mod tests {
     #[test]
     #[ignore = "Profiles an explicitly supplied database through a private backup"]
     fn profile_machine_activity_poll() {
+        use std::os::unix::fs::PermissionsExt;
         let source = PathBuf::from(
             std::env::var_os("HEY_BOSS_PROFILE_DB").expect("Set HEY_BOSS_PROFILE_DB"),
         );
@@ -560,11 +561,13 @@ mod tests {
             crate::issues::worker::random_id().unwrap()
         ));
         fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("issues.db");
         let db = Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
         db.backup("main", &path, None).unwrap();
         drop(db);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let ctx = Context {
             home: root.clone(),
             state: root.clone(),
