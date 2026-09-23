@@ -38,6 +38,15 @@ locks now use the shared inode guard before opening their descriptor; hard links
 and symlinks to main/WAL/shared memory are rejected. Ordinary nonblocking lock
 contention and subsequent reacquisition remain valid.
 
+Private configuration regressions also reproduced lock loss when a JSON read
+followed a database alias, and replacement of the active database inode when an
+atomic JSON write targeted its exact path. Context-owned fleet JSON reads and
+writes now check main/WAL/shared-memory inode identity first. Inventory text and
+maintenance source/receipt reads use the same protection. Existing JSON keys,
+ordinary config symlinks and missing-file defaults remain valid. The replacement
+regression uses synthetic private data; it does not establish the historical
+zeroed-header writer.
+
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
 writer responsible for that damage has not been established. The subsequent

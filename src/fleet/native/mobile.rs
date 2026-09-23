@@ -1,7 +1,7 @@
 //! Authenticated HTTPS bridge. Pairing credentials never enter logs or argv.
 use super::{
     Result,
-    context::{Context, atomic_json, read_json},
+    context::Context,
     replica::{self, invalid},
 };
 use crate::issues::{Actor, Operation, Project, Request, Store};
@@ -71,7 +71,7 @@ impl Mobile {
             .parent()
             .ok_or_else(|| invalid("Issue database has no parent"))?
             .join("mobile.json");
-        let config = read_json(&pairing, Value::Null)?;
+        let config = self.ctx.read_json(&pairing, Value::Null)?;
         if config.is_null() {
             return Err("Mobile pairing is not configured".into());
         }
@@ -127,7 +127,7 @@ impl Mobile {
             .ok_or_else(|| invalid("Missing mobile state directory"))?
             .join("mobile-relay.json");
         if state["ready"] == false {
-            let snapshot = read_json(&path, Value::Null)?;
+            let snapshot = self.ctx.read_json(&path, Value::Null)?;
             self.call(
                 "/api/bridge/checkpoint/restore",
                 Some(&json!({"snapshot":snapshot})),
@@ -135,7 +135,7 @@ impl Mobile {
         } else if let Some(snapshot) = state.get("snapshot") {
             // atomic_json fsyncs both the private file and its parent directory.
             // Only then may Fly acknowledge pairing, answers, or publication.
-            atomic_json(&path, snapshot)?;
+            self.ctx.atomic_json(&path, snapshot)?;
             self.call(
                 "/api/bridge/checkpoint/ack",
                 Some(&json!({"epoch":state["epoch"],"version":state["version"]})),

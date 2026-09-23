@@ -1,6 +1,6 @@
 use super::{
     Result,
-    context::{Context, atomic_json, now, read_frame, read_json, send},
+    context::{Context, now, read_frame, send},
     control, conversation, pull,
     replica::{self, invalid},
     takeover,
@@ -13,7 +13,7 @@ use std::{
 };
 fn local_config(ctx: &Context) -> Result<Vec<Value>> {
     Ok(
-        read_json(&ctx.state.join("fleet-agent.json"), json!({}))?["workers"]
+        ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?["workers"]
             .as_array()
             .into_iter()
             .flatten()
@@ -148,13 +148,13 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                         .map(Vec::as_slice)
                         .unwrap_or(&[]),
                 )?;
-                atomic_json(
+                ctx.atomic_json(
                     &ctx.state.join("fleet-agent-status.json"),
                     &json!({"connected_at":now(),"last_sync":now()}),
                 )?;
                 control::reconcile(
                     &ctx,
-                    &read_json(&ctx.state.join("fleet-agent.json"), json!({}))?,
+                    &ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?,
                 )?;
                 reply(
                     &output,
@@ -185,7 +185,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                 )?;
             }
             Some("ping") => {
-                atomic_json(
+                ctx.atomic_json(
                     &ctx.state.join("fleet-agent-status.json"),
                     &json!({"connected_at":now(),"last_sync":replica::state_get(&db,"last_sync",Value::Null)?}),
                 )?;
@@ -222,17 +222,17 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
         };
         for pending in interrupted {
             if let Err(e) = control::apply_signal(&ctx, &pending) {
-                atomic_json(
+                ctx.atomic_json(
                     &ctx.state.join("fleet-agent-error.json"),
                     &json!({"worker":pending["worker"],"error":e.to_string(),"at":now()}),
                 )?;
             }
         }
-        let config = read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
+        let config = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
         if config.as_object().is_some_and(|m| !m.is_empty())
             && let Err(e) = control::reconcile(&ctx, &config)
         {
-            atomic_json(
+            ctx.atomic_json(
                 &ctx.state.join("fleet-agent-error.json"),
                 &json!({"error":e.to_string(),"at":now()}),
             )?;

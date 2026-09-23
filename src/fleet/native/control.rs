@@ -1,7 +1,7 @@
 //! Worker lifecycle is independently owned: service exit never signals workers.
 use super::{
     Result,
-    context::{Context, atomic_json, hash, now, read_json},
+    context::{Context, hash, now},
     replica::{self, invalid},
 };
 use serde_json::{Value, json};
@@ -153,7 +153,7 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
             json!({"kind":"ack","configuration_error":"Worker restart in progress; configuration will retry"}),
         );
     };
-    let previous = read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
+    let previous = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
     let workers = message.get("workers").unwrap_or(&previous["workers"]);
     let configured = json!({"role":"agent","controller":message["controller"],"revision":message["revision"],"workers":workers});
     let failures = configure_workers(
@@ -165,7 +165,7 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
     if !failures.is_empty() {
         return Ok(json!({"kind":"ack","configuration_error":failures.join("; ")}));
     }
-    atomic_json(&ctx.state.join("fleet-agent.json"), &configured)?;
+    ctx.atomic_json(&ctx.state.join("fleet-agent.json"), &configured)?;
     replica::state_set(&ctx.db()?, "revision", &message["revision"])?;
     Ok(json!({"kind":"ack","revision":message["revision"]}))
 }
@@ -205,7 +205,7 @@ pub(super) fn reconcile(ctx: &Context, config: &Value) -> Result<()> {
             _ => Ok(()),
         };
         if let Err(e) = result {
-            atomic_json(
+            ctx.atomic_json(
                 &ctx.state.join("fleet-agent-error.json"),
                 &json!({"worker":desired["id"],"error":e.to_string(),"at":now()}),
             )?;
@@ -356,7 +356,7 @@ fn apply_signal_locked(
     } else {
         "fleet-agent.json"
     });
-    let mut saved = read_json(&config_path, json!({}))?;
+    let mut saved = ctx.read_json(&config_path, json!({}))?;
     set_intent(
         &mut saved,
         &worker["id"],
@@ -368,7 +368,7 @@ fn apply_signal_locked(
             "running"
         },
     );
-    atomic_json(&config_path, &saved)?;
+    ctx.atomic_json(&config_path, &saved)?;
     if matches!(action, "stop" | "restart") && !already_started {
         if phase != "starting" {
             replica::execute(
@@ -431,7 +431,7 @@ fn apply_signal_locked(
             action
         },
     );
-    atomic_json(&config_path, &saved)?;
+    ctx.atomic_json(&config_path, &saved)?;
     let result =
         json!({"id":message["id"],"state":"acknowledged","signal":action,"worker":worker["id"]});
     replica::execute(
