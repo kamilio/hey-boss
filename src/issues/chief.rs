@@ -661,6 +661,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::zombie_processes,
+        reason = "The test abandons Child to verify that the supervisor stops and reaps it"
+    )]
     fn chief_panic_stops_and_reaps_its_child_before_releasing_ownership() {
         let (root, store, job) = launch_fixture();
         let (send, receive) = mpsc::sync_channel(1);
