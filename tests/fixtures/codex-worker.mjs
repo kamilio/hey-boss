@@ -54,7 +54,7 @@ for await (const line of createInterface({input: process.stdin})) {
       if (!['unclaimed', 'delay-unclaimed', 'delay-model-start'].includes(mode)) {
         assert(match, text);
         assert.equal(process.env.HEY_BOSS_ISSUE_PROJECT, 'named:Worker fixture');
-        issue = cli(['issue', '--json', 'view', match[1]]).issue;
+        issue = cli(['issue', '--json', '--agent', 'codex:' + session, 'view', match[1]]).issue;
         assert.equal(issue.number, Number(match[1]));
         cli(['issue', '--json', '--agent', 'codex:' + session, 'claim', match[1]]);
       }
