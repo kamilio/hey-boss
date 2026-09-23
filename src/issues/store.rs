@@ -47,17 +47,45 @@ const CONTENTION_BUDGET: Duration = Duration::from_secs(6);
 fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
     loop {
         match operation() {
-            Err(error) if error.code == "database_busy" => {
+            Err(mut error) if error.code == "database_busy" => {
                 if Instant::now() >= deadline {
-                    return Err(Error::new(
-                        "database_busy",
-                        "Issue database is busy after bounded retries; retry the command. For guarded edits, read the latest version before retrying. No concurrent edit was overwritten.",
-                    ));
+                    error.message = format!(
+                        "Issue database is busy after bounded retries; retry the command. For guarded edits, read the latest version before retrying. No concurrent edit was overwritten. {}",
+                        error.message
+                    );
+                    return Err(error);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             result => return result,
         }
+    }
+}
+
+#[cfg(test)]
+mod contention_tests {
+    use super::*;
+
+    #[test]
+    fn an_exhausted_retry_retains_the_sqlite_failure_code() {
+        let cause = Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT),
+            Some("database is locked".into()),
+        ));
+        let mut attempts = 0;
+        let error = retry_contention(Instant::now(), || {
+            attempts += 1;
+            Err::<(), _>(cause.clone())
+        })
+        .unwrap_err();
+        assert_eq!(
+            attempts, 1,
+            "An expired retry must not start another attempt"
+        );
+        assert_eq!(error.code, "database_busy");
+        assert_eq!(error.details, cause.details);
+        assert!(error.message.contains("bounded retries"));
+        assert!(error.message.contains("SQLite 517"));
     }
 }
 // These additive migrations shipped independently. Verify the actual columns,
