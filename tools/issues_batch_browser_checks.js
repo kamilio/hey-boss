@@ -8,17 +8,12 @@ async page => {
   await page.goto(root);
   await page.reload();
   await page.locator('.issue-row').nth(1).waitFor();
-  const mutate = async (assignment, add, remove, dry_run = false, stale = false) => page.evaluate(async args => {
+  const mutate = async (assignment, add, remove, stale = false) => page.evaluate(async args => {
     const issues = (await api({action:'list',state:'open',mine:false,unassigned:false,labels:[],search:null,limit:100,offset:0})).issues;
     const edits = issues.map((i, index) => ({number:i.number,if_version:i.version + (args.stale && index === 1 ? 1 : 0),expected_assignee:i.assignee,add_labels:[args.add],remove_labels:[args.remove],assignment:args.assignment}));
-    return api({action:'batch',edits,dry_run:args.dry_run}, model.project.id, args.dry_run ? null : crypto.randomUUID());
-  }, {assignment,add,remove,dry_run,stale});
-  const preview = await mutate('boss','PR ready','rework needed',true);
-  check(preview.accepted && !preview.applied && preview.results.every(r => r.status === 'would_change'), 'Preview reports coupled changes without applying');
-  await page.reload();
-  await page.locator('.issue-row').nth(1).waitFor();
-  check(!(await page.locator('#issue-list').innerText()).includes('PR ready'), 'Preview leaves list labels untouched');
-  const rejected = await mutate('boss','PR ready','rework needed',false,true);
+    return api({action:'batch',edits}, model.project.id, crypto.randomUUID());
+  }, {assignment,add,remove,stale});
+  const rejected = await mutate('boss','PR ready','rework needed',true);
   check(!rejected.accepted && rejected.results[0].status === 'blocked' && rejected.results[1].status === 'rejected', 'Stale group blocks the other issue');
   const fits = () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
   for (const phase of ['ready','rework']) {

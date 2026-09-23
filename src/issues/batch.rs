@@ -70,7 +70,6 @@ pub(super) fn execute(
     project: &Project,
     actor: Option<&Actor>,
     edits: &[BatchEdit],
-    dry_run: bool,
     now: i64,
 ) -> Result<Value> {
     let replica: bool =
@@ -132,7 +131,7 @@ pub(super) fn execute(
         match prepared {
             Ok((before, after)) => {
                 let changed = before.version != after.version;
-                results.push(json!({"number":edit.number,"status":if changed { if dry_run { "would_change" } else { "changed" } } else { "unchanged" },"changed":changed,"before":summary(&before),"after":summary(&after)}));
+                results.push(json!({"number":edit.number,"status":if changed { "changed" } else { "unchanged" },"changed":changed,"before":summary(&before),"after":summary(&after)}));
                 updates.push((before, after));
             }
             Err(error)
@@ -157,7 +156,7 @@ pub(super) fn execute(
                 result.as_object_mut().unwrap().remove("after");
             }
         }
-    } else if !dry_run {
+    } else {
         let actor = actor.unwrap();
         for (before, after) in updates {
             if before.version == after.version {
@@ -187,6 +186,6 @@ pub(super) fn execute(
     }
     let changed = accepted && results.iter().any(|r| r["changed"] == true);
     Ok(
-        json!({"ok":true,"project":project,"accepted":accepted,"applied":accepted && !dry_run,"dry_run":dry_run,"changed":changed,"results":results}),
+        json!({"ok":true,"project":project,"accepted":accepted,"applied":accepted,"changed":changed,"results":results}),
     )
 }

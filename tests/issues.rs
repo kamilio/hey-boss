@@ -218,7 +218,28 @@ fn rejected_batch(o: Output) -> Value {
 }
 
 #[test]
-fn batch_triage_is_atomic_previewed_and_retryable() {
+fn removed_preview_fields_are_rejected_instead_of_silently_applying() {
+    assert!(
+        serde_json::from_value::<hey_boss::issues::Operation>(
+            json!({"action":"batch","edits":[],"dry_run":true})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<hey_boss::mindmap::Operation>(
+            json!({"command":"batch","edits":[],"if_version":null,"dry_run":true})
+        )
+        .is_err()
+    );
+    let f = Fixture::new();
+    assert_eq!(
+        f.stdin(&["drain-github", "--dry-run"], b"").status.code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn batch_triage_is_atomic_and_retryable() {
     let f = Fixture::new();
     f.create();
     f.create();
@@ -233,9 +254,12 @@ fn batch_triage_is_atomic_previewed_and_retryable() {
       {"number":1,"if_version":3,"expected_assignee":"session-a","add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"unassign"},
       {"number":2,"if_version":3,"expected_assignee":"session-a","add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"unassign"}
     ]"#;
-    let preview = success(f.stdin(&["batch", "--file", "-", "--dry-run"], edits));
-    assert_eq!(preview["dry_run"], true);
-    assert_eq!(preview["results"][0]["after"]["version"], 4);
+    assert_eq!(
+        f.stdin(&["batch", "--file", "-", "--dry-run"], edits)
+            .status
+            .code(),
+        Some(2)
+    );
     assert_eq!(f.run("session-a", &["view", "1"])["issue"]["version"], 3);
     let applied = success(f.stdin(&["batch", "--file", "-", "--request-id", "triage"], edits));
     assert_eq!(applied["applied"], true);
@@ -467,22 +491,11 @@ fn batch_rpc_and_replica_and_reservation_boundaries() {
 }
 
 #[test]
-fn batch_preview_registers_nothing_and_validates_limits() {
+fn batch_validates_limits_without_changes() {
     let f = Fixture::new();
+    f.create();
     let entry =
         json!({"number":1,"if_version":1,"expected_assignee":null,"add_labels":["PR ready"]});
-    let result = rejected_batch(f.stdin(
-        &["batch", "--file", "-", "--dry-run"],
-        json!([entry.clone()]).to_string().as_bytes(),
-    ));
-    assert_eq!(result["dry_run"], true);
-    for table in ["projects", "agents", "events", "requests", "fleet_outbox"] {
-        let count: i64 = f
-            .sql()
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 0, "Preview wrote {table}");
-    }
     for invalid in [
         json!([]),
         json!([entry.clone(), entry.clone()]),
@@ -490,7 +503,7 @@ fn batch_preview_registers_nothing_and_validates_limits() {
     ] {
         assert_eq!(
             f.stdin(
-                &["batch", "--file", "-", "--dry-run"],
+                &["batch", "--file", "-", "--request-id", "invalid"],
                 invalid.to_string().as_bytes()
             )
             .status
@@ -500,13 +513,14 @@ fn batch_preview_registers_nothing_and_validates_limits() {
     }
     assert_eq!(
         f.stdin(
-            &["batch", "--file", "-", "--dry-run"],
+            &["batch", "--file", "-", "--request-id", "too-large"],
             &vec![b' '; 1024 * 1024 + 1]
         )
         .status
         .code(),
         Some(2)
     );
+    assert_eq!(f.run("session-a", &["view", "1"])["issue"]["version"], 1);
 }
 
 #[test]

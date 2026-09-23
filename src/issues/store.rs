@@ -480,12 +480,10 @@ fn validate(r: &Request) -> Result<()> {
         _ => {}
     }
     match &r.operation {
-        Operation::Batch { edits, dry_run } => {
+        Operation::Batch { edits } => {
             batch::validate(edits)?;
-            if !*dry_run && r.request_id.is_none() {
-                return Err(Error::invalid(
-                    "issue batch requires --request-id unless --dry-run",
-                ));
+            if r.request_id.is_none() {
+                return Err(Error::invalid("issue batch requires --request-id"));
             }
         }
         Operation::ResolveComment { comment_id, .. } if *comment_id <= 0 => {
@@ -495,13 +493,6 @@ fn validate(r: &Request) -> Result<()> {
         Operation::Artifact { operation } => operation.validate()?,
         Operation::Mindmap { operation } => {
             operation.validate()?;
-            if matches!(
-                operation,
-                crate::mindmap::Operation::Batch { dry_run: true, .. }
-            ) && r.request_id.is_some()
-            {
-                return Err(Error::invalid("--request-id cannot be used with --dry-run"));
-            }
         }
         Operation::Create {
             title,
@@ -1053,9 +1044,7 @@ impl Store {
                 now,
                 &mut attachment_files,
             )?,
-            Operation::Batch { edits, dry_run } => {
-                batch::execute(&tx, &project, actor, edits, *dry_run, now)?
-            }
+            Operation::Batch { edits } => batch::execute(&tx, &project, actor, edits, now)?,
             Operation::Artifact { operation } => {
                 artifacts::execute(&tx, &project, operation, actor, now)?
             }
@@ -1527,19 +1516,10 @@ impl Store {
             tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response) VALUES(?1,?2,?3,?4,?5)",
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
         }
-        if matches!(
-            &r.operation,
-            Operation::Mindmap {
-                operation: crate::mindmap::Operation::Batch { dry_run: true, .. }
-            } | Operation::Batch { dry_run: true, .. }
-        ) {
-            tx.rollback()?;
-        } else {
-            tx.commit()?;
-            attachment_files.new = None;
-            if let Some(path) = attachment_files.removed.take() {
-                crate::attachments::delete_file(&path)?;
-            }
+        tx.commit()?;
+        attachment_files.new = None;
+        if let Some(path) = attachment_files.removed.take() {
+            crate::attachments::delete_file(&path)?;
         }
         if matches!(&r.operation, Operation::ControlWorker { command, .. } if command == "stop_worker" || command == "stop")
         {

@@ -140,8 +140,6 @@ impl BatchEdit {
 pub enum Operation {
     Batch {
         edits: Vec<BatchEdit>,
-        #[serde(default)]
-        dry_run: bool,
         if_version: Option<i64>,
     },
     Show {

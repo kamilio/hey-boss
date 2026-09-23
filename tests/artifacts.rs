@@ -41,12 +41,11 @@ fn guarded_edits_bound_contention_and_preserve_concurrent_versions() {
         error.message.contains("retry"),
         "Busy errors must explain recovery"
     );
-    // WAL readers and batch previews must remain responsive during a writer.
+    // WAL readers must remain responsive during a writer.
     assert_eq!(
         run(&mut store, json!({"command":"view","id":id}))["artifact"]["body"],
         "Original"
     );
-    store.execute(&request(json!({"action":"batch","edits":[{"number":1,"if_version":1,"expected_assignee":null,"add_labels":["verified"]}],"dry_run":true}))).unwrap();
     writer.execute_batch("ROLLBACK").unwrap();
     drop(writer);
 

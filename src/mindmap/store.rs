@@ -342,8 +342,8 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             "Map changed; show it again and retry with the current version",
         ));
     }
-    if let Operation::Batch { edits, dry_run, .. } = op {
-        return batch(db, p, edits, *dry_run, now);
+    if let Operation::Batch { edits, .. } = op {
+        return batch(db, p, edits, now);
     }
     execute_single(db, p, op, now, true)
 }
@@ -383,7 +383,6 @@ fn batch(
     db: &Connection,
     p: &Project,
     edits: &[crate::mindmap::BatchEdit],
-    dry_run: bool,
     now: i64,
 ) -> Result<Value> {
     let base_version = version(db, &p.id)?;
@@ -539,7 +538,7 @@ fn batch(
         .iter()
         .map(|project| Ok(json!({"project":project,"version":version(db,project)?})))
         .collect::<Result<Vec<_>>>()?;
-    let result = json!({"ok":true,"project":p,"changed":changed,"dry_run":dry_run,
+    let result = json!({"ok":true,"project":p,"changed":changed,
         "base_version":base_version,"version":version(db,&p.id)?,"changed_nodes":changed_nodes,
         "changed_links":changed_links,"affected_projects":affected_projects});
     ReadBudget::default().charge(&result)?;

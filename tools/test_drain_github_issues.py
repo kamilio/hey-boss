@@ -81,16 +81,16 @@ class DrainTests(unittest.TestCase):
         self.assertEqual(github.snapshot.call_count, 2)
         github.delete.assert_not_called()
 
-    def test_default_author_and_dry_run_do_not_write(self):
+    def test_default_author_with_no_matching_issues_does_not_write(self):
         github = Mock(repo="test/repo")
         github.api.return_value = {"login": "boss"}
-        github.issues.return_value = [{"number": 7, "html_url": snapshot()["html_url"]}]
+        github.issues.return_value = []
         with patch.object(drain, "Github", return_value=github), patch.object(drain, "Destination") as dest, contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(drain.main(["--dry-run", "--json"]), 0)
+            self.assertEqual(drain.main(["--json"]), 0)
         github.issues.assert_called_once_with("boss", "open")
         github.delete.assert_not_called()
         dest.assert_not_called()
-        self.assertEqual(json.loads(output.getvalue())["results"][0]["status"], "would_move")
+        self.assertEqual(json.loads(output.getvalue())["results"], [])
 
     def test_author_overrides(self):
         for args, author in ((["--author", "other"], "other"), (["--all-authors"], None)):
@@ -285,11 +285,10 @@ print(json.dumps(result))
         return subprocess.run([self.binary, "issue", "--project", "github-drain-test", "--json", "drain-github", *args],
                               capture_output=True, text=True, timeout=120)
 
-    def test_native_cli_dry_run_never_copies_or_deletes(self):
+    def test_native_cli_rejects_removed_dry_run_without_changes(self):
         root = self.fake_github()
         result = self.cli("--dry-run")
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)["results"][0]["status"], "would_move")
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertFalse((root / "delete.called").exists())
         self.assertEqual(self.dest.call(["list"])["issues"], [])
 

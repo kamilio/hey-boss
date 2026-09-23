@@ -591,22 +591,17 @@ requires an open, undrafted issue. The caller must assess PR readiness: batching
 does not review or merge PRs, close issues, or control workers.
 
 ```sh
-hey-boss issue batch --file triage.json --dry-run --json
 hey-boss issue batch --file triage.json --request-id review-head-abc123 --json
 ```
 
-Preview saves no issue changes, history, agent/project updates, or retry record
-and cannot use a request ID. Its `after.version` is the version a real change
-would produce; preview does not reserve it. Applying requires a stable request
-ID. A changed issue advances once and gets one `triaged` audit event containing
+Applying requires a stable request ID. A changed issue advances once and gets one `triaged` audit event containing
 its before/after labels, assignee and version. No-op entries keep their versions.
 
 If any entry is missing, deleted, stale, invalid against current state, or
 reserved, **no issues in the group change**. JSON returns `ok:true` for a processed
 group, `accepted:false`, `applied:false`, and ordered `results`: offending entries
 are `rejected` with an error, while other entries are `blocked`. The CLI exits 4.
-Successful results use `changed`/`unchanged`; previews use
-`would_change`/`unchanged`. Compact `before`/`after` snapshots contain version,
+Successful results use `changed`/`unchanged`. Compact `before`/`after` snapshots contain version,
 assignee and labels. Check `accepted`/`applied` as well as the exit code.
 
 Both accepted and rejected real group results are saved with the request ID in

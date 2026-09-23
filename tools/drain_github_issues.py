@@ -174,11 +174,10 @@ def main(argv=None):
     parser.add_argument("--state", choices=("open", "closed", "all"), default="open")
     parser.add_argument("--project", help="Destination hey-boss project")
     parser.add_argument("--host", help="Authoritative SSH issue host")
-    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     results = []
-    report = {"ok": True, "dry_run": args.dry_run, "results": results}
+    report = {"ok": True, "results": results}
     try:
         github = Github(args.repo)
         author = None if args.all_authors else args.author or github.api("user")["login"]
@@ -187,18 +186,15 @@ def main(argv=None):
         report.update(repository=github.repo, author=author)
         issues = github.issues(author, args.state)
         destination = None
-        if issues and not args.dry_run:
+        if issues:
             destination = Destination(os.environ.get("HEY_BOSS_DRAIN_BINARY", "hey-boss"),
                                       args.project, args.host)
             report["project"] = destination.project
         for issue in issues:
             result = {"github_number": issue["number"], "url": issue["html_url"]}
             try:
-                if args.dry_run:
-                    result["status"] = "would_move"
-                else:
-                    result["number"] = drain_one(github, destination, issue, author, args.state)
-                    result["status"] = "moved"
+                result["number"] = drain_one(github, destination, issue, author, args.state)
+                result["status"] = "moved"
             except (RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
                 report["ok"] = False
                 result.update(status="failed", error=str(error))
