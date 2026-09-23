@@ -613,7 +613,18 @@ fn completed_partial_deliveries_do_not_resolve_the_issue() {
         assert!(view["issue"]["assignee"].is_null());
         assert!(view["issue"]["closed_at"].is_null());
         assert!(view["issue"]["closed_by"].is_null());
-        assert_eq!(view["comments"].as_array().unwrap().len(), 1);
+        // Immediate pickup can admit another attempt before stop is observed;
+        // its report is valid too. The completed partial delivery must be kept.
+        assert!(
+            view["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|comment| comment["body"]
+                    .as_str()
+                    .is_some_and(|body| body.starts_with("### Worker completed\n"))),
+            "{view}"
+        );
     }
 }
 
