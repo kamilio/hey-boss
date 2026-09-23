@@ -1530,6 +1530,20 @@ fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
         w.ok(json!({"action":"view","number":1}))["issue"]["draft"],
         true
     );
+    fs::hard_link(w.root.join("issues.db"), w.root.join("plan.md")).unwrap();
+    let aliased = w.action(&w.project, json!({"action":"undraft","number":1}), None);
+    assert_ne!(aliased.status, 200);
+    assert!(
+        aliased.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("must not alias")
+    );
+    let preserved = w.ok(json!({"action":"view","number":1}));
+    assert_eq!(preserved["issue"]["draft"], true);
+    assert_eq!(preserved["issue"]["title"], "Plan");
+    assert_eq!(preserved["issue"]["body"], "Old body");
+    fs::remove_file(w.root.join("plan.md")).unwrap();
     fs::write(w.root.join("plan.md"), "# Final title\n\nFinal body\n").unwrap();
     let issue=w.ok(json!({"action":"edit","number":1,"draft":false,"title":"Stale editor","body":"Stale body","add_labels":[],"remove_labels":[]}));
     assert_eq!(issue["issue"]["draft"], false);

@@ -14,6 +14,14 @@ without SQLite's create flag. `tests/database_locks.rs` verifies lock retention
 with a separate process using `fcntl(F_SETLK)` and a journal-mode change; it also
 checks concurrent creation and rejected paths.
 
+The same regression also reproduced lock loss when a plan file was a hard link
+to the live database. Store-owned plan reads and final reconciliation now check
+inode identity before opening the plan or its sync lock. Plan, sync-lock and
+sync-paused aliases to the active database, WAL or shared-memory file are
+rejected. Separate-process tests cover hard links and symlinks and verify that
+ordinary Markdown reads still work. This protects existing aliases; the fleet
+still assumes database files are not replaced or relinked during an operation.
+
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
 writer responsible for that damage has not been established. The subsequent
