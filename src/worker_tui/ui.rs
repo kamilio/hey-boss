@@ -132,14 +132,17 @@ fn multiline(value: &Value) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn run_label(run: &Value) -> String {
+    if run["kind"] == "chief" {
+        format!("{} Chief", text(&run["project_name"]))
+    } else {
+        format!("{} #{}", text(&run["project_name"]), run["number"])
+    }
+}
+
 fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "{} #{} · {}",
-            text(&run["project_name"]),
-            run["number"],
-            text(&run["title"])
-        ),
+        format!("{} · {}", run_label(run), text(&run["title"])),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     ))];
     let status = text(&run["state"]);
@@ -147,6 +150,18 @@ fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
         format!("{status}{}", elapsed(run, now_ms)),
         Style::default().fg(color(&status)),
     )));
+    if run["kind"] == "chief" {
+        lines.push(Line::from("Chief · no issue slots"));
+        if let Some(session) = run["session_id"].as_str() {
+            lines.push(Line::from(format!(
+                "Codex {}",
+                text(&Value::String(session.into()))
+            )));
+        }
+        if let Some(pid) = run["pid"].as_u64() {
+            lines.push(Line::from(format!("Process {pid}")));
+        }
+    }
     if run["finished_at"].is_null()
         && run["state"] == "awaiting_claim"
         && run["claimed_at"].is_null()
@@ -427,14 +442,18 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             let status = text(&r["state"]);
             if compact_sessions {
                 return ListItem::new(Line::from(vec![
-                    Span::raw(format!("#{} ", r["number"])),
+                    Span::raw(if r["kind"] == "chief" {
+                        "Chief ".into()
+                    } else {
+                        format!("#{} ", r["number"])
+                    }),
                     Span::styled(status.clone(), Style::default().fg(color(&status))),
                     Span::raw(format!(" · {}", text(&r["title"]))),
                 ]));
             }
             ListItem::new(vec![
                 Line::from(vec![
-                    Span::raw(format!("{} #{} ", text(&r["project_name"]), r["number"])),
+                    Span::raw(format!("{} ", run_label(r))),
                     Span::styled(status.clone(), Style::default().fg(color(&status))),
                     Span::raw(if r["finished_at"].is_null() {
                         " · active"

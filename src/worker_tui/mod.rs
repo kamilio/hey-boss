@@ -71,14 +71,12 @@ impl Dashboard {
         if self.snapshot["worker_id"].as_str() != self.worker_id.as_deref() {
             return vec![];
         }
-        self.snapshot["runs"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter(|r| r["finished_at"].is_null() != self.history)
-                    .collect()
-            })
-            .unwrap_or_default()
+        ["runs", "chiefs"]
+            .into_iter()
+            .filter_map(|key| self.snapshot[key].as_array())
+            .flatten()
+            .filter(|r| r["finished_at"].is_null() != self.history)
+            .collect()
     }
 
     pub fn apply(&mut self, snapshot: Value) {
