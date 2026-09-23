@@ -83,6 +83,13 @@ The supervisor MUST derive its inventory from the existing machine configuration
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
+A committed request replay MUST return its saved original response. Reusing its
+ID with a different payload MUST reject the request. Cache hits SHOULD use a
+coherent read snapshot and remain available during an unrelated database write.
+Cache misses MUST recheck the saved request after acquiring the mutation lock
+before executing an operation. Replayed attachment removals MUST retry any file
+cleanup remaining after committed metadata removal.
+
 The supervisor MUST retain the latest 10,000 canonical journal entries and prune
 older entries in batches of at most 1,000. Pruning MUST commit a durable cursor
 floor atomically with deletion. A cursor below that floor or above the durable
@@ -156,7 +163,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
 | Filtered pickup | Small selected queues beside large unrelated queues, early candidates in a large selected queue, cross-project global priority, duplicate project IDs, unrestricted pickup, missing projects and limit boundaries |
 | Allocation refresh | Full pool over a large queue avoids scanning unallocated issues; overlapping filters retain distinct total slots; unclaimed expiry, claim deadlines and ownership remain correct |
-| Replay safety | Lose acknowledgment and replay; comments and mutations remain unique |
+| Replay safety | Lose acknowledgment and replay; comments and mutations remain unique; saved issue and global-setting responses during another writer; different-payload rejection; concurrent cache misses; attachment cleanup after committed removal |
 | Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation |
 | Journal retention | Bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection, receipt replay after pruning, idle maintenance during another write and unchanged snapshot after compaction |
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |

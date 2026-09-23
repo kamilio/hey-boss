@@ -42,6 +42,37 @@ const APPLICATION_ID: i64 = 0x48424953;
 const SCHEMA_VERSION: i64 = 13;
 const CONTENTION_BUDGET: Duration = Duration::from_secs(6);
 
+fn cached_response(
+    db: &Connection,
+    project: &Project,
+    request: &Request,
+    payload: &str,
+) -> Result<Option<Value>> {
+    if matches!(
+        request.operation,
+        Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
+    ) {
+        return super::global_settings::cached_response(db, request, payload);
+    }
+    let (Some(key), Some(actor)) = (&request.request_id, &request.actor) else {
+        return Ok(None);
+    };
+    identifier(&project.id, "project ID", 8192)?;
+    identifier(&project.name, "project name", 1024)?;
+    let previous: Option<(String, String)> = db.query_row(
+        "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
+        params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let Some((old, response)) = previous else {
+        return Ok(None);
+    };
+    if old != payload {
+        return Err(Error::conflict(
+            "Request ID was already used for a different operation",
+        ));
+    }
+    Ok(Some(serde_json::from_str(&response)?))
+}
+
 // Only repeat operations with no externally visible effects: opening a store,
 // reads, and acquiring a transaction before any mutation or file operation.
 fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
@@ -707,6 +738,15 @@ pub struct Store {
     attachment_root: std::path::PathBuf,
 }
 impl Store {
+    fn finish_replay(&self, request: &Request, response: Value) -> Result<Value> {
+        if let Operation::Attachment {
+            operation: crate::attachments::Operation::Remove { id },
+        } = &request.operation
+        {
+            crate::attachments::delete_file(&self.attachment_root.join(id))?;
+        }
+        Ok(response)
+    }
     pub fn open(path: &Path) -> Result<Self> {
         retry_contention(Instant::now() + CONTENTION_BUDGET, || Self::open_once(path))
     }
@@ -971,6 +1011,18 @@ impl Store {
                 "The home directory is not a project. Use --project or run from a project directory.",
             ));
         }
+        if r.request_id.is_some()
+            && r.actor.is_some()
+            && let Some(response) = retry_contention(deadline, || {
+                let snapshot =
+                    rusqlite::Transaction::new_unchecked(&self.db, TransactionBehavior::Deferred)?;
+                let project =
+                    resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
+                cached_response(&snapshot, &project, r, &payload)
+            })?
+        {
+            return self.finish_replay(r, response);
+        }
         let register = !matches!(
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
@@ -1007,24 +1059,10 @@ impl Store {
         identifier(&project.id, "project ID", 8192)?;
         identifier(&project.name, "project name", 1024)?;
         let actor = r.actor.as_ref();
-        if let (Some(key), Some(actor)) = (&r.request_id, actor) {
-            let previous: Option<(String, String)> = tx.query_row(
-                "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
-                params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-            if let Some((old, response)) = previous {
-                if old != payload {
-                    return Err(Error::conflict(
-                        "Request ID was already used for a different operation",
-                    ));
-                }
-                if let Operation::Attachment {
-                    operation: crate::attachments::Operation::Remove { id },
-                } = &r.operation
-                {
-                    crate::attachments::delete_file(&self.attachment_root.join(id))?;
-                }
-                return Ok(serde_json::from_str(&response)?);
-            }
+        // A preflight miss can race a successful copy of this request. Recheck
+        // only after acquiring the mutation lock to preserve exactly-once writes.
+        if let Some(response) = cached_response(&tx, &project, r, &payload)? {
+            return self.finish_replay(r, response);
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

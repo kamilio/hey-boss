@@ -55,6 +55,13 @@ foreign-key checks passed afterward, and all three machines remained connected.
 No live database or sidecar file was replaced manually. Continued writes can
 change these sizes after the checkpoint.
 
+A later storage check found 2,834 saved requests occupying about 51 MiB: their
+payloads contained 14.2 MB and their original responses 36.7 MB of text. These
+records preserve replay identity and return the original result after later edits.
+They remain intact. Cache hits now use a coherent read snapshot, so completed
+request retries no longer wait for an unrelated writer. Cache misses still
+recheck under the mutation lock to keep concurrent retries from executing twice.
+
 Heartbeat timestamps no longer rewrite large machine snapshots. Idle journal
 maintenance remains a reader. Machine activity now comes from one coherent WAL
 snapshot and reads the worker overview once. On a September 23 private copy

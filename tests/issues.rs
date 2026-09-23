@@ -2655,6 +2655,124 @@ fn existing_project_reads_open_and_query_while_another_connection_owns_writer() 
 }
 
 #[test]
+fn completed_request_replay_reads_the_original_response_during_another_write() {
+    let f = Fixture::new();
+    let args = [
+        "create",
+        "--title",
+        "Original",
+        "--request-id",
+        "cached-create",
+    ];
+    let original = f.run("human:boss", &args);
+    let profile_args = [
+        "settings",
+        "set",
+        "--boss-name",
+        "Alex",
+        "--request-id",
+        "cached-profile",
+    ];
+    let profile = f.run("human:boss", &profile_args);
+    let global = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&f.cwd)
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .args(["settings", "--json"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let global_args = ["set", "--boss-name", "Sam", "--request-id", "cached-global"];
+    let global_profile = success(global(&global_args));
+    f.run(
+        "human:boss",
+        &["settings", "set", "--boss-name", "Renamed afterward"],
+    );
+    f.run("human:boss", &["edit", "1", "--title", "Changed afterward"]);
+    let writer = f.sql();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE issues SET title='Uncommitted' WHERE number=1")
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(f.run("human:boss", &args), original);
+    assert_eq!(f.run("human:boss", &profile_args), profile);
+    assert_eq!(success(global(&global_args)), global_profile);
+    let conflict = f.fail(
+        "human:boss",
+        &[
+            "create",
+            "--title",
+            "Different payload",
+            "--request-id",
+            "cached-create",
+        ],
+        4,
+    );
+    assert_eq!(conflict["error"]["code"], "conflict");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "Cached requests waited for the writer lock"
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        f.run("reader", &["view", "1"])["issue"]["title"],
+        "Changed afterward"
+    );
+    assert_eq!(
+        writer
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        writer
+            .query_row("SELECT count(*) FROM requests", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(success(global(&["show"]))["boss_name"], "Renamed afterward");
+}
+
+#[test]
+fn concurrent_request_cache_misses_create_one_issue_and_one_cached_response() {
+    let f = Fixture::new();
+    f.create();
+    for round in 0..4 {
+        let key = format!("concurrent-{round}");
+        let barrier = std::sync::Barrier::new(2);
+        let responses = std::thread::scope(|scope| {
+            let run = || {
+                barrier.wait();
+                f.run(
+                    "human:boss",
+                    &["create", "--title", "Concurrent", "--request-id", &key],
+                )
+            };
+            let a = scope.spawn(run);
+            let b = scope.spawn(run);
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(responses.0, responses.1);
+        assert_eq!(responses.0["issue"]["number"], round + 2);
+    }
+    assert_eq!(
+        f.sql()
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        f.sql()
+            .query_row("SELECT count(*) FROM requests", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
 fn drafts_are_persisted_block_claims_and_obey_project_settings() {
     let f = Fixture::new();
     let issue = f.run("a", &["create", "--title", "Plan", "--draft"]);
