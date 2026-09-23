@@ -120,6 +120,16 @@ fell from about 1.72 million to fewer than 1.40 million SQLite VM steps. Assigne
 draft, closed, deleted and hidden-project behavior, tagged filtering and pickup
 order remain unchanged. The fresh 34-worker backup had no tagged workers.
 
+Agent pages and conversation lookups now request the supervisor's compact
+overview before transporting event-bearing status. The projection retains
+actor/session identity, lifecycle and Chief fields, omits ordinary run events
+and expanded prompts, and bounds summaries to 1,000 Unicode characters. Older
+supervisors lacking the identity projection still use full-status fallback.
+A captured fleet response projected from 2.45 MB to 494 KB of encoded JSON
+(about 80% less); this is a payload measurement, not a latency measurement.
+The regression also covers individually valid machine reports whose combined
+full status exceeds the 16 MiB transport limit while their overview fits.
+
 ## Ongoing verification
 
 The eight-hour September 23 reliability audit uses a private database with four

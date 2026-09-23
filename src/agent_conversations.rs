@@ -39,15 +39,38 @@ fn visible(db: &Connection) -> Result<HashSet<String>> {
 
 pub fn overview() -> Result<Value> {
     compact(
-        crate::fleet::call(&json!({"kind":"status"}))?,
+        fleet_overview(crate::fleet::call)?,
         &visible(&database(&crate::issues::database_path()?)?)?,
     )
+}
+fn fleet_overview(mut call: impl FnMut(&Value) -> Result<Value>) -> Result<Value> {
+    let overview = call(&json!({"kind":"overview"}))?;
+    let complete = overview["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|m| m["workers"].as_array().into_iter().flatten())
+        .flat_map(|w| w["runs"].as_array().into_iter().flatten())
+        .all(|run| COMPACT_RUN_FIELDS.iter().all(|key| run.get(*key).is_some()));
+    // Older supervisors omit assignment identity from their overview. Retain
+    // full-status compatibility until they upgrade; explicit nulls are valid.
+    if complete {
+        Ok(overview)
+    } else {
+        call(&json!({"kind":"status"}))
+    }
 }
 fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
     for machine in data["machines"].as_array_mut().into_iter().flatten() {
         for worker in machine["workers"].as_array_mut().into_iter().flatten() {
-            let runs = worker["runs"].as_array().cloned().unwrap_or_default();
-            let chiefs = worker["chiefs"].as_array().cloned().unwrap_or_default();
+            let runs = match worker["runs"].take() {
+                Value::Array(runs) => runs,
+                _ => vec![],
+            };
+            let chiefs = match worker["chiefs"].take() {
+                Value::Array(chiefs) => chiefs,
+                _ => vec![],
+            };
             if let Some(object) = worker.as_object_mut() {
                 object.retain(|k, _| matches!(k.as_str(), "id" | "pid" | "config"));
             }
@@ -76,38 +99,40 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
 fn runs_for_project(runs: &[Value], projects: &HashSet<String>) -> Vec<Value> {
     runs.iter()
         .filter(|r| projects.contains(r["project_id"].as_str().unwrap_or("")))
-        .map(|r| {
-            let mut value = json!({});
-            for key in [
-                "id",
-                "kind",
-                "next_at",
-                "enabled",
-                "project_id",
-                "project_name",
-                "number",
-                "title",
-                "session_id",
-                "actor_id",
-                "state",
-                "started_at",
-                "finished_at",
-            ] {
-                value[key] = r[key].clone();
-            }
-            for key in ["summary", "last_event"] {
-                value[key] = json!(
-                    r[key]
-                        .as_str()
-                        .unwrap_or("")
-                        .chars()
-                        .take(1000)
-                        .collect::<String>()
-                );
-            }
-            value
-        })
+        .map(compact_run)
         .collect()
+}
+const COMPACT_RUN_FIELDS: [&str; 13] = [
+    "id",
+    "kind",
+    "next_at",
+    "enabled",
+    "project_id",
+    "project_name",
+    "number",
+    "title",
+    "session_id",
+    "actor_id",
+    "state",
+    "started_at",
+    "finished_at",
+];
+pub(crate) fn compact_run(run: &Value) -> Value {
+    let mut value = json!({});
+    for key in COMPACT_RUN_FIELDS {
+        value[key] = run[key].clone();
+    }
+    for key in ["summary", "last_event"] {
+        value[key] = json!(
+            run[key]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(1000)
+                .collect::<String>()
+        );
+    }
+    value
 }
 
 pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
@@ -636,7 +661,7 @@ fn bridge(path: &Path) -> Result<()> {
         .filter(|t| !t.contains(['\r', '\n']))
         .ok_or_else(|| Error::invalid("Invalid mobile pairing"))?;
     let projects = visible(&database(path)?)?;
-    let mut status = compact(crate::fleet::call(&json!({"kind":"status"}))?, &projects)?;
+    let mut status = compact(fleet_overview(crate::fleet::call)?, &projects)?;
     for m in status["machines"].as_array_mut().into_iter().flatten() {
         for w in m["workers"].as_array_mut().into_iter().flatten() {
             if let Some(obj) = w.as_object_mut() {
@@ -1031,6 +1056,70 @@ mod tests {
         );
         f.db.execute("UPDATE projects SET hidden_at=1", []).unwrap();
         assert!(window_page(&f.db, &f.root, "chief:local:Atlas", &Window::default()).is_err());
+    }
+    #[test]
+    fn fleet_overview_uses_one_compact_request_when_identity_is_available() {
+        let expected = json!({"machines":[{"workers":[{"runs":runs_for_project(&[json!({"id":"run","project_id":"Atlas","actor_id":"actor","session_id":"session"})], &HashSet::from(["Atlas".into()]))}]}]});
+        let mut requests = vec![];
+        let result = fleet_overview(|request| {
+            requests.push(request.clone());
+            Ok(expected.clone())
+        })
+        .unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(requests, vec![json!({"kind":"overview"})]);
+    }
+    #[test]
+    fn fleet_overview_falls_back_for_legacy_projection_on_any_machine() {
+        let full = json!({"machines":[{"workers":[{"runs":[{"id":"run","actor_id":"actor","session_id":"session"}]}]}]});
+        let complete = runs_for_project(
+            &[json!({"project_id":"Atlas"})],
+            &HashSet::from(["Atlas".into()]),
+        );
+        for missing in ["actor_id", "session_id", "kind", "enabled", "next_at"] {
+            let mut incomplete = complete[0].clone();
+            incomplete.as_object_mut().unwrap().remove(missing);
+            let old = json!({"machines":[{"workers":[{"runs":complete}]},{"workers":[{"runs":[incomplete]}]}]});
+            let mut requests = vec![];
+            let result = fleet_overview(|request| {
+                requests.push(request.clone());
+                Ok(if request["kind"] == "overview" {
+                    old.clone()
+                } else {
+                    full.clone()
+                })
+            })
+            .unwrap();
+            assert_eq!(result, full);
+            assert_eq!(
+                requests,
+                vec![json!({"kind":"overview"}), json!({"kind":"status"})],
+                "{missing}"
+            );
+        }
+    }
+    #[test]
+    fn fleet_overview_accepts_empty_runs_and_propagates_transport_errors() {
+        let chiefs = json!({"machines":[{"workers":[{"runs":[],"chiefs":[{"actor_id":"chief","session_id":"session"}]}]}]});
+        let mut requests = vec![];
+        let result = fleet_overview(|request| {
+            requests.push(request.clone());
+            Ok(chiefs.clone())
+        })
+        .unwrap();
+        assert_eq!(result, chiefs);
+        assert_eq!(requests, vec![json!({"kind":"overview"})]);
+        let mut attempts = 0;
+        let error = fleet_overview(|_| {
+            attempts += 1;
+            Err(Error::new(
+                "fleet_unavailable",
+                "synthetic transport failure",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(error.to_string().contains("synthetic transport failure"));
     }
     #[test]
     fn compact_overview_filters_hidden_projects_without_mutating_input() {

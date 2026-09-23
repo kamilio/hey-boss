@@ -40,6 +40,16 @@ older clients. Worker stop/restart MUST leave the fleet supervisor running.
 
 The transport MUST authenticate with configured SSH credentials and validate host keys. Protocol version 1 uses newline-delimited JSON over a persistent, bidirectional SSH channel. Frames MUST be bounded to 16 MiB. A companion sends `hello`, `heartbeat`, and `ack` messages. Heartbeats include durable outgoing changes, worker activity, configuration revision, and the pull cursor. The supervisor sends `configure`, `ping`, `pull`, and `signal` messages. Pulls carry journal receipts and a full initial snapshot or incremental canonical changes. Every signal has a stable request ID; replay MUST NOT apply it twice. Events have monotonic sequence numbers within a supervisor epoch. Connections MUST use a five-second heartbeat and become disconnected after fifteen seconds without a valid response.
 
+The supervisor's compact agent overview MUST retain actor and session identity,
+run lifecycle fields and Chief scheduling fields. It MUST omit ordinary run
+event payloads, expanded prompts and hidden projects, and limit summaries and
+last-event text to 1,000 Unicode characters. Agent viewers and conversation
+lookups MUST request this compact overview rather than full event-bearing
+status when its run projection includes the required identity fields. Clients
+MUST fall back to full status for older projections that omit those fields;
+explicit null fields and empty run lists MUST remain valid. Transport failures
+MUST propagate without being treated as an older projection.
+
 Companions supporting streamed pulls MUST advertise `pull_gzip_chunks` in
 `hello.capabilities`. The supervisor MAY send `pull_begin`, ordered `pull_chunk`
 frames and `pull_end` for these peers. The transfer uses gzip-compressed JSON
@@ -189,6 +199,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, equivalent queue filter reuse with fresh counts on the next poll, indexed counts for explicit project filters, unrestricted and unknown-project behavior, public-status activity parity and legacy upgrade marker migration |
 | Worker build provenance | Compiled owner build, legacy registration invalidation, stale owner records, PID reuse, owner removal and unknown legacy builds |
 | Manager build provenance | A supervisor starting after the installed CLI is replaced still reports its compiled runtime build; companions announce their compiled build |
+| Agent overview transport | Individually valid machine reports exceeding the aggregate full-status frame limit; compact response retains assignment identity, Chief fields, visibility and Unicode bounds; one compact request for current projections, legacy fallback on any machine, empty runs, explicit nulls and transport errors |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria

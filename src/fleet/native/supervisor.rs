@@ -170,31 +170,7 @@ impl Supervisor {
                     .into_iter()
                     .flatten()
                     .filter(|r| visible.contains(r["project_id"].as_str().unwrap_or("")))
-                    .map(|r| {
-                        let mut v = json!({});
-                        for k in [
-                            "id",
-                            "project_id",
-                            "project_name",
-                            "number",
-                            "title",
-                            "state",
-                            "started_at",
-                            "finished_at",
-                        ] {
-                            v[k] = r[k].clone();
-                        }
-                        for k in ["summary", "last_event"] {
-                            v[k] = json!(
-                                r[k].as_str()
-                                    .unwrap_or("")
-                                    .chars()
-                                    .take(1000)
-                                    .collect::<String>()
-                            );
-                        }
-                        v
-                    })
+                    .map(crate::agent_conversations::compact_run)
                     .collect::<Vec<_>>();
                 w["runs"] = json!(runs);
                 w["chiefs"] = json!(
@@ -1279,6 +1255,64 @@ mod tests {
             }),
         };
         (directory, app)
+    }
+
+    #[test]
+    fn overview_preserves_agent_identity_without_transporting_event_payloads() {
+        let (_directory, app) = test_supervisor();
+        app.ctx.db().unwrap().execute_batch(
+            "INSERT INTO projects(id,name,next_number) VALUES('Atlas','Atlas',1),('Hidden','Hidden',1); UPDATE projects SET hidden_at=1 WHERE id='Hidden';"
+        ).unwrap();
+        let run = json!({
+            "id":"run", "project_id":"Atlas", "project_name":"Atlas", "number":4,
+            "actor_id":"worker:run", "session_id":"session", "kind":"issue",
+            "next_at":12, "enabled":true, "state":"running",
+            "summary":"é".repeat(1100), "last_event":"event".repeat(300),
+            "events":vec![json!({"text":"x".repeat(4000)});12],
+            "expanded_prompt":"private"
+        });
+        let mut runs = vec![run; 125];
+        runs.push(json!({"id":"hidden","project_id":"Hidden"}));
+        let workers = json!([{"id":"worker","pid":1,"config":{"concurrency":128},"runs":runs,"chiefs":[{"id":"chief","project_id":"Atlas","actor_id":"chief:Atlas","session_id":"chief-session"}]}]);
+        for host in ["one", "two", "three"] {
+            app.state.lock().unwrap().machines.insert(
+                host.into(),
+                json!({"host":host,"state":"connected","workers":workers}),
+            );
+        }
+        let full = app.status().unwrap();
+        let overview = app.overview().unwrap();
+        let full_bytes = serde_json::to_vec(&full).unwrap().len();
+        let overview_bytes = serde_json::to_vec(&overview).unwrap().len();
+        for machine in full["machines"].as_array().unwrap() {
+            assert!(serde_json::to_vec(machine).unwrap().len() < crate::issues::WIRE_LIMIT);
+        }
+        assert!(full_bytes > 16 * 1024 * 1024, "{full_bytes}");
+        assert!(overview_bytes < 2 * 1024 * 1024, "{overview_bytes}");
+        for machine in overview["machines"].as_array().unwrap().iter().skip(1) {
+            let worker = &machine["workers"][0];
+            assert_eq!(worker["config"]["concurrency"], 128);
+            assert_eq!(worker["runs"].as_array().unwrap().len(), 125);
+            let run = &worker["runs"][0];
+            assert_eq!(run["actor_id"], "worker:run");
+            assert_eq!(run["session_id"], "session");
+            assert_eq!(run["kind"], "issue");
+            assert_eq!(run["next_at"], 12);
+            assert_eq!(run["enabled"], true);
+            assert_eq!(run["summary"].as_str().unwrap().chars().count(), 1000);
+            assert_eq!(run["last_event"].as_str().unwrap().chars().count(), 1000);
+            assert!(run.get("events").is_none());
+            assert!(run.get("expanded_prompt").is_none());
+            assert_eq!(worker["chiefs"][0]["actor_id"], "chief:Atlas");
+        }
+        assert_eq!(
+            full["machines"][1]["workers"][0]["runs"][0]["summary"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            1100
+        );
     }
 
     #[test]
