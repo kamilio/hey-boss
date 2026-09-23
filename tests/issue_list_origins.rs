@@ -147,6 +147,31 @@ fn issue_lists_keep_null_and_populated_origins_with_filters_and_pagination() {
 }
 
 #[test]
+fn list_search_still_finds_text_only_in_a_large_body() {
+    let mut f = Fixture::new("body-search");
+    let body = format!("{}unique-body-marker", "context ".repeat(32000));
+    f.run(json!({"action":"create","title":"Short metadata","body":body,"labels":[]}));
+    assert_eq!(
+        f.run(json!({"action":"list"}))["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    for search in ["unique-body-marker", "Short metadata"] {
+        let result = f.run(json!({"action":"list","search":search}));
+        assert_eq!(result["issues"][0]["number"], 1);
+        assert!(result["issues"][0].get("body").is_none());
+    }
+    assert!(
+        f.run(json!({"action":"list","search":"absent-marker"}))["issues"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn invalid_origins_report_per_issue_errors_without_losing_rows() {
     let mut f = Fixture::new("invalid");
     for title in [
