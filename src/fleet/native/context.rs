@@ -102,6 +102,7 @@ impl Context {
                 && !alive(pid as u32)
             {
                 w["pid"] = Value::Null;
+                w["build"] = Value::Null;
             }
         }
         Ok(workers)
@@ -597,6 +598,7 @@ mod tests {
                     && !alive(pid as u32)
                 {
                     worker["pid"] = Value::Null;
+                    worker["build"] = Value::Null;
                 }
             }
             workers

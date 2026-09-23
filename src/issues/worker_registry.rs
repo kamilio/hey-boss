@@ -316,7 +316,13 @@ fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project,
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 fn worker_overview(db: &Connection) -> Result<Vec<Value>> {
-    let mut stmt=db.prepare("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL) FROM issue_workers w ORDER BY updated_at DESC,id LIMIT 100")?;
+    let builds_exist: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds')", [], |r| r.get(0))?;
+    let build = if builds_exist {
+        "(SELECT build FROM issue_worker_builds b WHERE b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start)"
+    } else {
+        "NULL"
+    };
+    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start FROM issue_workers w ORDER BY updated_at DESC,id LIMIT 100"))?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -327,12 +333,17 @@ fn worker_overview(db: &Connection) -> Result<Vec<Value>> {
                 r.get::<_, Option<u32>>(4)?,
                 r.get::<_, i64>(5)?,
                 r.get::<_, u32>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     // Runtime state is additive, so older CLIs can still read worker settings.
     let runtime_exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime')", [], |r| r.get(0))?;
-    let mut workers:Vec<Value>=rows.into_iter().map(|(id,c,v,k,pid,at,active)|Ok(json!({"id":id,"config":serde_json::from_str::<Settings>(&c)?,"upgrading":false,"version":v,"kind":k,"pid":pid,"updated_at":at,"active":active}))).collect::<Result<_>>()?;
+    let mut workers: Vec<Value> = rows.into_iter().map(|(id,c,v,k,pid,at,active,build,start)| {
+        let build = build.filter(|_| pid.zip(start.as_deref()).is_some_and(|(pid,start)| crate::agents::process_identity(pid).as_deref() == Some(start)));
+        Ok(json!({"id":id,"config":serde_json::from_str::<Settings>(&c)?,"upgrading":false,"version":v,"kind":k,"pid":pid,"updated_at":at,"active":active,"build":build}))
+    }).collect::<Result<_>>()?;
     if runtime_exists {
         for w in &mut workers {
             w["upgrading"] = json!(db.query_row("SELECT EXISTS(SELECT 1 FROM issue_worker_runtime r JOIN issue_workers w ON w.id=r.worker_id WHERE w.id=?1 AND r.owner_pid=w.owner_pid AND r.owner_start=w.owner_start)", [w["id"].as_str().unwrap()], |r| r.get::<_,bool>(0))?);
@@ -894,6 +905,14 @@ impl Store {
         tx.execute("INSERT INTO issue_workers(id,kind,config,version,owner_pid,owner_start,machine,updated_at) VALUES(?1,'cli',?2,1,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET kind='cli',config=excluded.config,version=version+1,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,machine=excluded.machine,stop_requested=0,updated_at=excluded.updated_at",params![id,serde_json::to_string(settings)?,pid,start,machine,now()])?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS issue_worker_runtime(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id),owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL)")?;
         tx.execute("DELETE FROM issue_worker_runtime WHERE worker_id=?1", [&id])?;
+        // Optional metadata identifies the binary running in the owner process.
+        // Legacy owner registration must clear even an unchanged PID/start pair.
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS issue_worker_builds(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id) ON DELETE CASCADE,owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL,build TEXT NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS issue_worker_build_owner_changed AFTER UPDATE OF owner_pid,owner_start ON issue_workers BEGIN DELETE FROM issue_worker_builds WHERE worker_id=NEW.id; END;")?;
+        tx.execute(
+            "INSERT OR REPLACE INTO issue_worker_builds VALUES(?1,?2,?3,?4)",
+            params![id, pid, start, env!("HEY_BOSS_BUILD_ID")],
+        )?;
         tx.commit()?;
         Ok(id)
     }
@@ -1146,6 +1165,60 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn worker_build_provenance_belongs_to_the_registered_process_owner() {
+        let root = std::env::temp_dir().join(format!("hb-worker-build-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            let id = store
+                .register_worker(None, &Settings::default(), "unit")
+                .unwrap();
+            let workers = worker_overview(&store.db).unwrap();
+            assert_eq!(workers[0]["build"], env!("HEY_BOSS_BUILD_ID"));
+            store.db.execute("UPDATE issue_workers SET owner_pid=owner_pid,owner_start=owner_start WHERE id=?1", [&id]).unwrap();
+            assert!(worker_overview(&store.db).unwrap()[0]["build"].is_null());
+            // An older CLI can register a new owner without writing provenance.
+            // Its status must not inherit a previous owner's recorded build.
+            store
+                .db
+                .execute(
+                    "UPDATE issue_workers SET owner_start='legacy-owner' WHERE id=?1",
+                    [&id],
+                )
+                .unwrap();
+            store
+                .register_worker(Some(&id), &Settings::default(), "unit")
+                .unwrap();
+            assert_eq!(
+                worker_overview(&store.db).unwrap()[0]["build"],
+                env!("HEY_BOSS_BUILD_ID")
+            );
+            store.db.execute("UPDATE issue_worker_builds SET owner_start='previous-owner' WHERE worker_id=?1", [&id]).unwrap();
+            assert!(worker_overview(&store.db).unwrap()[0]["build"].is_null());
+            // Even internally matching saved records cannot identify a process
+            // whose PID has been reused with a different actual start time.
+            store
+                .db
+                .execute(
+                    "UPDATE issue_workers SET owner_start='previous-owner' WHERE id=?1",
+                    [&id],
+                )
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO issue_worker_builds VALUES(?1,?2,'previous-owner',?3)",
+                    params![id, std::process::id(), env!("HEY_BOSS_BUILD_ID")],
+                )
+                .unwrap();
+            assert!(worker_overview(&store.db).unwrap()[0]["build"].is_null());
+            store.unregister_worker(&id).unwrap();
+            assert!(worker_overview(&store.db).unwrap()[0]["build"].is_null());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn fleet_poll_work_is_linear_in_the_number_of_workers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
