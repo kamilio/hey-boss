@@ -2,7 +2,7 @@ use super::{Result, context::Context, replica::invalid};
 use serde_json::json;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
-use std::{fs, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 #[cfg(target_os = "linux")]
 fn checked(command: &mut Command) -> Result<()> {
     let output = command.output()?;
@@ -58,19 +58,44 @@ pub(super) fn linux_definition(ctx: &Context, role: &str) -> String {
         "[Unit]\nDescription=Hey Boss fleet {name}\n[Service]\nExecStart=\"{binary}\" fleet {name}\nEnvironment=HEY_BOSS_FLEET_SUPERVISED=1\nKillMode=process\nRestart=always\nRestartSec=10\n[Install]\nWantedBy=default.target\n"
     )
 }
+// Stage only files; service control remains exclusively in install().
+fn stage_service(ctx: &Context, role: &str) -> Result<PathBuf> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        #[cfg(target_os = "macos")]
+        let (path, definition) = (
+            ctx.home
+                .join("Library/LaunchAgents")
+                .join(format!("local.hey-boss-fleet-{role}.plist")),
+            mac_definition(ctx, role),
+        );
+        #[cfg(target_os = "linux")]
+        let (path, definition) = (
+            ctx.home
+                .join(".config/systemd/user")
+                .join(format!("hey-boss-fleet-{role}.service")),
+            linux_definition(ctx, role),
+        );
+        ctx.protect_file(&path)?;
+        #[cfg(target_os = "macos")]
+        ctx.protect_file(&ctx.state.join(format!("fleet-{role}.log")))?;
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, definition)?;
+        Ok(path)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Err(invalid(
+        "Automatic startup requires macOS launchd or Linux systemd",
+    ))
+}
 pub(super) fn install(ctx: &Context, role: &str) -> Result<()> {
     if !matches!(role, "controller" | "agent") {
         return Err(invalid("Unknown fleet service role"));
     }
+    let path = stage_service(ctx, role)?;
     #[cfg(target_os = "macos")]
     {
         let label = format!("local.hey-boss-fleet-{role}");
-        let path = ctx
-            .home
-            .join("Library/LaunchAgents")
-            .join(format!("{label}.plist"));
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, mac_definition(ctx, role))?;
         let domain = format!("gui/{}", unsafe { libc::getuid() });
         let _ = Command::new("launchctl")
             .args(["bootout", &format!("{domain}/{label}")])
@@ -101,12 +126,6 @@ pub(super) fn install(ctx: &Context, role: &str) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let path = ctx
-            .home
-            .join(".config/systemd/user")
-            .join(format!("hey-boss-fleet-{role}.service"));
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, linux_definition(ctx, role))?;
         checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
         checked(
             Command::new("systemctl")
@@ -137,7 +156,51 @@ pub(super) fn ensure_companion(ctx: &Context) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::context::tests::{assert_sqlite_locked, test_context};
     use super::*;
+    #[test]
+    fn service_definition_aliases_cannot_truncate_sqlite_files() {
+        let (root, ctx, store) = test_context();
+        let path = stage_service(&ctx, "agent").unwrap();
+        fs::remove_file(&path).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            for symbolic in [false, true] {
+                let target = root.join(format!("issues.db{suffix}"));
+                if symbolic {
+                    std::os::unix::fs::symlink(&target, &path).unwrap();
+                } else {
+                    fs::hard_link(&target, &path).unwrap();
+                }
+                let before = fs::metadata(&target).unwrap().len();
+                let result = stage_service(&ctx, "agent");
+                assert_eq!(
+                    fs::metadata(&target).unwrap().len(),
+                    before,
+                    "Service definition truncated SQLite file {suffix}"
+                );
+                assert!(result.unwrap_err().to_string().contains("must not alias"));
+                assert_sqlite_locked(&ctx.path);
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        let path = stage_service(&ctx, "agent").unwrap();
+        assert!(fs::read_to_string(path).unwrap().contains("companion"));
+        assert_sqlite_locked(&ctx.path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchd_log_aliases_are_rejected_before_service_admission() {
+        let (root, ctx, store) = test_context();
+        let log = ctx.state.join("fleet-agent.log");
+        fs::hard_link(&ctx.path, &log).unwrap();
+        let result = stage_service(&ctx, "agent");
+        assert!(result.unwrap_err().to_string().contains("must not alias"));
+        assert_sqlite_locked(&ctx.path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn service_definitions_keep_workers_outside_service_shutdown() {
         let root = std::env::temp_dir();

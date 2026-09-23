@@ -47,6 +47,12 @@ ordinary config symlinks and missing-file defaults remain valid. The replacement
 regression uses synthetic private data; it does not establish the historical
 zeroed-header writer.
 
+Service staging also reproduced database truncation when a service definition
+was a hard link to the main database. Installation now checks service-definition
+inode identity before writing, and on macOS checks the launchd output log before
+admitting the service. Private tests cover definitions linked to main/WAL/shared
+memory and reject a database-linked log without invoking the service manager.
+
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
 writer responsible for that damage has not been established. The subsequent

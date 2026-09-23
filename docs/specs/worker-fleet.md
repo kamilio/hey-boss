@@ -133,6 +133,10 @@ Context-owned fleet JSON reads and writes MUST reject main/WAL/shared-memory
 inode aliases before non-SQLite I/O, including an atomic write targeting
 the database's exact path. Normal JSON contents, additive fields, ordinary
 configuration symlinks and missing-file defaults MUST retain their behavior.
+Service installation MUST reject service-definition inode aliases to its
+context's database, WAL and shared-memory files before writing the definition.
+On macOS it MUST also reject such aliases in the launchd output log before
+admitting the service.
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
@@ -212,7 +216,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Contract | Required evidence |
 | --- | --- |
 | Terminology and compatibility | Supervisor/companion help and legacy aliases; new status labels and old saved roles; worker restart preserves supervisor |
-| Database inode safety | Separate-process fcntl and journal-mode probes after another Store opens; plan/sync-marker, lifecycle-lock and config-read hard-link/symlink aliases to main, WAL and shared memory; atomic config targeting main preserves canonical inode; concurrent creation, rejected paths, preserved header/draft, ordinary Markdown/nonblocking lifecycle locks, JSON/additive keys/config symlinks/missing defaults |
+| Database inode safety | Separate-process fcntl and journal-mode probes after another Store opens; plan/sync-marker, lifecycle-lock, config-read and service-definition hard-link/symlink aliases to main, WAL and shared memory; atomic config targeting main preserves canonical inode; macOS log admission rejects a database alias; concurrent creation, rejected paths, preserved header/draft, ordinary Markdown/nonblocking lifecycle locks, JSON/additive keys/config symlinks/missing defaults |
 | Durable offline changes | Disconnect, mutate and restart, reconnect, verify exactly one canonical result |
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
 | Filtered pickup | Small selected queues beside large unrelated queues, early candidates in a large selected queue, cross-project global priority, duplicate project IDs, unrestricted pickup, missing projects and limit boundaries |
