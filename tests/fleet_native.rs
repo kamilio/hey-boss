@@ -74,7 +74,15 @@ impl Fixture {
         ]);
     }
     fn worker_status(&self) -> Value {
-        self.cli(&["worker", "--project", "Worker fixture", "--json", "status"])
+        self.cli(&[
+            "worker",
+            "--project",
+            "Worker fixture",
+            "--json",
+            "--history",
+            "20",
+            "status",
+        ])
     }
     fn wait_for(&self, condition: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(20);

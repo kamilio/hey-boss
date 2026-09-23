@@ -50,6 +50,132 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn json_status_and_watch_limit_finished_attempts_without_hiding_live_work() {
+    let fixture = Fixture::new("history");
+    fixture.add_worker("chosen");
+    let db = rusqlite::Connection::open(fixture.0.join("issues.db")).unwrap();
+    db.execute(
+        "INSERT INTO projects(id,name,next_number) VALUES('named:QA','QA',1)",
+        [],
+    )
+    .unwrap();
+    for (n, state, finished) in [
+        (1, "running", None),
+        (2, "awaiting_model", None),
+        (3, "awaiting_claim", None),
+        (4, "paused", None),
+        (5, "approval_waiting", None),
+        (6, "completed", Some(0)),
+        (7, "blocked", Some(7)),
+        (8, "cancelled", Some(8)),
+        (9, "paused", Some(9)),
+        (10, "approval_waiting", Some(10)),
+    ] {
+        db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) VALUES(?1,'named:QA',?2,'{\"issue\":{\"title\":\"QA attempt\"}}','agent',?3,?4,'start','qa',?2,0,'chosen',?5)", rusqlite::params![format!("run-{n}"), n, state, std::process::id(), finished]).unwrap();
+    }
+    for history in [0, 1, 3, 20] {
+        for action in ["status", "watch"] {
+            let mut command = fixture.command();
+            command.args(["--id", "chosen", "--history", &history.to_string(), action]);
+            if action == "watch" {
+                command.args(["--count", "1"]);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let snapshot = if action == "watch" {
+                &value["snapshots"][0]
+            } else {
+                &value
+            };
+            let runs = snapshot["runs"].as_array().unwrap();
+            assert_eq!(
+                runs.iter().filter(|r| r["finished_at"].is_null()).count(),
+                5
+            );
+            let finished: Vec<_> = runs
+                .iter()
+                .filter(|r| !r["finished_at"].is_null())
+                .map(|r| r["number"].as_i64().unwrap())
+                .collect();
+            assert_eq!(
+                finished,
+                (6..=10).rev().take(history).collect::<Vec<_>>(),
+                "{action}, history {history}"
+            );
+            assert_eq!(snapshot["active"], 5);
+            if action == "status" && history == 20 {
+                use hey_boss::worker_tui::{
+                    Dashboard,
+                    backend::{Client, Request},
+                    ui,
+                };
+                use ratatui::{Terminal, backend::TestBackend};
+                use std::{
+                    os::unix::fs::PermissionsExt,
+                    sync::{Arc, atomic::AtomicBool},
+                };
+                let wrapper = fixture.0.join("dashboard-cli");
+                fs::write(&wrapper, format!(
+                    "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$(dirname \"$0\")/issues.db\"\nunset HEY_BOSS_ISSUE_HOST HEY_BOSS_ISSUE_PROJECT\nexec '{}' \"$@\"\n",
+                    env!("CARGO_BIN_EXE_hey-boss").replace('\'', "'\\''")
+                )).unwrap();
+                fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+                let client = Client {
+                    binary: wrapper,
+                    host: None,
+                    directory: Some(fixture.0.clone()),
+                    timeout: Duration::from_secs(10),
+                };
+                let refreshed = client
+                    .execute(
+                        &Request::Refresh(Some("chosen".into())),
+                        &Arc::new(AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    refreshed["runs"].as_array().unwrap().len(),
+                    10,
+                    "The dashboard must request history explicitly"
+                );
+                let mut app = Dashboard::default();
+                app.apply(refreshed);
+                for (width, height) in [(48, 12), (80, 24), (120, 36)] {
+                    for history_tab in [false, true] {
+                        app.history = history_tab;
+                        app.normalize_run();
+                        assert_eq!(app.runs().len(), 5);
+                        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+                        let buffer = terminal.backend().buffer();
+                        let text: String = (0..height)
+                            .map(|y| {
+                                (0..width)
+                                    .map(|x| buffer[(x, y)].symbol())
+                                    .collect::<String>()
+                                    + "\n"
+                            })
+                            .collect();
+                        assert!(text.contains("QA attempt"), "{text}");
+                        assert!(text.contains("q quit"), "{text}");
+                        assert_eq!(text.contains(" · history"), history_tab, "{text}");
+                        println!("{width} × {height}, history {history_tab}:\n{text}");
+                    }
+                }
+            }
+        }
+    }
+    let stored: i64 = db
+        .query_row("SELECT count(*) FROM worker_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, 10, "Filtering must not delete saved attempts");
+}
+
+#[test]
 fn worker_status_displays_unique_names_while_preserving_storage_keys() {
     let fixture = Fixture::new("project-names");
     fixture.add_worker("chosen");
