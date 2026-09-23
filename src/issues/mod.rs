@@ -3,6 +3,7 @@ mod discovery;
 use store::chief;
 pub(crate) mod blockers;
 mod fleet;
+pub(crate) use fleet::INDEXES as FLEET_INDEXES;
 mod global_settings;
 pub mod identity;
 pub mod planning;

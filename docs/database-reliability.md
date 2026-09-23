@@ -89,8 +89,11 @@ the outgoing journal used 222 MiB, saved idempotent request responses 44 MiB,
 worker activity 18 MiB and worker runs 16 MiB. Issues themselves used 6 MiB.
 Full before/after issue bodies accounted for about 125 MiB of the journal.
 
-The supervisor retains the latest 10,000 canonical journal entries and removes
-at most 1,000 per maintenance pass. A durable floor makes old cursors recover
+The supervisor retains the newest canonical journal suffix fitting both 10,000
+entries and 64 MiB of UTF-8 before/after JSON, removing at most 1,000 per
+maintenance pass. An expression index stores byte lengths so maintenance can
+check the budget without rereading historical issue bodies. A durable floor makes
+old cursors recover
 through a verified snapshot. Companion outgoing changes, replay receipts and
 conflict evidence remain durable. Deletion releases SQLite pages for reuse;
 the file's apparent size need not shrink. A disposable backup shrank to about
@@ -106,6 +109,17 @@ from 402,132,992 to 186,552,320 bytes (about 384 to 178 MiB). Integrity and
 foreign-key checks passed afterward, and all three machines remained connected.
 No live database or sidecar file was replaced manually. Continued writes can
 change these sizes after the checkpoint.
+
+At 08:15 UTC the same production inode occupied 222,212,096 bytes (about
+212 MiB), with a clean quick check, no foreign-key violations and 10,000 journal
+rows. The journal alone occupied about 76 MiB; issue before/after JSON contained
+74 million characters. On a fresh private online backup, byte-budget
+pruning retained 4,369 rows / 67,103,665 UTF-8 JSON bytes in six bounded passes,
+preserving the complete canonical snapshot and journal high watermark. Full
+integrity and foreign-key checks passed. Identical byte-length scans measured
+2.41 ms median through the expression index versus 27.06 ms while reading table
+records. These are warm private-backup measurements, not live request latency.
+Freed pages remain available for reuse; another live compaction is not required.
 
 A later storage check found 2,834 saved requests occupying about 51 MiB: their
 payloads contained 14.2 MB and their original responses 36.7 MB of text. These
