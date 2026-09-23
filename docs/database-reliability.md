@@ -8,11 +8,26 @@ Concurrent opens in supervisor threads could therefore remove protection from
 an existing connection. Commit `9a31312` removed this operation.
 
 Existing database files are now opened only through SQLite. A missing database
-is published from a closed, private staging inode using a non-replacing hard
-link. The store rejects nonregular database paths and opens the canonical file
+is published from a closed, private staging inode using an exclusive rename
+that cannot replace another creator. The store rejects nonregular database paths
+and opens the canonical file
 without SQLite's create flag. `tests/database_locks.rs` verifies lock retention
 with a separate process using `fcntl(F_SETLK)` and a journal-mode change; it also
 checks concurrent creation and rejected paths.
+
+A separate private regression reproduced SQLite error 522 when the same main
+database inode was opened through a second hard-linked filename, which derives
+a different WAL filename. Another reproduced an unrelated file growing from
+4,096 to 32,768 bytes when its hard link occupied the database's SHM path.
+Store, direct fleet connections and the owner-private database driver now reject
+multiple main-file links
+and reject nonregular or multiply linked WAL, SHM and rollback-journal files
+before SQLite opens them. The fleet connection path also refuses to recreate
+a missing database. Tests preserve the unrelated file's bytes, SQLite locks and
+database integrity, covering hard links and symlinks for all three sidecars.
+The driver retains safe empty-database creation for its existing callers.
+Production's main database has one link; these private regressions do not
+establish the historical writer or show that production used such an alias.
 
 The same regression also reproduced lock loss when a plan file was a hard link
 to the live database. Store-owned plan reads and final reconciliation now check

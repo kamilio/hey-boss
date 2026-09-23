@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[path = "agent_launches.rs"]
@@ -737,7 +738,83 @@ pub struct Store {
     db: Connection,
     attachment_root: std::path::PathBuf,
 }
+
+// Publish without replacing a concurrent creator, and without a transient
+// second hard link that another opener could mistake for an unsafe DB alias.
+fn publish_database(staged: &Path, path: &Path) -> std::io::Result<()> {
+    let staged = std::ffi::CString::new(staged.as_os_str().as_bytes())?;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    #[cfg(target_os = "macos")]
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            staged.as_ptr(),
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            staged.as_ptr(),
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result = {
+        let _ = (staged, path);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Exclusive database publication requires macOS or Linux",
+        ));
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 impl Store {
+    pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() {
+            return Err(Error::invalid("Issue database must be a regular file"));
+        }
+        if metadata.nlink() != 1 {
+            return Err(Error::invalid(
+                "Issue database must not have hard links; aliases can split SQLite WAL state",
+            ));
+        }
+        let path = path.canonicalize()?;
+        // SQLite can resize or overwrite a sidecar before validating its
+        // contents. NOFOLLOW alone does not protect hard-linked sidecars.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            match fs::symlink_metadata(Path::new(&sidecar)) {
+                Ok(metadata) if !metadata.is_file() || metadata.nlink() != 1 => {
+                    return Err(Error::invalid(
+                        "Issue database sidecar must be a regular file without hard links",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?)
+    }
+
     fn finish_replay(&self, request: &Request, response: Value) -> Result<Value> {
         if let Operation::Attachment {
             operation: crate::attachments::Operation::Remove { id },
@@ -751,7 +828,7 @@ impl Store {
         retry_contention(Instant::now() + CONTENTION_BUDGET, || Self::open_once(path))
     }
 
-    fn open_once(path: &Path) -> Result<Self> {
+    pub(crate) fn create_database_if_missing(path: &Path) -> Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::DirBuilder::new()
                 .recursive(true)
@@ -771,23 +848,22 @@ impl Store {
                     .mode(0o600)
                     .open(&staged)?,
             );
-            let publish = fs::hard_link(&staged, path);
-            fs::remove_file(&staged)?;
+            let publish = publish_database(&staged, path);
+            if publish.is_err() {
+                fs::remove_file(&staged)?;
+            }
             match publish {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        if !fs::symlink_metadata(path)?.is_file() {
-            return Err(Error::invalid("Issue database must be a regular file"));
-        }
-        let mut db = Connection::open_with_flags(
-            path.canonicalize()?,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        Ok(())
+    }
+
+    fn open_once(path: &Path) -> Result<Self> {
+        Self::create_database_if_missing(path)?;
+        let mut db = Self::open_connection(path)?;
         // Short attempts limit how far the final wait can overrun the overall
         // contention deadline. Safe retry boundaries retain the six-second budget.
         db.busy_timeout(Duration::from_millis(250))?;

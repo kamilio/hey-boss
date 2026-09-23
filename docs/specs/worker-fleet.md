@@ -129,6 +129,13 @@ opening a non-SQLite descriptor. Rejection MUST preserve locks held by existing
 SQLite connections. Ordinary lifecycle lock contention MUST retain nonblocking
 and bounded-wait behavior. Database files MUST NOT be replaced or relinked while
 connections are active.
+Store and direct fleet connections MUST reject nonregular or multiply linked
+main database files before SQLite I/O. Existing WAL, shared-memory and rollback
+journal files MUST also be regular files with one link. Missing main databases
+MUST be published without replacing a concurrent creator or temporarily exposing
+multiple links. Managed fleet connections MUST NOT recreate a missing database.
+The owner-private database driver MAY create an empty database through the same
+safe publication path and MUST apply the same main and sidecar checks.
 Context-owned fleet JSON reads and writes MUST reject main/WAL/shared-memory
 inode aliases before non-SQLite I/O, including an atomic write targeting
 the database's exact path. Normal JSON contents, additive fields, ordinary

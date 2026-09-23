@@ -1,7 +1,7 @@
 use hey_boss::issues::Store;
 use rusqlite::{Connection, ErrorCode};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::{
     fs,
     process::Command,
@@ -65,6 +65,145 @@ fn opening_another_store_preserves_database_os_locks() {
         "ok"
     );
     drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn opening_hard_linked_database_names_cannot_split_wal_state() {
+    let root = temporary_directory();
+    let path = root.join("issues.db");
+    let store = Store::open(&path).unwrap();
+    let alias = root.join("second.db");
+    fs::hard_link(&path, &alias).unwrap();
+    let opened = Store::open(&alias);
+    assert!(
+        opened.is_err(),
+        "A hard-linked database name was accepted with a distinct WAL filename"
+    );
+    let error = opened.err().unwrap();
+    assert!(error.to_string().contains("hard link"), "{error}");
+    let error = Store::open(&path)
+        .err()
+        .expect("Original name must also reject multiple links");
+    assert!(error.to_string().contains("hard link"), "{error}");
+    assert!(!root.join("second.db-wal").exists());
+    assert!(!root.join("second.db-shm").exists());
+    assert_database_locked(&path);
+    fs::remove_file(alias).unwrap();
+    drop(store);
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn opening_a_hard_linked_sidecar_cannot_resize_an_unrelated_file() {
+    let root = temporary_directory();
+    let path = root.join("issues.db");
+    drop(Store::open(&path).unwrap());
+    let unrelated = root.join("unrelated.data");
+    let contents = vec![b'x'; 4096];
+    fs::write(&unrelated, &contents).unwrap();
+    for suffix in ["-shm", "-wal", "-journal"] {
+        for symbolic in [false, true] {
+            let sidecar = root.join(format!("issues.db{suffix}"));
+            assert!(!sidecar.exists());
+            if symbolic {
+                symlink(&unrelated, &sidecar).unwrap();
+            } else {
+                fs::hard_link(&unrelated, &sidecar).unwrap();
+            }
+            let opened = Store::open(&path);
+            assert_eq!(
+                fs::metadata(&unrelated).unwrap().len(),
+                contents.len() as u64,
+                "SQLite resized an unrelated file through its {suffix} alias"
+            );
+            assert!(opened.is_err(), "SQLite accepted a {suffix} alias");
+            let error = opened.err().unwrap();
+            assert!(error.to_string().contains("sidecar"), "{error}");
+            assert_eq!(fs::read(&unrelated).unwrap(), contents);
+            fs::remove_file(sidecar).unwrap();
+        }
+    }
+    let store = Store::open(&path).unwrap();
+    assert_database_locked(&path);
+    drop(store);
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundled_database_driver_rejects_database_name_aliases() {
+    let root = temporary_directory();
+    let path = root.join("issues.db");
+    let store = Store::open(&path).unwrap();
+    let alias = root.join("second.db");
+    fs::hard_link(&path, &alias).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .args(["fleet", "database", "--path"])
+        .arg(&alias)
+        .output()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "Database driver accepted main alias"
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("hard link"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!root.join("second.db-wal").exists());
+    assert!(!root.join("second.db-shm").exists());
+    assert_database_locked(&path);
+    fs::remove_file(alias).unwrap();
+    drop(store);
+    let unrelated = root.join("unrelated.data");
+    let contents = vec![b'x'; 4096];
+    fs::write(&unrelated, &contents).unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = root.join(format!("issues.db{suffix}"));
+        fs::hard_link(&unrelated, &sidecar).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .args(["fleet", "database", "--path"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "Driver accepted {suffix} alias");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("sidecar"),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read(&unrelated).unwrap(), contents);
+        fs::remove_file(sidecar).unwrap();
+    }
+    let empty = root.join("empty.db");
+    let result = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .args(["fleet", "database", "--path"])
+        .arg(&empty)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let metadata = fs::metadata(empty).unwrap();
+    assert_eq!(metadata.nlink(), 1);
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -227,6 +366,7 @@ fn concurrent_creation_is_private_and_preserves_existing_files() {
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+    assert_eq!(fs::metadata(&path).unwrap().nlink(), 1);
     for suffix in ["-wal", "-shm"] {
         assert_eq!(
             fs::metadata(root.join(format!("issues.db{suffix}")))
