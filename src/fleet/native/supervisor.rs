@@ -1,7 +1,7 @@
 use super::{
     Result,
     context::{Context, atomic_json, hash, id, now, read_frame, read_json, send},
-    control, conversation,
+    control, conversation, pull,
     replica::{self, invalid},
     takeover,
 };
@@ -706,10 +706,14 @@ impl Supervisor {
                         db.execute_batch("COMMIT")?;
                         (payload, receipts, signals)
                     };
-                    send(
+                    pull::send_pull(
                         &mut input,
-                        json!({"kind":"pull","payload":payload,"receipts":receipts}),
+                        payload,
+                        receipts,
+                        hello["capabilities"]["pull_gzip_chunks"] == true,
                     )?;
+                    // Our own encoding/writing time is not companion silence.
+                    last_message = Instant::now();
                     self.update(host,json!({"workers":message["workers"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now()}))?;
                     let active = message["workers"]
                         .as_array()
