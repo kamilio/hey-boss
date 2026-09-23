@@ -2317,12 +2317,17 @@ mod tests {
     fn blocker_migration_updates_existing_capture_triggers_before_normalizing() {
         for partial in [false, true] {
             let main = Fixture::new();
-            main.db.execute_batch("ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
+            main.db.execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
             main.capture();
             if partial {
                 main.db.execute_batch("ALTER TABLE issues ADD COLUMN manual_blocked INTEGER NOT NULL DEFAULT 0; ALTER TABLE issues ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]';").unwrap();
             }
             drop(Store::open(&main.path).unwrap());
+            assert!(main.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='issue_list_summary')",
+                [],
+                |row| row.get::<_, bool>(0),
+            ).unwrap());
             main.db
                 .execute("UPDATE issues SET blockers='[2]' WHERE number=1", [])
                 .unwrap();
