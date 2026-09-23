@@ -12,12 +12,9 @@ mod takeover;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use context::Context;
+pub(super) use context::read_control_body;
 use serde_json::{Value, json};
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-    time::Duration,
-};
+use std::{io::Write, os::unix::net::UnixStream, time::Duration};
 
 pub(super) fn run(action: &super::Action) -> std::io::Result<()> {
     run_inner(action).map_err(std::io::Error::other)
@@ -91,13 +88,8 @@ fn local_request(ctx: &Context, value: Value) -> Result<Value> {
     connection.write_all(value.to_string().as_bytes())?;
     connection.write_all(b"\n")?;
     connection.shutdown(std::net::Shutdown::Write)?;
-    let mut bytes = vec![];
-    connection
-        .take(crate::issues::WIRE_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > crate::issues::WIRE_LIMIT {
-        return Err(replica::invalid("Supervisor response exceeds limit"));
-    }
+    let bytes = read_control_body(&mut connection)?
+        .ok_or_else(|| replica::invalid("Supervisor response exceeds limit"))?;
     let result: Value = serde_json::from_slice(&bytes)?;
     if result["ok"] == false {
         return Err(replica::invalid(

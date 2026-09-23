@@ -299,6 +299,31 @@ impl Write for FrameBuffer {
         Ok(())
     }
 }
+// None means the EOF-delimited response exceeds the encoded-byte budget.
+pub(in crate::fleet) fn read_control_body(
+    reader: &mut impl Read,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut frame = FrameBuffer::new(crate::issues::WIRE_LIMIT);
+    // Larger socket reads avoid thousands of syscalls for a near-limit body.
+    let mut chunk = [0; 65536];
+    loop {
+        // Preserve the old limit+1 maximum read, including the final EOF probe.
+        let remaining = frame.limit - frame.bytes.len();
+        let length = chunk.len().min(remaining + 1);
+        let length = match reader.read(&mut chunk[..length]) {
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if length == 0 {
+            return Ok(Some(frame.bytes));
+        }
+        if length > remaining {
+            return Ok(None);
+        }
+        frame.write_all(&chunk[..length])?;
+    }
+}
 pub(super) fn read_frame(reader: &mut impl BufRead) -> Result<Option<Value>> {
     let mut frame = FrameBuffer::new(crate::issues::WIRE_LIMIT);
     loop {
@@ -536,6 +561,148 @@ pub(super) fn committed_source_build(source: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::BufReader;
+    struct Fragmented<R>(R);
+    impl<R: Read> Read for Fragmented<R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let length = bytes.len().min(8192);
+            self.0.read(&mut bytes[..length])
+        }
+    }
+    #[test]
+    fn fragmented_eof_control_body_keeps_buffer_within_its_byte_budget() {
+        let limit = crate::issues::WIRE_LIMIT;
+        let mut body = vec![b'x'; limit];
+        body[0] = b'"';
+        body[limit - 1] = b'"';
+        let mut reader = Fragmented(std::io::Cursor::new(body));
+        let (result, allocated) =
+            crate::test_allocations::measure(|| read_control_body(&mut reader));
+        let bytes = result.unwrap().unwrap();
+        eprintln!("exact-limit EOF response: {allocated} requested Rust allocation bytes");
+        assert_eq!(bytes.len(), limit);
+        assert!(bytes.capacity() <= limit, "capacity {}", bytes.capacity());
+        assert!(allocated < 40 * 1024 * 1024, "{allocated} allocation bytes");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .len(),
+            limit - 2
+        );
+    }
+    #[test]
+    fn oversized_eof_control_body_rejects_without_growing_past_the_quota() {
+        let mut reader = Fragmented(std::io::Cursor::new(vec![
+            b'x';
+            crate::issues::WIRE_LIMIT + 1
+        ]));
+        let (result, allocated) =
+            crate::test_allocations::measure(|| read_control_body(&mut reader));
+        eprintln!("oversized EOF response: {allocated} requested Rust allocation bytes");
+        assert!(result.unwrap().is_none());
+        assert!(allocated < 40 * 1024 * 1024, "{allocated} allocation bytes");
+    }
+    #[test]
+    fn eof_control_body_preserves_complete_bytes_and_lazy_empty_input() {
+        let value = json!({"text":"é\n\\\"","version":1});
+        let bytes = format!("{}\n\n", serde_json::to_string_pretty(&value).unwrap());
+        let actual = read_control_body(&mut std::io::Cursor::new(bytes.as_bytes()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, bytes.as_bytes());
+        assert_eq!(serde_json::from_slice::<Value>(&actual).unwrap(), value);
+        let (empty, allocated) =
+            crate::test_allocations::measure(|| read_control_body(&mut std::io::empty()));
+        assert!(empty.unwrap().unwrap().is_empty());
+        assert_eq!(allocated, 0);
+    }
+    #[test]
+    fn eof_control_body_retries_interrupted_and_propagates_partial_input_errors() {
+        struct Input {
+            interrupted: bool,
+            bytes: std::io::Cursor<&'static [u8]>,
+            final_error: bool,
+        }
+        impl Read for Input {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.interrupted) {
+                    Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+                } else if self.bytes.position() == self.bytes.get_ref().len() as u64
+                    && self.final_error
+                {
+                    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+                } else {
+                    self.bytes.read(output)
+                }
+            }
+        }
+        for final_error in [false, true] {
+            let mut input = Input {
+                interrupted: true,
+                bytes: std::io::Cursor::new(b"{\"version\":1}"),
+                final_error,
+            };
+            let result = read_control_body(&mut input);
+            if final_error {
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+            } else {
+                assert_eq!(result.unwrap().unwrap(), b"{\"version\":1}");
+            }
+        }
+    }
+    #[test]
+    #[ignore = "Profiles EOF control reads against the previous Vec read_to_end"]
+    fn profile_eof_control_reads() {
+        fn receive(size: usize, bounded: bool) -> Duration {
+            let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            writer
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let producing = std::thread::spawn(move || {
+                let chunk = [b'x'; 65536];
+                let mut remaining = size;
+                while remaining != 0 {
+                    let length = remaining.min(chunk.len());
+                    writer.write_all(&chunk[..length]).unwrap();
+                    remaining -= length;
+                }
+            });
+            let started = Instant::now();
+            let bytes = if bounded {
+                read_control_body(&mut reader).unwrap().unwrap()
+            } else {
+                let mut bytes = vec![];
+                reader
+                    .take(crate::issues::WIRE_LIMIT as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                bytes
+            };
+            let elapsed = started.elapsed();
+            assert_eq!(bytes.len(), size);
+            assert!(bytes.iter().all(|byte| *byte == b'x'));
+            producing.join().unwrap();
+            elapsed
+        }
+        for size in [128, 512 * 1024, crate::issues::WIRE_LIMIT] {
+            let mut old = vec![];
+            let mut bounded = vec![];
+            for _ in 0..9 {
+                old.push(receive(size, false));
+                bounded.push(receive(size, true));
+            }
+            old.sort();
+            bounded.sort();
+            eprintln!(
+                "EOF socket {size} bytes: old median {:?}, bounded median {:?}",
+                old[4], bounded[4]
+            );
+        }
+    }
     #[test]
     fn fragmented_oversized_frame_reading_has_bounded_allocation_work() {
         let mut reader = BufReader::with_capacity(
