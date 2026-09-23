@@ -387,6 +387,14 @@ for links without a project. Issue resources honor `--host`, then the fragment's
 reads your configured store or authenticated SSH backend. Inbox reads use the
 connected desktop, and conversation `host` identifies the owning fleet device.
 
+Issues created from Codex automatically capture the creating model from that
+session's saved turn metadata or exact thread record, when available. No CLI
+flags are needed. Lists, details, and the Origin card show the model in place of
+the creator's session hash; the full session and conversation link remain in
+Origin. The captured model stays unchanged after edits, retries, or later model
+switches. Older issues and unavailable metadata keep their existing attribution;
+configuration defaults are never treated as evidence of the model used.
+
 Every web page includes a source comment and a `hidden` guide for agents, with a
 shell-quoted `hey-boss lookup 'URL' --json` command that follows URL navigation.
 The paired Inbox root uses `hey-boss inbox --json`. `/llms.txt` publishes the same
