@@ -612,6 +612,7 @@ dependencies = [
  "html-escape",
  "libc",
  "linkify",
+ "memchr",
  "pulldown-cmark",
  "ratatui",
  "reqwest",

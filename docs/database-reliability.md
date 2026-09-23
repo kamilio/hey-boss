@@ -148,6 +148,10 @@ while a capable peer's oversized incremental pull fell from 55.6 MB to 5.3 MB
 and preserved its decoded body, cursor and receipts through verified streaming.
 SSH still reserves the newline byte; local control responses use EOF. These
 measurements describe allocation work rather than total resident memory.
+Fragmented incoming frames also cap buffer growth at the existing 16 MiB limit.
+Rejecting a synthetic oversized frame delivered in 8 KiB fragments fell from
+67.1 MB to 33.5 MB of requested Rust allocation bytes. The reader preserves
+delimiter accounting, prefetched frames, UTF-8 and complete JSON at EOF.
 
 ## Ongoing verification
 
