@@ -3,6 +3,7 @@ use super::*;
 use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
 use std::collections::HashMap;
 pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
+pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
 
 pub(super) fn stale_pr_capture(db: &Connection) -> Result<bool> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name IN ('fleet_capture_issue_pull_requests_INSERT','fleet_capture_issue_pull_requests_UPDATE','fleet_capture_issue_pull_requests_DELETE') AND (instr(sql,'''purpose'',')=0 OR (name='fleet_capture_issue_pull_requests_UPDATE' AND instr(sql,'OLD.\"purpose\" IS NEW.\"purpose\"')=0)))", [], |r| r.get(0))?)
@@ -298,8 +299,8 @@ impl Store {
         Ok(result)
     }
 }
+// Callers constrain projects separately so their queries can use project indexes.
 const ELIGIBLE:&str="i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
- AND (json_array_length(?1)=0 OR i.project_id IN(SELECT value FROM json_each(?1)))
  AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))";
 // Finished attempts do not permanently exclude unfinished issues. Approval holds
 // still need explicit retry; other failures back off from 30 seconds to 5 minutes.
@@ -310,25 +311,35 @@ pub(super) const PICKUP_READY: &str = "
  AND ((SELECT role FROM fleet_meta WHERE id=1)<>'agent' OR EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node=(SELECT node FROM fleet_meta WHERE id=1)))
  AND EXISTS(SELECT 1 FROM issue_pickup_ready ready WHERE ready.project_id=i.project_id AND ready.number=i.number)";
 fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project, i64)>> {
-    let mut stmt=db.prepare(&format!("SELECT p.id,p.name,i.number FROM issues i JOIN projects p ON p.id=i.project_id WHERE {ELIGIBLE} {PICKUP_READY} ORDER BY i.sort_order,i.created_at,i.project_id,i.number LIMIT ?3"))?;
-    Ok(stmt
-        .query_map(
-            params![
-                serde_json::to_string(&c.projects)?,
-                serde_json::to_string(&c.tags)?,
-                limit
-            ],
-            |r| {
-                Ok((
-                    Project {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                    },
-                    r.get(2)?,
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut projects: Vec<Option<&str>> = c.projects.iter().map(|p| Some(p.as_str())).collect();
+    projects.sort_unstable();
+    projects.dedup();
+    let project_filter = if projects.is_empty() {
+        projects.push(None);
+        "?1 IS NULL"
+    } else {
+        "i.project_id=?1"
+    };
+    let mut stmt=db.prepare(&format!("SELECT i.sort_order,i.created_at,p.id,i.number,p.name FROM issues i JOIN projects p ON p.id=i.project_id WHERE {project_filter} AND {ELIGIBLE} {PICKUP_READY} ORDER BY i.sort_order,i.created_at,i.project_id,i.number LIMIT ?3"))?;
+    let tags = serde_json::to_string(&c.tags)?;
+    // Each project's first N candidates suffice for the global first N. Keep
+    // only that global prefix, even when many projects are configured.
+    let mut selected = std::collections::BinaryHeap::<(i64, i64, String, i64, String)>::new();
+    for project in projects {
+        for row in stmt.query_map(params![project, tags, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })? {
+            selected.push(row?);
+            if limit >= 0 && selected.len() > limit as usize {
+                selected.pop();
+            }
+        }
+    }
+    Ok(selected
+        .into_sorted_vec()
+        .into_iter()
+        .map(|(_, _, id, number, name)| (Project { id, name }, number))
+        .collect())
 }
 fn worker_overview(db: &Connection) -> Result<Vec<Value>> {
     let builds_exist: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds')", [], |r| r.get(0))?;
@@ -1480,6 +1491,154 @@ mod tests {
                 steps < 10000,
                 "Queue counts scanned unrelated projects: {steps} VM steps"
             );
+            // Unrelated issues precede every selected issue in global queue
+            // order. A LIMIT must not disguise scanning the global queue.
+            store
+                .db
+                .execute(
+                    "UPDATE issues SET sort_order=-10000+number WHERE project_id='named:Other'",
+                    [],
+                )
+                .unwrap();
+            let pickup_steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&pickup_steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let result = candidates(&store.db, &config, 3);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            let selected: Vec<_> = result
+                .unwrap()
+                .into_iter()
+                .map(|(p, n)| (p.id, n))
+                .collect();
+            assert_eq!(
+                selected,
+                vec![
+                    ("named:A".to_owned(), 4),
+                    ("named:A".to_owned(), 5),
+                    ("named:A".to_owned(), 6)
+                ]
+            );
+            let pickup_steps = pickup_steps.load(Ordering::Relaxed);
+            eprintln!(
+                "Project-filtered pickup: fewer than {} VM steps",
+                pickup_steps + 100
+            );
+            assert!(
+                pickup_steps < 10000,
+                "Pickup scanned unrelated projects: {pickup_steps} VM steps"
+            );
+            let unrestricted_pickup = candidates(
+                &store.db,
+                &Settings {
+                    tags: config.tags.clone(),
+                    ..Settings::default()
+                },
+                3,
+            )
+            .unwrap();
+            assert_eq!(
+                unrestricted_pickup
+                    .into_iter()
+                    .map(|(p, n)| (p.id, n))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("named:Other".to_owned(), 1),
+                    ("named:Other".to_owned(), 2),
+                    ("named:Other".to_owned(), 3)
+                ]
+            );
+            assert!(
+                candidates(
+                    &store.db,
+                    &Settings {
+                        projects: vec!["named:Missing".into()],
+                        ..Settings::default()
+                    },
+                    3
+                )
+                .unwrap()
+                .is_empty()
+            );
+            let dominant_steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&dominant_steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let dominant = candidates(
+                &store.db,
+                &Settings {
+                    projects: vec!["named:Other".into()],
+                    tags: config.tags.clone(),
+                    ..Settings::default()
+                },
+                3,
+            );
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            assert_eq!(
+                dominant
+                    .unwrap()
+                    .into_iter()
+                    .map(|(p, n)| (p.id, n))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("named:Other".to_owned(), 1),
+                    ("named:Other".to_owned(), 2),
+                    ("named:Other".to_owned(), 3)
+                ]
+            );
+            let dominant_steps = dominant_steps.load(Ordering::Relaxed);
+            eprintln!(
+                "Large selected project, 3 pickups: fewer than {} VM steps",
+                dominant_steps + 100
+            );
+            assert!(
+                dominant_steps < 10000,
+                "LIMIT must avoid scanning the whole selected queue: {dominant_steps} VM steps"
+            );
+            store.db.execute_batch("UPDATE issues SET sort_order=-50000 WHERE project_id='named:A' AND number=7;
+                UPDATE issues SET sort_order=-60000 WHERE project_id='named:B' AND number=7;
+                UPDATE issues SET sort_order=-45000,created_at=1 WHERE project_id='named:A' AND number=8;
+                UPDATE issues SET sort_order=-45000 WHERE project_id='named:B' AND number=9;").unwrap();
+            let ordered = candidates(&store.db, &config, 3)
+                .unwrap()
+                .into_iter()
+                .map(|(p, n)| (p.id, n))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ordered,
+                vec![
+                    ("named:B".to_owned(), 7),
+                    ("named:A".to_owned(), 7),
+                    ("named:B".to_owned(), 9)
+                ]
+            );
+            assert_eq!(candidates(&store.db, &config, 1).unwrap()[0].1, 7);
+            assert!(candidates(&store.db, &config, 0).unwrap().is_empty());
+            assert_eq!(candidates(&store.db, &config, -1).unwrap().len(), 14);
             let unrestricted = worker_queue(
                 &store.db,
                 &Settings {

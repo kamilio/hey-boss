@@ -125,6 +125,10 @@ and tag sets within one coherent database snapshot. Reused counts MUST NOT
 survive into the next poll or change each worker's capacity and activity results.
 Queue counts for explicit project filters SHOULD avoid scanning open issues in
 unselected projects. Empty filters MUST preserve unrestricted queue behavior.
+Filtered pickup SHOULD use ordered project queues and avoid reading the whole
+selected queue when a requested batch is ready near its beginning. Pickup MUST
+preserve global ordering by issue sort order, creation time, project ID and issue
+number. Duplicate project IDs MUST NOT produce duplicate candidates.
 
 Worker status SHOULD expose the build compiled into the registered owner
 process. A reported build MUST match the worker's registered PID and process
@@ -150,6 +154,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Terminology and compatibility | Supervisor/companion help and legacy aliases; new status labels and old saved roles; worker restart preserves supervisor |
 | Durable offline changes | Disconnect, mutate and restart, reconnect, verify exactly one canonical result |
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
+| Filtered pickup | Small selected queues beside large unrelated queues, early candidates in a large selected queue, cross-project global priority, duplicate project IDs, unrestricted pickup, missing projects and limit boundaries |
 | Allocation refresh | Full pool over a large queue avoids scanning unallocated issues; overlapping filters retain distinct total slots; unclaimed expiry, claim deadlines and ownership remain correct |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique |
 | Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation |
