@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
+use std::os::unix::{
+    fs::{MetadataExt, OpenOptionsExt},
+    process::CommandExt,
+};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -138,8 +141,42 @@ fn lock(path: &Path, nonblocking: bool) -> Result<File> {
     }
     Ok(file)
 }
-fn local_read(plan: &Plan) -> Result<(String, String)> {
+fn protect_database_files(db: &Connection, plan: &Plan) -> Result<()> {
+    let Some(database) = db.path().filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    // Inspect inode identity without opening a raw descriptor: even closing a
+    // read-only alias would release this process's SQLite record locks.
+    let mut protected = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        match fs::metadata(format!("{database}{suffix}")) {
+            Ok(metadata) => protected.push((metadata.dev(), metadata.ino())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !suffix.is_empty() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for path in [
+        plan.file(),
+        lock_path(plan),
+        plan.file().with_extension("hey-boss-sync-paused"),
+    ] {
+        match fs::metadata(&path) {
+            Ok(metadata) if protected.contains(&(metadata.dev(), metadata.ino())) => {
+                return Err(Error::invalid(
+                    "Plan files and sync markers must not alias the active issue database or its sidecars",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn local_read(db: &Connection, plan: &Plan) -> Result<(String, String)> {
     plan.validate()?;
+    protect_database_files(db, plan)?;
     let _lock = lock(&lock_path(plan), true).map_err(|_| {
         Error::new(
             "plan_sync_busy",
@@ -202,7 +239,7 @@ pub fn final_sync(
 ) -> Result<()> {
     let Some(plan) = plan else { return Ok(()) };
     let content = if plan.machine == super::identity::machine()? {
-        local_read(plan)?
+        local_read(db, plan)?
     } else {
         let host = owner_host(db, plan)?;
         if !crate::health::remote::valid_host(&host) {
@@ -242,11 +279,11 @@ pub fn final_sync(
     *body = content.1;
     Ok(())
 }
-pub fn read_plan(plan: &Plan) -> Result<Value> {
+pub fn read_plan(db: &Connection, plan: &Plan) -> Result<Value> {
     if plan.machine != super::identity::machine()? {
         return Err(Error::invalid("This machine does not own the plan"));
     }
-    let (title, body) = local_read(plan)?;
+    let (title, body) = local_read(db, plan)?;
     let pause = plan.file().with_extension("hey-boss-sync-paused");
     if pause.exists() {
         fs::remove_file(pause)?;

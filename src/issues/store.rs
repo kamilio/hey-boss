@@ -984,7 +984,7 @@ impl Store {
     fn execute_once(&mut self, r: &Request, deadline: Instant) -> Result<Value> {
         validate(r)?;
         if let Operation::ReadPlan { plan } = &r.operation {
-            return super::planning::read_plan(plan);
+            return super::planning::read_plan(&self.db, plan);
         }
         let payload = if let Operation::Attachment { operation } = &r.operation {
             serde_json::to_string(
