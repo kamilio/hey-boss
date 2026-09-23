@@ -57,6 +57,9 @@ descriptor or spawning the worker. A private regression reproduced output
 appended directly to a database-linked log; the guard rejects main/WAL/shared
 memory hard links and symlinks while preserving ordinary append behavior and
 SQLite locks.
+The setup command applies the same check before writing its saved upgrade-source
+marker. A private regression reproduced database truncation through that marker;
+all main/WAL/shared-memory hard links and symlinks are now rejected before writing.
 
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
