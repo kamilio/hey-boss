@@ -1578,6 +1578,22 @@ fn prompt_update(instructions: &str) -> String {
 pub fn print_status(v: &Value, redraw: bool) {
     print_status_with_history(v, redraw, 3);
 }
+/// Limit output history without treating paused or approval-waiting live work as finished.
+/// Store snapshots order finished attempts newest first; keep all unfinished attempts.
+pub fn limit_status_history(value: &mut Value, history_limit: usize) {
+    let mut finished = 0;
+    if let Some(runs) = value["runs"].as_array_mut() {
+        runs.retain(|run| {
+            if run["finished_at"].is_null() {
+                true
+            } else {
+                finished += 1;
+                finished <= history_limit
+            }
+        });
+    }
+}
+
 pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) {
     if redraw {
         print!("\x1b[H\x1b[2J");
@@ -1820,6 +1836,7 @@ pub fn serve_instance_with_history(
         value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
         value["upgrading"] =
             json!(worker.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
+        limit_status_history(&mut value, history_limit);
         let signature = serde_json::to_string(&value)?;
         if signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
             if json_output {

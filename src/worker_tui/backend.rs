@@ -44,7 +44,8 @@ impl Client {
                 if let Some(id) = id {
                     command.args(["--id", id]);
                 }
-                command.arg("status");
+                // Keep history available for the dashboard's local tab switch.
+                command.args(["--history", "20", "status"]);
             }
             Request::Control { worker_id, stop } => {
                 command.args([if *stop { "stop" } else { "pause" }, worker_id]);

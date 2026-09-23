@@ -52,7 +52,7 @@ pub struct Options {
     claim_timeout: Option<u32>,
     #[arg(long)]
     json: bool,
-    /// Finished-attempt history (0 starts with active work only).
+    /// Finished-attempt history (0 keeps only active or pending attempts).
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=20))]
     history: u8,
     #[command(subcommand)]
@@ -234,6 +234,9 @@ pub fn run(o: &Options) -> Result<()> {
             Action::Status | Action::Restart { .. } | Action::Watch { .. } => {}
         }
         value["store"] = serde_json::json!({"host":issues::identity::host(),"database":issues::database_path()?});
+        if matches!(action, Action::Status) {
+            issues::worker::limit_status_history(&mut value, o.history as usize);
+        }
         if o.json {
             println!("{value}");
         } else {
@@ -376,18 +379,7 @@ fn watch_snapshot(
         } else {
             fetch(Some(id))?
         };
-        // Keep every active agent and only the requested finished history.
-        let mut finished = 0;
-        if let Some(runs) = value["runs"].as_array_mut() {
-            runs.retain(|run| {
-                if run["finished_at"].is_null() {
-                    true
-                } else {
-                    finished += 1;
-                    finished <= history
-                }
-            });
-        }
+        issues::worker::limit_status_history(&mut value, history);
         // Inventory is emitted once rather than repeated for every worker.
         value.as_object_mut().unwrap().remove("workers");
         snapshots.push(value);

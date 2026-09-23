@@ -67,6 +67,13 @@ progress. `issue reopen NUMBER` resumes eligibility
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
 
+`hey-boss worker --json --id WORKER_ID --history 0 status` shows only active or
+pending attempts. Live paused or approval-waiting attempts remain visible;
+`finished_at` identifies terminated attempts, regardless of their state label.
+Use `--history 20` to include up to twenty recent finished attempts. The same
+limit applies to watch and streaming JSON output; the terminal dashboard's
+History tab remains available.
+
 ## Issue priority order
 
  Use `hey-boss issue move NUMBER --before OTHER`, `--after OTHER`,
