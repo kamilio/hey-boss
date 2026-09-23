@@ -668,7 +668,7 @@ fn project_metadata_migrates_old_databases_without_losing_history_or_numbers() {
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
 }
 
@@ -698,7 +698,7 @@ fn worker_schema_migrates_version_two_preserving_hidden_projects_and_history() {
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
 }
 fn git(cwd: &Path, args: &[&str]) {
@@ -1930,7 +1930,7 @@ fn schema_four_migration_initializes_order_without_losing_prs_claims_or_history(
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
 }
 
@@ -2112,7 +2112,7 @@ fn schema_five_migration_preserves_settings_order_claims_and_history() {
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
 }
 
@@ -2582,7 +2582,7 @@ fn schema_seven_subtask_migration_preserves_existing_issue_and_global_profile() 
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     f.run(
         "session-a",
@@ -2606,7 +2606,7 @@ fn schema_eight_graph_sync_migration_keeps_links_and_reinstates_safe_upsert() {
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     f.sql().execute_batch("INSERT INTO issue_subtasks SELECT * FROM issue_subtasks WHERE child_number=2 ON CONFLICT(project_id,child_number) DO UPDATE SET parent_number=excluded.parent_number;").unwrap();
     assert_eq!(f.run("session-a", &["view", "1"]), before);
@@ -2920,7 +2920,7 @@ fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss()
             f.sql()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
     }
 }
@@ -3007,7 +3007,7 @@ fn staged_upgrade_migrates_the_destination_state_before_replacement() {
         f.sql()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         f.run("session-a", &["view", "1"])["issue"]["title"],
