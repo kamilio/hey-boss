@@ -395,7 +395,7 @@ fn reservation_reports_machine_and_explicit_takeover_preserves_allocation() {
 fn cached_inventory_names_a_reserved_device_without_releasing_offline_work() {
     let f = Fixture::new("inventory");
     let db = f.db("controller");
-    db.execute_batch("CREATE TABLE fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'remote-machine');").unwrap();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'remote-machine');").unwrap();
     let machines = serde_json::json!({"devbox":{"host":"devbox","hostname":"Remote device","node":"remote-machine","state":"disconnected"}});
     db.execute(
         "INSERT INTO fleet_state VALUES('machines',?1)",

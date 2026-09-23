@@ -151,8 +151,13 @@ pub(super) fn write<T: Serialize>(output: &mut impl Write, value: &T) -> io::Res
     output.flush()
 }
 pub(super) fn read<T: for<'a> Deserialize<'a>>(input: &mut impl BufRead) -> io::Result<Option<T>> {
-    if input.fill_buf()?.is_empty() {
-        return Ok(None);
+    loop {
+        match input.fill_buf() {
+            Ok([]) => return Ok(None),
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
     }
     let mut header = [0u8; 4];
     input
@@ -167,4 +172,43 @@ pub(super) fn read<T: for<'a> Deserialize<'a>>(input: &mut impl BufRead) -> io::
         .read_exact(&mut encoded)
         .map_err(|e| io::Error::other(format!("Incomplete database frame: {e}")))?;
     Ok(Some(serde_json::from_slice(&encoded)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Read};
+
+    #[test]
+    fn interrupted_wait_keeps_the_same_response_frame() {
+        struct InterruptedOnce {
+            bytes: Cursor<Vec<u8>>,
+            interrupted: bool,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                self.bytes.read(output)
+            }
+        }
+        impl BufRead for InterruptedOnce {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.bytes.fill_buf()
+            }
+            fn consume(&mut self, amount: usize) {
+                self.bytes.consume(amount);
+            }
+        }
+        let mut bytes = Vec::new();
+        write(&mut bytes, &42).unwrap();
+        let mut input = InterruptedOnce {
+            bytes: Cursor::new(bytes),
+            interrupted: false,
+        };
+        assert_eq!(read::<i32>(&mut input).unwrap(), Some(42));
+        assert_eq!(read::<i32>(&mut input).unwrap(), None);
+    }
 }
