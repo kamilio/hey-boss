@@ -141,6 +141,9 @@ Worker output logs MUST reject these inode aliases before opening their
 descriptor or spawning a worker. Ordinary log append behavior MUST be preserved.
 Setup MUST also reject these aliases before writing the saved upgrade-source
 marker.
+Stored attachment downloads MUST reject main/WAL/shared-memory inode aliases
+before opening a non-SQLite descriptor and MUST preserve existing SQLite locks.
+Ordinary downloads MUST retain their content-integrity check and original bytes.
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 

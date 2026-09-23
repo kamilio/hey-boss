@@ -132,6 +132,63 @@ fn assert_database_locked(path: &std::path::Path) {
     );
 }
 
+#[test]
+fn downloading_an_attachment_alias_preserves_database_locks() {
+    let root = temporary_directory();
+    let path = root.join("issues.db");
+    let mut store = Store::open(&path).unwrap();
+    let request = |operation| {
+        serde_json::from_value(serde_json::json!({
+        "version":1,"project":{"id":"named:Locktest","name":"Locktest"},
+        "actor":{"id":"human:boss","kind":"human","machine":"test","host":"test","cwd":"/tmp","source":"test"},
+        "operation":operation
+    })).unwrap()
+    };
+    store
+        .execute(&request(
+            serde_json::json!({"action":"create","title":"Files","body":"","labels":[]}),
+        ))
+        .unwrap();
+    let uploaded = store
+        .execute(&request(serde_json::json!({
+            "action":"attachment","operation":{"command":"upload",
+            "target":{"kind":"issue","id":"1"},"name":"file.txt","data":"aGVsbG8="}
+        })))
+        .unwrap();
+    let id = uploaded["attachment"]["id"].as_str().unwrap();
+    let attachment = root.join("issues.attachments").join(id);
+    fs::remove_file(&attachment).unwrap();
+    let download = request(
+        serde_json::json!({"action":"attachment","operation":{"command":"download","id":id}}),
+    );
+    for suffix in ["", "-wal", "-shm"] {
+        let target = root.join(format!("issues.db{suffix}"));
+        for symbolic in [false, true] {
+            if symbolic {
+                symlink(&target, &attachment).unwrap();
+            } else {
+                fs::hard_link(&target, &attachment).unwrap();
+            }
+            let error = store.execute(&download).unwrap_err();
+            assert_database_locked(&path);
+            assert!(error.to_string().contains("must not alias"), "{error}");
+            fs::remove_file(&attachment).unwrap();
+        }
+    }
+    fs::write(&attachment, "hello").unwrap();
+    assert_eq!(store.execute(&download).unwrap()["data"], "aGVsbG8=");
+    assert_database_locked(&path);
+    drop(store);
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn temporary_directory() -> std::path::PathBuf {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
