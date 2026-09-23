@@ -46,6 +46,15 @@ the file's apparent size need not shrink. A disposable backup shrank to about
 cursor high watermark and replay identities remained identical. This is a
 measurement on a backup, not a report of live production compaction.
 
+At the September 23 04:34 UTC checkpoint, a fresh online backup and a separate
+disposable proof copy were retained. The proof preserved the full canonical
+snapshot, journal high watermark and replay identities across compaction.
+Production then completed SQLite `VACUUM` with the same database inode, shrinking
+from 402,132,992 to 186,552,320 bytes (about 384 to 178 MiB). Integrity and
+foreign-key checks passed afterward, and all three machines remained connected.
+No live database or sidecar file was replaced manually. Continued writes can
+change these sizes after the checkpoint.
+
 Heartbeat timestamps no longer rewrite large machine snapshots. Idle journal
 maintenance remains a reader. Machine activity now comes from one coherent WAL
 snapshot and reads the worker overview once. On a September 23 private copy
