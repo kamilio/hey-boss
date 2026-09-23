@@ -37,7 +37,8 @@ struct State {
 pub(super) struct Supervisor {
     pub ctx: Context,
     state: Mutex<State>,
-    persistence: Mutex<()>,
+    // Keep failed substantive saves dirty until a later update commits them.
+    persistence: Mutex<bool>,
 }
 impl Supervisor {
     pub fn new(ctx: Context) -> Result<Arc<Self>> {
@@ -62,7 +63,7 @@ impl Supervisor {
         let build = ctx.build()?;
         Ok(Arc::new(Self {
             ctx,
-            persistence: Mutex::new(()),
+            persistence: Mutex::new(false),
             state: Mutex::new(State {
                 machines,
                 local,
@@ -88,22 +89,29 @@ impl Supervisor {
         }
     }
     fn update(&self, host: &str, fields: Value) -> Result<()> {
-        let _persistence = self.persistence.lock().unwrap();
+        let fields = fields
+            .as_object()
+            .ok_or_else(|| invalid("Invalid fleet state update"))?;
+        let mut dirty = self.persistence.lock().unwrap();
         let machines = {
             let mut state = self.state.lock().unwrap();
             let m = state
                 .machines
                 .entry(host.into())
                 .or_insert_with(|| json!({"host":host}));
-            m.as_object_mut().unwrap().extend(
-                fields
-                    .as_object()
-                    .ok_or_else(|| invalid("Invalid fleet state update"))?
-                    .clone(),
-            );
+            *dirty |= fields
+                .iter()
+                .any(|(key, value)| key != "heartbeat" && m.get(key) != Some(value));
+            m.as_object_mut().unwrap().extend(fields.clone());
+            // Liveness is current in memory. Connection/worker/config changes
+            // save the latest timestamp with the durable snapshot.
+            if !*dirty {
+                return Ok(());
+            }
             json!(state.machines)
         };
         replica::state_set(&self.ctx.db()?, "machines", &machines)?;
+        *dirty = false;
         Ok(())
     }
     fn machine(&self, host: &str) -> Value {
@@ -1203,6 +1211,101 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDirectory(std::path::PathBuf);
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_supervisor() -> (TestDirectory, Supervisor) {
+        let directory =
+            TestDirectory(std::env::temp_dir().join(format!("hb-supervisor-{}", id().unwrap())));
+        std::fs::create_dir(&directory.0).unwrap();
+        let ctx = Context {
+            home: directory.0.clone(),
+            state: directory.0.clone(),
+            desired: directory.0.join("fleet.json"),
+            binary: std::env::current_exe().unwrap(),
+            path: directory.0.join("issues.db"),
+            node: "test-supervisor".into(),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        drop(crate::issues::Store::open(&ctx.path).unwrap());
+        replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
+        let app = Supervisor {
+            ctx,
+            persistence: Mutex::new(false),
+            state: Mutex::new(State {
+                machines: BTreeMap::new(),
+                local: vec![],
+                local_updated: 0.0,
+                events: VecDeque::new(),
+                sequence: 0,
+                epoch: "test".into(),
+                build: "test".into(),
+                desired_build: Value::Null,
+                connections: BTreeMap::new(),
+                waiters: BTreeMap::new(),
+                deploying: false,
+            }),
+        };
+        (directory, app)
+    }
+
+    #[test]
+    fn heartbeat_progress_does_not_rewrite_durable_machine_snapshots() {
+        let (_directory, app) = test_supervisor();
+        let workers = json!([{"id":"worker","runs":[{"summary":"x".repeat(800_000)}]}]);
+        app.update(
+            "remote",
+            json!({"state":"connected","heartbeat":1,"workers":workers}),
+        )
+        .unwrap();
+        let db = app.ctx.db().unwrap();
+        let saved = replica::state_get(&db, "machines", Value::Null).unwrap();
+        for heartbeat in 2..100 {
+            app.update("remote", json!({"heartbeat":heartbeat}))
+                .unwrap();
+        }
+        assert_eq!(app.machine("remote")["heartbeat"], 99);
+        assert!(saved == replica::state_get(&db, "machines", Value::Null).unwrap());
+        app.update("remote", json!({"state":"disconnected","error":"offline"}))
+            .unwrap();
+        let saved = replica::state_get(&db, "machines", Value::Null).unwrap();
+        assert_eq!(saved["remote"]["state"], "disconnected");
+        assert_eq!(saved["remote"]["heartbeat"], 99);
+        assert!(saved["remote"]["workers"] == workers);
+    }
+
+    #[test]
+    fn a_failed_machine_save_is_retried_even_when_the_fields_are_identical() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("CREATE TRIGGER reject_machine_save BEFORE INSERT ON fleet_state WHEN new.key='machines' BEGIN SELECT RAISE(ABORT,'synthetic persistence failure'); END;").unwrap();
+        let fields = json!({"state":"connected","applied_revision":"revision"});
+        assert!(app.update("remote", fields.clone()).is_err());
+        db.execute_batch("DROP TRIGGER reject_machine_save")
+            .unwrap();
+        app.update("remote", fields).unwrap();
+        let saved = replica::state_get(&db, "machines", Value::Null).unwrap();
+        assert_eq!(saved["remote"]["applied_revision"], "revision");
+    }
+
+    #[test]
+    fn identical_machine_updates_do_not_acquire_the_database_writer_lock() {
+        let (_directory, app) = test_supervisor();
+        let fields = json!({"state":"connected","applied_revision":"revision"});
+        app.update("remote", fields.clone()).unwrap();
+        let writer = app.ctx.db().unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // A write here would wait for the ten-second SQLite timeout and fail.
+        app.update("remote", fields).unwrap();
+        app.update("remote", json!({"heartbeat":42})).unwrap();
+        assert_eq!(app.machine("remote")["heartbeat"], 42);
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
 
     #[test]
     fn rolling_upgrade_accepts_saved_revision_only_for_identical_definitions() {
