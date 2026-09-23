@@ -5,29 +5,14 @@ description: Background notifications, project issues, and secrets kept out of a
 
 ## Notifications
 
-Notify once for substantial background results or essential blocking decisions. Keep active chat, routine progress, and tests in chat. One outcome sentence; brief details.
-
-Notification commands infer the project from Git/directory, or inherit
-`HEY_BOSS_ISSUE_PROJECT` in worker sessions. `--project` is optional and uses the
-same registry as `issue projects`: full IDs, unambiguous short names, or a new
-custom name. `--title` remains required.
-
+Notify once for substantial background results or essential blocking decisions. Ask yourself - should I page user for this? Keep active chat, routine progress, and tests in chat. One outcome sentence; brief details.
 ```sh
-hey-boss alert --project Atlas --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
-hey-boss update --project Atlas --title Review 'Please review.' --file PATH --comments
+
+hey-boss alert --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
+hey-boss update --title Review 'Please review.' --file PATH --comments
 ```
 
 Use `ask --sync` to wait, or `ask --async` then `wait TASK_ID`. Cancellation is never approval; do not automatically re-ask. Remote `pending` does not confirm delivery.
-
-## Web Inbox and issue relationships
-
-`hey-boss inbox` opens the shared web Inbox; `inbox --json` lists notices.
-The menu-bar Inbox opens the same page. The native Inbox window is removed;
-notification banners, questions, and document previews still work.
-Ordinary notices become read when opened. Questions and document reviews stay
-pending until answered, finished, or cancelled; cancellation is never approval.
-
-Add an optional issue relationship when creating a notice:
 
 ```sh
 hey-boss alert --project poe2 --title Ready 'Ready for review.' --issue 123
@@ -35,10 +20,6 @@ hey-boss alert --project poe2 --title Ready 'Ready for review.' --issue 123
 
 `--issue` defaults to the current Git/directory issue project; use
 `--issue-project FULL_ID --issue-host HOST` for an explicit remote issue.
-`HEY_BOSS_ISSUE_HOST` supplies the issue host when configured.
-Existing notices can be linked/unlinked in the web Inbox, with backlinks on issues.
-The relationship never claims/closes/reopens an issue, changes its content/revision,
-or completes a notice. Linked creations retain ordinary offline queue behavior.
 
 ## Secrets
 
@@ -51,27 +32,7 @@ hey-boss secret --field API_KEY -- python3 app.py
 (set -C; umask 077; hey-boss secret --field API_KEY --stdout > .env)
 ```
 
-Secrets bypass history/mobile/offline queues. Child output is suppressed; consumers must not log credentials. Never carry values through tool arguments, `$(...)`, `tee`, or tracing. Check only exit status/non-secret metadata. Keep files out of Git/context.
-
-Files must be private; existing keys, links, and tracked files are refused. Redirection requires a new private file; cancellation may leave it empty. File quoting is POSIX; use child environment mode for other dotenv parsers. Remote secrets need a live updated companion; destinations belong to the caller. Do not automatically retry cancellation.
-
 ## Issues
-
-Issue and artifact creation automatically records session/device/checkout origin
-and the creating tool invocation when available; no extra flags are needed.
-JSON details expose `origin`. The web Origin card opens the saved creator
-conversation at its invocation, including older runs outside recent activity;
-Created in this run links back to its issues and artifacts. Origins survive edits,
-retries, project moves and issue replica sync. Legacy origins are unknown;
-missing transcripts and disconnected devices are reported without guessing.
-
-Project defaults to the repository across worktrees. Fleet companions keep durable local replicas and sync automatically with their supervisor. Standalone queues require the same `--host` / `HEY_BOSS_ISSUE_HOST` to target another machine.
-
-Automatic discovery ignores local temporary agent folders and `.git` metadata
-directories. Legacy empty entries are omitted from the picker; empty metadata
-entries also release their project name. Saved issues, artifacts, mindmaps and
-project settings remain accessible. Worktrees share one repository project,
-including repositories without a remote.
 
 ```sh
 hey-boss issue list --unassigned --json
@@ -81,283 +42,47 @@ hey-boss issue claim 1
 hey-boss issue status 1 green --comment 'Checking what causes the reconnect failure.'
 hey-boss issue comment 1 --body 'Sleep drops the connection before the retry timer starts.'
 hey-boss issue close 1 --comment 'Fixed and verified'
-hey-boss issue web
 ```
 
-The web app always acts as Boss (`human:boss`). Assign human work with
+Assign human work with
 `hey-boss issue assign-to-boss NUMBER`; list it with `issue list --assignee boss`.
-Rename Boss globally with `hey-boss settings set --boss-name NAME`, or open
-Settings from the web profile badge. Use `hey-boss settings show` to read it.
-The profile is shared across projects in the issue store; the stable ID and
-assignments remain unchanged. Boss-assigned issues
-are excluded from worker pickup. Web list labels and assignees are clickable filters.
 
-Create a draft only when the user explicitly asks for a draft. Otherwise create an ordinary issue; do not infer draft status from planning, incomplete requirements, or exploratory discussion. Interactive mode is a human-facing terminal workflow. Agents must not start it unless explicitly asked.
+Use `issue create --title TITLE --draft` for a persisted draft without files or sessions, `issue edit NUMBER --draft` to draft an eligible issue, and `issue undraft NUMBER` to make it runnable. 
 
-Use `issue create --title TITLE --draft` for a persisted draft without files or sessions, `issue edit NUMBER --draft` to draft an eligible issue, and `issue undraft NUMBER` to make it runnable. Explicit human planning uses `create --interactive` or `edit NUMBER --interactive`, optionally with `--file PATH`. File-bound issues keep syncing every ten seconds after planning ends; assigned issues continue receiving plan edits.
-
-Claim before work; stop on conflict (exit 4). Never force another session's claim without authorization. Use stable `--agent` if needed. Workers and web discovery release open claims of verified dead local Codex/Claude processes after sixty seconds since their last recorded issue activity. Idle live agents and remote/unverifiable processes keep claims. Reclaim before resuming released work; `unassign` releases explicitly.
-
-Fleet denials distinguish `fleet_reserved` and `fleet_allocation_missing` (exit 4).
-Inspect without changes: `hey-boss issue allocation NUMBER --json`; add the same
-`--project` / `--host` context as the claim. Missing companion allocation may be
-stale. Inspect the supervisor with `issue allocation NUMBER --host SUPERVISOR`.
-If unreserved or reserved for your machine, resume with
-`issue claim NUMBER --host SUPERVISOR --agent SAVED_ID`. A successful supervisor
-claim reserves the caller's machine atomically. Companions sync automatically;
-there is no one-shot sync command. Wait for local allocation before offline work.
-For another device's reservation, resume there or ask Boss for a handoff.
-Never change worker controls to discover allocation. `--force` is an explicit
-takeover override requiring authorization; never use it to resolve an allocation
-or synchronization denial. Ordinary claims protect offline reservations.
-
-The reserved `yolo` label is controlled only by Boss in the web UI's **Assign
-tags** picker, or removed with the tag's × button. Its lightning icon and amber
-color distinguish it from ordinary tags. Do not add/remove it with CLI labels or batch triage.
-YOLO grants full access without sandboxing or approval prompts to the next worker
-attempt, including resumed sessions. Boss can disable it to restore Auto on the
-next attempt; running agents keep their current permissions.
-
-While you own an issue, publish a short status after claiming, when the next step
+While you own an issue, publish a one-line short status after claiming, when the next step
 or risk changes, and at least every ten minutes during active work:
 `hey-boss issue status NUMBER green --comment 'The fix passes tests. Checking the phone layout next.'`
-Use **green** for on track, **orange** for a risk you are working through, and
-**red** when trouble prevents progress. Write one sentence in simple human
-language: what is happening and, when useful, what comes next. Avoid tool logs,
-file lists, jargon, and repetitive updates. Status comments are one line, up to
-500 characters. Set the final status before closing or handing off ownership.
-Anyone can update an open, non-draft issue; posting status or a comment warns
-when you are not its owner and reports the owner's process presence when known.
-Status never claims, blocks, closes, or changes an issue's revision or fleet
-allocation. The web is a read-only viewer.
-`issue status-history NUMBER --limit 20 --offset 0` reads its separate history.
-Use ordinary **comments** for lasting findings, decisions, essential questions,
-and final verification. Keep routine progress in status so comments stay useful.
 
 `issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
 its claim; `list --state blocked` finds paused work. Add repeatable `--by NUMBER`
 to link the issues that must close first. `issue blocked-by NUMBER BLOCKER...`
-sets these links on an existing issue; omit BLOCKERs to remove them. Use
-`--if-version N` to guard concurrent edits. Lists and details expose `blocked_by`
-and clickable links. Dependency cycles and links outside the project are refused.
-Unfinished subtasks use the same Blocked state. Dependency blocks reopen
-automatically when all blockers finish or are unlinked, and return if a blocker
-is reopened. Manual blocks still require explicit reopening. Approval holds
-also appear as Blocked. Blocking should be rare:
+sets these links on an existing issue; omit BLOCKERs to remove them. Blocking should be rare:
 make every effort to resolve the issue, raise questions via `hey-boss ask`, and
 ask the user for help before giving up. Explain the blocker and what enables
-progress. `issue reopen NUMBER` resumes eligibility with a fresh retry budget.
-Workers automatically block after five unsuccessful launched attempts per open
-cycle; cancellations, interruptions and unlaunched reservations do not count.
-Blocked subtasks continue to hold their parent. Worker Retry does not reopen
-blocked issues; reopen explicitly when the blocker is resolved.
+progress. `issue reopen NUMBER` resumes eligibility
 
-Reuse `--request-id` for identical uncertain retries; `view` reads current state; `edit --if-version N` protects concurrent changes. Test with separate `HEY_BOSS_ISSUE_DB` and `web --no-discovery`.
-
-`issue reopen NUMBER --if-version N` reopens only if the issue still has the version
-read with `view`, including on `--host`. A mismatch returns conflict (exit 4) before
-changing state, assignment, PR links or history. Omit the guard for unconditional
-reopening. Retry an identical successful `--request-id` to receive its original
-result, even if the issue has changed since.
-
-## Guarded issue triage batches
-
-Use `issue batch --file triage.json --dry-run --json` to preview and
-`issue batch --file triage.json --request-id review-head-ID --json` to apply.
-`--file -` reads stdin. Input is a JSON array of up to 100 unique issues / 1 MiB:
-
-```json
-[{"number":12,"if_version":7,"expected_assignee":"codex:session","add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"unassign"}]
-```
-
-Every entry requires a version and exact owner guard (`null` means unassigned).
-`assignment` is `keep` (default), `unassign`, or `boss`; arrays default empty.
-For caller-verified ready work, invert those labels and use `boss`. Guards
-authorize handing off the exact expected claim, including another actor's;
-newer claims and unclaimed worker reservations are protected. The entire array
-is atomic within one project/authority. Any rejection blocks all changes;
-CLI exit 4 retains compact JSON `accepted:false`, `applied:false`, ordered
-`results` with `rejected` errors and `blocked` entries. Success returns compact
-before/after labels, owner and version; each changed issue advances once.
-Preview saves nothing and forbids a request ID. Applying requires one; identical
-retries return the original accepted or rejected result. Changed payloads conflict;
-reassess rejected guards with fresh reads and a new ID. Batch never reviews,
-merges, closes issues or controls workers; the caller assesses readiness.
-Use `--host SUPERVISOR` from fleet companions: replica stores reject batches
-because offline row replay cannot preserve atomicity. SSH sends one group with
-no local fallback; separate authorities have separate transactions.
-
-## GitHub issue imports
-
-`hey-boss issue drain-github --dry-run` previews issues created by the authenticated
-GitHub user. Omit `--dry-run` to copy them into the current project and delete each
-GitHub original after read-back verification and a source-change check. Requires
-Python 3 and authenticated `gh`. Use `--author LOGIN`, `--all-authors`, `--repo
-OWNER/REPO`, `--project PROJECT`, or `--state all` to override the defaults.
-Retries reuse the copy; conflicts retain the original. Do not change the target
-project when retrying. GitHub deletion is unconditional, so a last-moment edit can
-still race the final check. See `docs/github-drain.md` in the source repository.
 
 ## Issue workers
 
-Issues labeled `task:plan` are artifact tasks. Customize their Plan prompt in
-project settings; it replaces implementation and Git delivery with a plan
-saved as issue-linked artifacts. Use a mindmap for related output and draft
-follow-up issues for proposed implementation; do not start them. These tasks
-close on successful artifact delivery even in PR-enabled projects. The web
-editor and Quick Add offer Implement and Plan. Older `task:research` issues use
-the Plan prompt; Research is no longer a separate task.
-
-Use **Supervisor → Worker → Agent** consistently: the supervisor coordinates the
-fleet, workers pick issues and manage agent lifecycle/retries, and agents are
-Codex coding sessions. A machine companion synchronizes its replica and applies
-worker controls. `fleet supervisor` and `fleet companion` run these background
-services; `fleet setup` manages their installation.
-
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
-`--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory. Agents continue allocated work offline and replay durable changes on reconnect. `/agents` groups tasks by project with device labels and separate live conversation pages. Saved requests, replies and tool activity load in pages; disconnected tasks show their last known state. Paired web devices read through the authenticated supervisor bridge. Manage devices contains service controls; `/workers` remains an alias; `fleet status` shows the same fleet in the CLI. The terminal shows the
-queue host and database.
-In a live Agents conversation, **Steer** adds an instruction without stopping it.
-Choose **This agent** for a one-session message, **This issue** to also save it in
-the issue requirements, or **This project** to also append it to the base project
-instructions. Other agents using project instructions receive the update; worker
-overrides remain in effect. Queue acceptance is not delivery: confirmation appears
-in the conversation. Retries reuse the request ID to avoid duplicate instructions.
-
-In a live Agents conversation, **Take over** stops only that agent and assigns
-its issue to Boss. Once stopped, **Copy command** provides a terminal resume
-command with SSH and the checkout directory for remote sessions. Paired devices
-support the same action. Other agents and worker pickup settings are preserved.
-Use `worker --host HOST --directory /remote/checkout` (or set `HEY_BOSS_ISSUE_HOST`)
-to run the worker and its Codex sessions on the authoritative SSH host. New remote
-workers require a remote checkout path (or `--all-projects` to discover known
-checkouts); remote status/stop/pause also work. Every worker owns its slots and
-filters, without shared project/global caps. `worker watch` observes all existing workers on a machine every two seconds without starting or controlling them; `worker --json watch --count 3` emits three newline-delimited JSON records with `observed_at`, `workers`, and per-worker `snapshots` containing queue counts, active runs and recent events. Use `--id ID`, `--history 5` or `--host HOST` before `watch` to select a worker, include finished attempts, or observe an SSH companion. Ctrl-C ends continuous watches. Disconnections fail without local fallback. `worker status` shows slots, pipeline, runtimes and
-activity. Active agents and recent history are separate; `--history 0` hides
-finished attempts. Open, unassigned unsuccessful issues retry automatically after
-a delay of 30 seconds to five minutes. Codex command/network/file/permission
-approvals route to issue-linked Inbox questions, retaining the live session and
-claim. Explicit approval or decline continues that session; command/file approval
-applies once and permissions are limited to the current turn. Cancel/dismiss,
-unsupported input and unavailable Inbox require explicit retry. Stopping a worker
-cancels its pending approval questions. Stopping/restarting workers stops owned agents and releases unfinished claims for immediate pickup; killed workers are recovered the same way. Pickup resumes the latest unfinished Codex session on the same machine and checkout, even with a new worker ID, and sends the original prompt template again so the agent claims before continuing. Timeout retries also resume; completed attempts start fresh if reopened, and existing claims block pickup. Resume failures retain the saved session ID for retry. Routine CLI replacements keep pickup running and reload at a natural idle point. For emergency draining only, create `issues.db.drain-for-update` beside the machine's issue database (append `.drain-for-update` to a custom `HEY_BOSS_ISSUE_DB` path). Workers awaiting an update stop pickup and finish active agents; remove the marker to resume pickup or after the update. The marker persists and is local to each machine. Older running workers adopt this behavior after their first reload.
-`worker pause ID` drains, `worker stop ID` stops its sessions, and
-`worker --id ID` restores settings. Standalone workers launch from the CLI. Fleet controls persist desired intent and can resume or restart managed workers through the web app. Use `worker restart ID` locally or `worker --host HOST restart ID` from the supervisor machine; `fleet signal HOST ID restart` also works. These queue durable signals, retain the worker ID/settings, and keep the supervisor and companion running. Acknowledgment requires the replacement to register. Failed restarts retry with backoff; a new stop supersedes unfinished restart intent.
-Pickup reserves an unassigned issue; the default ten-minute manual claim window (`--claim-timeout`) starts with the first model activity. Saved workers retain their configured timeout; start with `--id ID --claim-timeout 600` to update an older two-minute setting. Model startup has a separate fifteen-minute bound;
-**the agent must claim manually** using `hey-boss issue claim NUMBER`.
-Claim output includes project instructions and PR attachment commands.
-PRs are disabled by default; project settings or `worker --prs` enable them.
-Attach one or more with `hey-boss issue pr add NUMBER URL`; list/remove through
-`issue pr list/remove`. They remain visible in CLI and UI.
-Record a link's role with `issue pr add NUMBER URL --purpose fix|prerequisite|supporting-evidence|unspecified`.
-Use `issue pr classify NUMBER URL --purpose PURPOSE` to change an existing link
-without reattaching it. Older links are `unspecified`; adding an existing URL
-preserves its purpose. `view` and `pr list` JSON expose `purpose`. Review every PR,
-using purpose to distinguish merge requirements from supporting material;
-classification alone never closes an issue or assigns it to Boss.
-In PR workflow mode, keep the issue open until its actual fix PR is merged.
-Passing CI or a ready-for-review handoff is not a merge. Continue the existing
-session through required reviews, feedback, findings and conflicts. Only when
-fully merge-ready, comment with verification and the remaining merge step, then
-`issue assign-to-boss NUMBER` and report completed; Boss ownership prevents worker
-pickup. If blocked, report blocked; do not hand incomplete work to Boss. Worker
-completion in PR mode preserves an open issue and assigns it to Boss rather than
-closing it. Custom PR prompts inherit these lifecycle rules. Explicit source/group
-closure and non-PR completion can still close normally. Supporting evidence PRs
-do not all need to merge. No automatic merging is performed.
-Prefix the prompt with `/goal` to enable native Codex goals; no toggle is needed.
-A bare `/goal` uses the default instructions. Issue commands inherit the worker project. The shared prompt defaults to `Claim and implement` followed by the backtick-wrapped
-`{{issue_command}}`. Project settings assembles shared instructions + the workspace preview + selected
-delivery branch. The workspace selector only previews a worker choice.
-Worktree permission and PR mode default off. Each branch has a code default and an optional
-project override; **Use default** clears an override. Workers use the existing checkout
-by default. `worker --worktree` selects worktrees only when the project allows them;
-disabling permission prevents worktree use for new tasks, including saved workers.
-`--prs` / `--no-prs` override project delivery choices. Worktree mode
-instructs the agent to create a dedicated Git worktree before editing.
-Prompts can use `{{worktree_name}}` and `{{worktree_path}}` for a deterministic
-branch/directory name and its sibling checkout path. Names use the project,
-up to 15 characters of the title slug, and issue number. The default prompt
-reuses the same worktree and branch on retry or resume. Renaming a project or
-issue changes the suggested name.
-Without PRs, delivery commits and pushes main when a remote exists (commit only
-otherwise); PR mode opens and attaches every PR. `{{commit_instruction}}` is
-retired and stripped from legacy shared templates. A bare `/goal` uses default
-shared instructions plus selected branches.
-Use `{{create_issue_command poe-code}}` in custom instructions to expand a create
-command targeting poe-code explicitly, including title/Markdown placeholders.
-Replace those with the report. Full project IDs and names with spaces work;
-omit the target to create in the current project. Preview and claim output share
-this expansion and the worker's authoritative issue DB.
-Devbox workers use their local authoritative issue DB and continue while the laptop is
-disconnected. Ordinary updates are durably queued by the companion and do not delay
-completion, pickup, or shutdown. Replay is FIFO with acknowledgments and exponential
-backoff; duplicates after acknowledgment loss are acceptable. Explicit human review
-or approval waits still require a reply.
-Test against an isolated DB and Inbox socket. Approval decisions must be explicit;
-cancellation is never approval. MCP forms offer an explicit ‘Continue without
-this tool’ choice that cancels only the tool request and preserves the running
-session; form values and credentials are never collected. Other unsupported
-input requests block for manual resumption. Save delivery and verification
-evidence in an issue comment before optional cleanup, and run cleanup separately
-from read-only Git, CI and verification commands.
+`--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
 
 ## Issue priority order
 
-Web drag-and-drop, filtered/paginated CLI lists, and worker pickup share a persistent
-project queue order. Use `hey-boss issue move NUMBER --before OTHER`, `--after OTHER`,
-or omit the anchor to move to the end. UI-created issues go to the top by default;
-the editor and Quick Add offer **Add to bottom** (⌘⇧B / Ctrl+Shift+B).
-CLI-created issues append. Lifecycle changes keep
-position. Each worker reserves from fresh ordered SQLite data, respecting tags
-and claims. Concurrent browser moves reject stale queue revisions and refresh.
+ Use `hey-boss issue move NUMBER --before OTHER`, `--after OTHER`,
 
-## Reference
 
-Worker checkout selection accepts repeatable `-C PATH` / `--cwd PATH` (`--directory`
-is an alias). Multiple paths select their repository projects and save a distinct
-checkout for each; repeated `--project` restricts pickup. With `--host`, paths are
-resolved on that host. Saved `--id` settings retain the mapping through restart.
-Do not combine checkout paths with `--all-projects` or select two checkouts of the
-same project for one worker.
-
-`hey-boss upgrade` updates this installation and every registered SSH companion.
-Use `--source /path/to/hey-boss` to explicitly install a development snapshot and
-remember its checkout location. Without `--source`, upgrades archive committed
-main, fetching upstream even for remembered checkouts; dirty changes are never
-implicitly installed. Installers queue per machine, refuse older or unrelated
-commits, and reject development snapshots superseded while queued. `--force`
-never bypasses ordering. Reports include source/build receipts and final fleet
-verification; `superseded` means an intervening upgrade changed a verified host.
-`--check` only reports
-build mismatches; `--local-only` or repeatable `--host HOST` limits targets.
-Matching source build IDs with matching provenance skip compilation. Failed hosts
-are reported separately; rerun after reconnecting. Rust, Git and tar must be
-available on each target.
-
-`hey-boss COMMAND --help`; companions may need `~/.local/bin/hey-boss`.
-Edit only the repository skill; rebuild/install the Mac CLI, then `hey-boss companion sync-skill`. Existing chats must reload.
+`hey-boss COMMAND --help`; 
 
 ## Subtasks
 
 `issue subtask create PARENT --title TITLE --body MARKDOWN` creates and links an
 ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
-A child has one parent in the same project; cycles are rejected. Relationships
-support eight levels and 100 direct children. Each issue keeps its Markdown,
-labels, ownership and PRs; closing or deleting a parent never closes its children. Siblings follow the
-shared queue order. Parents are Blocked by unfinished reachable descendants, even
-through closed children, while deleted subtrees do not block pickup. Blocked
-parents cannot be claimed; closing the last descendant resumes eligibility. Use parent/child version checks and identical request IDs for
-uncertain retries. Fleet journals retain offline edits and conflicting payloads.
 
 ## Mindmaps
 
-`hey-boss mm` shows a project's nested outline. Author from the CLI; `mm web` is a
-read-only viewer. `--project`, `--host`, `--agent`, `--json`, `--request-id` and
-mutation `--if-version` follow issue conventions. Use an isolated issue DB in tests.
-Mindmaps are not replicated to fleet companions; use `--host SUPERVISOR` (or
-`HEY_BOSS_ISSUE_HOST`) there for authoritative reads/edits and the web viewer.
+`hey-boss mm` shows a project's nested outline. Author from the CLI;
 
 ```sh
 hey-boss mm add 'Release' --id release
@@ -371,85 +96,6 @@ hey-boss mm show --bodies preview --json
 hey-boss mm web
 ```
 
-Aliases are project-local; qualify cross-project selectors as `PROJECT::alias`.
-Links add missing typed `issue:NUMBER`, `pr:URL` or `notice:TASK_ID` references atomically.
-Descriptions are optional; A depends-on B means A waits for B. Nesting stays within
-one project; cycles are rejected. Automatic issue→PR relationships come from
-`issue pr add/remove`. Only confirmed pending Inbox notices appear; an unavailable
-Inbox is reported explicitly. Map reads never complete notices or change issues.
-`mm batch --file edits.json` (or `--file -` for stdin) atomically applies a JSON
-array of `edit` (`node`, `title` or `clear_label`), `alias` (`node`, `alias`),
-`move` (`node`, optional `under`/`before`/`after`), and `link` (`from`, `to`, `kind`,
-optional `description`) entries. Each object requires the
-exact `command` discriminator, not `action`; `mm batch --help` shows the complete
-format and copy-ready examples. For existing selectors, save this as `edits.json`:
-
-```json
-[
-  {"command":"edit","node":"issue:12","title":"Keep replies safe"},
-  {"command":"alias","node":"followup","alias":"reply-followup"},
-  {"command":"move","node":"followup","under":"existing-topic"},
-  {"command":"link","from":"followup","to":"issue:12","kind":"depends-on","description":"Replies need this fix"}
-]
-```
-
-```sh
-hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
-hey-boss mm batch --file - --dry-run --if-version 42 --json < edits.json
-hey-boss mm batch --file edits.json --if-version 42 --request-id organize-replies --json
-```
-
-Replace 42 with the map version from `mm show --json`. Preview with `--dry-run`
-and guard the whole batch with `--if-version`. All selectors bind before edits;
-use the original alias or stable node ID in later entries, never a new alias
-introduced by an earlier entry. Omitted/null `alias` clears it; omitted/null
-`under` moves to the root; omitted sibling anchors append. Use only one of
-`before`/`after`. `clear_label:true` restores an issue's title and excludes `title`.
-Unknown fields/commands and body edits are rejected. Limits: 1 MiB/10,000 entries.
-Invalid nodes, duplicate requested labels/aliases, cycles and stale versions roll
-back everything. Link entries follow `mm link`: cross-project endpoints and missing
-typed resource references are supported; missing aliases/IDs and self-links fail.
-Required `kind` is nonblank, at most 64 bytes, without control characters;
-`pull-request` is reserved. `description` is at most 16 KiB; null, omission or
-blank text clears it. Invalid descriptions/kinds reject the whole transaction.
-JSON returns compact `changed_nodes` and `changed_links` before/after metadata
-(stable `from`/`to`/`kind`, description objects; null before means a new link),
-one resulting version and `affected_projects`. Each affected map advances once;
-the single guard applies to the selected map. Empty/net no-op batches do not
-advance versions. Identical
-`--request-id` retries are safe after alias changes; dry runs cannot use request IDs.
-
-`mm move NODE --under PARENT` rehomes a node; `--before/--after` reorder siblings.
-`mm alias NODE NAME` changes a readable alias; `--clear` removes it without changing
-the generated node ID or links. Aliases must remain unique within their project.
-`mm pr URL --title LABEL` gives a PR a readable label; `mm edit NODE --title LABEL`
-changes it while preserving URL/attachments/dependencies. Issue and notice text stays
-live; issue and PR nodes accept title edits only. `mm edit issue:12 --title LABEL`
-sets a map-only issue label; `mm edit issue:12 --clear-label` restores its live
-title. Details retain the original title and search matches both titles.
-`mm issue NUMBER --title LABEL` sets an initial map-only label atomically with
-creation and nesting, using one version guard/increment. On an existing reference,
-it updates only the label; supplied alias/parent must match (use alias/move to
-change them). Omitted placement is preserved. Matching labels are no-ops;
-identical request-ID retries return the original result. Cross-project references
-support the same labels. Without --title, duplicate references remain errors.
-`view` prints the PR URL and export links its label.
-`view NODE --bodies preview|none|full` controls focused text reads (default full).
-Live issue assignments appear in the viewer and `view`; viewer search matches
-assignment names/IDs and state. Show less fetches a fresh preview after a full read.
-The web viewer opens a branching map with pan/zoom, collapsible branches and a
-clickable overview. Select cards for live details and relationships; Outline
-switches to nested reading. Search reveals matches without moving keyboard focus.
-Previous/next search buttons and Enter/Shift+Enter cycle through matches.
-`mm remove NODE --recursive` removes a subtree and its graph links, preserving resources.
-Terminal outlines omit bodies by default; JSON defaults to full bodies. Use
-`mm view NODE` for one full live node, `show --bodies preview|none|full` to control
-map body size, and `export` for complete Markdown. The viewer loads 512-character
-previews and fetches full bodies on demand; search covers previews and loaded text.
-Reads have a 32 MiB response budget. If a complete map exceeds it, use preview/none
-bodies, `view NODE` for text, or `links NODE` for a focused read with bodies omitted.
-Mutations retain all saved content regardless of read size.
-
 ## Artifacts
 
 `hey-boss artifact` manages persistent project Markdown documents in the issue store.
@@ -459,22 +105,11 @@ Use `create --title TITLE --file plan.md` (or `--body`, '-' for stdin), `list --
 `unlink ID --issue NUMBER` or `--node NODE` preserves it. `links` reads resource attachments.
 `comment ID --body TEXT --quote SELECTED_TEXT` or `--parent COMMENT_ID` adds discussions.
 `resolve ID COMMENT_ID` and `--reopen` retain thread history. `archive/restore ID --if-version N`
-retain stable references. Project/host/agent/request IDs follow issue conventions.
-Use the authoritative supervisor host from companions; artifacts, like mindmaps, are not
-fleet issue replicas. Web/Fly use existing project authentication and the supervisor bridge.
-Test using a separate `HEY_BOSS_ISSUE_DB`. Interrupted mutations must retry the same request ID
-and payload; stale document revisions must be merged explicitly rather than overwritten.
+retain stable references. 
 
 ## URL lookup
 
-`hey-boss lookup 'URL'` reads the resource identified by a copied web link:
-issues, artifacts, mindmap nodes, Inbox notices, agent conversations and their
-collection pages. Quote URLs containing `&`. `--json` includes `route` plus the
-normal resource result. Lookup is read-only, including for unread notices.
-Explicit URL project context overrides worker defaults; `--project` is a fallback.
-Issue resources use `--host`, URL fragment `host`, then `HEY_BOSS_ISSUE_HOST`.
-Inbox uses the connected desktop; an agent URL's host is its owning device.
-The source URL origin is not fetched. Invalid routes and missing items fail.
+`hey-boss lookup 'URL'` reads the resource identified by a copied web link
 
 ## File attachments
 
@@ -483,8 +118,4 @@ The source URL origin is not fetched. Invalid routes and missing items fail.
 for mindmap nodes and artifacts. `list --issue NUMBER --json` exposes file IDs,
 filenames, sizes and SHA-256. `download FILE_ID` materializes a private temporary
 copy on the caller's machine; `--output PATH` selects a filename or existing
-directory. Existing files are never overwritten. `remove FILE_ID` deletes the file.
-Project/host/actor/request-ID conventions match issues. From fleet companions use
-`--host SUPERVISOR`; file contents are not part of issue replica row sync. Reuse
-identical request IDs for uncertain upload/removal retries. The web resource views
-support file selection, drag-and-drop upload, download and confirmed removal.
+directory.
