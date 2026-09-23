@@ -47,7 +47,7 @@ fn rejects_invalid_payloads_and_bounds_hung_commands() {
 #[test]
 fn passes_worker_id_as_literal_argument_and_cancels_promptly() {
     let client = client(
-        "test \"$1\" = worker && test \"$2\" = --json && test \"$3\" = --id && test \"$4\" = 'a; echo injected' && test \"$5\" = status || exit 2\nprintf '{\"ok\":true,\"workers\":[],\"runs\":[]}'",
+        "test \"$1\" = worker && test \"$2\" = --json && test \"$3\" = --id && test \"$4\" = 'a; echo injected' && test \"$5\" = --history && test \"$6\" = 20 && test \"$7\" = status && test \"$#\" = 7 || exit 2\nprintf '{\"ok\":true,\"workers\":[],\"runs\":[]}'",
         "args",
     );
     let cancelled = Arc::new(AtomicBool::new(false));
