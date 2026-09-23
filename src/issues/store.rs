@@ -442,6 +442,26 @@ fn validate(r: &Request) -> Result<()> {
                 reserved(&edit.remove_labels)?;
             }
         }
+        Operation::ReleaseAllocation {
+            expected_machine,
+            if_version,
+            ..
+        } => {
+            if !r.actor.as_ref().is_some_and(|actor| {
+                actor.id == "human:boss"
+                    && actor.kind == "human"
+                    && matches!(actor.source.as_str(), "web interface" | "phone")
+            }) {
+                return Err(Error::new(
+                    "forbidden",
+                    "Only Boss in the web UI can release a fleet reservation",
+                ));
+            }
+            identifier(expected_machine, "reserved machine ID", 256)?;
+            if *if_version < 1 {
+                return Err(Error::invalid("Issue version must be positive"));
+            }
+        }
         Operation::SetYolo { if_version, .. } => {
             if !r.actor.as_ref().is_some_and(|actor| {
                 actor.id == "human:boss"
@@ -1267,6 +1287,19 @@ impl Store {
                 identifier(machine, "machine ID", 256)?;
                 json!({"ok":true,"project":project,"allocation":super::fleet::allocation(&tx,&project.id,*number,Some(machine))?})
             }
+            Operation::ReleaseAllocation {
+                number,
+                expected_machine,
+                if_version,
+            } => release_allocation(
+                &tx,
+                &project,
+                actor.unwrap(),
+                *number,
+                expected_machine,
+                *if_version,
+                now,
+            )?,
             Operation::View { number } => {
                 let issue = get_issue(&tx, &project.id, *number, true)?;
                 if issue.deleted_at.is_some()
@@ -1615,6 +1648,63 @@ fn create_issue(
         &json!({"issue":issue}),
     )?;
     Ok(issue)
+}
+
+/// Executed in the store's immediate transaction; the confirmed reservation and
+/// issue revision must both still match before opening pickup to another device.
+fn release_allocation(
+    db: &Connection,
+    project: &Project,
+    actor: &Actor,
+    number: i64,
+    expected_machine: &str,
+    version: i64,
+    now: i64,
+) -> Result<Value> {
+    let supervisor: bool = db.query_row(
+        "SELECT role='controller' FROM fleet_meta WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if !supervisor {
+        return Err(Error::conflict(
+            "Release fleet reservations on the supervisor; a replica cannot release them",
+        ));
+    }
+    let issue = get_issue(db, &project.id, number, false)?;
+    if issue.version != version {
+        return Err(Error::conflict(
+            "Issue changed; refresh before releasing its reservation",
+        ));
+    }
+    let active: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)", params![project.id, number], |r| r.get(0))?;
+    if issue.assignee.is_some() || active {
+        return Err(Error::conflict(
+            "Stop the active worker attempt and unassign the issue before releasing its reservation",
+        ));
+    }
+    let changed = db.execute(
+        "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node=?3",
+        params![project.id, number, expected_machine],
+    )?;
+    if changed == 0 {
+        return Err(Error::conflict(
+            "Fleet reservation changed; refresh before releasing it",
+        ));
+    }
+    db.execute("UPDATE issues SET version=version+1,updated_at=max(updated_at,?3) WHERE project_id=?1 AND number=?2", params![project.id, number, now])?;
+    event(
+        db,
+        &project.id,
+        number,
+        &actor.id,
+        "allocation_released",
+        now,
+        &json!({"machine":expected_machine}),
+    )?;
+    Ok(
+        json!({"ok":true,"project":project,"changed":true,"issue":get_issue(db,&project.id,number,false)?,"allocation":super::fleet::allocation(db,&project.id,number,None)?}),
+    )
 }
 
 pub(super) fn event(
