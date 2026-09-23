@@ -6,6 +6,24 @@ use std::time::Duration;
 
 const INTERVAL: Duration = Duration::from_secs(60);
 
+// LaunchAgents do not inherit the interactive shell's Homebrew/user PATH.
+fn gh_program(home: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .chain([
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            "/opt/homebrew/bin".into(),
+            "/usr/local/bin".into(),
+        ])
+        .map(|directory| directory.join("gh"))
+        .find(|path| {
+            path.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .unwrap_or_else(|| "gh".into())
+}
+
 fn selector(url: &str) -> Option<(String, u64)> {
     let tail = url.strip_prefix("https://github.com/")?;
     let parts: Vec<_> = tail.trim_end_matches('/').split('/').collect();
@@ -71,6 +89,7 @@ fn poll(
         // Separate from the daemon-owned cache, with the same conditional reads,
         // request queue and GitHub backoff supplied by the embedded hey-gh SDK.
         let resolved = runtime.block_on(Client::from_gh(Config {
+            gh_program: gh_program(&ctx.home),
             cache_path: ctx.state.join("pr-monitor.sqlite"),
             request_timeout: Duration::from_secs(10),
             queue_timeout: Duration::from_secs(15),
