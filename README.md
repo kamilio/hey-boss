@@ -966,6 +966,13 @@ Issue lists and details show each issue's worker agent launch count. Hover or fo
 
 In the issue list, the arrow beside an assigned agent opens that session's conversation in Agents, including its owning device and latest recorded attempt for the issue. The assignee badge still filters the list. Assignments without recent recorded history show an availability explanation.
 
+Use **Move to draft** in an open or blocked issue's Readiness section, or
+`hey-boss issue edit NUMBER --draft`, to refine its scope with agent pickup paused.
+Drafting a blocked issue clears its manual block and keeps linked blockers and
+subtasks. Marking it ready checks those dependencies again; unfinished work returns
+it to Blocked. Drafting requires project drafts to be enabled and no assignment or
+active worker reservation.
+
 Quick add issues with **⌘⇧K** (Mac) or **Ctrl+Shift+K** from any web page,
 including over an open editor. On Mac, **⌘⌃⌥⇧I** opens a native Spotlight-style
 panel from any application without opening the browser; the menu bar also has

@@ -920,7 +920,7 @@ async function resolveComment(button) {
   }
 }
 function draftUnavailable(issue, enabled) {
-  if (issue?.state && issue.state !== "open") return "Reopen this issue before moving it to draft.";
+  if (issue?.state === "closed") return "Reopen this issue before moving it to draft.";
   if (issue?.assignee) return "Unassign this issue before moving it to draft.";
   if (enabled === false) return "Drafts are disabled in project settings.";
   return "";
@@ -935,8 +935,8 @@ function renderReadiness(value) {
   const status = i.state === "blocked" ? "Blocked · pickup paused" : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
   const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
   const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
-  const note = i.state === "blocked" ? "Resolve linked blocking issues to resume automatically, or reopen after resolving a manual blocker." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
-  return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${renderAllocation(value)}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${i.draft || i.state !== "open" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
+  const note = i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
+  return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${renderAllocation(value)}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${(i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
 }
 function issueStateActions(issue) {
   const reopen = issue.state !== "open";
@@ -948,7 +948,7 @@ function issueStateActions(issue) {
 function renderDraftNotice(issue) {
   if (issue.state === "blocked" && !issue.deleted_at) return `<section class="blocked-notice" aria-label="Blocked issue"><div>${icon("blocked")}</div><div><h2>This issue is blocked</h2><p>Workers won’t pick up this issue. Resolve the issues linked below to resume automatically, or reopen after resolving a manual blocker.</p></div><button type="button" class="button" data-action="reopen" ${issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon("refresh")}Reopen issue</button></section>`;
   if (!issue.draft || issue.deleted_at || issue.state !== "open") return "";
-  return `<section class="draft-notice" aria-label="Draft readiness"><div class="draft-notice-icon">${icon("edit")}</div><div><h2>This issue is a draft</h2><p>Agents won’t pick up this issue until you mark it ready.</p><p id="draft-error" class="form-error" role="alert" hidden></p></div><button type="button" class="button primary" data-draft-action="ready">${icon("check")}Mark ready</button></section>`;
+  return `<section class="draft-notice" aria-label="Draft readiness"><div class="draft-notice-icon">${icon("edit")}</div><div><h2>This issue is a draft</h2><p>Agents won’t pick up this issue until you mark it ready.</p>${issue.blocked_by?.length ? "<p>Unfinished blockers are kept. Marking ready will return this issue to Blocked until they’re resolved.</p>" : ""}<p id="draft-error" class="form-error" role="alert" hidden></p></div><button type="button" class="button primary" data-draft-action="ready">${icon("check")}Mark ready</button></section>`;
 }
 let updateIssueProgress;
 function mountIssueProgress(issue) {
@@ -1319,14 +1319,14 @@ function updateEditorReadiness() {
   const ctx = model.editor;
   if (!ctx) return;
   const input = $("#editor-draft"), checked = input.checked;
-  const reason = ctx.original?.draft ? "" : draftUnavailable(ctx.original, ctx.draftSettings?.drafts_enabled);
+  const reason = ctx.original?.draft && ctx.original.state !== "blocked" ? "" : draftUnavailable(ctx.original, ctx.draftSettings?.drafts_enabled);
   input.disabled = ctx.busy || !!ctx.parent || !ctx.draftSettings || (!!reason && !checked);
   $("#editor-draft-control").classList.toggle("selected", checked);
   $("#editor-draft-control").classList.toggle("unavailable", input.disabled);
   $("#editor-draft-help").textContent = ctx.draftSettingsError
     ? "Could not check draft availability. Close and reopen this editor to retry."
     : !ctx.draftSettings ? "Checking draft availability…"
-    : reason || (checked ? "Saved to the project. Agents skip it until you mark it ready." : "Leave unchecked to make this issue ready for agents.");
+    : reason || (checked ? "Saved to the project. Agents skip it until you mark it ready." : ctx.original?.state === "blocked" ? "Leave unchecked to keep this issue blocked." : "Leave unchecked to make this issue ready for agents.");
   const text = ctx.number ? checked ? "Save draft" : ctx.original.draft ? "Save & mark ready" : "Save changes"
     : ctx.parent ? "Create subtask" : checked ? "Create draft" : "Create issue";
   $("#editor-submit").innerHTML = `${text}${icon("arrow-right")}`;
@@ -1524,7 +1524,7 @@ $("#editor-form").onsubmit = async (e) => {
         add_labels: labels.filter((l) => !ctx.original.labels.includes(l)),
         remove_labels: ctx.original.labels.filter((l) => l !== "yolo" && !labels.includes(l)),
         if_version: ctx.version,
-        ...(values.draft !== ctx.original.draft ? {draft: values.draft} : {}),
+        ...(values.draft !== ctx.original.draft || (values.draft && ctx.original.state === "blocked") ? {draft: values.draft} : {}),
       }
     : {
         action: ctx.parent ? "create_subtask" : "create",
@@ -1979,7 +1979,7 @@ document.addEventListener("click", async event => {
     if (!current()) return;
     const next = $("[data-draft-action]");
     (next && !next.disabled ? next : $("[data-edit]") || $("#main")).focus({preventScroll:true});
-    toast(ready ? "Issue marked ready for agents" : "Issue moved to draft");
+    toast(ready ? model.detail.issue.state === "blocked" ? "Draft marked ready; unfinished blockers still pause pickup" : "Issue marked ready for agents" : "Issue moved to draft");
   } catch(error) {
     if (!current()) return;
     let message = $("#draft-error");
