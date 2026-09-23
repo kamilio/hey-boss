@@ -70,6 +70,11 @@ reports identify their loaded code rather than a replacement executable on disk.
 Startup connection errors also retain the bounded SSH error tail, so a transport
 failure before the first hello remains distinguishable from an application error.
 
+Explicit project queue filters use the existing project index. Counting 20
+selected issues beside 10,000 unrelated open issues fell from 123,800 to fewer
+than 3,800 SQLite VM steps. Duplicate project IDs do not double counts; empty
+project filters retain unrestricted status behavior.
+
 ## Ongoing verification
 
 The eight-hour September 23 reliability audit uses a private database with four

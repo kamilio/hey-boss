@@ -396,6 +396,11 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
 }
 
 fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
+    let project_filter = if config.projects.is_empty() {
+        "1"
+    } else {
+        "i.project_id IN(SELECT value FROM json_each(?1))"
+    };
     let (open, assigned, tag_filtered, eligible): (i64, i64, i64, i64) = db.query_row(
         &format!(
             "SELECT count(*),
@@ -404,7 +409,7 @@ fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
              coalesce(sum(CASE WHEN {ELIGIBLE} {PICKUP_READY} THEN 1 ELSE 0 END),0)
              FROM issues i JOIN projects p ON p.id=i.project_id
              WHERE i.state='open' AND i.deleted_at IS NULL AND p.hidden_at IS NULL
-             AND (json_array_length(?1)=0 OR i.project_id IN(SELECT value FROM json_each(?1)))"
+             AND {project_filter}"
         ),
         params![
             serde_json::to_string(&config.projects)?,
@@ -1416,6 +1421,88 @@ mod tests {
                     "next poll must refresh counts"
                 );
             }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn queue_counts_skip_open_issues_in_unselected_projects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+            unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(100, Ordering::Relaxed);
+            0
+        }
+        let root = std::env::temp_dir().join(format!("hb-project-queue-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:A','A',11,0,0),('named:B','B',11,0,0),('named:Other','Other',10001,0,0);
+                INSERT INTO agents VALUES('agent','{}',0);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,draft,assignee)
+                SELECT p.id,x,'Task','','open','agent',0,0,1,CASE WHEN x=1 THEN '[]' ELSE '[\"ready\"]' END,x=2,CASE WHEN x=3 THEN 'agent' ELSE NULL END FROM n CROSS JOIN projects p WHERE p.id IN ('named:A','named:B');
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+                SELECT 'named:Other',x,'Unrelated','','open','agent',0,0,1,'[\"ready\"]' FROM n;").unwrap();
+            let config = Settings {
+                projects: vec!["named:B".into(), "named:A".into(), "named:A".into()],
+                tags: vec!["ready".into()],
+                ..Settings::default()
+            };
+            let steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let result = worker_queue(&store.db, &config);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            assert_eq!(
+                result.unwrap(),
+                json!({"open":20,"assigned":2,"tag_filtered":2,"waiting":2,"eligible":14})
+            );
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!(
+                "20 selected issues / 10000 unrelated: fewer than {} queue VM steps",
+                steps + 100
+            );
+            assert!(
+                steps < 10000,
+                "Queue counts scanned unrelated projects: {steps} VM steps"
+            );
+            let unrestricted = worker_queue(
+                &store.db,
+                &Settings {
+                    tags: config.tags.clone(),
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                unrestricted,
+                json!({"open":10020,"assigned":2,"tag_filtered":2,"waiting":2,"eligible":10014})
+            );
+            assert_eq!(
+                worker_queue(
+                    &store.db,
+                    &Settings {
+                        projects: vec!["named:Missing".into()],
+                        ..Settings::default()
+                    }
+                )
+                .unwrap(),
+                json!({"open":0,"assigned":0,"tag_filtered":0,"waiting":0,"eligible":0})
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }
