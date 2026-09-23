@@ -99,6 +99,12 @@ creations and deletions MUST retain their whole local row until acknowledgment.
 Same-field changes MUST remain pending for canonical conflict arbitration;
 merging incoming data MUST NOT alter the saved outgoing mutation or create echoes.
 
+When existing allocations satisfy all configured tag filters and total machine
+prefetch capacity, refresh SHOULD NOT scan the unallocated issue queue. Refresh
+MUST preserve claim deadlines, expired-allocation recovery, number-range
+replenishment and issue ordering. Allocations matching multiple tag filters
+MUST count once toward total machine capacity.
+
 Companions MAY continue active work and pick up previously allocated work offline. Allocations MUST NOT expire solely because a machine disconnects. The supervisor and other companions MUST exclude another machine's allocations from pickup. Unallocated replicated issues MUST NOT be launched offline. Explicit human reassignment MAY revoke ownership and MUST be observable after synchronization. Offline issue creation MUST use supervisor-reserved number ranges; exhaustion MUST produce a visible error rather than collide with another machine.
 
 Concurrent changes to different fields MAY merge. Conflicting changes to the same field MUST be retained durably for review and MUST NOT silently overwrite canonical data. Offline completion MUST NOT close an issue whose requirements or ownership changed on the supervisor. Pending changes MUST survive companion, supervisor, and machine restarts. Local checkouts and process metadata MUST remain machine-specific. Fleet database operations MUST use the CLI bundled SQLite, version 3.51.3 or later, rather than the machine Python SQLite library.
@@ -122,6 +128,7 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 | Terminology and compatibility | Supervisor/companion help and legacy aliases; new status labels and old saved roles; worker restart preserves supervisor |
 | Durable offline changes | Disconnect, mutate and restart, reconnect, verify exactly one canonical result |
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
+| Allocation refresh | Full pool over a large queue avoids scanning unallocated issues; overlapping filters retain distinct total slots; unclaimed expiry, claim deadlines and ownership remain correct |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique |
 | Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation |
 | Journal retention | Bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection, receipt replay after pruning, idle maintenance during another write and unchanged snapshot after compaction |
