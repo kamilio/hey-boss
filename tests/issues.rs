@@ -654,7 +654,7 @@ fn project_metadata_migrates_old_databases_without_losing_history_or_numbers() {
     let updated = f.run("session-a", &["view", "1"])["issue"]["updated_at"]
         .as_i64()
         .unwrap();
-    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP TABLE issue_workers; DROP TABLE worker_events; DROP TABLE worker_runs; DROP TABLE project_workers; DROP TABLE worker_pool; DROP INDEX project_activity; ALTER TABLE projects DROP COLUMN created_at; ALTER TABLE projects DROP COLUMN activity_at; ALTER TABLE projects DROP COLUMN hidden_at; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=1;").unwrap();
+    f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP TABLE issue_workers; DROP TABLE worker_events; DROP TABLE worker_runs; DROP TABLE project_workers; DROP TABLE worker_pool; DROP INDEX project_activity; ALTER TABLE projects DROP COLUMN created_at; ALTER TABLE projects DROP COLUMN activity_at; ALTER TABLE projects DROP COLUMN hidden_at; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=1;").unwrap();
     let migrated = f.run("session-a", &["projects"]);
     assert_eq!(migrated["projects"][0]["id"], project);
     assert_eq!(migrated["projects"][0]["activity_at"], updated);
@@ -682,7 +682,7 @@ fn worker_schema_migrates_version_two_preserving_hidden_projects_and_history() {
         &["comment", "1", "--body", "Preserve this Markdown"],
     );
     f.run("session-a", &["hide-project"]);
-    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP TABLE issue_workers; DROP TABLE worker_events; DROP TABLE worker_runs; DROP TABLE project_workers; DROP TABLE worker_pool; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=2;").unwrap();
+    f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP TABLE issue_workers; DROP TABLE worker_events; DROP TABLE worker_runs; DROP TABLE project_workers; DROP TABLE worker_pool; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=2;").unwrap();
     let status = f.run("session-a", &["worker", "status"]);
     assert_eq!(status["config"]["prompt"], Value::Null);
     assert_eq!(status["config"]["enabled"], false);
@@ -1681,7 +1681,7 @@ fn schema_three_migration_preserves_legacy_independent_worker_settings() {
     // below. A genuine legacy store never had them.
     db.execute_batch("DROP INDEX worker_finished_history; DROP TRIGGER fleet_worker_deadline_started; DROP TRIGGER fleet_worker_deadline_updated;")
         .unwrap();
-    db.execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP INDEX worker_runs_worker; ALTER TABLE worker_runs DROP COLUMN worker_id; ALTER TABLE worker_runs DROP COLUMN reservation_expires; ALTER TABLE worker_runs DROP COLUMN claimed_at; DROP TABLE issue_workers; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=3;").unwrap();
+    db.execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP INDEX worker_runs_worker; ALTER TABLE worker_runs DROP COLUMN worker_id; ALTER TABLE worker_runs DROP COLUMN reservation_expires; ALTER TABLE worker_runs DROP COLUMN claimed_at; DROP TABLE issue_workers; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=3;").unwrap();
     let s = f.run("session-a", &["worker", "status"]);
     assert_eq!(s["config"]["concurrency"], 3);
     assert_eq!(s["config"]["tags"][0], "ready");
@@ -1916,7 +1916,7 @@ fn schema_four_migration_initializes_order_without_losing_prs_claims_or_history(
     );
     f.run("session-a", &["claim", "1"]);
     f.run("session-a", &["comment", "1", "--body", "Preserve this"]);
-    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; ALTER TABLE project_settings DROP COLUMN boss_name; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=4;").unwrap();
+    f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX worker_project_queue; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; ALTER TABLE project_settings DROP COLUMN boss_name; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=4;").unwrap();
     let migrated = f.run("session-a", &["view", "1"]);
     assert_eq!(migrated["issue"]["sort_order"], 1);
     assert_eq!(migrated["issue"]["assignee"], "session-a");
@@ -2095,7 +2095,7 @@ fn schema_five_migration_preserves_settings_order_claims_and_history() {
         ],
     );
     f.sql()
-        .execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; ALTER TABLE project_settings DROP COLUMN boss_name; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=5;")
+        .execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; ALTER TABLE project_settings DROP COLUMN boss_name; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=5;")
         .unwrap();
     let settings = f.run("session-a", &["settings", "show"]);
     assert_eq!(settings["boss_name"], "Boss");
@@ -2221,7 +2221,7 @@ fn schema_six_migration_preserves_latest_custom_boss_name_globally() {
             )
             .unwrap();
     }
-    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=6;").unwrap();
+    f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=6;").unwrap();
     for name in ["Alpha", "Beta"] {
         assert_eq!(
             f.run("session-a", &["view", "--project", name, "1"])["boss"]["name"],
@@ -2574,7 +2574,7 @@ fn schema_seven_subtask_migration_preserves_existing_issue_and_global_profile() 
     let before = f.run("session-a", &["view", "1"]);
     f.sql()
         .execute_batch(
-            "ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; PRAGMA user_version=7;",
+            "DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; PRAGMA user_version=7;",
         )
         .unwrap();
     assert_eq!(f.run("session-a", &["view", "1"]), before);
@@ -2600,7 +2600,7 @@ fn schema_eight_graph_sync_migration_keeps_links_and_reinstates_safe_upsert() {
     f.create();
     f.run("session-a", &["subtask", "create", "1", "--title", "Child"]);
     let before = f.run("session-a", &["view", "1"]);
-    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP TABLE fleet_subtask_receipts; DROP TABLE fleet_deferred_subtasks; PRAGMA user_version=8;").unwrap();
+    f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP TABLE fleet_subtask_receipts; DROP TABLE fleet_deferred_subtasks; PRAGMA user_version=8;").unwrap();
     assert_eq!(f.run("session-a", &["view", "1"]), before);
     assert_eq!(
         f.sql()
@@ -2861,7 +2861,7 @@ fn blocked_issue_cannot_be_drafted_while_a_worker_is_still_running() {
 
 // Model the released pre-draft schema without touching any live store.
 fn remove_draft_schema(f: &Fixture, version: i64) {
-    f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan;
+    f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan;
         ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template;
         ALTER TABLE mindmap_nodes DROP COLUMN display_label;").unwrap();
     f.sql()
@@ -3315,7 +3315,7 @@ fn dependency_migration_normalizes_legacy_parents_and_preserves_manual_blocks() 
     f.sql()
         .execute_batch(
             "UPDATE issues SET state='open',assignee='session-a' WHERE number=1;
-        ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
+        DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
         )
         .unwrap();
     let parent = f.run("reader", &["view", "1"]);

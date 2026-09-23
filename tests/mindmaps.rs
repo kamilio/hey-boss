@@ -1190,7 +1190,7 @@ fn schema_nine_migrates_and_map_reads_do_not_wait_for_an_existing_writer() {
     let f = Fixture::new();
     f.issue("Atlas", &["create", "--title", "Existing issue"]);
     let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
-    db.execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; PRAGMA user_version=9;").unwrap();
+    db.execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; PRAGMA user_version=9;").unwrap();
     assert!(nodes(&f.run("Atlas", &["show"])).is_empty());
     assert_eq!(
         f.issue("Atlas", &["view", "1"])["issue"]["title"],
