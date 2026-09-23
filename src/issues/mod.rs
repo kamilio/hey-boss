@@ -98,7 +98,15 @@ impl From<rusqlite::Error> for Error {
             }
             _ => "database_error",
         };
-        Self::new(code, value.to_string())
+        let mut result = Self::new(code, value.to_string());
+        if let rusqlite::Error::SqliteFailure(sqlite, _) = &value {
+            result.message = format!("{} (SQLite {})", result.message, sqlite.extended_code);
+            result.details = Some(serde_json::json!({
+                "sqlite_code": sqlite.extended_code & 0xff,
+                "sqlite_extended_code": sqlite.extended_code,
+            }));
+        }
+        result
     }
 }
 impl From<serde_json::Error> for Error {
