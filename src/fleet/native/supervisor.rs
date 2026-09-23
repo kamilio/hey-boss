@@ -60,7 +60,7 @@ impl Supervisor {
                 &json!({"role":"controller","workers":definitions(&local)}),
             )?;
         }
-        let build = ctx.build()?;
+        let build = Context::running_build().to_owned();
         Ok(Arc::new(Self {
             ctx,
             persistence: Mutex::new(false),
@@ -1279,6 +1279,24 @@ mod tests {
             }),
         };
         (directory, app)
+    }
+
+    #[test]
+    fn supervisor_reports_its_loaded_build_after_the_installed_binary_changes() {
+        let (_directory, mut fixture) = test_supervisor();
+        fixture.ctx.binary = fixture.ctx.state.join("replacement-cli");
+        std::fs::write(
+            &fixture.ctx.binary,
+            "#!/bin/sh\nprintf '%s\\n' 'hey-boss 0.1.0 (build replacement-on-disk)'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fixture.ctx.binary, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert!(fixture.ctx.build().unwrap().contains("replacement-on-disk"));
+        let app = Supervisor::new(fixture.ctx.clone()).unwrap();
+        let loaded = app.state.lock().unwrap().build.clone();
+        assert!(loaded.contains(env!("HEY_BOSS_BUILD_ID")), "{loaded}");
+        assert!(!loaded.contains("replacement-on-disk"));
     }
 
     #[test]

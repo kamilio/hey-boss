@@ -507,6 +507,16 @@ fn streamed_snapshot_survives_disconnect_and_preserves_edits_made_during_transfe
         output.read_line(&mut line).unwrap();
         let hello: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(hello["capabilities"]["pull_gzip_chunks"], true);
+        assert_eq!(
+            hello["build"],
+            concat!(
+                "hey-boss ",
+                env!("CARGO_PKG_VERSION"),
+                " (build ",
+                env!("HEY_BOSS_BUILD_ID"),
+                ")"
+            )
+        );
         let input = child.0.stdin.take().unwrap();
         (child, input, output)
     };

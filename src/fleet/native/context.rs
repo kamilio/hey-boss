@@ -114,6 +114,15 @@ impl Context {
         }
         Ok(String::from_utf8(output.stdout)?.trim().into())
     }
+    pub fn running_build() -> &'static str {
+        concat!(
+            "hey-boss ",
+            env!("CARGO_PKG_VERSION"),
+            " (build ",
+            env!("HEY_BOSS_BUILD_ID"),
+            ")"
+        )
+    }
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
