@@ -282,6 +282,31 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
         }
     }
 }
+fn worker_snapshot(id: &Value, read: impl FnOnce(Value) -> Result<Value>) -> Result<Value> {
+    let status = read(json!({"action":"workers","worker_id":id}))?;
+    if &status["worker_id"] != id {
+        return Err(invalid(
+            "Worker snapshot does not match the requested worker",
+        ));
+    }
+    let mut worker = status["workers"]
+        .as_array()
+        .and_then(|workers| workers.iter().find(|worker| &worker["id"] == id))
+        .cloned()
+        .ok_or_else(|| invalid("Worker not found on this machine"))?;
+    for key in ["active", "free", "eligible", "runs", "chiefs", "upgrading"] {
+        if let Some(value) = status.get(key) {
+            worker[key] = value.clone();
+        }
+    }
+    if let Some(pid) = worker["pid"].as_u64()
+        && !super::context::alive(pid as u32)
+    {
+        worker["pid"] = Value::Null;
+    }
+    Ok(worker)
+}
+
 fn apply_signal_locked(
     ctx: &Context,
     db: &rusqlite::Connection,
@@ -295,11 +320,7 @@ fn apply_signal_locked(
     if !matches!(action, "pause" | "resume" | "stop" | "restart") {
         return Err(invalid("Unknown signal"));
     }
-    let mut worker = ctx
-        .workers()?
-        .into_iter()
-        .find(|w| w["id"] == message["worker"])
-        .ok_or_else(|| invalid("Worker not found on this machine"))?;
+    let mut worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
     replica::execute(
         db,
         "INSERT OR IGNORE INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)",
@@ -362,11 +383,7 @@ fn apply_signal_locked(
         }
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            worker = ctx
-                .workers()?
-                .into_iter()
-                .find(|w| w["id"] == message["worker"])
-                .ok_or_else(|| invalid("Worker disappeared"))?;
+            worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
             if worker["pid"].is_null() && worker["active"] == 0 {
                 break;
             }
@@ -440,6 +457,44 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_snapshot_reads_only_target_and_preserves_owned_agents() {
+        let mut reads = 0;
+        let snapshot = worker_snapshot(&json!("target"), |query| {
+            reads += 1;
+            assert_eq!(query["worker_id"], "target", "lifecycle polling must not read unrelated worker details");
+            Ok(json!({"worker_id":"target","workers":[{"id":"unrelated","active":9},{"id":"target","pid":std::process::id(),"active":0,"config":{"enabled":false}}],"active":2,"runs":[{"id":"owned","finished_at":null}],"upgrading":true}))
+        }).unwrap();
+        assert_eq!(reads, 1);
+        assert_eq!(snapshot["id"], "target");
+        assert_eq!(snapshot["pid"], std::process::id());
+        assert_eq!(
+            snapshot["active"], 2,
+            "a stopped worker may still own live agents"
+        );
+        assert_eq!(snapshot["runs"][0]["id"], "owned");
+        assert_eq!(snapshot["config"]["enabled"], false);
+        assert_eq!(snapshot["upgrading"], true);
+    }
+
+    #[test]
+    fn lifecycle_snapshot_refuses_missing_or_mismatched_workers() {
+        for status in [
+            json!({"worker_id":"other","workers":[{"id":"target"}],"active":0}),
+            json!({"worker_id":"target","workers":[],"active":0}),
+        ] {
+            assert!(worker_snapshot(&json!("target"), |_| Ok(status)).is_err());
+        }
+    }
+
+    #[test]
+    fn lifecycle_snapshot_clears_dead_pid_without_hiding_owned_agents() {
+        let worker = worker_snapshot(&json!("target"), |_| Ok(json!({"worker_id":"target","workers":[{"id":"target","pid":2147483647}],"active":1,"runs":[{"id":"owned","finished_at":null}]}))).unwrap();
+        assert!(worker["pid"].is_null());
+        assert_eq!(worker["active"], 1);
+        assert_eq!(worker["runs"][0]["id"], "owned");
+    }
 
     #[test]
     fn restart_intent_survives_supervisor_reconciliation() {
