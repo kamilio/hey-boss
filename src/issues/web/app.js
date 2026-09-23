@@ -490,7 +490,7 @@ function listPullRequests(issue) {
         const url = new URL(pr.url),
           match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
         title = match
-          ? `${match[1]}/${match[2]}#${match[3]}`
+          ? `#${match[3]}`
           : `${url.host}${url.pathname}${url.search}`;
       } catch {
         /* Keep old attached links readable if URL parsing fails. */
