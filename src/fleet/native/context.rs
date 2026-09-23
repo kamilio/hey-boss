@@ -273,12 +273,56 @@ pub(super) fn read_frame(reader: &mut impl std::io::BufRead) -> Result<Option<Va
     }
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
+// None means the JSON body exceeds its byte budget. SSH reserves one byte for
+// the newline; local control responses are delimited by EOF instead.
+pub(super) fn encode_frame(frame: &Value, limit: usize) -> Result<Option<Vec<u8>>> {
+    struct Buffer {
+        bytes: Vec<u8>,
+        limit: usize,
+        exceeded: bool,
+    }
+    impl Write for Buffer {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if data.len() > self.limit.saturating_sub(self.bytes.len()) {
+                self.exceeded = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "JSON byte limit exceeded",
+                ));
+            }
+            let required = self.bytes.len() + data.len();
+            if required > self.bytes.capacity() {
+                // Ordinary geometric growth remains amortized, but a large
+                // string must not double capacity beyond the frame budget.
+                let capacity = required
+                    .max(self.bytes.capacity().saturating_mul(2))
+                    .min(self.limit);
+                self.bytes.reserve_exact(capacity - self.bytes.len());
+            }
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut buffer = Buffer {
+        bytes: Vec::with_capacity(limit.min(128)),
+        limit,
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut buffer, frame);
+    if buffer.exceeded {
+        Ok(None)
+    } else {
+        result?;
+        Ok(Some(buffer.bytes))
+    }
+}
 pub(super) fn send(writer: &mut impl Write, mut frame: Value) -> Result<()> {
     frame["version"] = json!(1);
-    let bytes = serde_json::to_vec(&frame)?;
-    if bytes.len() + 1 > crate::issues::WIRE_LIMIT {
-        return Err(invalid("Fleet frame exceeds 16 MiB"));
-    }
+    let bytes = encode_frame(&frame, crate::issues::WIRE_LIMIT - 1)?
+        .ok_or_else(|| invalid("Fleet frame exceeds 16 MiB"))?;
     writer.write_all(&bytes)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
@@ -467,6 +511,72 @@ pub(super) fn committed_source_build(source: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_frame_encoding_has_bounded_allocation_work() {
+        let frame = json!({"parts": vec![json!({"text":"x".repeat(4096)});12288]});
+        let (encoded, allocated) = crate::test_allocations::measure(|| {
+            encode_frame(&frame, crate::issues::WIRE_LIMIT).unwrap()
+        });
+        eprintln!("oversized JSON encoding: {allocated} requested Rust allocation bytes");
+        assert!(encoded.is_none());
+        assert!(allocated < 40 * 1024 * 1024, "{allocated} allocation bytes");
+    }
+    #[test]
+    fn oversized_string_frame_encoding_stops_before_copying_text() {
+        let frame = json!({"payload":"x".repeat(crate::issues::WIRE_LIMIT + 1)});
+        let (encoded, allocated) = crate::test_allocations::measure(|| {
+            encode_frame(&frame, crate::issues::WIRE_LIMIT).unwrap()
+        });
+        eprintln!("oversized string encoding: {allocated} requested Rust allocation bytes");
+        assert!(encoded.is_none());
+        assert!(allocated < 1024 * 1024, "{allocated} allocation bytes");
+    }
+    #[test]
+    fn valid_large_frame_encoding_keeps_buffer_capacity_within_its_budget() {
+        let frame = json!({"payload":"x".repeat(9 * 1024 * 1024)});
+        let encoded = encode_frame(&frame, crate::issues::WIRE_LIMIT)
+            .unwrap()
+            .unwrap();
+        assert!(
+            encoded.capacity() <= crate::issues::WIRE_LIMIT,
+            "{} capacity bytes",
+            encoded.capacity()
+        );
+        assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), frame);
+    }
+    #[test]
+    fn frame_encoding_uses_encoded_byte_limits_for_both_delimiters() {
+        for frame in [
+            json!({"version":1,"text":"é\n\"\\"}),
+            json!([true, null, 42]),
+            json!({}),
+        ] {
+            let expected = serde_json::to_vec(&frame).unwrap();
+            assert_eq!(
+                encode_frame(&frame, expected.len()).unwrap(),
+                Some(expected.clone())
+            );
+            assert!(encode_frame(&frame, expected.len() - 1).unwrap().is_none());
+            assert!(encode_frame(&frame, 0).unwrap().is_none());
+        }
+    }
+    #[test]
+    fn send_never_emits_an_oversized_partial_frame_and_preserves_version_and_text() {
+        let mut output = vec![];
+        let error = send(
+            &mut output,
+            json!({"payload":"x".repeat(crate::issues::WIRE_LIMIT + 1)}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 16 MiB"));
+        assert!(output.is_empty());
+        send(&mut output, json!({"version":8,"text":"é\n\"\\"})).unwrap();
+        assert_eq!(output.last(), Some(&b'\n'));
+        assert_eq!(
+            read_frame(&mut std::io::Cursor::new(output)).unwrap(),
+            Some(json!({"version":1,"text":"é\n\"\\"}))
+        );
+    }
     #[test]
     fn native_source_fingerprint_matches_the_cli_build() {
         assert_eq!(

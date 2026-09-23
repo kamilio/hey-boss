@@ -139,6 +139,16 @@ bytes. This measures allocation work rather than resident memory or latency;
 the regression bounds that work without a timing threshold. Worker metadata
 and complete Chief projections remain available to native mobile clients.
 
+Fleet frame encoding now stops at the existing byte budget and caps its output
+buffer capacity, including legacy pull preflight. Rejecting a synthetic large
+aggregate fell from 134.8 MB to 33.6 MB of requested Rust allocation bytes;
+rejecting one oversized string fell from 50.3 MB to 256 bytes. A legacy oversized
+pull now rejects without transmitting data using about 1 KB of allocations,
+while a capable peer's oversized incremental pull fell from 55.6 MB to 5.3 MB
+and preserved its decoded body, cursor and receipts through verified streaming.
+SSH still reserves the newline byte; local control responses use EOF. These
+measurements describe allocation work rather than total resident memory.
+
 ## Ongoing verification
 
 The eight-hour September 23 reliability audit uses a private database with four
