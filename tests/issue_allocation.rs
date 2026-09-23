@@ -263,11 +263,26 @@ fn release_does_not_open_pickup_during_an_unclaimed_worker_attempt() {
 fn local_reservation_follows_the_workers_startup_and_claim_deadlines() {
     let f = Fixture::new("worker-deadline");
     let db = f.db("agent");
-    db.execute("INSERT INTO fleet_allocations SELECT 'named:Allocation fixture',1,node FROM fleet_meta", []).unwrap();
+    db.execute(
+        "INSERT INTO fleet_allocations SELECT 'named:Allocation fixture',1,node FROM fleet_meta",
+        [],
+    )
+    .unwrap();
     db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,reservation_expires) SELECT 'run','named:Allocation fixture',1,'{}','codex:pending','awaiting_model',1,'start',node,0,0,123456 FROM fleet_meta", []).unwrap();
-    let deadline = || db.query_row("SELECT expires_at FROM fleet_allocation_deadlines", [], |r|r.get::<_,i64>(0)).unwrap();
+    let deadline = || {
+        db.query_row(
+            "SELECT expires_at FROM fleet_allocation_deadlines",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
     assert_eq!(deadline(), 123456);
-    db.execute("UPDATE worker_runs SET state='awaiting_claim',reservation_expires=234567", []).unwrap();
+    db.execute(
+        "UPDATE worker_runs SET state='awaiting_claim',reservation_expires=234567",
+        [],
+    )
+    .unwrap();
     assert_eq!(deadline(), 234567);
 }
 
