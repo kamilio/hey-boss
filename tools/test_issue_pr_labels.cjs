@@ -22,10 +22,14 @@ for (const purpose of ['unspecified', undefined, null, '', 'unknown']) {
   assert.ok(html.includes('aria-label="Open pull request poe-internal/poe2#15015"'));
   assert.ok(html.includes('title="https://github.com/poe-internal/poe2/pull/15015"'));
 }
-for (const [purpose, label] of [['fix', 'Fix'], ['prerequisite', 'Prerequisite'], ['supporting-evidence', 'Supporting evidence']]) {
+for (const [purpose, label] of [['fix', 'Fix']]) {
   const html = render(purpose);
   assert.ok(html.includes(`<span class="pr-purpose-label">${label}</span>`));
   assert.ok(html.includes(`aria-label="Open pull request poe-internal/poe2#15015 · ${label}"`));
+}
+for (const [purpose, label] of [['prerequisite', 'Prerequisite'], ['supporting-evidence', 'Supporting evidence']]) {
+  assert.equal(render(purpose), '', `${label} links are omitted from the issue list`);
+  assert.equal(context.prPurposeLabel(purpose), label, 'Details retain the purpose label');
 }
 assert.equal(context.prPurposeLabel('unspecified'), 'Unspecified', 'Details retain the purpose label');
 assert.equal(context.listPullRequests({}), '');
