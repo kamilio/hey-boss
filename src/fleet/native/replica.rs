@@ -884,13 +884,41 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
 }
 pub(super) fn incremental(db: &Connection, node: &str, cursor: i64) -> Result<Value> {
     let own: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
-    let ids = identities(db)?;
     let mut changes = journal(db, cursor)?;
-    for c in &mut changes {
-        let table = c["table_name"].as_str().unwrap();
-        if append(table) && c["after_json"].is_string() {
-            c["append"] = canonical_append(&own, table, &row_json(c, "after_json")?, &ids)?;
+    let mut ids = BTreeMap::new();
+    let mut lookup = db.prepare_cached("SELECT origin,origin_id FROM fleet_row_ids WHERE table_name=?1 AND local_id=?2 ORDER BY rowid LIMIT 1")?;
+    for change in &mut changes {
+        let table = change["table_name"].as_str().unwrap();
+        if !append(table) || !change["after_json"].is_string() {
+            continue;
         }
+        let row = row_json(change, "after_json")?;
+        let mut needed = vec![(
+            table,
+            row["id"]
+                .as_i64()
+                .ok_or_else(|| invalid("Missing append identity"))?,
+        )];
+        if table == "events" {
+            let data: Value = serde_json::from_str(row["data"].as_str().unwrap())?;
+            if let Some(comment) = data["comment_id"].as_i64() {
+                needed.push(("comments", comment));
+            }
+        }
+        for (table, local) in needed {
+            let key = (table.to_owned(), local);
+            if !ids.contains_key(&key) {
+                let identity = lookup
+                    .query_row(rusqlite::params![table, local], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                    })
+                    .optional()?;
+                if let Some(identity) = identity {
+                    ids.insert(key, identity);
+                }
+            }
+        }
+        change["append"] = canonical_append(&own, table, &row, &ids)?;
     }
     allocation_payload(
         db,
@@ -1468,6 +1496,82 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn incremental_sync_work_is_bounded_by_the_changed_rows() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+            let count = unsafe { &*context.cast::<AtomicUsize>() };
+            count.fetch_add(100, Ordering::Relaxed);
+            0
+        }
+        let f = Fixture::new();
+        f.capture();
+        f.db.execute_batch(
+            "WITH RECURSIVE n(id) AS (VALUES(100000) UNION ALL SELECT id+1 FROM n WHERE id<129999)
+            INSERT INTO fleet_row_ids SELECT 'unrelated','events',id,id FROM n;",
+        )
+        .unwrap();
+        for changed in [false, true] {
+            if changed {
+                f.db.execute_batch("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Native fleet',1,'human:fixture','New comment',1);").unwrap();
+            }
+            let steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    f.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let started = std::time::Instant::now();
+            let result = incremental(&f.db, "agent", 0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    f.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            let payload = result.unwrap();
+            assert_eq!(
+                payload["changes"].as_array().unwrap().len(),
+                usize::from(changed)
+            );
+            let steps = steps.load(Ordering::Relaxed);
+            let elapsed = started.elapsed();
+            eprintln!(
+                "Incremental pull ({changed} changed): fewer than {} VM steps in {elapsed:?}",
+                steps + 100
+            );
+            assert!(
+                steps < 5000,
+                "A small pull scanned unrelated identities: {steps} VM steps in {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_resolution_keeps_the_remote_comments_original_identity() {
+        let f = Fixture::new();
+        f.capture();
+        f.db.execute_batch("INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(41,'named:Native fleet',1,'human:fixture','Offline comment',1);
+            INSERT INTO fleet_row_ids VALUES('offline','comments',77,41);
+            INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data) VALUES(51,'named:Native fleet',1,'human:fixture','comment_resolved',2,'{\"comment_id\":41}');
+            INSERT INTO fleet_row_ids VALUES('main','events',51,51);").unwrap();
+        let pull = incremental(&f.db, "agent", 0).unwrap();
+        let comment = &pull["changes"][0]["append"];
+        assert_eq!(comment["origin"], "offline");
+        assert_eq!(comment["row"]["id"], 77);
+        let event = &pull["changes"][1]["append"];
+        assert_eq!(event["origin"], "main");
+        let data: Value = serde_json::from_str(event["row"]["data"].as_str().unwrap()).unwrap();
+        assert_eq!(data["comment_id"], 77);
+        assert_eq!(data["comment_origin"], "offline");
+        assert_eq!(data["comment_origin_id"], 77);
+    }
 
     #[test]
     fn blocker_migration_updates_existing_capture_triggers_before_normalizing() {
