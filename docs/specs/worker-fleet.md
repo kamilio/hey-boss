@@ -61,11 +61,12 @@ the companion MUST send progress responses every five seconds. These responses
 MUST NOT advance the acknowledged cursor. The supervisor MUST measure companion
 silence after completing its own outgoing transfer.
 
-The supervisor SHOULD update heartbeat timestamps without rewriting durable
-machine snapshots. Identical machine updates SHOULD NOT require a database
+The supervisor SHOULD update heartbeat and successful-sync timestamps without
+rewriting durable machine snapshots. Identical machine updates SHOULD NOT require a database
 writer lock. Connection, configuration and worker changes MUST remain durable;
 a failed save MUST remain eligible for retry even when subsequent fields are
-identical. Every successful snapshot save MUST include the latest heartbeat.
+identical. Every successful snapshot save MUST include the latest heartbeat and
+successful-sync timestamps.
 
 Each machine activity poll MUST read worker capacity, runs, chief activity and
 upgrade state from one coherent database snapshot. A poll SHOULD read the
