@@ -1517,6 +1517,33 @@ fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_bound
 }
 
 #[test]
+fn web_blocked_drafts_preserve_subtasks_and_recheck_them_on_editor_save() {
+    let w = Web::start();
+    w.ok(json!({"action":"create","title":"Parent","body":"","labels":[]}));
+    w.ok(json!({"action":"create_subtask","number":1,"title":"Child","body":"","labels":[]}));
+    let blocked = w.ok(json!({"action":"view","number":1}));
+    assert_eq!(blocked["issue"]["state"], "blocked");
+    let draft = w.ok(json!({"action":"edit","number":1,"draft":true,"add_labels":[],"remove_labels":[],"if_version":blocked["issue"]["version"]}));
+    assert_eq!(draft["issue"]["state"], "open");
+    assert_eq!(draft["issue"]["draft"], true);
+    assert_eq!(draft["issue"]["blocked_by"][0]["source"], "subtask");
+    let ready = w.ok(json!({"action":"edit","number":1,"draft":false,"add_labels":[],"remove_labels":[],"if_version":draft["issue"]["version"]}));
+    assert_eq!(ready["issue"]["state"], "blocked");
+    assert_eq!(ready["issue"]["draft"], false);
+    w.ok(json!({"action":"edit","number":1,"draft":true,"add_labels":[],"remove_labels":[]}));
+    // Explicitly blocking an existing draft remains reversible too.
+    w.ok(json!({"action":"block","number":1,"force":false}));
+    let draft =
+        w.ok(json!({"action":"edit","number":1,"draft":true,"add_labels":[],"remove_labels":[]}));
+    assert_eq!(draft["issue"]["state"], "open");
+    w.ok(json!({"action":"close","number":2,"force":false}));
+    assert_eq!(
+        w.ok(json!({"action":"view","number":1}))["issue"]["draft"],
+        true
+    );
+}
+
+#[test]
 fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
     let w = Web::start();
     let created =
