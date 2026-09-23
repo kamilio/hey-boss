@@ -62,6 +62,14 @@ containing 34 workers, the median poll fell from 1.63 seconds to 68 milliseconds
 with identical activity results. Run history and recent events remain bounded
 and indexed; these improvements preserve their existing contents and ordering.
 
+Equivalent worker project/tag filters now share queue counts within that poll's
+snapshot. A regression with 30 workers and 2,000 issues reduced SQLite VM work
+from 8.36 million to under 816,000 steps, while matching public status and
+refreshing counts after later issue changes. Supervisor and companion build
+reports identify their loaded code rather than a replacement executable on disk.
+Startup connection errors also retain the bounded SSH error tail, so a transport
+failure before the first hello remains distinguishable from an application error.
+
 ## Ongoing verification
 
 The eight-hour September 23 reliability audit uses a private database with four

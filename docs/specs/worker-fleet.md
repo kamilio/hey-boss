@@ -120,6 +120,10 @@ Supervisor and companion build reports MUST identify their loaded software.
 Replacing the installed CLI during startup MUST NOT change the reported runtime
 build or prevent detection that the supervisor needs to reload.
 
+Machine polling SHOULD reuse queue eligibility counts for equivalent project
+and tag sets within one coherent database snapshot. Reused counts MUST NOT
+survive into the next poll or change each worker's capacity and activity results.
+
 Worker status SHOULD expose the build compiled into the registered owner
 process. A reported build MUST match the worker's registered PID and process
 start identity, including the actual current process identity. Owner registration
@@ -153,7 +157,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |
 | Connectivity | Heartbeat, EOF, timeout, reconnect state transitions, startup transport error retention and bounded collection with open stderr |
 | Machine persistence | Heartbeat-only updates retain current liveness without rewriting snapshots; identical updates during another write; failed-save retry retains worker and configuration state |
-| Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, public-status activity parity and legacy upgrade marker migration |
+| Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, equivalent queue filter reuse with fresh counts on the next poll, public-status activity parity and legacy upgrade marker migration |
 | Worker build provenance | Compiled owner build, legacy registration invalidation, stale owner records, PID reuse, owner removal and unknown legacy builds |
 | Manager build provenance | A supervisor starting after the installed CLI is replaced still reports its compiled runtime build; companions announce their compiled build |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
