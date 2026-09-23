@@ -154,8 +154,10 @@ Cache misses MUST recheck the saved request after acquiring the mutation lock
 before executing an operation. Replayed attachment removals MUST retry any file
 cleanup remaining after committed metadata removal.
 
-The supervisor MUST retain the latest 10,000 canonical journal entries and prune
-older entries in batches of at most 1,000. Pruning MUST commit a durable cursor
+The supervisor MUST retain the newest canonical journal suffix fitting both
+10,000 entries and 64 MiB of UTF-8 before/after JSON, pruning older entries in
+batches of at most 1,000. Byte-budget checks SHOULD read stored index lengths
+instead of historical issue bodies. Pruning MUST commit a durable cursor
 floor atomically with deletion. A cursor below that floor or above the durable
 journal high watermark MUST receive a current snapshot. Snapshot cursors and
 future journal sequences MUST NOT regress when history is deleted. Pruning MUST
@@ -230,7 +232,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Allocation refresh | Full pool over a large queue avoids scanning unallocated issues; overlapping filters retain distinct total slots; unclaimed expiry, claim deadlines and ownership remain correct |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique; saved issue and global-setting responses during another writer; different-payload rejection; concurrent cache misses; attachment cleanup after committed removal |
 | Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation; bounded legacy/incremental preflight allocations with unchanged upgrade rejection and streamed body, cursor and receipts |
-| Journal retention | Bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection, receipt replay after pruning, idle maintenance during another write and unchanged snapshot after compaction |
+| Journal retention | Row and UTF-8 byte budgets, bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection, receipt replay after pruning, idle maintenance during another write and unchanged snapshot after compaction |
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |
 | Configuration | Revision change reaches companion, survives restart, and queues offline |
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |

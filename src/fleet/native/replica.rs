@@ -224,9 +224,7 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
     {
         db.execute_batch("ALTER TABLE fleet_row_ids RENAME TO fleet_row_ids_legacy; CREATE TABLE fleet_row_ids(origin TEXT NOT NULL,table_name TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER NOT NULL,PRIMARY KEY(origin,table_name,origin_id)); INSERT INTO fleet_row_ids SELECT * FROM fleet_row_ids_legacy; DROP TABLE fleet_row_ids_legacy;")?;
     }
-    db.execute_batch(
-        "CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);",
-    )?;
+    db.execute_batch(crate::issues::FLEET_INDEXES)?;
     if role == "controller" {
         for table in ["comments", "events"] {
             db.execute(
@@ -850,24 +848,40 @@ fn allocation_payload(db: &Connection, node: &str, mut payload: Value) -> Result
     )?);
     Ok(payload)
 }
+fn journal_cutoff(db: &Connection) -> Result<Option<i64>> {
+    // The expression index stores UTF-8 byte lengths. Scan only its small
+    // entries, never old issue bodies, to find the newest history suffix that
+    // fits both budgets.
+    let mut statement = db.prepare("SELECT seq,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0) FROM fleet_outbox INDEXED BY fleet_outbox_retention ORDER BY seq DESC LIMIT 10001")?;
+    let mut rows = statement.query([])?;
+    let mut bytes = 0i64;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let seq: i64 = row.get(0)?;
+        bytes += row.get::<_, i64>(1)?;
+        count += 1;
+        if count > 10_000 || bytes > 64 * 1024 * 1024 {
+            return Ok(db.query_row(
+                "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=?1 ORDER BY seq LIMIT 1000)",
+                [seq],
+                |r| r.get(0),
+            )?);
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
     // Companions need every unacknowledged mutation; only the canonical history
-    // can be recovered by a snapshot. Keep 10,000 changes, deleting at most
-    // 1,000 per maintenance pass so ordinary writers are not stalled by cleanup.
+    // can be recovered by a snapshot. Keep up to 10,000 changes / 64 MiB,
+    // deleting at most 1,000 per pass so cleanup does not stall ordinary writers.
     let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     if role != "controller" {
         return Ok(0);
     }
-    let cutoff = || -> Result<Option<i64>> {
-        Ok(db.query_row(
-            "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=(SELECT seq FROM fleet_outbox ORDER BY seq DESC LIMIT 1 OFFSET 10000) ORDER BY seq LIMIT 1000)",
-            [],
-            |r| r.get(0),
-        )?)
-    };
     // An ordinary maintenance pass must remain a WAL reader when there is no
     // excess history. Recheck under the writer lock before deleting anything.
-    if cutoff()?.is_none() {
+    if journal_cutoff(db)?.is_none() {
         return Ok(0);
     }
     let tx = if db.is_autocommit() {
@@ -878,7 +892,7 @@ pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
     } else {
         None
     };
-    let deleted = if let Some(cutoff) = cutoff()? {
+    let deleted = if let Some(cutoff) = journal_cutoff(db)? {
         let deleted = db.execute("DELETE FROM fleet_outbox WHERE seq<=?1", [cutoff])?;
         let floor = state_get(db, "journal_floor", json!(0))?
             .as_i64()
@@ -1686,6 +1700,126 @@ mod tests {
     fn journal_count(f: &Fixture) -> i64 {
         f.db.query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn journal_retention_bounds_utf8_bytes_and_recovers_pruned_cursors() {
+        let f = Fixture::new();
+        f.capture();
+        let original = snapshot(&f.db, "agent").unwrap();
+        let mut row = current_row(
+            &f.db,
+            "issues",
+            &json!({"project_id":"named:Native fleet","number":1}),
+        )
+        .unwrap();
+        row["body"] = json!("🌍".repeat(32_768));
+        let encoded = row.to_string();
+        f.db.execute("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<650) INSERT INTO fleet_outbox(table_name,after_json,created_at) SELECT 'issues',?1,0 FROM n", [&encoded]).unwrap();
+        let head = journal_head(&f.db).unwrap();
+        let keep = (64 * 1024 * 1024 / encoded.len()) as i64;
+        f.db.execute("UPDATE fleet_meta SET role='agent'", [])
+            .unwrap();
+        assert_eq!(
+            prune_journal(&f.db).unwrap(),
+            0,
+            "Pending companion changes must survive the canonical byte budget"
+        );
+        assert_eq!(journal_count(&f), 650);
+        f.db.execute("UPDATE fleet_meta SET role='controller'", [])
+            .unwrap();
+        assert_eq!(
+            prune_journal(&f.db).unwrap() as i64,
+            650 - keep,
+            "Canonical history needs a byte budget even below 10,000 rows"
+        );
+        assert_eq!(journal_count(&f), keep);
+        assert_eq!(prune_journal(&f.db).unwrap(), 0);
+        let floor = state_get(&f.db, "journal_floor", Value::Null)
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        assert_eq!(floor, head - keep);
+        let recovery = incremental(&f.db, "agent", floor - 1).unwrap();
+        assert!(recovery["tables"].is_object());
+        assert_eq!(recovery["tables"], original["tables"]);
+        assert_eq!(recovery["cursor"], head);
+        let boundary = incremental(&f.db, "agent", floor).unwrap();
+        assert_eq!(boundary["changes"][0]["seq"], floor + 1);
+        assert_eq!(
+            snapshot(&f.db, "agent").unwrap()["tables"],
+            original["tables"]
+        );
+        assert_eq!(journal_head(&f.db).unwrap(), head);
+    }
+
+    #[test]
+    #[ignore = "Profiles byte-budget checks on an explicitly supplied private backup"]
+    fn profile_journal_byte_budget() {
+        let path = PathBuf::from(
+            std::env::var_os("HEY_BOSS_JOURNAL_PROFILE_DB")
+                .expect("Set HEY_BOSS_JOURNAL_PROFILE_DB to a disposable backup"),
+        );
+        assert!(path.is_file(), "Existing private backup required");
+        drop(Store::open(&path).unwrap());
+        let db = Connection::open(&path).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let original = snapshot(&db, "byte-profile").unwrap();
+        let head = journal_head(&db).unwrap();
+        let sql = "SELECT seq,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0) FROM fleet_outbox ORDER BY seq DESC LIMIT 10001";
+        let indexed = sql.replace(
+            "FROM fleet_outbox",
+            "FROM fleet_outbox INDEXED BY fleet_outbox_retention",
+        );
+        let unindexed = sql.replace("FROM fleet_outbox", "FROM fleet_outbox NOT INDEXED");
+        let scan = |sql: &str| {
+            let start = std::time::Instant::now();
+            let mut statement = db.prepare(sql).unwrap();
+            let result = statement
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (result, start.elapsed())
+        };
+        let mut times = [vec![], vec![]];
+        for trial in 0..10 {
+            for index in [trial % 2, 1 - trial % 2] {
+                let (actual, elapsed) = scan([&indexed, &unindexed][index]);
+                assert_eq!(actual, scan([&indexed, &unindexed][1 - index]).0);
+                times[index].push(elapsed);
+            }
+        }
+        for values in &mut times {
+            values.sort();
+        }
+        let mut passes = 0;
+        let start = std::time::Instant::now();
+        while prune_journal(&db).unwrap() > 0 {
+            passes += 1;
+        }
+        let elapsed = start.elapsed();
+        let retained: i64 = db.query_row("SELECT coalesce(sum(coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0)),0) FROM fleet_outbox", [], |r| r.get(0)).unwrap();
+        let count: i64 = db
+            .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert!(retained <= 64 * 1024 * 1024 && count <= 10_000);
+        assert_eq!(snapshot(&db, "byte-profile").unwrap(), original);
+        assert_eq!(journal_head(&db).unwrap(), head);
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            rows(&db, "PRAGMA foreign_key_check", &[])
+                .unwrap()
+                .is_empty()
+        );
+        eprintln!(
+            "Journal byte scan: identical rows; indexed median {:?}; body scan median {:?}; {passes} bounded passes in {elapsed:?}; {count} rows / {retained} UTF-8 bytes retained; unchanged canonical snapshot/highwater; full integrity/FK ok",
+            times[0][5], times[1][5]
+        );
     }
 
     #[test]

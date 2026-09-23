@@ -3,8 +3,10 @@ use super::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-pub(crate) const INDEXES: &str =
-    "CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);";
+pub(crate) const INDEXES: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);",
+    "CREATE INDEX IF NOT EXISTS fleet_outbox_retention ON fleet_outbox(seq DESC,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0));"
+);
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS fleet_meta(id INTEGER PRIMARY KEY CHECK(id=1),role TEXT NOT NULL,node TEXT NOT NULL,syncing INTEGER NOT NULL DEFAULT 0);

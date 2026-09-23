@@ -920,7 +920,9 @@ impl Store {
             tx.commit()?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_row_local' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::fleet::INDEXES)?; }
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_row_local','fleet_outbox_retention') AND type='index'", [], |r|r.get::<_,i64>(0))? < 2 {
+            db.execute_batch(super::fleet::INDEXES)?;
+        }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs' AND type='table')", [], |r|r.get::<_,bool>(0))? {
             db.execute_batch(super::chief::SCHEMA)?;
         }
