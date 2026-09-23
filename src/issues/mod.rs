@@ -315,6 +315,11 @@ pub enum Operation {
         number: i64,
         machine: String,
     },
+    ReleaseAllocation {
+        number: i64,
+        expected_machine: String,
+        if_version: i64,
+    },
     Subtasks {
         number: i64,
         #[serde(default)]
@@ -530,6 +535,7 @@ impl Operation {
             | Self::Transfer { number, .. }
             | Self::View { number }
             | Self::Allocation { number, .. }
+            | Self::ReleaseAllocation { number, .. }
             | Self::Subtasks { number, .. }
             | Self::CreateSubtask { number, .. }
             | Self::AddSubtask { number, .. }

@@ -137,7 +137,12 @@ and distinguish `fleet_reserved` from `fleet_allocation_missing`; their structur
 `details` include the reserved machine, last known hostname, caller/store machine,
 replica role, connectivity and safe recovery guidance. A missing companion
 allocation may be stale: it never proves the supervisor has no reservation.
-Issue details also show the reserved device and a copyable inspection command.
+Issue details show the reserved device, with reservation timing explained on
+hover or keyboard focus. Boss can use **Release reservation** on the supervisor
+to let another device pick up an unassigned issue. Stop any active worker attempt
+first. The confirmed device and issue revision must still match; releases are
+recorded in activity and replicated automatically. Reservations do not expire
+automatically, including while a device is offline.
 
 To resume a released manual claim, keep its saved `--agent ID`. For missing local
 allocation, run `hey-boss issue allocation NUMBER --host SUPERVISOR` with the

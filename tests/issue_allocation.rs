@@ -65,6 +65,9 @@ impl Fixture {
         serde_json::from_slice::<Value>(&o.stdout).unwrap()["error"].clone()
     }
     fn rpc(&self, actor: Option<Value>, operation: Value) -> Output {
+        self.rpc_id(actor, operation, None)
+    }
+    fn rpc_id(&self, actor: Option<Value>, operation: Value, request_id: Option<&str>) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .env("HEY_BOSS_ISSUE_DB", self.0.join("issues.db"))
             .env("HEY_BOSS_FLEET_STATE", &self.0)
@@ -74,7 +77,7 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let request = serde_json::json!({"version":1,"project":{"id":"named:Allocation fixture","name":"Allocation fixture"},"project_override":null,"actor":actor,"operation":operation,"request_id":null});
+        let request = serde_json::json!({"version":1,"project":{"id":"named:Allocation fixture","name":"Allocation fixture"},"project_override":null,"actor":actor,"operation":operation,"request_id":request_id});
         child
             .stdin
             .take()
@@ -88,6 +91,172 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn boss(f: &Fixture) -> Value {
+    let mut actor = f.json(&["whoami"])["agent"].clone();
+    actor["id"] = serde_json::json!("human:boss");
+    actor["kind"] = serde_json::json!("human");
+    actor["source"] = serde_json::json!("web interface");
+    actor
+}
+
+fn release(version: i64, machine: &str) -> Value {
+    serde_json::json!({"action":"release_allocation","number":1,"if_version":version,"expected_machine":machine})
+}
+
+#[test]
+fn boss_releases_an_offline_reservation_with_audited_revision() {
+    let f = Fixture::new("release");
+    let db = f.db("controller");
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'offline-machine')",
+        [],
+    )
+    .unwrap();
+    let before = f.json(&["view", "1"])["issue"].clone();
+    let output = f.rpc(
+        Some(boss(&f)),
+        release(before["version"].as_i64().unwrap(), "offline-machine"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["changed"], true);
+    assert_eq!(result["allocation"]["reserved_machine"], Value::Null);
+    assert_eq!(
+        result["issue"]["version"],
+        before["version"].as_i64().unwrap() + 1
+    );
+    assert_eq!(result["issue"]["assignee"], Value::Null);
+    assert_eq!(result["issue"]["body"], before["body"]);
+    let history = f.json(&["history", "1"]);
+    let event = history["events"].as_array().unwrap().last().unwrap();
+    assert_eq!(event["action"], "allocation_released");
+    assert_eq!(event["actor"], "human:boss");
+    assert_eq!(event["data"]["machine"], "offline-machine");
+    f.json(&["claim", "1"]);
+}
+
+#[test]
+fn allocation_release_rejects_changed_reservations_and_assigned_work() {
+    let f = Fixture::new("release-guards");
+    let db = f.db("controller");
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'offline-machine')",
+        [],
+    )
+    .unwrap();
+    let version = f.json(&["view", "1"])["issue"]["version"].as_i64().unwrap();
+    for op in [
+        release(version, "other-machine"),
+        release(version + 1, "offline-machine"),
+    ] {
+        let output = f.rpc(Some(boss(&f)), op);
+        assert_eq!(output.status.code(), Some(4));
+    }
+    f.json(&["claim", "1", "--force"]);
+    let current = f.json(&["view", "1"]);
+    let output = f.rpc(
+        Some(boss(&f)),
+        release(
+            current["issue"]["version"].as_i64().unwrap(),
+            "offline-machine",
+        ),
+    );
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(f.json(&["view", "1"])["issue"], current["issue"]);
+    assert_eq!(
+        f.json(&["allocation", "1"])["allocation"]["reserved_machine"],
+        "offline-machine"
+    );
+}
+
+#[test]
+fn only_boss_on_the_supervisor_can_release_an_allocation() {
+    let f = Fixture::new("release-authority");
+    let db = f.db("controller");
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'offline-machine')",
+        [],
+    )
+    .unwrap();
+    let version = f.json(&["view", "1"])["issue"]["version"].as_i64().unwrap();
+    let output = f.rpc(
+        Some(f.json(&["whoami"])["agent"].clone()),
+        release(version, "offline-machine"),
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "forbidden");
+    db.execute("UPDATE fleet_meta SET role='agent'", [])
+        .unwrap();
+    let output = f.rpc(Some(boss(&f)), release(version, "offline-machine"));
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        f.json(&["allocation", "1"])["allocation"]["reserved_machine"],
+        "offline-machine"
+    );
+}
+
+#[test]
+fn release_retry_does_not_remove_a_new_reservation() {
+    let f = Fixture::new("release-retry");
+    let db = f.db("controller");
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'offline-machine')",
+        [],
+    )
+    .unwrap();
+    let version = f.json(&["view", "1"])["issue"]["version"].as_i64().unwrap();
+    let actor = boss(&f);
+    let op = release(version, "offline-machine");
+    let first = f.rpc_id(Some(actor.clone()), op.clone(), Some("release-once"));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'new-machine')",
+        [],
+    )
+    .unwrap();
+    let retry = f.rpc_id(Some(actor), op, Some("release-once"));
+    assert!(retry.status.success());
+    assert_eq!(first.stdout, retry.stdout);
+    assert_eq!(
+        f.json(&["allocation", "1"])["allocation"]["reserved_machine"],
+        "new-machine"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM events WHERE action='allocation_released'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn release_does_not_open_pickup_during_an_unclaimed_worker_attempt() {
+    let f = Fixture::new("release-active");
+    let db = f.db("controller");
+    db.execute_batch("INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'offline-machine');
+        INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at)
+        VALUES('active-run','named:Allocation fixture',1,'{}','codex:offline','running',1,'start','offline-machine',0,0);").unwrap();
+    let version = f.json(&["view", "1"])["issue"]["version"].as_i64().unwrap();
+    let output = f.rpc(Some(boss(&f)), release(version, "offline-machine"));
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        f.json(&["allocation", "1"])["allocation"]["reserved_machine"],
+        "offline-machine"
+    );
 }
 
 #[test]
