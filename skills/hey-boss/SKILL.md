@@ -75,6 +75,21 @@ An `18 successful, 20 total` summary is incomplete. Preserve the command, exit
 status, interruption and completed/expected counts in the handoff, then rerun
 the required checks. Keep existing hooks and project gates enabled.
 
+Use the project's single admission path for validation. Do not wrap an already
+gated command in manual `lockf`/`flock` locks or reserve additional slots to make
+slow checks exclusive unless the task explicitly requires exclusive capacity.
+Preserve the configured limit and the wrapper's inherited ownership contract;
+never manufacture a slot-held marker outside a real owning reservation. Serial
+task execution within one admitted job does not require owning every slot.
+
+For queue diagnosis, report the actual holder and waiter PIDs, parent/child
+relationship, slot paths, and whether the payload has started. A lock process
+or open file alone does not prove ownership: on macOS inspect `lsof`'s lock
+indicator alongside `ps`; on Linux inspect `/proc/locks` (including blocked
+entries) and process ancestry. Distinguish observations from inferred waits.
+Do not kill owners, unlink lock files, or release reservations based on idle or
+orphan labels. Any repair must preserve live checks and their task ownership.
+
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
 
