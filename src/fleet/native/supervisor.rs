@@ -99,12 +99,12 @@ impl Supervisor {
                 .machines
                 .entry(host.into())
                 .or_insert_with(|| json!({"host":host}));
-            *dirty |= fields
-                .iter()
-                .any(|(key, value)| key != "heartbeat" && m.get(key) != Some(value));
+            *dirty |= fields.iter().any(|(key, value)| {
+                !matches!(key.as_str(), "heartbeat" | "last_sync") && m.get(key) != Some(value)
+            });
             m.as_object_mut().unwrap().extend(fields.clone());
-            // Liveness is current in memory. Connection/worker/config changes
-            // save the latest timestamp with the durable snapshot.
+            // Liveness and sync progress are current in memory. Substantive
+            // changes save both latest timestamps with the durable snapshot.
             if !*dirty {
                 return Ok(());
             }
@@ -1260,7 +1260,7 @@ mod tests {
         let workers = json!([{"id":"worker","runs":[{"summary":"x".repeat(800_000)}]}]);
         app.update(
             "remote",
-            json!({"state":"connected","heartbeat":1,"workers":workers}),
+            json!({"state":"connected","heartbeat":1,"last_sync":1,"workers":workers,"pending":0,"conflicts":0,"applied_revision":"revision"}),
         )
         .unwrap();
         let db = app.ctx.db().unwrap();
@@ -1268,14 +1268,18 @@ mod tests {
         for heartbeat in 2..100 {
             app.update("remote", json!({"heartbeat":heartbeat}))
                 .unwrap();
+            // The real heartbeat path also reports a successful sync time.
+            app.update("remote", json!({"workers":workers,"pending":0,"conflicts":0,"applied_revision":"revision","last_sync":heartbeat})).unwrap();
         }
         assert_eq!(app.machine("remote")["heartbeat"], 99);
+        assert_eq!(app.machine("remote")["last_sync"], 99);
         assert!(saved == replica::state_get(&db, "machines", Value::Null).unwrap());
         app.update("remote", json!({"state":"disconnected","error":"offline"}))
             .unwrap();
         let saved = replica::state_get(&db, "machines", Value::Null).unwrap();
         assert_eq!(saved["remote"]["state"], "disconnected");
         assert_eq!(saved["remote"]["heartbeat"], 99);
+        assert_eq!(saved["remote"]["last_sync"], 99);
         assert!(saved["remote"]["workers"] == workers);
     }
 
@@ -1303,7 +1307,9 @@ mod tests {
         // A write here would wait for the ten-second SQLite timeout and fail.
         app.update("remote", fields).unwrap();
         app.update("remote", json!({"heartbeat":42})).unwrap();
+        app.update("remote", json!({"last_sync":42})).unwrap();
         assert_eq!(app.machine("remote")["heartbeat"], 42);
+        assert_eq!(app.machine("remote")["last_sync"], 42);
         writer.execute_batch("ROLLBACK").unwrap();
     }
 
