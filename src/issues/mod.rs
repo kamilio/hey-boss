@@ -243,7 +243,7 @@ pub enum Operation {
     GlobalSettings,
     ConfigureGlobal {
         boss_name: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_close_merged_prs: Option<bool>,
         if_version: Option<i64>,
     },

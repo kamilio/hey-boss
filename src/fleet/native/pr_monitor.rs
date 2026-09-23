@@ -107,7 +107,9 @@ fn poll(
         };
         let result = runtime.block_on(tokio_read(client.as_ref().unwrap(), &repository, number));
         match result {
-            Ok(data) => {
+            Ok(response) => {
+                let checked_at = i64::try_from(response.validated_at_ms)?;
+                let data = response.data;
                 let status = if merged(&data, &repository, number) {
                     Some("merged")
                 } else if data["number"] == number
@@ -126,7 +128,7 @@ fn poll(
                 Store::open(&ctx.path)?.record_pr_status(
                     &url,
                     status,
-                    crate::issues::worker::now(),
+                    checked_at,
                     if status.is_none() {
                         Some("Incomplete PR metadata")
                     } else {
@@ -164,14 +166,13 @@ async fn tokio_read(
     client: &Client,
     repository: &str,
     number: u64,
-) -> hey_gh::Result<serde_json::Value> {
+) -> hey_gh::Result<hey_gh::Response> {
     tokio::time::timeout(
         Duration::from_secs(20),
         client.pull_request(repository, number, Freshness::MaxAge(INTERVAL)),
     )
     .await
     .map_err(|_| hey_gh::Error::Deadline)?
-    .map(|r| r.data)
 }
 
 #[cfg(test)]
