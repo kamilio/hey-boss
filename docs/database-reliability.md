@@ -129,6 +129,8 @@ A captured fleet response projected from 2.45 MB to 494 KB of encoded JSON
 (about 80% less); this is a payload measurement, not a latency measurement.
 The regression also covers individually valid machine reports whose combined
 full status exceeds the 16 MiB transport limit while their overview fits.
+Oversized full-status requests now receive a small JSON error on the control
+socket instead of an empty response that fails client parsing.
 
 ## Ongoing verification
 
