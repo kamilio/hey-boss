@@ -576,7 +576,7 @@ pub(super) fn committed_source_build(source: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::io::BufReader;
     #[test]
@@ -602,7 +602,7 @@ mod tests {
             Some(libc::EACCES | libc::EAGAIN)
         ));
     }
-    fn assert_sqlite_locked(path: &Path) {
+    pub(in crate::fleet::native) fn assert_sqlite_locked(path: &Path) {
         let probe = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -619,7 +619,7 @@ mod tests {
             String::from_utf8_lossy(&probe.stderr)
         );
     }
-    fn test_context() -> (PathBuf, Context, Store) {
+    pub(in crate::fleet::native) fn test_context() -> (PathBuf, Context, Store) {
         let root =
             std::env::temp_dir().join(format!("hey-boss-fleet-lock-alias-{}", id().unwrap()));
         let state = root.join("state");
