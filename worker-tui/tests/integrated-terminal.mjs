@@ -67,7 +67,7 @@ try {
   assert.ok(status().ok, "JSON status must remain machine-readable");
   await quit(worker);
   assert.equal(status().workers.find(w => w.id === live.id)?.pid, null, "Quit leaked the owned worker");
-  const finished = JSON.parse(execFileSync(binary, ["worker", "--json", "--id", live.id, "status"], { cwd: temporary, env, encoding: "utf8" }));
+  const finished = JSON.parse(execFileSync(binary, ["worker", "--json", "--id", live.id, "--history", "20", "status"], { cwd: temporary, env, encoding: "utf8" }));
   assert.equal(finished.active, 0, "Quit leaked an owned Codex session");
   assert.ok(finished.runs.some(r => r.state === "cancelled"), `Owned session was not finalized on quit: ${JSON.stringify(finished.runs)}`);
   console.log("Integrated worker/status terminal-pilot walkthrough passed.");
