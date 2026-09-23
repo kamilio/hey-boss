@@ -125,6 +125,10 @@ impl Fixture {
         c.arg(args[0]).arg("--json");
         if args[0] == "worker" {
             c.args(["--project", "Approval QA"]);
+            if args.get(1) == Some(&"status") {
+                // These assertions inspect completed attempts as well as live approvals.
+                c.args(["--history", "20"]);
+            }
         }
         c.args(&args[1..]);
         c
