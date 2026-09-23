@@ -61,6 +61,12 @@ the companion MUST send progress responses every five seconds. These responses
 MUST NOT advance the acknowledged cursor. The supervisor MUST measure companion
 silence after completing its own outgoing transfer.
 
+The supervisor SHOULD update heartbeat timestamps without rewriting durable
+machine snapshots. Identical machine updates SHOULD NOT require a database
+writer lock. Connection, configuration and worker changes MUST remain durable;
+a failed save MUST remain eligible for retry even when subsequent fields are
+identical. Every successful snapshot save MUST include the latest heartbeat.
+
 ## Configuration
 
 The supervisor MUST derive its inventory from the existing machine configuration and distribute the supervisor identity, companion role, configuration revision, desired worker settings, and software build. Invalid configuration MUST leave the previous valid configuration active and expose an error. Companions MUST persist configuration atomically. The supervisor MUST reconcile reachable machines on startup, reconnect, configuration changes, and source changes. Deployment failures MUST be visible and retried with backoff. Explicit deployment MUST remain available.
@@ -75,6 +81,9 @@ floor atomically with deletion. A cursor below that floor or above the durable
 journal high watermark MUST receive a current snapshot. Snapshot cursors and
 future journal sequences MUST NOT regress when history is deleted. Pruning MUST
 NOT delete companion outgoing changes, replay receipts or conflict evidence.
+When no entries exceed retention, maintenance SHOULD remain a database reader
+and MUST NOT wait for an unrelated writer to finish. Compaction MUST preserve
+the canonical snapshot, journal high watermark and replay identities.
 
 While a local update awaits its receipt, incoming pulls MUST preserve fields
 changed by that update and merge canonical values for other fields. Pending
@@ -107,11 +116,12 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique |
 | Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation |
-| Journal retention | Bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection and receipt replay after pruning |
+| Journal retention | Bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection, receipt replay after pruning, idle maintenance during another write and unchanged snapshot after compaction |
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |
 | Configuration | Revision change reaches companion, survives restart, and queues offline |
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |
 | Connectivity | Heartbeat, EOF, timeout, and reconnect state transitions |
+| Machine persistence | Heartbeat-only updates retain current liveness without rewriting snapshots; identical updates during another write; failed-save retry retains worker and configuration state |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria

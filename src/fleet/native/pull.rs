@@ -24,7 +24,7 @@ pub(super) fn send_pull(
     frame["receipts"] = Value::Array(receipts);
     if !supports_chunks || !snapshot {
         let bytes = serde_json::to_vec(&frame)?;
-        if bytes.len() + 1 <= crate::issues::WIRE_LIMIT {
+        if bytes.len() < crate::issues::WIRE_LIMIT {
             writer.write_all(&bytes)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
@@ -270,7 +270,7 @@ mod tests {
         assert!(
             bytes
                 .split(|b| *b == b'\n')
-                .all(|frame| frame.len() + 1 <= crate::issues::WIRE_LIMIT)
+                .all(|frame| frame.len() < crate::issues::WIRE_LIMIT)
         );
         let sent = frames(&bytes);
         assert!(

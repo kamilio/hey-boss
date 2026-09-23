@@ -858,6 +858,18 @@ pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
     if role != "controller" {
         return Ok(0);
     }
+    let cutoff = || -> Result<Option<i64>> {
+        Ok(db.query_row(
+            "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=(SELECT seq FROM fleet_outbox ORDER BY seq DESC LIMIT 1 OFFSET 10000) ORDER BY seq LIMIT 1000)",
+            [],
+            |r| r.get(0),
+        )?)
+    };
+    // An ordinary maintenance pass must remain a WAL reader when there is no
+    // excess history. Recheck under the writer lock before deleting anything.
+    if cutoff()?.is_none() {
+        return Ok(0);
+    }
     let tx = if db.is_autocommit() {
         Some(rusqlite::Transaction::new_unchecked(
             db,
@@ -866,12 +878,7 @@ pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
     } else {
         None
     };
-    let cutoff: Option<i64> = db.query_row(
-        "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=(SELECT seq FROM fleet_outbox ORDER BY seq DESC LIMIT 1 OFFSET 10000) ORDER BY seq LIMIT 1000)",
-        [],
-        |r| r.get(0),
-    )?;
-    let deleted = if let Some(cutoff) = cutoff {
+    let deleted = if let Some(cutoff) = cutoff()? {
         let deleted = db.execute("DELETE FROM fleet_outbox WHERE seq<=?1", [cutoff])?;
         let floor = state_get(db, "journal_floor", json!(0))?
             .as_i64()
@@ -977,14 +984,14 @@ fn incremental_retained(db: &Connection, node: &str, cursor: i64) -> Result<Valu
         }
         for (table, local) in needed {
             let key = (table.to_owned(), local);
-            if !ids.contains_key(&key) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(key) {
                 let identity = lookup
                     .query_row(rusqlite::params![table, local], |r| {
                         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
                     })
                     .optional()?;
                 if let Some(identity) = identity {
-                    ids.insert(key, identity);
+                    entry.insert(identity);
                 }
             }
         }
@@ -1697,9 +1704,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(journal_head(&db).unwrap(), cursor);
+        let snapshot_before = snapshot(&db, "compaction-probe").unwrap();
         let started = std::time::Instant::now();
         db.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")
             .unwrap();
+        assert!(
+            snapshot_before == snapshot(&db, "compaction-probe").unwrap(),
+            "Compaction changed the canonical snapshot"
+        );
         assert_eq!(
             db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
                 .unwrap(),
@@ -1715,6 +1727,19 @@ mod tests {
             started.elapsed(),
             std::fs::metadata(&path).unwrap().len()
         );
+    }
+
+    #[test]
+    fn retained_journal_maintenance_does_not_wait_for_another_writer() {
+        let f = Fixture::new();
+        f.capture();
+        grow_journal(&f, 10_000);
+        let writer = Connection::open(&f.path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        f.db.busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(prune_journal(&f.db).unwrap(), 0);
+        writer.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
