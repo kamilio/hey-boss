@@ -746,7 +746,9 @@ impl Store {
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        db.busy_timeout(Duration::from_secs(2))?;
+        // Short attempts limit how far the final wait can overrun the overall
+        // contention deadline. Safe retry boundaries retain the six-second budget.
+        db.busy_timeout(Duration::from_millis(250))?;
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
