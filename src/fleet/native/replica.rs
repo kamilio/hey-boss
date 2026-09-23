@@ -789,10 +789,9 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
 fn canonical_append(
     own: &str,
     table: &str,
-    row: &Value,
+    mut row: Value,
     identities: &BTreeMap<(String, i64), (String, i64)>,
 ) -> Result<Value> {
-    let mut row = row.clone();
     let local_id = row["id"].as_i64().unwrap();
     let (origin, id) = identities
         .get(&(table.into(), local_id))
@@ -818,7 +817,9 @@ fn canonical_append(
             }
         }
     }
-    Ok(json!({"origin":origin,"row":row}))
+    let mut result = json!({"origin":origin});
+    result["row"] = row;
+    Ok(result)
 }
 fn identities(db: &Connection) -> Result<BTreeMap<(String, i64), (String, i64)>> {
     let mut ids = BTreeMap::new();
@@ -839,13 +840,13 @@ fn identities(db: &Connection) -> Result<BTreeMap<(String, i64), (String, i64)>>
     Ok(ids)
 }
 fn allocation_payload(db: &Connection, node: &str, mut payload: Value) -> Result<Value> {
-    payload["allocations"] = json!(rows(db, "SELECT * FROM fleet_allocations", &[])?);
+    payload["allocations"] = Value::Array(rows(db, "SELECT * FROM fleet_allocations", &[])?);
     payload["allocation_deadlines"] =
-        json!(rows(db, "SELECT * FROM fleet_allocation_deadlines", &[])?);
-    payload["ranges"] = json!(rows(
+        Value::Array(rows(db, "SELECT * FROM fleet_allocation_deadlines", &[])?);
+    payload["ranges"] = Value::Array(rows(
         db,
         "SELECT project_id,first_number,last_number FROM fleet_ranges WHERE node=?",
-        &[json!(node)]
+        &[json!(node)],
     )?);
     Ok(payload)
 }
@@ -908,22 +909,24 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
         let mut data = rows(db, &format!("SELECT * FROM {table}"), &[])?;
         if append(table) {
             data = data
-                .iter()
+                .into_iter()
                 .map(|r| canonical_append(&own, table, r, &ids))
                 .collect::<Result<_>>()?;
         }
-        tables.insert((*table).into(), json!(data));
+        tables.insert((*table).into(), Value::Array(data));
     }
     // Canonical name choices belong to the supervisor. Keep this additive
     // snapshot metadata out of companion write journals and older protocols.
     for table in ["project_name_keys", "project_name_collisions"] {
         tables.insert(
             table.into(),
-            json!(rows(db, &format!("SELECT * FROM {table}"), &[])?),
+            Value::Array(rows(db, &format!("SELECT * FROM {table}"), &[])?),
         );
     }
     let cursor = journal_head(db)?;
-    let result = allocation_payload(db, node, json!({"tables":tables,"cursor":cursor}))?;
+    let mut payload = json!({"cursor":cursor});
+    payload["tables"] = Value::Object(tables);
+    let result = allocation_payload(db, node, payload)?;
     if let Some(tx) = tx {
         tx.commit()?;
     }
@@ -985,7 +988,7 @@ fn incremental_retained(db: &Connection, node: &str, cursor: i64) -> Result<Valu
                 }
             }
         }
-        change["append"] = canonical_append(&own, table, &row, &ids)?;
+        change["append"] = canonical_append(&own, table, row, &ids)?;
     }
     allocation_payload(
         db,
