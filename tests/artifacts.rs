@@ -32,8 +32,7 @@ fn guarded_edits_bound_contention_and_preserve_concurrent_versions() {
     let error = store.execute(&request(json!({"action":"artifact","operation":{"command":"edit","id":id,"body":"Pending","if_version":1}}))).unwrap_err();
     assert_eq!(error.code, "database_busy");
     assert!(
-        // Six-second retry window + the current two-second SQLite wait,
-        // with one second for scheduling jitter on shared CI runners.
+        // Allow shared CI scheduling jitter around the bounded retry window.
         started.elapsed() < std::time::Duration::from_secs(9),
         "Contention must have a short bounded wait"
     );
