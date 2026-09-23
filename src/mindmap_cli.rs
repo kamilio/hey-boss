@@ -215,6 +215,11 @@ const BATCH_HELP: &str = r#"JSON input format:
   edit, alias and move require "node".
   "node" is an existing selector: alias, n-ID, PROJECT::alias,
   issue:NUMBER, pr:URL or notice:TASK_ID, in the selected map.
+  Automatic PR rows (automatic:true in mm show --json) are display resources,
+  not editable stored nodes. Before edit/alias/move or placement anchors, run:
+    hey-boss mm pr URL --under issue:NUMBER --title TITLE
+  Use the same --project as the batch. Reload mm show --json for the new
+  --if-version before retrying. Link entries can create typed PR nodes directly.
 
   edit:  "title" (string) or "clear_label":true is required.
          "title" changes topic/PR text or an issue's map-only label.

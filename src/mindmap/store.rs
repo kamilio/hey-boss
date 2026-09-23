@@ -255,6 +255,22 @@ fn select(
             touched.insert(p.id);
             return Ok(node);
         }
+        if kind == "pr" {
+            return Err(Error::new(
+                "not_found",
+                format!(
+                    "No stored PR node for {reference:?} in {}. Automatic PR rows \
+                     (automatic:true in mm show --json) are display resources, not editable stored nodes. \
+                     Create an explicit node first: hey-boss mm pr {} --project {} \
+                     (add --under issue:NUMBER to keep it under its issue, and --title TITLE for a label). \
+                     Then reload hey-boss mm show --json and retry the batch with the new --if-version. \
+                     No changes were made.",
+                    p.id,
+                    crate::health::remote::quote(&reference),
+                    crate::health::remote::quote(&p.id),
+                ),
+            ));
+        }
     } else {
         let found = db
             .query_row(

@@ -100,6 +100,26 @@ prefers its node in the current map, then in the issue's own project map. Traili
 slash variants of the same PR attachment do not duplicate automatic nodes or links.
 Automatic links are not manually editable with `mm link/unlink`.
 
+Automatic PR rows (`kind: "pr"`, `automatic: true` in `mm show --json`) are
+display resources projected from issue attachments, rather than editable stored
+nodes. Their typed `pr:URL` selector cannot be edited, aliased, moved or used as a
+placement anchor until an explicit PR node exists in the selected map. Create it
+with the same project selection as your batch:
+
+```sh
+hey-boss mm pr https://github.com/ORG/REPO/pull/123 --under issue:12 --title 'Short label' --project PROJECT
+hey-boss mm show --json --project PROJECT
+```
+
+Replace the URL, issue number and project with your values. The explicit node
+reuses the automatic relationship without duplicating the displayed PR; the
+attachment stays intact. Use the newly returned map version for the batch's
+`--if-version`. A rejected automatic PR selector changes nothing, and stale
+version guards still reject the whole batch. Link entries can create typed PR
+endpoints directly, but organization selectors bind to the original stored map.
+The viewer explains this distinction in automatic PR details and offers file and
+artifact attachment controls only after the PR has a stored node.
+
 Mirrored issues show their source project and issue number in the viewer and
 `mm view`. Deleted issues keep their saved map references with an unavailable
 state; the viewer omits their issue-opening link.

@@ -2159,6 +2159,86 @@ fn batch_atomic_commit_retry_and_resource_preservation() {
 }
 
 #[test]
+fn batch_automatic_pr_selectors_explain_explicit_nodes_and_preserve_guards() {
+    let f = Fixture::new();
+    let url = "https://github.com/org/repo/pull/123";
+    f.issue("Atlas", &["create", "--title", "Ship"]);
+    f.issue("Atlas", &["pr", "add", "1", url]);
+    f.run("Atlas", &["issue", "1"]);
+    f.run("Atlas", &["add", "Root", "--id", "root"]);
+    let before = f.run("Atlas", &["show"]);
+    assert!(
+        nodes(&before)
+            .iter()
+            .any(|n| n["kind"] == "pr" && n["automatic"] == true)
+    );
+    let version = before["version"].to_string();
+    let selector = format!("pr:{url}/");
+    for operation in [
+        json!({"command":"edit","node":selector,"title":"Short label"}),
+        json!({"command":"alias","node":selector,"alias":"implementation"}),
+        json!({"command":"move","node":selector,"under":"root"}),
+        json!({"command":"move","node":"root","under":selector}),
+        json!({"command":"move","node":"root","before":selector}),
+        json!({"command":"move","node":"root","after":format!("Atlas::{selector}")}),
+    ] {
+        let file = batch_file(
+            &f,
+            json!([
+                {"command":"edit","node":"root","title":"Must roll back"}, operation
+            ]),
+        );
+        let error = f.fail(
+            "Atlas",
+            &["batch", "--file", &file, "--if-version", &version],
+            3,
+        );
+        assert_eq!(error["error"]["code"], "not_found");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(message.contains("display resources"), "{message}");
+        assert!(
+            message.contains(&format!(
+                "hey-boss mm pr '{url}' --project '{}'",
+                before["project"]["id"].as_str().unwrap()
+            )),
+            "{message}"
+        );
+        assert!(message.contains("--under issue:NUMBER"), "{message}");
+        assert!(message.contains("--if-version"), "{message}");
+        assert_eq!(f.run("Atlas", &["show"]), before);
+        f.fail("Atlas", &["batch", "--file", &file, "--if-version", "0"], 4);
+        assert_eq!(f.run("Atlas", &["show"]), before);
+    }
+    // The suggested command creates the editable endpoint without duplicating the PR.
+    f.run("Atlas", &["pr", url, "--under", "issue:1"]);
+    let explicit = f.run("Atlas", &["show"]);
+    assert_eq!(nodes(&explicit).len(), nodes(&before).len());
+    let file = batch_file(
+        &f,
+        json!([
+            {"command":"edit","node":selector,"title":"Short label"},
+            {"command":"move","node":selector,"under":"root"}
+        ]),
+    );
+    f.run(
+        "Atlas",
+        &[
+            "batch",
+            "--file",
+            &file,
+            "--if-version",
+            &explicit["version"].to_string(),
+        ],
+    );
+    let after = f.run("Atlas", &["show"]);
+    let pr = nodes(&after).iter().find(|n| n["kind"] == "pr").unwrap();
+    assert_eq!(pr["title"], "Short label");
+    assert_eq!(pr["automatic"], false);
+    assert_eq!(pr["parent_id"], alias(&after, "root")["id"]);
+    assert_eq!(f.issue("Atlas", &["view", "1"])["issue"]["title"], "Ship");
+}
+
+#[test]
 fn invalid_batches_roll_back_every_edit_and_revision() {
     let f = Fixture::new();
     f.run("Atlas", &["add", "Root", "--id", "root"]);
