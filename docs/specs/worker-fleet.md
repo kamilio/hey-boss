@@ -99,11 +99,12 @@ creations and deletions MUST retain their whole local row until acknowledgment.
 Same-field changes MUST remain pending for canonical conflict arbitration;
 merging incoming data MUST NOT alter the saved outgoing mutation or create echoes.
 
-When existing allocations satisfy all configured tag filters and total machine
-prefetch capacity, refresh SHOULD NOT scan the unallocated issue queue. Refresh
+When existing allocations for a project satisfy all configured tag filters and
+the machine's prefetch capacity for that project, refresh SHOULD NOT scan the
+unallocated issue queue. Refresh
 MUST preserve claim deadlines, expired-allocation recovery, number-range
 replenishment and issue ordering. Allocations matching multiple tag filters
-MUST count once toward total machine capacity.
+MUST count once toward the machine's total capacity for that project.
 
 Companions MAY continue active work and pick up previously allocated work offline. Allocations MUST NOT expire solely because a machine disconnects. The supervisor and other companions MUST exclude another machine's allocations from pickup. Unallocated replicated issues MUST NOT be launched offline. Explicit human reassignment MAY revoke ownership and MUST be observable after synchronization. Offline issue creation MUST use supervisor-reserved number ranges; exhaustion MUST produce a visible error rather than collide with another machine.
 
