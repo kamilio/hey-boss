@@ -1,8 +1,4 @@
-use super::{
-    Result,
-    context::{Context, atomic_json, read_json},
-    replica::invalid,
-};
+use super::{Result, context::Context, replica::invalid};
 use serde_json::json;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -132,9 +128,9 @@ pub(super) fn install(ctx: &Context, role: &str) -> Result<()> {
 pub(super) fn ensure_companion(ctx: &Context) -> Result<()> {
     let path = ctx.state.join("fleet-agent-service.json");
     let build = ctx.build()?;
-    if read_json(&path, json!({}))?["build"] != build {
+    if ctx.read_json(&path, json!({}))?["build"] != build {
         install(ctx, "agent")?;
-        atomic_json(&path, &json!({"build":build}))?;
+        ctx.atomic_json(&path, &json!({"build":build}))?;
     }
     Ok(())
 }

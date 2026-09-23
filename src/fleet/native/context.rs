@@ -136,7 +136,7 @@ impl Context {
     }
     pub fn lock(&self, name: &str, wait: bool) -> Result<Option<Lock>> {
         let path = self.state.join(name);
-        crate::issues::planning::protect_database_paths(&self.path, [&path])?;
+        self.protect_file(&path)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -160,11 +160,25 @@ impl Context {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    pub fn protect_file(&self, path: &Path) -> Result<()> {
+        Ok(crate::issues::planning::protect_database_paths(
+            &self.path,
+            [path],
+        )?)
+    }
+    pub fn read_json(&self, path: &Path, default: Value) -> Result<Value> {
+        self.protect_file(path)?;
+        read_json(path, default)
+    }
+    pub fn atomic_json(&self, path: &Path, value: &Value) -> Result<()> {
+        self.protect_file(path)?;
+        atomic_json(path, value)
+    }
     pub fn inventory(&self) -> Result<Vec<Value>> {
         let config = std::env::var_os("HEY_BOSS_FLEET_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join(".hey-boss/config.json"));
-        let value = read_json(&config, json!({}))?;
+        let value = self.read_json(&config, json!({}))?;
         let mut hosts = vec![];
         for entry in value["ssh_hosts"].as_array().into_iter().flatten() {
             let entry = if entry.is_string() {
@@ -180,7 +194,9 @@ impl Context {
             }
         }
         if hosts.is_empty() {
-            match fs::read_to_string(self.state.join("companion-hosts")) {
+            let path = self.state.join("companion-hosts");
+            self.protect_file(&path)?;
+            match fs::read_to_string(path) {
                 Ok(s) => {
                     hosts = s
                         .lines()
@@ -192,7 +208,7 @@ impl Context {
                 Err(e) => return Err(e.into()),
             }
         }
-        let overrides = read_json(&self.desired, json!({}))?;
+        let overrides = self.read_json(&self.desired, json!({}))?;
         for entry in &mut hosts {
             let host = entry["host"].as_str().unwrap().to_owned();
             if let Some(m) = overrides["machines"][&host].as_object() {
@@ -603,8 +619,7 @@ mod tests {
             String::from_utf8_lossy(&probe.stderr)
         );
     }
-    #[test]
-    fn fleet_lock_aliases_are_rejected_without_releasing_sqlite_locks() {
+    fn test_context() -> (PathBuf, Context, Store) {
         let root =
             std::env::temp_dir().join(format!("hey-boss-fleet-lock-alias-{}", id().unwrap()));
         let state = root.join("state");
@@ -620,6 +635,61 @@ mod tests {
             node: "test".into(),
             stop: Arc::new(AtomicBool::new(false)),
         };
+        (root, ctx, store)
+    }
+    #[test]
+    fn fleet_json_reads_reject_aliases_without_releasing_sqlite_locks() {
+        let (root, ctx, store) = test_context();
+        let alias = ctx.state.join("config.json");
+        for suffix in ["", "-wal", "-shm"] {
+            for symbolic in [false, true] {
+                let target = root.join(format!("issues.db{suffix}"));
+                if symbolic {
+                    std::os::unix::fs::symlink(&target, &alias).unwrap();
+                } else {
+                    fs::hard_link(&target, &alias).unwrap();
+                }
+                let result = ctx.read_json(&alias, json!({}));
+                assert_sqlite_locked(&ctx.path);
+                assert!(result.unwrap_err().to_string().contains("must not alias"));
+                fs::remove_file(&alias).unwrap();
+            }
+        }
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn fleet_json_writes_cannot_replace_the_live_database_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let (root, ctx, store) = test_context();
+        let before = fs::metadata(&ctx.path).unwrap().ino();
+        let result = ctx.atomic_json(&ctx.path, &json!({"workers":[]}));
+        assert_eq!(
+            fs::metadata(&ctx.path).unwrap().ino(),
+            before,
+            "Configuration replaced the live database inode"
+        );
+        assert!(result.unwrap_err().to_string().contains("must not alias"));
+        assert_sqlite_locked(&ctx.path);
+        let value = json!({"workers":[],"future":{"text":"é\n"}});
+        ctx.atomic_json(&ctx.desired, &value).unwrap();
+        assert_eq!(ctx.read_json(&ctx.desired, Value::Null).unwrap(), value);
+        let link = ctx.state.join("ordinary-config.json");
+        std::os::unix::fs::symlink(&ctx.desired, &link).unwrap();
+        assert_eq!(ctx.read_json(&link, Value::Null).unwrap(), value);
+        assert_eq!(
+            ctx.read_json(&ctx.state.join("missing.json"), json!({"default":true}))
+                .unwrap(),
+            json!({"default":true})
+        );
+        assert_sqlite_locked(&ctx.path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn fleet_lock_aliases_are_rejected_without_releasing_sqlite_locks() {
+        let (root, ctx, store) = test_context();
+        let path = ctx.path.clone();
         let lock = ctx.state.join("fleet-worker-control.lock");
         for suffix in ["", "-wal", "-shm"] {
             for symbolic in [false, true] {

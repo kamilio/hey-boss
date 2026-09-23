@@ -1,6 +1,6 @@
 use super::{
     Result,
-    context::{Context, atomic_json, encode_frame, hash, id, now, read_frame, read_json, send},
+    context::{Context, encode_frame, hash, id, now, read_frame, send},
     control, conversation, pull,
     replica::{self, invalid},
     takeover,
@@ -58,7 +58,7 @@ impl Supervisor {
         }
         let local = ctx.workers()?;
         if !ctx.state.join("fleet-main.json").exists() {
-            atomic_json(
+            ctx.atomic_json(
                 &ctx.state.join("fleet-main.json"),
                 &json!({"role":"controller","workers":definitions(&local)}),
             )?;
@@ -390,9 +390,11 @@ impl Supervisor {
                 json!(now()),
             ],
         )?;
-        let mut saved = read_json(&self.ctx.desired, json!({}))?;
+        let mut saved = self.ctx.read_json(&self.ctx.desired, json!({}))?;
         let default = if host == "local" {
-            read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?["workers"].clone()
+            self.ctx
+                .read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?["workers"]
+                .clone()
         } else {
             self.state
                 .lock()
@@ -418,7 +420,7 @@ impl Supervisor {
                 });
             }
         }
-        atomic_json(&self.ctx.desired, &saved)?;
+        self.ctx.atomic_json(&self.ctx.desired, &saved)?;
         self.event(host, "signal", &format!("{action} queued for {worker}"));
         Ok(json!({"ok":true,"id":identifier,"state":"pending"}))
     }
@@ -470,9 +472,9 @@ impl Supervisor {
             replica::state_set(&db, &key, &change["local_revision"])?;
         }
         tx.commit()?;
-        let mut saved = read_json(&self.ctx.desired, json!({}))?;
+        let mut saved = self.ctx.read_json(&self.ctx.desired, json!({}))?;
         saved["machines"][host]["workers"] = updated.clone();
-        atomic_json(&self.ctx.desired, &saved)?;
+        self.ctx.atomic_json(&self.ctx.desired, &saved)?;
         self.event(host, "configuration", "Local worker settings synchronized");
         Ok(updated)
     }
@@ -932,10 +934,12 @@ impl Supervisor {
             .iter()
             .map(definition)
             .collect();
-        let main = read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?;
+        let main = self
+            .ctx
+            .read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?;
         let mut desired = {
             let _configuration = self.configuration.lock().unwrap();
-            let mut saved = read_json(&self.ctx.desired, json!({}))?;
+            let mut saved = self.ctx.read_json(&self.ctx.desired, json!({}))?;
             if main["workers"]
                 .as_array()
                 .into_iter()
@@ -950,7 +954,7 @@ impl Supervisor {
                         .map(|w| json!({"id":w["id"],"config":w["config"],"intent":w["intent"]}))
                         .collect::<Vec<_>>()
                 );
-                atomic_json(&self.ctx.desired, &saved)?;
+                self.ctx.atomic_json(&self.ctx.desired, &saved)?;
             }
             saved["machines"]["local"]
                 .get("workers")
@@ -971,7 +975,8 @@ impl Supervisor {
             }
         }
         let main = json!({"role":"controller","workers":desired,"revision":hash(&desired)});
-        atomic_json(&self.ctx.state.join("fleet-main.json"), &main)?;
+        self.ctx
+            .atomic_json(&self.ctx.state.join("fleet-main.json"), &main)?;
         {
             let Some(_lock) = self.ctx.lock("fleet-worker-control.lock", false)? else {
                 return Ok(());
@@ -993,7 +998,11 @@ impl Supervisor {
                 Err(e) => self.event("local", "signal", &format!("{}: {e}", pending["id"])),
             }
         }
-        if let Ok(source) = std::fs::read_to_string(self.ctx.state.join("upgrade-source"))
+        let source_path = self.ctx.state.join("upgrade-source");
+        self.ctx.protect_file(&source_path)?;
+        self.ctx
+            .protect_file(&self.ctx.state.join("upgrade-receipt.json"))?;
+        if let Ok(source) = std::fs::read_to_string(source_path)
             && !super::context::development_install_active(
                 &self.ctx.state,
                 std::path::Path::new(source.trim()),
