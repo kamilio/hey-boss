@@ -4,7 +4,6 @@ authenticated GitHub login supplies the default creator filter; this avoids
 guessing a GitHub account from a Git email address.
 
 ```sh
-hey-boss issue drain-github --dry-run
 hey-boss issue drain-github
 hey-boss issue drain-github --author octocat
 hey-boss issue drain-github --repo owner/repo --project target-project --state all
@@ -14,8 +13,7 @@ hey-boss issue --host devbox drain-github --repo owner/repo
 
 The default source is the checkout's GitHub repository and the default state is
 open. `--state closed` and `--state all` preserve the imported issue's closed
-state. Pull requests are excluded. `--dry-run` only lists matching source issues;
-it never creates destination issues or deletes originals. `--all-authors` explicitly
+state. Pull requests are excluded. `--all-authors` explicitly
 disables the creator filter. Source and comment pagination have no fixed issue limit.
 
 Each imported issue keeps its title and labels. Its body contains the original

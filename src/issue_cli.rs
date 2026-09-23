@@ -110,15 +110,12 @@ impl Body {
 enum Action {
     /// Atomically update guarded labels and ownership; the entire array is one group.
     #[command(
-        after_help = "JSON array (up to 100 issues / 1 MiB):\n  [{\"number\":1,\"if_version\":3,\"expected_assignee\":\"codex:session\",\"add_labels\":[\"rework needed\"],\"remove_labels\":[\"PR ready\"],\"assignment\":\"unassign\"}]\nexpected_assignee is required; use null for unassigned. assignment: keep (default), unassign, boss.\nUse --dry-run without a request ID to preview. Applying requires --request-id.\nGuard rejection returns applied:false and per-issue rejected/blocked results; no issue changes.\nThe caller assesses readiness; this command never closes issues or controls workers."
+        after_help = "JSON array (up to 100 issues / 1 MiB):\n  [{\"number\":1,\"if_version\":3,\"expected_assignee\":\"codex:session\",\"add_labels\":[\"rework needed\"],\"remove_labels\":[\"PR ready\"],\"assignment\":\"unassign\"}]\nexpected_assignee is required; use null for unassigned. assignment: keep (default), unassign, boss.\nApplying requires --request-id.\nGuard rejection returns applied:false and per-issue rejected/blocked results; no issue changes.\nThe caller assesses readiness; this command never closes issues or controls workers."
     )]
     Batch {
         /// JSON array file; '-' reads stdin.
         #[arg(long)]
         file: PathBuf,
-        /// Preview only; no changes, history or retry record are saved.
-        #[arg(long)]
-        dry_run: bool,
     },
     /// Upgrade preflight; use the destination installation's state directory.
     #[command(hide = true)]
@@ -139,9 +136,6 @@ enum Action {
         all_authors: bool,
         #[arg(long, default_value = "open", value_parser = ["open", "closed", "all"])]
         state: String,
-        /// Preview matching issues without creating or deleting anything.
-        #[arg(long)]
-        dry_run: bool,
     },
     #[command(skip)]
     GlobalSettings { operation: Operation },
@@ -519,7 +513,7 @@ impl Options {
     }
     fn operation(&self) -> Result<Operation> {
         Ok(match &self.action {
-            Action::Batch { file, dry_run } => {
+            Action::Batch { file } => {
                 let raw = Body {
                     body: None,
                     file: Some(file.clone()),
@@ -528,7 +522,6 @@ impl Options {
                 .unwrap();
                 Operation::Batch {
                     edits: serde_json::from_str(&raw)?,
-                    dry_run: *dry_run,
                 }
             }
             Action::Subtask { command } => match command {
@@ -917,7 +910,6 @@ pub fn run(options: &Options) -> Result<()> {
         author,
         all_authors,
         state,
-        dry_run,
     } = &options.action
     {
         if options.request_id.is_some() {
@@ -944,11 +936,7 @@ pub fn run(options: &Options) -> Result<()> {
             command.arg("--project").arg(project);
         }
         command.arg("--state").arg(state);
-        for (enabled, flag) in [
-            (*all_authors, "--all-authors"),
-            (*dry_run, "--dry-run"),
-            (options.json, "--json"),
-        ] {
+        for (enabled, flag) in [(*all_authors, "--all-authors"), (options.json, "--json")] {
             if enabled {
                 command.arg(flag);
             }
@@ -1206,8 +1194,6 @@ pub(crate) fn print_text(value: &Value) {
             "Batch: {}",
             if value["accepted"] != true {
                 "rejected; no issue changes"
-            } else if value["dry_run"] == true {
-                "preview; nothing saved"
             } else {
                 "applied"
             }

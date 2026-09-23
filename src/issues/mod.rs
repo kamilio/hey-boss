@@ -186,8 +186,6 @@ pub enum Operation {
     },
     Batch {
         edits: Vec<BatchEdit>,
-        #[serde(default)]
-        dry_run: bool,
     },
     Artifact {
         operation: crate::artifacts::Operation,
@@ -497,7 +495,6 @@ impl Operation {
                 | Self::Comments { .. }
                 | Self::StatusHistory { .. }
                 | Self::StatusView { .. }
-                | Self::Batch { dry_run: true, .. }
         )
     }
     pub fn needs_actor(&self) -> bool {

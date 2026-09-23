@@ -67,7 +67,7 @@ async page => {
   check(request.operation.expected_machine === original.allocation.reserved_machine && request.operation.if_version === original.issue.version && !!request.request_id, 'Release sends reservation and revision guards with an idempotent request ID');
   check(await card.locator('.readiness-status').innerText() === 'Ready for agents', 'Successful release restores general readiness');
   await page.getByRole('button',{name:'View activity',exact:true}).click();
-  await page.locator('#activity-timeline').getByText('released the fleet reservation', {exact:false}).waitFor();
+  await page.locator('#activity-timeline').getByText('released the fleet reservation', {exact:false}).first().waitFor();
   check((await page.locator('#activity-timeline').innerText()).includes('released the fleet reservation'), 'Release appears in activity');
   const state = await page.evaluate(async () => api({action:'view',number:model.detail.issue.number}));
   check(state.allocation.reserved_machine === null && state.issue.version === original.issue.version + 1, 'Release commits on real isolated supervisor');

@@ -1988,7 +1988,7 @@ fn batch_file(f: &Fixture, edits: Value) -> String {
 }
 
 #[test]
-fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
+fn batch_help_examples_apply_from_file_and_retry_from_stdin() {
     let f = Fixture::new();
     let help = f.terminal("Atlas", &["batch", "--help"]);
     let long_help = f.terminal("Atlas", &["batch", "-h"]);
@@ -2005,7 +2005,6 @@ fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
         "after",
         "null",
         "--file -",
-        "--dry-run",
         "--if-version",
         "--request-id",
         "before any edits",
@@ -2043,20 +2042,20 @@ fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
     let before = f.run("Atlas", &["show"]);
     let version = before["version"].to_string();
     let file = batch_file(&f, edits);
-    let preview = f.run(
+    let saved = f.run(
         "Atlas",
         &[
             "batch",
             "--file",
             &file,
-            "--dry-run",
             "--if-version",
             &version,
+            "--request-id",
+            "help-example",
         ],
     );
-    assert_eq!(preview["changed"], true);
-    assert_eq!(preview["dry_run"], true);
-    assert_eq!(f.run("Atlas", &["show"]), before);
+    assert_eq!(saved["changed"], true);
+    let after = f.run("Atlas", &["show"]);
     let mut child = f
         .cmd(
             "Atlas",
@@ -2065,7 +2064,8 @@ fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
                 "batch",
                 "--file",
                 "-",
-                "--dry-run",
+                "--request-id",
+                "help-example",
                 "--if-version",
                 &version,
             ],
@@ -2081,12 +2081,12 @@ fn batch_help_examples_validate_from_file_and_stdin_without_changes() {
         .unwrap()
         .write_all(example.as_bytes())
         .unwrap();
-    assert_eq!(success(child.wait_with_output().unwrap()), preview);
-    assert_eq!(f.run("Atlas", &["show"]), before);
+    assert_eq!(success(child.wait_with_output().unwrap()), saved);
+    assert_eq!(f.run("Atlas", &["show"]), after);
 }
 
 #[test]
-fn batch_preview_atomic_commit_retry_and_resource_preservation() {
+fn batch_atomic_commit_retry_and_resource_preservation() {
     let f = Fixture::new();
     f.issue(
         "Atlas",
@@ -2121,21 +2121,6 @@ fn batch_preview_atomic_commit_retry_and_resource_preservation() {
             {"command":"move","node":"followup","under":"root"}
         ]),
     );
-    let preview = f.run(
-        "Atlas",
-        &[
-            "batch",
-            "--file",
-            &file,
-            "--dry-run",
-            "--if-version",
-            &version,
-        ],
-    );
-    assert_eq!(preview["dry_run"], true);
-    assert_eq!(preview["version"], before["version"].as_i64().unwrap() + 1);
-    assert_eq!(preview["changed_nodes"].as_array().unwrap().len(), 1);
-    assert_eq!(f.run("Atlas", &["show"]), before);
     let args = [
         "batch",
         "--file",
@@ -2146,7 +2131,10 @@ fn batch_preview_atomic_commit_retry_and_resource_preservation() {
         "batch-1",
     ];
     let saved = f.run("Atlas", &args);
-    assert_eq!(saved["version"], preview["version"]);
+
+    assert_eq!(saved["version"], before["version"].as_i64().unwrap() + 1);
+    assert_eq!(saved["changed_nodes"].as_array().unwrap().len(), 1);
+
     assert_eq!(f.run("Atlas", &args), saved);
     let graph = f.run("Atlas", &["show"]);
     assert_eq!(alias(&graph, "short")["title"], "Short label");
@@ -2219,17 +2207,13 @@ fn invalid_batches_roll_back_every_edit_and_revision() {
         json!([{ "command":"edit","node":"root","title":"Changed" }]),
     );
     f.fail("Atlas", &["batch", "--file", &file, "--if-version", "0"], 4);
-    f.fail(
-        "Atlas",
-        &[
-            "batch",
-            "--file",
-            &file,
-            "--dry-run",
-            "--request-id",
-            "preview",
-        ],
-        2,
+    assert_eq!(
+        f.cmd("Atlas", "mm", &["batch", "--file", &file, "--dry-run"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
     );
     assert_eq!(f.run("Atlas", &["show"]), before);
 }
@@ -2337,7 +2321,7 @@ fn batch_many_labels_have_one_revision_and_compact_receipts() {
 }
 
 #[test]
-fn batch_links_preview_commit_retry_and_preserve_resources() {
+fn batch_links_commit_retry_and_preserve_resources() {
     let f = Fixture::new();
     f.issue(
         "Atlas",
@@ -2381,25 +2365,6 @@ fn batch_links_preview_commit_retry_and_preserve_resources() {
             {"command":"link","from":"release","to":"pr","kind":"depends-on","description":"PR first"}
         ]),
     );
-    let preview = f.run(
-        "Atlas",
-        &[
-            "batch",
-            "--file",
-            &file,
-            "--dry-run",
-            "--if-version",
-            &version,
-        ],
-    );
-    assert_eq!(preview["changed_links"].as_array().unwrap().len(), 2);
-    assert_eq!(preview["changed_nodes"].as_array().unwrap().len(), 1);
-    assert_eq!(preview["version"], before["version"].as_i64().unwrap() + 1);
-    for link in preview["changed_links"].as_array().unwrap() {
-        assert_eq!(link["before"]["description"], "Old note");
-        assert!(link["from"].as_str().unwrap().starts_with("n-"));
-    }
-    assert_eq!(f.run("Atlas", &["show"]), before);
     let args = [
         "batch",
         "--file",
@@ -2410,7 +2375,15 @@ fn batch_links_preview_commit_retry_and_preserve_resources() {
         "notes",
     ];
     let saved = f.run("Atlas", &args);
-    assert_eq!(saved["version"], preview["version"]);
+
+    assert_eq!(saved["changed_links"].as_array().unwrap().len(), 2);
+    assert_eq!(saved["changed_nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["version"], before["version"].as_i64().unwrap() + 1);
+    for link in saved["changed_links"].as_array().unwrap() {
+        assert_eq!(link["before"]["description"], "Old note");
+        assert!(link["from"].as_str().unwrap().starts_with("n-"));
+    }
+
     assert_eq!(f.run("Atlas", &args), saved);
     let after = f.run("Atlas", &["show"]);
     assert_eq!(after["nodes"].as_array().unwrap().len(), 3);
@@ -2426,7 +2399,7 @@ fn batch_links_preview_commit_retry_and_preserve_resources() {
     assert!(saved.to_string().len() < 4096);
     let terminal = f.terminal("Atlas", &["batch", "--file", &batch_file(&f, json!([
         {"command":"link","from":"launch","to":"issue","kind":"depends-on","description":"Changed"}
-    ])), "--dry-run"]);
+    ]))]);
     assert!(terminal.contains("Changed"));
 }
 
@@ -2501,8 +2474,6 @@ fn batch_links_create_typed_endpoints_and_bump_each_affected_map_once() {
     f.run("Atlas", &["add", "Release", "--id", "release"]);
     f.issue("Other", &["create", "--title", "External issue"]);
     f.run("Other", &["add", "External topic", "--id", "external"]);
-    let atlas = f.run("Atlas", &["show"]);
-    let other = f.run("Other", &["show"]);
     let resource = f.issue("Other", &["view", "1"]);
     let file = batch_file(
         &f,
@@ -2512,21 +2483,6 @@ fn batch_links_create_typed_endpoints_and_bump_each_affected_map_once() {
             {"command":"link","from":"release","to":"pr:https://github.com/org/repo/pull/2","kind":"depends-on","description":"Review first"}
         ]),
     );
-    let preview = f.run(
-        "Atlas",
-        &["batch", "--file", &file, "--dry-run", "--if-version", "1"],
-    );
-    assert_eq!(preview["changed_links"].as_array().unwrap().len(), 3);
-    assert_eq!(preview["changed_nodes"].as_array().unwrap().len(), 2);
-    assert!(
-        preview["changed_links"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|l| l["before"].is_null())
-    );
-    assert_eq!(f.run("Atlas", &["show"]), atlas);
-    assert_eq!(f.run("Other", &["show"]), other);
     let args = [
         "batch",
         "--file",
@@ -2537,6 +2493,17 @@ fn batch_links_create_typed_endpoints_and_bump_each_affected_map_once() {
         "new-links",
     ];
     let saved = f.run("Atlas", &args);
+
+    assert_eq!(saved["changed_links"].as_array().unwrap().len(), 3);
+    assert_eq!(saved["changed_nodes"].as_array().unwrap().len(), 2);
+    assert!(
+        saved["changed_links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["before"].is_null())
+    );
+
     assert_eq!(
         saved["affected_projects"],
         json!([

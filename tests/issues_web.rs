@@ -188,7 +188,7 @@ fn yolo_is_a_versioned_boss_web_action_and_not_an_ordinary_label() {
         json!({"action":"create","title":"No CLI escape","body":"","labels":["yolo"]}),
         json!({"action":"create_subtask","number":number,"title":"Child","body":"","labels":["YOLO"]}),
         json!({"action":"edit","number":number,"title":null,"body":null,"add_labels":["yolo"],"remove_labels":[]}),
-        json!({"action":"batch","dry_run":true,"edits":[{"number":number,"if_version":1,"expected_assignee":null,"add_labels":["yolo"]}]}),
+        json!({"action":"batch","edits":[{"number":number,"if_version":1,"expected_assignee":null,"add_labels":["yolo"]}]}),
     ] {
         let denied = web.action(&web.project, operation, None);
         assert_eq!(denied.json()["error"]["code"], "forbidden");

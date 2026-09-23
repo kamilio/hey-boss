@@ -156,9 +156,6 @@ enum Action {
         /// JSON file; '-' reads stdin, up to 1 MiB.
         #[arg(long)]
         file: PathBuf,
-        /// Validate and preview the transaction without saving changes.
-        #[arg(long)]
-        dry_run: bool,
     },
     /// Set or clear a node's readable alias, preserving its identity and links.
     Alias {
@@ -257,23 +254,21 @@ Example edits.json (all selectors must already exist):
    "kind":"related","description":null}
 ]
 
-Preview and apply (replace 42 with the version from hey-boss mm show --json):
-  hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
-  hey-boss mm batch --file - --dry-run --if-version 42 --json < edits.json
+Apply (replace 42 with the version from hey-boss mm show --json):
   hey-boss mm batch --file edits.json --if-version 42 \
     --request-id organize-replies --json
+  hey-boss mm batch --file - --if-version 42 \
+    --request-id organize-replies --json < edits.json
 
 Selectors bind before any edits. Later entries must use the original alias
 or stable node ID, not a new alias introduced earlier in the array.
 Entries then execute in order. Invalid selectors, descriptions, kinds,
 alias/label collisions, cycles or a stale version roll back the whole transaction.
-Dry runs save nothing and cannot use --request-id. A changed batch advances
-the map version once; empty/net no-op batches preserve it. Retry an identical
+A changed batch advances the map version once; empty/net no-op batches preserve it. Retry an identical
 commit with the same --request-id to receive its original result.
 JSON includes changed_nodes, changed_links (stable from/to/kind and before/after
 description metadata; null before means a new link), base_version, version and
-affected_projects. Each affected map advances once; a dry run reports proposed
-versions. Underlying resources and unrelated links are preserved."#;
+affected_projects. Each affected map advances once. Underlying resources and unrelated links are preserved."#;
 
 impl Options {
     fn operation(&self) -> Result<Operation> {
@@ -316,7 +311,7 @@ impl Options {
                 body_mode: *bodies,
             },
             Some(Action::Projects) => Operation::Projects,
-            Some(Action::Batch { file, dry_run }) => {
+            Some(Action::Batch { file }) => {
                 let input = Body {
                     body: None,
                     file: Some(file.clone()),
@@ -326,7 +321,6 @@ impl Options {
                 Operation::Batch {
                     edits: serde_json::from_str(&input)
                         .map_err(|e| Error::invalid(format!("Invalid batch JSON: {e}")))?,
-                    dry_run: *dry_run,
                     if_version: self.if_version,
                 }
             }
@@ -590,9 +584,7 @@ pub fn run(options: &Options) -> Result<()> {
     if matches!(options.action, Some(Action::Batch { .. })) {
         println!(
             "{} · map version {}",
-            if graph["dry_run"] == true {
-                "Preview"
-            } else if graph["changed"] == true {
+            if graph["changed"] == true {
                 "Saved"
             } else {
                 "Unchanged"

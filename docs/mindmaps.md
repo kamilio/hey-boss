@@ -207,9 +207,8 @@ body edits remain unavailable for live issue references.
 ### Atomic organization batches
 
 `mm batch --file edits.json` applies a JSON array of label edits, alias changes,
-moves and directed connection updates as one transaction. `--file -` reads stdin. Preview it with `--dry-run`;
-the preview executes the same validation and returns the proposed result without
-saving anything. Guard the preview and commit with the same map `--if-version`.
+moves and directed connection updates as one transaction. `--file -` reads stdin.
+Guard the batch with the map's current `--if-version`.
 `mm batch --help` documents the complete input format and copy-ready examples.
 Every object requires `command` (exactly `edit`, `alias`, `move` or `link`, not
 `action`). Edit, alias and move require `node` (an existing selector in the selected map).
@@ -227,8 +226,6 @@ Link requires `from`, `to` and `kind`.
 ```
 
 ```sh
-hey-boss mm batch --file edits.json --dry-run --if-version 42 --json
-hey-boss mm batch --file - --dry-run --if-version 42 --json < edits.json
 hey-boss mm batch --file edits.json --if-version 42 --request-id organize-replies --json
 ```
 
@@ -268,9 +265,8 @@ JSON results include `changed_nodes` with each changed node's stable `id` and co
 `changed_links` contains each changed connection's stable `from`, `to`, `kind` and
 `before`/`after` objects containing `description`; `before:null` means a new connection.
 New typed reference nodes appear in `changed_nodes` with `before:null`.
-`base_version` is the guarded revision; `version` is the resulting revision (the
-proposed revision for a dry run). A batch advances each affected map version once;
+`base_version` is the guarded revision; `version` is the resulting revision. A batch advances each affected map version once;
 `affected_projects` reports those revisions for cross-project connections. The
 single guard applies to the selected map, just as with `mm link`. Empty
 or net no-op batches leave it unchanged. Identical request-ID retries return the
-original receipt even after aliases change. Dry runs cannot use `--request-id`.
+original receipt even after aliases change.

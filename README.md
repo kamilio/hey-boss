@@ -487,7 +487,6 @@ source changes. It preserves Markdown, labels, comments, source metadata, and
 closed state. Python 3 and an authenticated GitHub CLI (`gh`) are required.
 
 ```sh
-hey-boss issue drain-github --dry-run
 hey-boss issue drain-github
 hey-boss issue drain-github --repo owner/repo --author octocat --project target
 ```
