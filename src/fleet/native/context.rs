@@ -260,57 +260,81 @@ pub(super) fn atomic_json(path: &Path, value: &Value) -> Result<()> {
     }
     result
 }
-pub(super) fn read_frame(reader: &mut impl std::io::BufRead) -> Result<Option<Value>> {
-    let mut bytes = vec![];
-    let length = reader
-        .take(crate::issues::WIRE_LIMIT as u64 + 1)
-        .read_until(b'\n', &mut bytes)?;
-    if length == 0 {
-        return Ok(None);
+struct FrameBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+impl FrameBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: vec![],
+            limit,
+            exceeded: false,
+        }
     }
-    if length > crate::issues::WIRE_LIMIT {
-        return Err(invalid("Fleet frame exceeds 16 MiB"));
+}
+impl Write for FrameBuffer {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if data.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "JSON byte limit exceeded",
+            ));
+        }
+        let required = self.bytes.len() + data.len();
+        if required > self.bytes.capacity() {
+            // Keep ordinary geometric growth, without doubling past the quota.
+            let capacity = required
+                .max(self.bytes.capacity().saturating_mul(2))
+                .max(8)
+                .min(self.limit);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
     }
-    Ok(Some(serde_json::from_slice(&bytes)?))
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+pub(super) fn read_frame(reader: &mut impl BufRead) -> Result<Option<Value>> {
+    let mut frame = FrameBuffer::new(crate::issues::WIRE_LIMIT);
+    loop {
+        let data = match reader.fill_buf() {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if data.is_empty() {
+            break;
+        }
+        // Inspect at most the remaining budget plus one overflow byte, matching
+        // the previous bounded read. Leave prefetched subsequent frames intact.
+        let data = &data[..data.len().min(frame.limit - frame.bytes.len() + 1)];
+        let newline = memchr::memchr(b'\n', data);
+        let length = newline.map_or(data.len(), |position| position + 1);
+        frame
+            .write_all(&data[..length])
+            .map_err(|_| invalid("Fleet frame exceeds 16 MiB"))?;
+        reader.consume(length);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if frame.bytes.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_slice(&frame.bytes)?))
+    }
 }
 // None means the JSON body exceeds its byte budget. SSH reserves one byte for
 // the newline; local control responses are delimited by EOF instead.
 pub(super) fn encode_frame(frame: &Value, limit: usize) -> Result<Option<Vec<u8>>> {
-    struct Buffer {
-        bytes: Vec<u8>,
-        limit: usize,
-        exceeded: bool,
-    }
-    impl Write for Buffer {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            if data.len() > self.limit.saturating_sub(self.bytes.len()) {
-                self.exceeded = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "JSON byte limit exceeded",
-                ));
-            }
-            let required = self.bytes.len() + data.len();
-            if required > self.bytes.capacity() {
-                // Ordinary geometric growth remains amortized, but a large
-                // string must not double capacity beyond the frame budget.
-                let capacity = required
-                    .max(self.bytes.capacity().saturating_mul(2))
-                    .min(self.limit);
-                self.bytes.reserve_exact(capacity - self.bytes.len());
-            }
-            self.bytes.extend_from_slice(data);
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut buffer = Buffer {
-        bytes: Vec::with_capacity(limit.min(128)),
-        limit,
-        exceeded: false,
-    };
+    let mut buffer = FrameBuffer::new(limit);
+    // Match serde_json's ordinary small-frame allocation; reads stay lazy.
+    buffer.bytes.reserve_exact(limit.min(128));
     let result = serde_json::to_writer(&mut buffer, frame);
     if buffer.exceeded {
         Ok(None)
@@ -511,6 +535,92 @@ pub(super) fn committed_source_build(source: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufReader;
+    #[test]
+    fn fragmented_oversized_frame_reading_has_bounded_allocation_work() {
+        let mut reader = BufReader::with_capacity(
+            8192,
+            std::io::Cursor::new(vec![b'x'; crate::issues::WIRE_LIMIT + 1]),
+        );
+        let (result, allocated) = crate::test_allocations::measure(|| read_frame(&mut reader));
+        eprintln!("oversized fragmented frame read: {allocated} requested Rust allocation bytes");
+        assert!(result.unwrap_err().to_string().contains("exceeds 16 MiB"));
+        assert!(allocated < 40 * 1024 * 1024, "{allocated} allocation bytes");
+    }
+    #[test]
+    fn fragmented_frame_reading_preserves_utf8_next_frames_and_eof() {
+        let first = json!({"version":1,"text":"é\n\"\\"});
+        let second = json!({"version":1,"kind":"heartbeat"});
+        let bytes = format!("{first}\n{second}");
+        for capacity in [1, 7, 8192] {
+            let mut reader =
+                BufReader::with_capacity(capacity, std::io::Cursor::new(bytes.as_bytes()));
+            assert_eq!(read_frame(&mut reader).unwrap(), Some(first.clone()));
+            assert_eq!(read_frame(&mut reader).unwrap(), Some(second.clone()));
+            assert_eq!(read_frame(&mut reader).unwrap(), None);
+        }
+    }
+    #[test]
+    fn frame_reading_counts_newline_in_exact_byte_limit() {
+        let limit = crate::issues::WIRE_LIMIT;
+        let text = "x".repeat(limit - 3);
+        let bytes = format!("\"{text}\"\n");
+        assert_eq!(bytes.len(), limit);
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        assert_eq!(read_frame(&mut reader).unwrap(), Some(json!(text)));
+        assert_eq!(read_frame(&mut reader).unwrap(), None);
+
+        let text = "x".repeat(limit - 2);
+        let bytes = format!("\"{text}\"");
+        assert_eq!(bytes.len(), limit);
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        assert_eq!(read_frame(&mut reader).unwrap(), Some(json!(text)));
+
+        let bytes = format!("\"{text}\"\n");
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        assert!(
+            read_frame(&mut reader)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 16 MiB")
+        );
+    }
+    #[test]
+    fn frame_reading_retries_interrupted_input_and_propagates_other_io_errors() {
+        struct Input {
+            error: Option<std::io::ErrorKind>,
+            bytes: std::io::Cursor<&'static [u8]>,
+        }
+        impl Read for Input {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if let Some(kind) = self.error.take() {
+                    Err(std::io::Error::from(kind))
+                } else {
+                    self.bytes.read(output)
+                }
+            }
+        }
+        let mut interrupted = BufReader::new(Input {
+            error: Some(std::io::ErrorKind::Interrupted),
+            bytes: std::io::Cursor::new(b"{\"version\":1}\n"),
+        });
+        assert_eq!(
+            read_frame(&mut interrupted).unwrap(),
+            Some(json!({"version":1}))
+        );
+        let mut broken = BufReader::new(Input {
+            error: Some(std::io::ErrorKind::BrokenPipe),
+            bytes: std::io::Cursor::new(b""),
+        });
+        assert_eq!(
+            read_frame(&mut broken)
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
     #[test]
     fn oversized_frame_encoding_has_bounded_allocation_work() {
         let frame = json!({"parts": vec![json!({"text":"x".repeat(4096)});12288]});

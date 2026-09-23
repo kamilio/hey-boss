@@ -63,6 +63,10 @@ full 16 MiB for JSON. Legacy pull size checks MUST use the same bounded encoding
 before rejecting an unsupported oversized pull or choosing verified streaming
 for a capable peer. Rejection MUST preserve the existing upgrade error and
 MUST NOT transmit a partial oversized pull.
+Newline-delimited frame readers MUST include the delimiter in the 16 MiB budget
+and cap accumulated input buffer capacity to that budget. Fragmented input MUST
+preserve UTF-8, prefetched subsequent frames and complete JSON terminated by
+EOF. Readers MUST retry interrupted reads and propagate other input errors.
 
 Companions supporting streamed pulls MUST advertise `pull_gzip_chunks` in
 `hello.capabilities`. The supervisor MAY send `pull_begin`, ordered `pull_chunk`
@@ -215,6 +219,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Manager build provenance | A supervisor starting after the installed CLI is replaced still reports its compiled runtime build; companions announce their compiled build |
 | Agent overview transport | Individually valid machine reports exceeding the aggregate full-status frame limit; bounded full-status error over the control socket; compact response retains assignment identity, Chief fields, worker/machine metadata, visibility and Unicode bounds; deterministic allocation budget for discarded events; one compact request for current projections, legacy fallback on any machine, empty runs, explicit nulls and transport errors; CLI collection/conversation lookup over current and legacy sockets |
 | Frame encoding memory | Exact encoded-byte limits, UTF-8 and escapes, valid large payload buffer capacity, oversized bulk/aggregate allocation budgets, no partial SSH output and unchanged protocol version; complete valid local status response |
+| Frame input memory | Fragmented oversized frame allocation budget; exact limit including newline and complete JSON at EOF; UTF-8, prefetched next frame, interrupted retry and other input errors |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria
