@@ -4,8 +4,10 @@ use serde_json::json;
 
 #[test]
 fn approval_infrastructure_hold_has_readable_history_at_terminal_sizes() {
-    let mut app = Dashboard::default();
-    app.history = true;
+    let mut app = Dashboard {
+        history: true,
+        ..Dashboard::default()
+    };
     app.apply(json!({
         "worker_id":"test", "workers":[{"id":"test","pid":123,"active":0,
             "config":{"name":"MacBook","enabled":true,"concurrency":2}}],
