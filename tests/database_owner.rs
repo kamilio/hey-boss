@@ -78,6 +78,65 @@ impl Drop for Fixture {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn sandbox_denial_does_not_bootstrap_another_service() {
+    use sha2::{Digest, Sha256};
+    let root = std::env::temp_dir().join(format!("hb-denied-process-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let mut fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    fixture.service = Some(
+        fixture
+            .command(&["fleet", "companion"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    drop(fixture.connection());
+    let path = fixture.root.join("issues.db").canonicalize().unwrap();
+    let identity = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
+    let startup = PathBuf::from(format!(
+        "/tmp/hey-boss-db-{}/{}.startup",
+        unsafe { libc::getuid() },
+        &identity[..24]
+    ));
+    let command = fixture.command(&["issue", "--project", "Sandbox test", "--json", "projects"]);
+    let mut sandbox = Command::new("/usr/bin/sandbox-exec");
+    sandbox
+        .args([
+            "-p",
+            "(version 1)(allow default)(deny network-outbound)(deny process-fork)",
+        ])
+        .arg(command.get_program())
+        .args(command.get_args())
+        .current_dir(&fixture.root);
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            sandbox.env(name, value);
+        } else {
+            sandbox.env_remove(name);
+        }
+    }
+    let output = sandbox.output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        error.contains("Operation not permitted") || error.contains("Permission denied"),
+        "{error}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !startup.exists(),
+        "Denied clients must not try to start another service"
+    );
+}
+
+#[test]
 fn standalone_databases_in_one_directory_have_independent_services() {
     let root = std::env::temp_dir().join(format!("hb-multiple-process-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();

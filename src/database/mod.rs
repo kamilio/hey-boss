@@ -53,6 +53,11 @@ pub(crate) fn remote_enabled() -> bool {
 fn error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message.into())))
 }
+fn permission_denied(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::ToSqlConversionFailure(source)
+        if source.downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied))
+}
 
 pub trait Params {
     fn values(self) -> Result<Vec<Value>>;
@@ -140,6 +145,7 @@ impl Connection {
         if remote_enabled() {
             match Self::connect(path.as_ref()) {
                 Ok(connection) => Ok(connection),
+                Err(e) if permission_denied(&e) => Err(e),
                 Err(_) => {
                     owner::ensure(path.as_ref())?;
                     Self::connect(path.as_ref())
@@ -157,8 +163,12 @@ impl Connection {
         })
     }
     pub fn connect(path: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(owner::socket_path(path))
-            .map_err(|e| error(format!("Database service unavailable: {e}")))?;
+        let stream = UnixStream::connect(owner::socket_path(path)).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                e.kind(),
+                format!("Database service unavailable: {e}"),
+            )))
+        })?;
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
             .map_err(|e| error(e.to_string()))?;
@@ -387,8 +397,13 @@ impl Remote {
             }
             Err(e) => {
                 *state = None;
-                Err(error(format!(
-                    "Database service transport failed: {e}. Write outcome may be unknown; mutations are never automatically replayed."
+                Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "Database service transport failed: {e}. Write outcome may be unknown; mutations are never automatically replayed."
+                        ),
+                    ),
                 )))
             }
         }
