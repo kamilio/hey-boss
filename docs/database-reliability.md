@@ -19,8 +19,17 @@ to the live database. Store-owned plan reads and final reconciliation now check
 inode identity before opening the plan or its sync lock. Plan, sync-lock and
 sync-paused aliases to the active database, WAL or shared-memory file are
 rejected. Separate-process tests cover hard links and symlinks and verify that
-ordinary Markdown reads still work. This protects existing aliases; the fleet
-still assumes database files are not replaced or relinked during an operation.
+ordinary Markdown reads still work.
+
+A terminal-workflow regression additionally reproduced direct database header
+overwrite: resuming a saved plan wrote `Startup reconciliation pending` through
+a pause-marker hard link to the database. The CLI now performs the same inode
+check before startup locks, marker writes, reconciliation writes and background
+sync. The regression verifies that the SQLite header and draft contents survive
+rejection and that no coding agent launches. The demonstrated overwrite contains
+text and does not establish the writer behind the historical zeroed header.
+These checks protect existing aliases; the fleet still assumes database files
+are not replaced or relinked during an operation.
 
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact

@@ -85,8 +85,10 @@ Opening a store or reading a local bound plan MUST preserve SQLite locks held
 by existing connections in the same process. Store-owned local plan reads and
 final reconciliation MUST reject plan or sync-marker inode aliases to the
 active issue database, WAL and shared-memory files before opening them through
-non-SQLite file APIs. Database files MUST NOT be replaced or relinked while
-connections are active.
+non-SQLite file APIs. Interactive planning and background plan sync MUST reject
+such aliases to the configured local issue database before opening sync locks
+or writing plan contents and sync markers. Database files MUST NOT be replaced
+or relinked while connections are active.
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
