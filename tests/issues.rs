@@ -3031,16 +3031,47 @@ fn explicit_database_override_survives_running_executable_replacement() {
     let f = Fixture::new();
     let executable = f.root.join("running-test");
     fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
-    let output = Command::new(executable)
+    let mut command = Command::new(&executable);
+    command
         .env(CHILD, "1")
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .args([
             "--exact",
             "explicit_database_override_survives_running_executable_replacement",
             "--nocapture",
-        ])
-        .output()
-        .unwrap();
+        ]);
+    #[cfg(target_os = "linux")]
+    let releasing = {
+        // Reproduce the transient writer inherited by another concurrent fork.
+        let writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .unwrap();
+        assert_eq!(
+            command.output().unwrap_err().raw_os_error(),
+            Some(libc::ETXTBSY)
+        );
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(75));
+            drop(writer);
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let output = loop {
+        match command.output() {
+            // Concurrent fork children can temporarily retain the copy's
+            // write descriptor even after fs::copy closes it in this process.
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => break result.unwrap(),
+        }
+    };
+    #[cfg(target_os = "linux")]
+    releasing.join().unwrap();
     assert!(
         output.status.success(),
         "{} {}",
