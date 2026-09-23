@@ -425,9 +425,13 @@ including uncommitted changes, and remembers the checkout location. Later upgrad
 without `--source` fetch and archive committed `main` from that location; dirty
 work is only installed when `--source` is explicitly supplied. A clean main checkout
 is recorded as committed main; other explicit snapshots are recorded as development.
-Automatic supervisor rollouts watch committed main and leave an explicit development
-installation in place until main advances beyond its base commit (or a normal
-upgrade is requested).
+Automatic supervisor rollouts watch fetched/published `origin/main` (local `main`
+for a checkout without an origin). Unpushed local commits do not request a rollout.
+They leave an explicit development installation in place until published main
+advances beyond its base commit (or a normal upgrade is requested). Deployment
+reports must verify the requested published build and source receipt; a different
+release is retried with the normal failure backoff without interrupting sync.
+An already matching companion connection stays open after a no-change upgrade.
 
 Each machine queues installers behind its installation lock, then checks source
 ancestry against its last verified installation. Older or unrelated commits are

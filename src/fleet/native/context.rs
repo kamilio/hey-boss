@@ -443,8 +443,21 @@ fn source_build(source: &Path) -> Result<String> {
     }
     Ok(format!("{fingerprint:016x}"))
 }
-// Read committed blobs in one Git batch; cache by immutable tree commit rather
-// than re-reading the checkout on each supervisor heartbeat.
+// Match the normal installer's source selection. A push/fetch advances the
+// published ref; local commits and dirty files must not request a rollout.
+fn published_main_ref(source: &Path) -> Result<&'static str> {
+    let remote = Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["remote", "get-url", "origin"])
+        .output()?;
+    Ok(if remote.status.success() {
+        "refs/remotes/origin/main"
+    } else {
+        "refs/heads/main"
+    })
+}
+
 pub(super) fn development_install_active(
     state: &Path,
     source: &Path,
@@ -465,12 +478,32 @@ pub(super) fn development_install_active(
     let result = Command::new("git")
         .arg("-C")
         .arg(source)
-        .args(["rev-parse", "refs/heads/main"])
+        .args(["rev-parse", published_main_ref(source)?])
         .output()?;
-    Ok(result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == commit)
+    if !result.status.success() {
+        return Err(invalid(
+            "Cannot resolve published main for development installation",
+        ));
+    }
+    let published = String::from_utf8(result.stdout)?;
+    if published.trim() == commit {
+        return Ok(true);
+    }
+    let ancestry = Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["merge-base", "--is-ancestor", commit, published.trim()])
+        .output()?;
+    match ancestry.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(invalid("Cannot verify published main ancestry")),
+    }
 }
 
-pub(super) fn committed_source_build(source: &Path) -> Result<String> {
+// Read committed blobs in one Git batch; cache by immutable tree commit rather
+// than re-reading the checkout on each supervisor heartbeat.
+pub(super) fn published_source_build(source: &Path) -> Result<String> {
     static CACHE: std::sync::Mutex<Option<(PathBuf, String, String)>> = std::sync::Mutex::new(None);
     fn git(source: &Path, args: &[&str]) -> Result<Vec<u8>> {
         let result = Command::new("git")
@@ -483,7 +516,7 @@ pub(super) fn committed_source_build(source: &Path) -> Result<String> {
         }
         Ok(result.stdout)
     }
-    let commit = String::from_utf8(git(source, &["rev-parse", "refs/heads/main"])?)?
+    let commit = String::from_utf8(git(source, &["rev-parse", published_main_ref(source)?])?)?
         .trim()
         .to_owned();
     let mut cache = CACHE.lock().unwrap();
@@ -1058,7 +1091,7 @@ pub(super) mod tests {
         );
     }
     #[test]
-    fn automatic_rollout_fingerprint_ignores_dirty_changes_and_advances_on_commit() {
+    fn automatic_rollout_fingerprint_ignores_dirty_and_unpublished_changes() {
         let root = std::env::temp_dir().join(format!("hey-boss-106-main-{}", id().unwrap()));
         fs::create_dir(&root).unwrap();
         struct Cleanup(PathBuf);
@@ -1109,8 +1142,15 @@ pub(super) mod tests {
             "-m",
             "initial",
         ]);
-        let committed = committed_source_build(&root).unwrap();
+        let committed = published_source_build(&root).unwrap();
         assert_eq!(committed, source_build(&root).unwrap());
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/hey-boss.git",
+        ]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let head = Command::new("git")
             .arg("-C")
             .arg(&root)
@@ -1123,7 +1163,7 @@ pub(super) mod tests {
         assert!(development_install_active(&root, &root, "hey-boss (build dev-build)").unwrap());
         assert!(!development_install_active(&root, &root, "hey-boss (build other-build)").unwrap());
         fs::write(root.join("src/file"), "dirty changes").unwrap();
-        assert_eq!(committed, committed_source_build(&root).unwrap());
+        assert_eq!(committed, published_source_build(&root).unwrap());
         assert_ne!(committed, source_build(&root).unwrap());
         git(&["add", "."]);
         git(&[
@@ -1135,11 +1175,36 @@ pub(super) mod tests {
             "-m",
             "next",
         ]);
-        assert_ne!(committed, committed_source_build(&root).unwrap());
+        assert_eq!(
+            committed,
+            published_source_build(&root).unwrap(),
+            "Unpublished main must not trigger a rollout"
+        );
+        assert!(development_install_active(&root, &root, "hey-boss (build dev-build)").unwrap());
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        assert_ne!(committed, published_source_build(&root).unwrap());
         assert!(!development_install_active(&root, &root, "hey-boss (build dev-build)").unwrap());
         assert_eq!(
-            committed_source_build(&root).unwrap(),
+            published_source_build(&root).unwrap(),
             source_build(&root).unwrap()
+        );
+        let next = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        atomic_json(&root.join("upgrade-receipt.json"), &json!({"source":{
+            "kind":"development", "commit":String::from_utf8_lossy(&next.stdout).trim(), "build":"dev-build"
+        }})).unwrap();
+        git(&[
+            "update-ref",
+            "refs/remotes/origin/main",
+            String::from_utf8_lossy(&head.stdout).trim(),
+        ]);
+        assert!(
+            development_install_active(&root, &root, "hey-boss (build dev-build)").unwrap(),
+            "Older published main must leave an explicit development installation in place"
         );
     }
     #[test]
