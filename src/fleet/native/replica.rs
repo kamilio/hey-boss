@@ -1569,13 +1569,40 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
                 &values,
             )?;
         }
+        // Start from allocation keys; readiness checks must inspect this
+        // machine's small supplied pool rather than every project issue.
         let mut supplied = rows(
             db,
             &format!(
-                "SELECT i.labels FROM fleet_allocations a JOIN issues i ON i.project_id=a.project_id AND i.number=a.issue_number WHERE a.node=? AND a.project_id=? AND i.state='open' AND i.deleted_at IS NULL AND {ALLOCATED}"
+                "SELECT i.labels FROM fleet_allocations a CROSS JOIN issues i WHERE i.project_id=a.project_id AND i.number=a.issue_number AND a.node=? AND a.project_id=? AND i.state='open' AND i.deleted_at IS NULL AND {ALLOCATED}"
             ),
             &[json!(node), json!(project)],
         )?;
+        let mut filters = BTreeMap::<BTreeSet<String>, i64>::new();
+        for c in &configs {
+            *filters.entry(tags(c)).or_default() += c["concurrency"].as_i64().unwrap_or(1);
+        }
+        // A filled pool needs no queue scan. Check both each filter and the
+        // union: one allocation can match multiple filters, but must not count
+        // as multiple slots in the machine's total capacity.
+        if filters.iter().all(|(filter, capacity)| {
+            supplied
+                .iter()
+                .filter(|r| matches(&r["labels"], filter).unwrap_or(false))
+                .count() as i64
+                >= capacity * 2
+        }) && supplied
+            .iter()
+            .filter(|r| {
+                filters
+                    .keys()
+                    .any(|f| matches(&r["labels"], f).unwrap_or(false))
+            })
+            .count() as i64
+            >= filters.values().sum::<i64>() * 2
+        {
+            continue;
+        }
         let candidates = rows(
             db,
             &format!(
@@ -1584,10 +1611,6 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
             &[json!(project)],
         )?;
         let mut used = BTreeSet::new();
-        let mut filters = BTreeMap::<BTreeSet<String>, i64>::new();
-        for c in &configs {
-            *filters.entry(tags(c)).or_default() += c["concurrency"].as_i64().unwrap_or(1);
-        }
         for (filter, capacity) in &filters {
             let mut needed = (capacity * 2
                 - supplied
@@ -2921,6 +2944,102 @@ mod tests {
             0
         );
     }
+    #[test]
+    fn overlapping_allocation_filters_still_fill_distinct_machine_slots() {
+        let f = Fixture::new();
+        f.db.execute_batch("UPDATE issues SET labels='[\"a\",\"b\"]';
+            WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<4)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT 'named:Native fleet',x,'Queued','','open','human:fixture',0,0,1,'[\"a\",\"b\"]',x FROM n;
+            UPDATE projects SET next_number=5 WHERE id='named:Native fleet';").unwrap();
+        f.capture();
+        for number in 1..=2 {
+            f.db.execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',?1,'agent')",
+                [number],
+            )
+            .unwrap();
+        }
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"tags":["a"],"enabled":true}}),
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"tags":["b"],"enabled":true}}),
+        ];
+        allocate(&f.db, "agent", &workers).unwrap();
+        let supplied = rows(
+            &f.db,
+            "SELECT issue_number FROM fleet_allocations WHERE node='agent' ORDER BY issue_number",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            supplied,
+            vec![
+                json!({"issue_number":1}),
+                json!({"issue_number":2}),
+                json!({"issue_number":3}),
+                json!({"issue_number":4})
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_allocation_pool_does_not_scan_the_unallocated_queue() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+            unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(100, Ordering::Relaxed);
+            0
+        }
+        let f = Fixture::new();
+        f.db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT 'named:Native fleet',x,'Queued','','open','human:fixture',0,0,1,'[]',x FROM n;
+            UPDATE projects SET next_number=10001 WHERE id='named:Native fleet';").unwrap();
+        f.capture();
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":2,"enabled":true}}),
+        ];
+        allocate(&f.db, "agent", &workers).unwrap();
+        let before = rows(
+            &f.db,
+            "SELECT * FROM fleet_allocations ORDER BY issue_number",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(before.len(), 4);
+        let steps = AtomicUsize::new(0);
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                f.db.handle(),
+                100,
+                Some(count_steps),
+                (&steps as *const AtomicUsize).cast_mut().cast(),
+            );
+        }
+        let result = allocate(&f.db, "agent", &workers);
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(f.db.handle(), 0, None, std::ptr::null_mut());
+        }
+        result.unwrap();
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT * FROM fleet_allocations ORDER BY issue_number",
+                &[]
+            )
+            .unwrap(),
+            before
+        );
+        let steps = steps.load(Ordering::Relaxed);
+        eprintln!(
+            "Full allocation pool over 10,000 queued issues: fewer than {} VM steps",
+            steps + 100
+        );
+        assert!(
+            steps < 20_000,
+            "A full pool scanned queued issues: {steps} VM steps"
+        );
+    }
+
     #[test]
     fn unclaimed_allocations_expire_and_another_machine_can_pick_up() {
         let f = Fixture::new();
