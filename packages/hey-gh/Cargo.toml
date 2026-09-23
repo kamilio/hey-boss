@@ -1,0 +1,31 @@
+[package]
+name = "hey-gh"
+version = "0.1.0"
+edition = "2024"
+description = "A cache-aware GitHub SDK, CLI, and incremental local API"
+license = "MIT"
+
+
+[dependencies]
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+dirs = "6"
+fastrand = "2"
+graphql-parser = "0.4"
+getrandom = "0.4"
+subtle = "2"
+httpdate = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

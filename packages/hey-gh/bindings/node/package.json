@@ -1,0 +1,50 @@
+{
+  "name": "@hey-gh/node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "napi-rs bindings for hey-gh's shared GitHub SDK",
+  "license": "MIT",
+  "main": "index.js",
+  "module": "index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "native.js",
+    "*.node",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^20.17.0 || ^22.13.0 || >=23.5.0"
+  },
+  "napi": {
+    "binaryName": "hey-gh",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --js native.js --dts native.d.ts -- --locked",
+    "build:release": "napi build --platform --release --js native.js --dts native.d.ts -- --locked",
+    "test": "cargo build --manifest-path ../../Cargo.toml --example node_test_daemon --locked -j 2 && node --test test/bindings.test.cjs",
+    "typecheck": "tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 test/types.mts",
+    "prepack": "npm run build:release"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.4",
+    "typescript": "~5.9.3"
+  }
+}

@@ -31,6 +31,14 @@ func installHeyBoss() -> [String: String] {
     try! Data(contentsOf: root.appendingPathComponent("target/release/hey-boss")).write(to: binary, options: .atomic)
     run("/usr/bin/swift", [root.appendingPathComponent("package_hey_boss.swift").path, staging.path, app.path])
     for executable in [binary, daemon] { try! files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path) }
+    let github = binaries.appendingPathComponent("hey-gh")
+    var githubPaths = [github]
+    let cargoGithub = files.homeDirectoryForCurrentUser.appendingPathComponent(".cargo/bin/hey-gh")
+    if files.fileExists(atPath: cargoGithub.path) && cargoGithub != github { githubPaths.append(cargoGithub) }
+    for destination in githubPaths {
+        try! Data(contentsOf: root.appendingPathComponent("target/release/hey-gh")).write(to: destination, options: .atomic)
+        try! files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
+    }
     let shortcut = binaries.appendingPathComponent("hb")
     if !files.fileExists(atPath: shortcut.path) && (try? files.destinationOfSymbolicLink(atPath: shortcut.path)) == nil {
         try! files.createSymbolicLink(atPath: shortcut.path, withDestinationPath: "hey-boss")

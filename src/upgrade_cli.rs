@@ -20,6 +20,7 @@ const INPUTS: &[&str] = &[
     "build.rs",
     "src",
     "skills/hey-boss",
+    "packages/hey-gh",
     "tools/upgrade_hey_boss.py",
     "tools/drain_github_issues.py",
     "hey_boss_daemon.swift",
@@ -33,6 +34,7 @@ const PAYLOAD: &[&str] = &[
     "build.rs",
     "src",
     "skills/hey-boss",
+    "packages/hey-gh",
     "tools/upgrade_hey_boss.py",
     "tools/drain_github_issues.py",
     "hey_boss_daemon.swift",
@@ -312,6 +314,7 @@ fn snapshot_at(
                 "build.rs",
                 "src",
                 "skills/hey-boss",
+                "packages/hey-gh",
                 "tools/upgrade_hey_boss.py",
                 "tools/drain_github_issues.py",
                 "hey_boss_daemon.swift",
@@ -960,7 +963,15 @@ mod tests {
     fn fixture(root: &Path) {
         for name in PAYLOAD {
             let path = root.join(name);
-            if ["src", "skills/hey-boss", "assets", "tests"].contains(name) {
+            if [
+                "src",
+                "skills/hey-boss",
+                "packages/hey-gh",
+                "assets",
+                "tests",
+            ]
+            .contains(name)
+            {
                 fs::create_dir_all(&path).unwrap();
                 fs::write(path.join("fixture"), name).unwrap();
             } else {
