@@ -80,6 +80,38 @@ pub struct Owner {
     thread: Option<JoinHandle<()>>,
 }
 impl Owner {
+    /// Keep an existing service eligible to own the database after a peer exits.
+    pub fn host(path: &Path) -> Result<Self> {
+        let mut owner = Self::start(path)?;
+        let path = path.to_owned();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("sqlite-election".into())
+            .spawn(move || {
+                while !stopping.load(Ordering::Acquire) {
+                    if owner.as_ref().is_some_and(|owner| {
+                        owner.thread.as_ref().is_none_or(JoinHandle::is_finished)
+                    }) {
+                        owner.take();
+                    }
+                    if owner.is_none() {
+                        match Self::start(&path) {
+                            Ok(elected) => owner = elected,
+                            Err(e) => eprintln!("Database owner recovery: {e}"),
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                drop(owner);
+            })
+            .map_err(|e| error(e.to_string()))?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
     /// Nonblocking election: another existing service may already host the owner.
     pub fn start(path: &Path) -> Result<Option<Self>> {
         prepare_parent(path)?;
