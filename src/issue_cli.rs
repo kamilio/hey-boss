@@ -1006,19 +1006,11 @@ pub fn run(options: &Options) -> Result<()> {
         let project = issues::identity::project(&cwd, &machine)?;
         let inspection = matches!(operation, Operation::View { .. }) && !interactive;
         let mut actor = if operation.needs_actor() || interactive || inspection {
-            Some(
-                issues::identity::resolve(options.agent.as_deref(), &machine, &cwd).or_else(
-                    |error| {
-                        // Inspection needs the caller's machine, not a verified
-                        // agent session. Keep ordinary terminal reads available.
-                        if inspection && error.code == "identity_unavailable" {
-                            issues::identity::resolve(Some("human:boss"), &machine, &cwd)
-                        } else {
-                            Err(error)
-                        }
-                    },
-                )?,
-            )
+            Some(if inspection {
+                issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?
+            } else {
+                issues::identity::resolve(options.agent.as_deref(), &machine, &cwd)?
+            })
         } else {
             None
         };

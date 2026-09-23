@@ -140,6 +140,9 @@ allocation may be stale: it never proves the supervisor has no reservation.
 `issue view NUMBER --json` includes the same allocation diagnostics. Remote
 inspection uses the initiating caller's machine, rather than the remote store's
 machine, just as normal claim protection does.
+Noninteractive `issue view` preserves configured actor identities but skips live
+session discovery. Without a configured identity it uses the terminal caller;
+claims and edits still require the normal verified agent identity.
 Issue details show the reserved device, with reservation timing explained on
 hover or keyboard focus. Boss can use **Release reservation** on the supervisor
 to let another device pick up an unassigned issue. Stop any active worker attempt

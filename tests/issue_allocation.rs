@@ -671,3 +671,149 @@ fn remote_cli_view_forwards_machine_identity_without_requiring_an_agent_flag() {
         );
     }
 }
+
+#[test]
+fn private_home_inspection_skips_discovery_but_claims_still_require_identity() {
+    let f = Fixture::new("view-no-discovery");
+    let db = f.db("agent");
+    let machine = f.json(&["whoami"])["agent"]["machine"].clone();
+    db.execute("UPDATE fleet_meta SET node='backend-machine'", [])
+        .unwrap();
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES('named:Allocation fixture',1,'backend-machine')",
+        [],
+    )
+    .unwrap();
+    let before = f.json(&["view", "1"])["issue"].clone();
+    let events: i64 = db
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    let home = f.0.join("home");
+    let bin = f.0.join("bin");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&bin).unwrap();
+    // Fail discovery at its entry point instead of consulting real processes or
+    // histories. The marker detects even a quick scan followed by a fallback.
+    let shim = bin.join("ps");
+    fs::write(&shim, "#!/bin/sh\n: > \"$DISCOVERY_MARKER\"\nexit 17\n").unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+    let ssh = bin.join("ssh");
+    fs::write(
+        &ssh,
+        "#!/bin/sh\ncat > \"$INSPECTION_REQUEST\"\nexec \"$ISSUE_TEST_BIN\" issue rpc < \"$INSPECTION_REQUEST\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+    let marker = f.0.join("discovery-attempted");
+    let request = f.0.join("inspection-request.json");
+    let command = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        command
+            .current_dir(&f.0)
+            .env("HOME", &home)
+            .env("CODEX_HOME", home.join(".codex"))
+            .env("HEY_BOSS_ISSUE_DB", f.0.join("issues.db"))
+            .env("HEY_BOSS_FLEET_STATE", &f.0)
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .env_remove("HEY_BOSS_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env("DISCOVERY_MARKER", &marker)
+            .env("INSPECTION_REQUEST", &request)
+            .env("ISSUE_TEST_BIN", env!("CARGO_BIN_EXE_hey-boss"))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .args(["issue", "--project", "Allocation fixture", "--json"])
+            .args(args);
+        command
+    };
+    for args in [vec!["view", "1"], vec!["view", "1", "--host", "devbox"]] {
+        let output = command(&args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(view["allocation"]["caller_machine"], machine);
+        assert_eq!(view["allocation"]["store_machine"], "backend-machine");
+        assert_eq!(view["allocation"]["reason"], "reserved_elsewhere");
+        assert_eq!(view["issue"], before);
+        assert!(
+            !marker.exists(),
+            "Read-only inspection attempted session discovery"
+        );
+    }
+    for (explicit, configured, thread, id, source) in [
+        (None, None, None, "human:boss", "terminal inspection"),
+        (
+            None,
+            None,
+            Some("thread"),
+            "codex:thread",
+            "CODEX_THREAD_ID",
+        ),
+        (
+            None,
+            Some("codex:configured"),
+            Some("thread"),
+            "codex:configured",
+            "HEY_BOSS_AGENT_ID",
+        ),
+        (
+            Some("codex:explicit"),
+            Some("codex:configured"),
+            Some("thread"),
+            "codex:explicit",
+            "--agent",
+        ),
+        (
+            Some("human:reader"),
+            None,
+            Some("thread"),
+            "human:reader",
+            "--agent",
+        ),
+    ] {
+        let mut command = command(&["view", "1", "--host", "devbox"]);
+        if let Some(explicit) = explicit {
+            command.args(["--agent", explicit]);
+        }
+        if let Some(configured) = configured {
+            command.env("HEY_BOSS_AGENT_ID", configured);
+        }
+        if let Some(thread) = thread {
+            command.env("CODEX_THREAD_ID", thread);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let forwarded: Value = serde_json::from_slice(&fs::read(&request).unwrap()).unwrap();
+        let actor = &forwarded["actor"];
+        assert_eq!(actor["id"], id);
+        assert_eq!(actor["source"], source);
+        assert_eq!(actor["machine"], machine);
+        assert_eq!(actor["cwd"], f.0.canonicalize().unwrap().to_str().unwrap());
+        assert_eq!(actor["invocation"], Value::Null);
+        assert_eq!(actor["creation_run"], Value::Null);
+        if let Some(session) = id.strip_prefix("codex:") {
+            assert_eq!(actor["kind"], "codex");
+            assert_eq!(actor["session_id"], session);
+        } else {
+            assert_eq!(actor["session_id"], Value::Null);
+        }
+        assert!(!marker.exists());
+    }
+    let output = command(&["view", "1", "--agent", ""]).output().unwrap();
+    assert!(
+        !output.status.success(),
+        "Invalid explicit identities must not fall back"
+    );
+    assert!(!marker.exists());
+    let output = command(&["claim", "1"]).output().unwrap();
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "identity_unavailable");
+    assert!(marker.exists(), "Mutations must retain verified discovery");
+    assert_eq!(f.json(&["view", "1"])["issue"], before);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        events
+    );
+}

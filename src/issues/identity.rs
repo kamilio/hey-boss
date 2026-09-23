@@ -141,6 +141,21 @@ fn env(name: &str) -> Option<String> {
 }
 
 pub fn resolve(explicit: Option<&str>, machine: &str, cwd: &Path) -> Result<Actor> {
+    resolve_with_discovery(explicit, machine, cwd, true)
+}
+
+/// Read-only inspection authenticates the initiating machine, without needing
+/// to discover a live agent session. Configured identities retain precedence.
+pub fn resolve_inspection(explicit: Option<&str>, machine: &str, cwd: &Path) -> Result<Actor> {
+    resolve_with_discovery(explicit, machine, cwd, false)
+}
+
+fn resolve_with_discovery(
+    explicit: Option<&str>,
+    machine: &str,
+    cwd: &Path,
+    discover: bool,
+) -> Result<Actor> {
     let origin = crate::Origin::capture();
     let mut actor = Actor {
         id: String::new(),
@@ -173,7 +188,7 @@ pub fn resolve(explicit: Option<&str>, machine: &str, cwd: &Path) -> Result<Acto
         actor.kind = "codex".into();
         actor.session_id = Some(id);
         actor.source = "CODEX_THREAD_ID".into();
-    } else {
+    } else if discover {
         // Only a uniquely matched session belonging to an ancestor is evidence of
         // the caller. In particular, never pick the newest transcript in the cwd.
         let snapshot = crate::agents::scan();
@@ -192,6 +207,10 @@ pub fn resolve(explicit: Option<&str>, machine: &str, cwd: &Path) -> Result<Acto
                 "Cannot identify this agent session. Set HEY_BOSS_AGENT_ID to a stable session ID or pass --agent ID (for a terminal, use --agent human:NAME).",
             ));
         }
+    } else {
+        actor.id = "human:boss".into();
+        actor.kind = "human".into();
+        actor.source = "terminal inspection".into();
     }
     // A launcher is diagnostic metadata, never the durable owner ID. Explicit
     // identities do not imply that their parent shell is an agent process.
