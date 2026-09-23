@@ -208,6 +208,10 @@
 .issue-meta .issue-number {
   color: var(--faint);
 }
+.issue-authorship {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .agent-launch-count {
   position: relative;
   display: inline-flex;
