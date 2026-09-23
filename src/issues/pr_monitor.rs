@@ -16,7 +16,7 @@ impl Store {
         checked_at: i64,
         error: Option<&str>,
     ) -> Result<()> {
-        self.db.execute("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE url=?1", params![url,status,checked_at,error])?;
+        self.db.execute("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE url=?1 AND status<>'merged'", params![url,status,checked_at,error])?;
         Ok(())
     }
 
