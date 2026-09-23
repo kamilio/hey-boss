@@ -85,6 +85,15 @@ fn shortcut(binary: &Path) -> io::Result<()> {
     }
 }
 
+fn github_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![binary.with_file_name("hey-gh")];
+    let cargo = home.join(".cargo/bin/hey-gh");
+    if cargo.exists() && !paths.contains(&cargo) {
+        paths.push(cargo);
+    }
+    paths
+}
+
 pub(super) fn publish(
     snapshot: &Path,
     binary: &Path,
@@ -108,6 +117,7 @@ pub(super) fn publish(
             app,
             companion,
             skills,
+            github_bins: github_bins(binary, &home()?),
         },
     )
 }
@@ -116,6 +126,7 @@ struct Services {
     app: Option<PathBuf>,
     companion: bool,
     skills: Vec<PathBuf>,
+    github_bins: Vec<PathBuf>,
 }
 
 fn publish_to(
@@ -130,6 +141,7 @@ fn publish_to(
         app,
         companion,
         skills,
+        github_bins,
     } = services;
     let companion = *companion;
     let temp = Temp::new()?;
@@ -193,11 +205,25 @@ fn publish_to(
     if let Some(adjacent) = &adjacent {
         copy_tree(&staged_app, adjacent)?;
     }
+    let mut github_backups = Vec::new();
+    for (index, destination) in github_bins.iter().enumerate() {
+        let saved = if destination.exists() {
+            let saved = backup.join(format!("hey-gh.{index}.previous"));
+            fs::copy(destination, &saved)?;
+            Some(saved)
+        } else {
+            None
+        };
+        github_backups.push((destination, saved));
+    }
     let mut replaced_app = false;
     let mut replaced_binary = false;
     let result = (|| -> io::Result<()> {
         atomic_copy(built, binary, 0o755)?;
         replaced_binary = true;
+        for destination in github_bins {
+            atomic_copy(&built.with_file_name("hey-gh"), destination, 0o755)?;
+        }
         if let (Some(app), Some(adjacent), Some(app_backup)) = (&app, &adjacent, &app_backup) {
             fs::rename(app, app_backup)?;
             if let Err(e) = fs::rename(adjacent, app) {
@@ -232,6 +258,13 @@ fn publish_to(
         write_json(&state.join("upgrade-receipt.json"), receipt)
     })();
     if let Err(e) = result {
+        for (destination, saved) in github_backups {
+            if let Some(saved) = saved {
+                atomic_copy(&saved, destination, 0o755)?;
+            } else if destination.exists() {
+                fs::remove_file(destination)?;
+            }
+        }
         if replaced_binary {
             atomic_copy(&previous, binary, 0o755)?;
         }
@@ -284,6 +317,8 @@ mod tests {
         let built = temp.0.join("built");
         script(&bin, "echo previous");
         script(&built, "echo migration-failed >&2; exit 1");
+        script(&built.with_file_name("hey-gh"), "echo new-hey-gh");
+        script(&bin.with_file_name("hey-gh"), "echo old-hey-gh");
         let original = fs::read(&bin).unwrap();
         let state = temp.0.join("state");
         fs::create_dir(&state).unwrap();
@@ -297,11 +332,16 @@ mod tests {
             &Services {
                 app: None,
                 companion: false,
+                github_bins: vec![],
                 skills: Vec::new(),
             },
         );
         assert!(result.unwrap_err().to_string().contains("migration-failed"));
         assert_eq!(fs::read(&bin).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
+            "#!/bin/sh\necho old-hey-gh\n"
+        );
         assert_eq!(
             fs::read_to_string(state.join("upgrade-receipt.json")).unwrap(),
             "old-receipt"
@@ -317,6 +357,8 @@ mod tests {
             &built,
             "if [ \"$1\" = --version ]; then echo 'hey-boss (build 0000000000000000)'; fi; exit 0",
         );
+        script(&built.with_file_name("hey-gh"), "echo new-hey-gh");
+        script(&bin.with_file_name("hey-gh"), "echo old-hey-gh");
         let original = fs::read(&bin).unwrap();
         let state = temp.0.join("state");
         fs::create_dir(&state).unwrap();
@@ -330,6 +372,7 @@ mod tests {
             &Services {
                 app: None,
                 companion: false,
+                github_bins: vec![bin.with_file_name("hey-gh")],
                 skills: Vec::new(),
             },
         );
@@ -340,6 +383,10 @@ mod tests {
                 .contains("build verification")
         );
         assert_eq!(fs::read(&bin).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
+            "#!/bin/sh\necho old-hey-gh\n"
+        );
         assert_eq!(
             fs::read_to_string(state.join("upgrade-receipt.json")).unwrap(),
             "old-receipt"
@@ -355,6 +402,7 @@ mod tests {
             &built,
             "if [ \"$1\" = --version ]; then echo 'hey-boss (build 1234567890abcdef)'; fi; exit 0",
         );
+        script(&built.with_file_name("hey-gh"), "echo new-hey-gh");
         fs::create_dir_all(temp.0.join("skills/hey-boss")).unwrap();
         fs::write(temp.0.join("skills/hey-boss/SKILL.md"), "canonical skill").unwrap();
         let skill = temp.0.join("deployed/SKILL.md");
@@ -368,6 +416,7 @@ mod tests {
             &Services {
                 app: None,
                 companion: false,
+                github_bins: vec![bin.with_file_name("hey-gh")],
                 skills: vec![skill.clone()],
             },
         )
@@ -382,5 +431,9 @@ mod tests {
             PathBuf::from("hey-boss")
         );
         assert_eq!(fs::read_to_string(skill).unwrap(), "canonical skill");
+        assert_eq!(
+            fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
+            "#!/bin/sh\necho new-hey-gh\n"
+        );
     }
 }

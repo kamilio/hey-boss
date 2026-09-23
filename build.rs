@@ -20,6 +20,7 @@ fn main() {
         "build.rs",
         "src",
         "skills/hey-boss",
+        "packages/hey-gh",
         "tools/upgrade_hey_boss.py",
         "tools/drain_github_issues.py",
         "hey_boss_daemon.swift",

@@ -28,7 +28,7 @@ jobs:
           codesign --verify --strict "out/Hey Boss.app"
           plutil -lint "out/Hey Boss.app/Contents/Info.plist"
       - run: cargo build --locked --release
-      - run: cargo package --locked --allow-dirty
+      - run: cargo package --locked --allow-dirty --workspace --exclude hey-gh-node
   linux:
     runs-on: ubuntu-latest
     steps:

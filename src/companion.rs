@@ -183,6 +183,7 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "src",
                     "tests",
                     "skills/hey-boss",
+                    "packages/hey-gh",
                     "README.md",
                     "LICENSE",
                     "tools/upgrade_hey_boss.py",
@@ -209,6 +210,14 @@ cargo test --locked --manifest-path "$stage/Cargo.toml" --bin hey-boss --test se
 cargo build --locked --release --manifest-path "$stage/Cargo.toml"
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/hey-boss" "$HOME/.codex/skills/hey-boss"
 chmod 700 "$HOME/.local/share/hey-boss"
+cp "$stage/target/release/hey-gh" "$HOME/.local/bin/hey-gh.new"
+chmod 755 "$HOME/.local/bin/hey-gh.new"
+mv "$HOME/.local/bin/hey-gh.new" "$HOME/.local/bin/hey-gh"
+if [ -e "$HOME/.cargo/bin/hey-gh" ]; then
+cp "$stage/target/release/hey-gh" "$HOME/.cargo/bin/hey-gh.new"
+chmod 755 "$HOME/.cargo/bin/hey-gh.new"
+mv "$HOME/.cargo/bin/hey-gh.new" "$HOME/.cargo/bin/hey-gh"
+fi
 cp "$stage/target/release/hey-boss" "$HOME/.local/bin/hey-boss.new"
 mv "$HOME/.local/bin/hey-boss.new" "$HOME/.local/bin/hey-boss"
 if [ ! -e "$HOME/.local/bin/hb" ] && [ ! -L "$HOME/.local/bin/hb" ]; then
