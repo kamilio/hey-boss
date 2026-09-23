@@ -223,17 +223,21 @@ within 16 MiB capacity and fell from 67.1 MB to 33.5 MB of requested allocation
 bytes. Empty EOF still allocates nothing, and both CLI callers retain their
 existing limits, errors and complete response bytes.
 
-## Ongoing verification
+## Durability verification
 
-The eight-hour September 23 reliability audit uses a private database with four
-writer processes, a reader and periodic quick-check/foreign-key checks. An
-isolated supervisor adds concurrent same-process store opens and journal
+The September 23 reliability audit combines separate private durability segments
+within an eight-hour investigation. Four writer processes and a reader exercise
+concurrent issue edits. An isolated supervisor adds same-process store opens and journal
 maintenance, with no workers or SSH inventory. The initial writer segment stopped
 when its external SQLite checker, which had no busy timeout, returned
 `SQLITE_BUSY`. A full check with bundled SQLite then passed, with no foreign-key
 violations and 69,502 durable events (69,498 synthetic edits plus four seed
-events). The same database and inode are retained. A resumed writer segment uses
+events). A resumed writer segment retains the same database and inode and uses
 the bundled checker with its ten-second busy timeout and tracks new writes and
-reads separately. It and the isolated supervisor remain scheduled until the
-audit deadline; intermediate results are not final soak results. Production
-integrity and fleet convergence are checked separately.
+reads separately. A separate segment exercises the final guarded binary against
+a fresh private database. Each segment reports its actual start and end; none
+is described as an uninterrupted eight-hour writer soak. Joined writer segments
+check full integrity, foreign keys and exact event accounting: one durable event
+per committed edit, plus the seed events. Intermediate counters can differ from
+a checker's snapshot while writers are active; final counts are compared after
+joining them. Production integrity and fleet convergence are checked separately.
