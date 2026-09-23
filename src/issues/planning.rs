@@ -85,9 +85,9 @@ pub fn can_draft(
 ) -> Result<()> {
     drafts_allowed(db, project)?;
     let reserved: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)", params![project.id,number], |r|r.get(0))?;
-    if state != "open" || assignee.is_some() || reserved {
+    if !matches!(state, "open" | "blocked") || assignee.is_some() || reserved {
         return Err(Error::conflict(
-            "Only open, unassigned, unreserved issues can be drafted",
+            "Only open or blocked, unassigned, unreserved issues can be drafted",
         ));
     }
     Ok(())

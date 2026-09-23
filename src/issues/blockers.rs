@@ -71,8 +71,8 @@ impl Graph {
             children: BTreeMap::new(),
             links: BTreeMap::new(),
         };
-        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
-        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?}), r.get::<_,String>(5)?)))? {
+        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
+        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?}), r.get::<_,String>(5)?)))? {
             let (n, issue, links) = row?;
             graph.links.insert(n, serde_json::from_str(&links)?);
             graph.issues.insert(n, issue);
@@ -209,7 +209,9 @@ pub(super) fn reconcile(
             graph.validate_edge(number, target)?;
         }
         let blockers = graph.active(number);
-        let state = if issue["manual_blocked"] == true || !blockers.is_empty() {
+        let state = if issue["manual_blocked"] == true
+            || (issue["draft"] != true && !blockers.is_empty())
+        {
             "blocked"
         } else {
             "open"

@@ -1593,6 +1593,8 @@ impl Store {
                 | Operation::Delete { .. }
                 | Operation::Restore { .. }
                 | Operation::Transfer { .. }
+                | Operation::Edit { draft: Some(_), .. }
+                | Operation::Undraft { .. }
         ) {
             super::blockers::reconcile(
                 &tx,
@@ -1985,7 +1987,7 @@ fn mutate(
                 )));
             }
             if let Some(draft) = draft {
-                if *draft && !issue.draft {
+                if *draft && (!issue.draft || issue.state == "blocked") {
                     super::planning::can_draft(
                         db,
                         project,
@@ -1993,6 +1995,13 @@ fn mutate(
                         &issue.state,
                         issue.assignee.as_deref(),
                     )?;
+                    // Pause pickup in the same transaction that clears the block.
+                    // Dependency links remain; marking ready reconciles them again.
+                    if issue.state == "blocked" {
+                        db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL", params![project.id,number])?;
+                    }
+                    issue.state = "open".into();
+                    issue.manual_blocked = false;
                 }
                 issue.draft = *draft;
             }
@@ -2020,7 +2029,7 @@ fn mutate(
             labels(&issue.labels)?;
             if serde_json::to_value(&issue)? != before {
                 action = "edited";
-                data = json!({"before":{"title":before["title"],"body":before["body"],"labels":before["labels"]},"after":{"title":issue.title,"body":issue.body,"labels":issue.labels,"draft":issue.draft}});
+                data = json!({"before":{"title":before["title"],"body":before["body"],"labels":before["labels"],"state":before["state"],"draft":before["draft"]},"after":{"title":issue.title,"body":issue.body,"labels":issue.labels,"state":issue.state,"draft":issue.draft}});
             }
         }
         Operation::Undraft { .. } => {

@@ -2791,6 +2791,74 @@ fn drafts_are_persisted_block_claims_and_obey_project_settings() {
     assert_eq!(f.run("a", &["view", "1"])["issue"]["draft"], true);
 }
 
+#[test]
+fn blocked_issues_move_atomically_to_draft_and_keep_dependencies() {
+    let f = Fixture::new();
+    f.create();
+    f.run("a", &["block", "1"]);
+    f.run("a", &["settings", "set", "--no-drafts"]);
+    f.fail("a", &["edit", "1", "--draft"], 2);
+    f.run("a", &["settings", "set", "--drafts-enabled"]);
+    f.fail("a", &["edit", "1", "--draft", "--if-version", "1"], 4);
+    let drafted = f.run("a", &["edit", "1", "--draft"]);
+    assert_eq!(drafted["issue"]["state"], "open");
+    assert_eq!(drafted["issue"]["draft"], true);
+    f.fail("a", &["claim", "1"], 4);
+    f.run("a", &["undraft", "1"]);
+    f.run("a", &["claim", "1"]);
+    f.run("a", &["block", "1"]);
+    f.run("a", &["create", "--title", "Dependency"]);
+    f.run("a", &["blocked-by", "1", "2"]);
+    let drafted = f.run("a", &["edit", "1", "--draft"]);
+    assert_eq!(drafted["issue"]["state"], "open");
+    assert_eq!(drafted["issue"]["blocker_links"][0]["number"], 2);
+    // Unrelated mutations must not put a draft back in the blocked queue.
+    f.run("a", &["create", "--title", "Other"]);
+    assert_eq!(f.run("a", &["view", "1"])["issue"]["state"], "open");
+    let ready = f.run("a", &["undraft", "1"]);
+    assert_eq!(ready["issue"]["draft"], false);
+    assert_eq!(ready["issue"]["state"], "blocked");
+    f.fail("a", &["claim", "1"], 4);
+    f.run("a", &["edit", "1", "--draft"]);
+    f.run("a", &["close", "2"]);
+    assert_eq!(f.run("a", &["view", "1"])["issue"]["draft"], true);
+    f.run("a", &["undraft", "1"]);
+    f.run("a", &["claim", "1"]);
+    f.run("a", &["close", "1"]);
+    f.fail("a", &["edit", "1", "--draft"], 4);
+}
+
+#[test]
+fn blocked_issue_cannot_be_drafted_while_a_worker_is_still_running() {
+    let f = Fixture::new();
+    let created = f.create();
+    f.run("a", &["block", "1"]);
+    f.sql().execute("INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,reservation_expires,job,owner_pid,owner_start,machine) VALUES('reserved',?1,1,'worker-actor','reserved',0,0,9223372036854775807,'{}',123,'test','test-machine')", [created["project"]["id"].as_str().unwrap()]).unwrap();
+    f.fail("a", &["edit", "1", "--draft"], 4);
+    let issue = f.run("a", &["view", "1"]);
+    assert_eq!(issue["issue"]["state"], "blocked");
+    assert_eq!(issue["issue"]["draft"], false);
+    f.sql()
+        .execute(
+            "UPDATE worker_runs SET finished_at=1,retry_allowed=0 WHERE id='reserved'",
+            [],
+        )
+        .unwrap();
+    let draft = f.run("a", &["edit", "1", "--draft"]);
+    assert_eq!(draft["issue"]["draft"], true);
+    assert_eq!(
+        f.sql()
+            .query_row(
+                "SELECT retry_allowed FROM worker_runs WHERE id='reserved'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    f.fail("a", &["claim", "1"], 4);
+}
+
 // Model the released pre-draft schema without touching any live store.
 fn remove_draft_schema(f: &Fixture, version: i64) {
     f.sql().execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan;
