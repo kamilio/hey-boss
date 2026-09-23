@@ -19,6 +19,16 @@ use std::{io::Write, os::unix::net::UnixStream, time::Duration};
 pub(super) fn run(action: &super::Action) -> std::io::Result<()> {
     run_inner(action).map_err(std::io::Error::other)
 }
+fn save_upgrade_source(ctx: &Context, source: &std::path::Path) -> Result<()> {
+    let source = source.canonicalize()?;
+    if !source.join("Cargo.toml").is_file() {
+        return Err(replica::invalid("Source must be a hey-boss checkout"));
+    }
+    let path = ctx.state.join("upgrade-source");
+    ctx.protect_file(&path)?;
+    std::fs::write(path, format!("{}\n", source.display()))?;
+    Ok(())
+}
 fn run_inner(action: &super::Action) -> Result<()> {
     let ctx = Context::new()?;
     if matches!(
@@ -31,14 +41,7 @@ fn run_inner(action: &super::Action) -> Result<()> {
     match action {
         super::Action::Setup { source } => {
             if let Some(source) = source {
-                let source = source.canonicalize()?;
-                if !source.join("Cargo.toml").is_file() {
-                    return Err(replica::invalid("Source must be a hey-boss checkout"));
-                }
-                std::fs::write(
-                    ctx.state.join("upgrade-source"),
-                    format!("{}\n", source.display()),
-                )?;
+                save_upgrade_source(&ctx, source)?;
             }
             service::install(&ctx, "controller")?;
             println!(
@@ -79,6 +82,50 @@ fn run_inner(action: &super::Action) -> Result<()> {
         }
         #[allow(unreachable_patterns)]
         _ => unreachable!("Internal fleet command is handled before native dispatch"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context::tests::{assert_sqlite_locked, test_context};
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn setup_source_marker_aliases_cannot_truncate_sqlite_files() {
+        let (root, ctx, store) = test_context();
+        let source = root.join("source 🌍");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("Cargo.toml"), "[package]\nname='test'\n").unwrap();
+        let marker = ctx.state.join("upgrade-source");
+        for suffix in ["", "-wal", "-shm"] {
+            for symbolic in [false, true] {
+                let target = root.join(format!("issues.db{suffix}"));
+                if symbolic {
+                    std::os::unix::fs::symlink(&target, &marker).unwrap();
+                } else {
+                    fs::hard_link(&target, &marker).unwrap();
+                }
+                let before = fs::metadata(&target).unwrap().len();
+                let result = save_upgrade_source(&ctx, &source);
+                assert_eq!(
+                    fs::metadata(&target).unwrap().len(),
+                    before,
+                    "Source marker truncated SQLite file {suffix}"
+                );
+                assert!(result.unwrap_err().to_string().contains("must not alias"));
+                assert_sqlite_locked(&ctx.path);
+                fs::remove_file(&marker).unwrap();
+            }
+        }
+        save_upgrade_source(&ctx, &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(marker).unwrap(),
+            format!("{}\n", source.canonicalize().unwrap().display())
+        );
+        assert_sqlite_locked(&ctx.path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 fn local_request(ctx: &Context, value: Value) -> Result<Value> {
