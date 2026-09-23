@@ -121,7 +121,7 @@ fn reading_a_plan_alias_of_the_live_database_preserves_its_locks() {
 fn assert_database_locked(path: &std::path::Path) {
     let probe = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "journal_mode_probe", "--nocapture"])
-        .env("HEY_BOSS_LOCK_PROBE_DB", &path)
+        .env("HEY_BOSS_LOCK_PROBE_DB", path)
         .output()
         .unwrap();
     assert!(
