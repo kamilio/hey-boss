@@ -1677,7 +1677,9 @@ fn schema_three_migration_preserves_legacy_independent_worker_settings() {
     let p = v["project"]["id"].as_str().unwrap();
     let db = f.sql();
     db.execute("INSERT INTO project_workers VALUES(?1,?2,7,123)",rusqlite::params![p,serde_json::to_string(&json!({"cwd":f.cwd,"prompt":"Implement {{issue_command}}. {{commit_instruction}}","concurrency":3,"labels":["ready"],"use_goal":true,"enabled":false})).unwrap()]).unwrap();
-    db.execute_batch("DROP INDEX worker_finished_history;")
+    // These triggers shipped after schema three and refer to columns removed
+    // below. A genuine legacy store never had them.
+    db.execute_batch("DROP INDEX worker_finished_history; DROP TRIGGER fleet_worker_deadline_started; DROP TRIGGER fleet_worker_deadline_updated;")
         .unwrap();
     db.execute_batch("ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan; ALTER TABLE project_settings DROP COLUMN drafts_enabled; ALTER TABLE project_settings DROP COLUMN plan_template; DROP TABLE mindmap_links; DROP TABLE mindmap_nodes; DROP TABLE mindmaps; DROP VIEW issue_pickup_ready; DROP TABLE issue_subtasks; DROP INDEX worker_sort_order; DROP INDEX issue_sort_order; ALTER TABLE issues DROP COLUMN sort_order; ALTER TABLE projects DROP COLUMN issue_order_version; DROP TABLE issue_pull_requests; DROP TABLE project_settings; DROP INDEX worker_runs_worker; ALTER TABLE worker_runs DROP COLUMN worker_id; ALTER TABLE worker_runs DROP COLUMN reservation_expires; ALTER TABLE worker_runs DROP COLUMN claimed_at; DROP TABLE issue_workers; DROP TABLE global_settings_requests; DROP TABLE global_settings; PRAGMA user_version=3;").unwrap();
     let s = f.run("session-a", &["worker", "status"]);
