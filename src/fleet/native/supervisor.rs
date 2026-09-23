@@ -33,12 +33,15 @@ struct State {
     connections: BTreeMap<String, (u32, SyncSender<Value>)>,
     waiters: BTreeMap<String, SyncSender<Value>>,
     deploying: bool,
+    machines_dirty: bool,
 }
 pub(super) struct Supervisor {
     pub ctx: Context,
     state: Mutex<State>,
-    // Keep failed substantive saves dirty until a later update commits them.
-    persistence: Mutex<bool>,
+    // Serialize disk snapshots without serializing in-memory peer progress.
+    persistence: Mutex<()>,
+    // Configuration and signal ordering must not hold the liveness mutex.
+    configuration: Mutex<()>,
 }
 impl Supervisor {
     pub fn new(ctx: Context) -> Result<Arc<Self>> {
@@ -63,7 +66,8 @@ impl Supervisor {
         let build = Context::running_build().to_owned();
         Ok(Arc::new(Self {
             ctx,
-            persistence: Mutex::new(false),
+            persistence: Mutex::new(()),
+            configuration: Mutex::new(()),
             state: Mutex::new(State {
                 machines,
                 local,
@@ -76,6 +80,7 @@ impl Supervisor {
                 connections: BTreeMap::new(),
                 waiters: BTreeMap::new(),
                 deploying: false,
+                machines_dirty: false,
             }),
         }))
     }
@@ -92,27 +97,48 @@ impl Supervisor {
         let fields = fields
             .as_object()
             .ok_or_else(|| invalid("Invalid fleet state update"))?;
-        let mut dirty = self.persistence.lock().unwrap();
-        let machines = {
+        {
             let mut state = self.state.lock().unwrap();
             let m = state
                 .machines
                 .entry(host.into())
                 .or_insert_with(|| json!({"host":host}));
-            *dirty |= fields.iter().any(|(key, value)| {
+            let changed = fields.iter().any(|(key, value)| {
                 !matches!(key.as_str(), "heartbeat" | "last_sync") && m.get(key) != Some(value)
             });
             m.as_object_mut().unwrap().extend(fields.clone());
+            state.machines_dirty |= changed;
             // Liveness and sync progress are current in memory. Substantive
             // changes save both latest timestamps with the durable snapshot.
-            if !*dirty {
+        }
+        // Pure liveness never waits for SQLite, including after a failed save.
+        if fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "heartbeat" | "last_sync"))
+        {
+            self.save_machines()?;
+        }
+        Ok(())
+    }
+    fn save_machines(&self) -> Result<()> {
+        let Ok(_saving) = self.persistence.try_lock() else {
+            return Ok(());
+        };
+        let machines = {
+            let mut state = self.state.lock().unwrap();
+            if !state.machines_dirty {
                 return Ok(());
             }
+            // New substantive updates during this write remain dirty. Only the
+            // serialized writer can clear the dirty bit before taking a snapshot.
+            state.machines_dirty = false;
             json!(state.machines)
         };
-        replica::state_set(&self.ctx.db()?, "machines", &machines)?;
-        *dirty = false;
-        Ok(())
+        let result = (|| replica::state_set(&self.ctx.db()?, "machines", &machines))();
+        if result.is_err() {
+            self.state.lock().unwrap().machines_dirty = true;
+        }
+        result
     }
     fn machine(&self, host: &str) -> Value {
         self.state
@@ -338,8 +364,8 @@ impl Supervisor {
         if !matches!(action, "pause" | "resume" | "stop" | "restart") {
             return Err(invalid("Unknown signal"));
         }
-        // Serialize controls and config-file changes under the same service mutex.
-        let state = self.state.lock().unwrap();
+        // Keep controls ordered with config-file changes, independently of liveness.
+        let _configuration = self.configuration.lock().unwrap();
         let identifier = request["id"].as_str().map(str::to_owned).unwrap_or(id()?);
         let db = self.ctx.db()?;
         let old = replica::rows(
@@ -368,7 +394,9 @@ impl Supervisor {
         let default = if host == "local" {
             read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?["workers"].clone()
         } else {
-            state
+            self.state
+                .lock()
+                .unwrap()
                 .machines
                 .get(host)
                 .map(|m| m["desired_workers"].clone())
@@ -391,7 +419,6 @@ impl Supervisor {
             }
         }
         atomic_json(&self.ctx.desired, &saved)?;
-        drop(state);
         self.event(host, "signal", &format!("{action} queued for {worker}"));
         Ok(json!({"ok":true,"id":identifier,"state":"pending"}))
     }
@@ -399,8 +426,8 @@ impl Supervisor {
         if changes.is_empty() {
             return Ok(workers.clone());
         }
-        let _state = self.state.lock().unwrap();
-        let previous = _state.machines.get(host).cloned().unwrap_or(Value::Null);
+        let _configuration = self.configuration.lock().unwrap();
+        let previous = self.machine(host);
         let current = control::revision(&self.ctx.node, workers);
         let mut updated = workers.clone();
         let db = self.ctx.db()?;
@@ -446,7 +473,6 @@ impl Supervisor {
         let mut saved = read_json(&self.ctx.desired, json!({}))?;
         saved["machines"][host]["workers"] = updated.clone();
         atomic_json(&self.ctx.desired, &saved)?;
-        drop(_state);
         self.event(host, "configuration", "Local worker settings synchronized");
         Ok(updated)
     }
@@ -896,15 +922,12 @@ impl Supervisor {
         }
         Ok(())
     }
-    fn tick(
-        self: &Arc<Self>,
-        threads: &mut BTreeMap<String, std::thread::JoinHandle<()>>,
-    ) -> Result<()> {
+    fn tick(self: &Arc<Self>) -> Result<()> {
         let hosts = self.ctx.inventory()?;
-        let observed = self.ctx.workers()?;
+        let observed = self.state.lock().unwrap().local.clone();
         let main = read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?;
         let mut desired = {
-            let _state = self.state.lock().unwrap();
+            let _configuration = self.configuration.lock().unwrap();
             let mut saved = read_json(&self.ctx.desired, json!({}))?;
             if main["workers"]
                 .as_array()
@@ -953,23 +976,6 @@ impl Supervisor {
         }
         control::reconcile(&self.ctx, &main)?;
         replica::prune_journal(&self.ctx.db()?)?;
-        {
-            let mut state = self.state.lock().unwrap();
-            state.local = observed;
-            state.local_updated = now();
-        }
-        self.event("local", "heartbeat", "Worker state refreshed");
-        for entry in &hosts {
-            let host = entry["host"].as_str().unwrap();
-            if !threads.get(host).is_some_and(|t| !t.is_finished()) {
-                let app = self.clone();
-                let host = host.to_owned();
-                threads.insert(
-                    host.clone(),
-                    std::thread::spawn(move || app.connection(host)),
-                );
-            }
-        }
         for pending in replica::rows(
             &self.ctx.db()?,
             "SELECT * FROM fleet_signals WHERE host='local' AND state IN ('pending','stopping','starting') ORDER BY created_at",
@@ -1060,7 +1066,56 @@ impl Supervisor {
     fn scheduler(self: Arc<Self>) {
         let mut threads = BTreeMap::new();
         while !self.ctx.stopped() {
-            if let Err(e) = self.tick(&mut threads) {
+            match self.ctx.inventory() {
+                Ok(hosts) => self.start_connections(&hosts, &mut threads),
+                Err(e) => self.event("local", "error", &e.to_string()),
+            }
+            self.ctx.wait(Duration::from_secs(5));
+        }
+    }
+    fn start_connections(
+        self: &Arc<Self>,
+        hosts: &[Value],
+        threads: &mut BTreeMap<String, std::thread::JoinHandle<()>>,
+    ) {
+        for entry in hosts {
+            let host = entry["host"].as_str().unwrap();
+            if !threads.get(host).is_some_and(|t| !t.is_finished()) {
+                let app = self.clone();
+                let host = host.to_owned();
+                threads.insert(
+                    host.clone(),
+                    std::thread::spawn(move || app.connection(host)),
+                );
+            }
+        }
+    }
+    fn observe_local(&self) -> Result<()> {
+        let observed = self.ctx.workers()?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.local = observed;
+            // Advance only after a successful fresh collection, never for a
+            // timer tick or a failed observation.
+            state.local_updated = now();
+        }
+        self.event("local", "heartbeat", "Worker state refreshed");
+        Ok(())
+    }
+    fn observer(self: Arc<Self>) {
+        while !self.ctx.stopped() {
+            if let Err(e) = self.observe_local() {
+                self.event("local", "error", &e.to_string());
+            }
+            self.ctx.wait(Duration::from_secs(5));
+        }
+    }
+    fn maintenance(self: Arc<Self>) {
+        while !self.ctx.stopped() {
+            if let Err(e) = self.save_machines() {
+                self.event("local", "error", &e.to_string());
+            }
+            if let Err(e) = self.tick() {
                 self.event("local", "error", &e.to_string());
             }
             self.ctx.wait(Duration::from_secs(5));
@@ -1181,6 +1236,10 @@ pub(super) fn run(ctx: Context) -> Result<()> {
     listener.set_nonblocking(true)?;
     let scheduler = app.clone();
     std::thread::spawn(move || scheduler.scheduler());
+    let observer = app.clone();
+    std::thread::spawn(move || observer.observer());
+    let maintenance = app.clone();
+    std::thread::spawn(move || maintenance.maintenance());
     let mobile = ctx.clone();
     std::thread::spawn(move || super::mobile::run(mobile));
     while !ctx.stopped() {
@@ -1292,7 +1351,8 @@ mod tests {
         replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
         let app = Supervisor {
             ctx,
-            persistence: Mutex::new(false),
+            persistence: Mutex::new(()),
+            configuration: Mutex::new(()),
             state: Mutex::new(State {
                 machines: BTreeMap::new(),
                 local: vec![],
@@ -1305,6 +1365,7 @@ mod tests {
                 connections: BTreeMap::new(),
                 waiters: BTreeMap::new(),
                 deploying: false,
+                machines_dirty: false,
             }),
         };
         (directory, app)
@@ -1505,6 +1566,125 @@ mod tests {
         child.wait().unwrap();
         assert!(error.to_string().contains("Companion closed before hello"));
         assert!(elapsed < Duration::from_secs(2), "waited {elapsed:?}");
+    }
+
+    #[test]
+    fn queued_signal_contention_does_not_block_local_observation_or_peers() {
+        let (_directory, fixture) = test_supervisor();
+        let app = Arc::new(fixture);
+        let writer = app.ctx.db().unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let slow = app.clone();
+        let signaling = std::thread::spawn(move || {
+            slow.signal(
+                &json!({"id":"test-signal","host":"local","worker":"test","signal":"pause"}),
+            )
+        });
+        // Observe the actual SQLite wait rather than relying on a sleep.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.configuration.try_lock().is_ok() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            app.configuration.try_lock().is_err(),
+            "signal never reached its serialized write"
+        );
+        let healthy = app.clone();
+        let (tx, rx) = mpsc::channel();
+        let progressing = std::thread::spawn(move || {
+            healthy.observe_local().unwrap();
+            tx.send(healthy.update("healthy", json!({"heartbeat":2})))
+                .unwrap();
+        });
+        let progress = rx.recv_timeout(Duration::from_secs(1));
+        writer.execute_batch("ROLLBACK").unwrap();
+        signaling.join().unwrap().unwrap();
+        progressing.join().unwrap();
+        progress
+            .expect("signal writer stalled local observation and healthy peer")
+            .unwrap();
+        assert!(app.state.lock().unwrap().local_updated > 0.0);
+        let db = app.ctx.db().unwrap();
+        assert_eq!(
+            replica::rows(
+                &db,
+                "SELECT state FROM fleet_signals WHERE id='test-signal'",
+                &[]
+            )
+            .unwrap()[0]["state"],
+            "pending"
+        );
+    }
+
+    #[test]
+    fn sqlite_snapshot_contention_does_not_block_other_machine_updates() {
+        let (_directory, fixture) = test_supervisor();
+        let app = Arc::new(fixture);
+        app.update("healthy", json!({"state":"connected","heartbeat":1}))
+            .unwrap();
+        let writer = app.ctx.db().unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let slow = app.clone();
+        let saving = std::thread::spawn(move || slow.update("slow", json!({"state":"connected"})));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.persistence.try_lock().is_ok() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            app.persistence.try_lock().is_err(),
+            "snapshot never reached its serialized write"
+        );
+        let healthy = app.clone();
+        let (tx, rx) = mpsc::channel();
+        let progressing = std::thread::spawn(move || {
+            let result = healthy.update("healthy", json!({"heartbeat":2}));
+            let startup = healthy.update("new-peer", json!({"state":"connecting"}));
+            tx.send((result, startup)).unwrap();
+        });
+        let progress = rx.recv_timeout(Duration::from_secs(1));
+        writer.execute_batch("ROLLBACK").unwrap();
+        saving.join().unwrap().unwrap();
+        progressing.join().unwrap();
+        let (heartbeat, startup) =
+            progress.expect("unrelated heartbeat and startup stalled behind snapshot write");
+        heartbeat.unwrap();
+        startup.unwrap();
+        assert!(app.state.lock().unwrap().machines_dirty);
+        // The maintenance retry must save updates that arrived during the
+        // blocked write even without another substantive peer update.
+        app.save_machines().unwrap();
+        let saved = replica::state_get(&app.ctx.db().unwrap(), "machines", Value::Null).unwrap();
+        assert_eq!(saved["healthy"]["heartbeat"], 2);
+        assert_eq!(saved["new-peer"]["state"], "connecting");
+    }
+
+    #[test]
+    fn connection_startup_does_not_wait_for_collection_or_maintenance_locks() {
+        let (_directory, fixture) = test_supervisor();
+        let app = Arc::new(fixture);
+        // A stopped context prevents any real transport from being launched.
+        app.ctx
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _state = app.state.lock().unwrap();
+        let _configuration = app.configuration.lock().unwrap();
+        let _persistence = app.persistence.lock().unwrap();
+        let mut threads = BTreeMap::new();
+        app.start_connections(&[json!({"host":"test-peer"})], &mut threads);
+        assert_eq!(threads.len(), 1);
+        threads.remove("test-peer").unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn failed_observation_does_not_advance_the_local_heartbeat() {
+        let (_directory, app) = test_supervisor();
+        app.ctx
+            .db()
+            .unwrap()
+            .execute_batch("DROP TABLE issue_workers")
+            .unwrap();
+        assert!(app.observe_local().is_err());
+        assert_eq!(app.state.lock().unwrap().local_updated, 0.0);
     }
 
     #[test]
