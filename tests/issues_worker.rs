@@ -1626,6 +1626,15 @@ fn stop_and_shutdown_reap_codex_before_releasing_claim() {
     let s = f.wait(|s| s["runs"][0]["state"] == "running" && s["runs"][0]["goal"].is_object());
     let id = s["runs"][0]["id"].as_str().unwrap();
     let pid = s["runs"][0]["pid"].as_u64().unwrap() as i32;
+    let worker = s["worker_id"].as_str().unwrap();
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    // Stopped unfinished work is immediately eligible again. Pause new pickup
+    // while inspecting the stopped attempt's process and released claim.
+    db.execute(
+        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('false')) WHERE id=?1",
+        [worker],
+    )
+    .unwrap();
     f.control("stop", id);
     let s = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(s["runs"][0]["state"], "cancelled");
@@ -1633,7 +1642,12 @@ fn stop_and_shutdown_reap_codex_before_releasing_claim() {
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
     f.control("retry", id);
-    f.wait(|s| s["active"] == 1 && s["runs"][0]["goal"].is_object());
+    db.execute(
+        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('true')) WHERE id=?1",
+        [worker],
+    )
+    .unwrap();
+    f.wait(|s| s["active"] == 1 && s["runs"][0]["goal"]["status"] == "active");
     w.stop();
     let s = f.cli(&["worker", "status"]);
     assert_eq!(s["active"], 0);
