@@ -129,6 +129,10 @@ The web view MUST show all configured machines, including offline machines; conn
 
 An unreachable host MUST remain visible and reconnect with bounded backoff. A protocol mismatch MUST show an upgrade error. A failed deployment MUST retain the working installation. A failed sync MUST retain the journal. Configuration or code changes MUST NOT cancel active work merely to deploy an update; automatic replacement drains active jobs first. An explicit restart is allowed to cancel owned sessions.
 
+When a transport closes before its initial hello, the supervisor MUST expose
+the available bounded transport error tail with the startup failure. Collecting
+that tail MUST NOT wait indefinitely for an inherited open error stream.
+
 ## Test and Validation Matrix
 
 | Contract | Required evidence |
@@ -143,7 +147,7 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |
 | Configuration | Revision change reaches companion, survives restart, and queues offline |
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |
-| Connectivity | Heartbeat, EOF, timeout, and reconnect state transitions |
+| Connectivity | Heartbeat, EOF, timeout, reconnect state transitions, startup transport error retention and bounded collection with open stderr |
 | Machine persistence | Heartbeat-only updates retain current liveness without rewriting snapshots; identical updates during another write; failed-save retry retains worker and configuration state |
 | Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, public-status activity parity and legacy upgrade marker migration |
 | Worker build provenance | Compiled owner build, legacy registration invalidation, stale owner records, PID reuse, owner removal and unknown legacy builds |

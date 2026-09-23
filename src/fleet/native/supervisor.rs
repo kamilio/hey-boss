@@ -537,6 +537,7 @@ impl Supervisor {
         let errors = child.stderr.take().unwrap();
         let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
         let error_tail = tail.clone();
+        let (errors_finished, errors_done) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             for line in BufReader::new(errors)
                 .lines()
@@ -548,6 +549,7 @@ impl Supervisor {
                     tail.pop_front();
                 }
             }
+            let _ = errors_finished.send(());
         });
         let (incoming, rx) = mpsc::sync_channel(32);
         std::thread::spawn(move || {
@@ -566,10 +568,35 @@ impl Supervisor {
             .unwrap()
             .connections
             .insert(host.into(), (child.id(), outgoing));
-        let hello = rx
-            .recv_timeout(Duration::from_secs(15))
-            .map_err(|_| invalid("Companion is missing or has an incompatible fleet protocol"))??
-            .ok_or_else(|| invalid("Companion closed before hello"))?;
+        let hello = match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Ok(Some(hello))) => hello,
+            result => {
+                // stdout and stderr are read independently. Allow stderr to
+                // catch up after EOF, without waiting for a descendant that
+                // might retain the pipe after the SSH process exits.
+                let _ = errors_done.recv_timeout(Duration::from_millis(100));
+                let detail = tail
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let reason = match result {
+                    Ok(Ok(None)) => "Companion closed before hello".to_owned(),
+                    Ok(Err(error)) => format!("Companion hello failed: {error}"),
+                    Err(_) => {
+                        "Companion is missing or has an incompatible fleet protocol".to_owned()
+                    }
+                    Ok(Ok(Some(_))) => unreachable!(),
+                };
+                return Err(invalid(&if detail.is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {detail}")
+                }));
+            }
+        };
         if hello["kind"] != "hello" || hello["version"] != 1 {
             return Err(invalid("Companion has an incompatible fleet protocol"));
         }
@@ -1252,6 +1279,44 @@ mod tests {
             }),
         };
         (directory, app)
+    }
+
+    #[test]
+    fn startup_eof_reports_the_upstream_transport_error() {
+        let (_directory, app) = test_supervisor();
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "printf '%s\\n' 'synthetic SSH route failure' >&2; exit 1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let error = app.channel_inner("test-host", &mut child).unwrap_err();
+        child.wait().unwrap();
+        assert!(error.to_string().contains("Companion closed before hello"));
+        assert!(error.to_string().contains("synthetic SSH route failure"));
+    }
+
+    #[test]
+    fn startup_eof_does_not_wait_indefinitely_for_open_stderr() {
+        let (_directory, app) = test_supervisor();
+        let mut child = Command::new("sh")
+            .args(["-c", "exec 1>&-; exec sleep 10"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let error = app.channel_inner("test-host", &mut child).unwrap_err();
+        let elapsed = started.elapsed();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(error.to_string().contains("Companion closed before hello"));
+        assert!(elapsed < Duration::from_secs(2), "waited {elapsed:?}");
     }
 
     #[test]
