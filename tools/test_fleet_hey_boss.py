@@ -745,7 +745,7 @@ class FleetTests(unittest.TestCase):
             self.assertEqual('codex:' + resumed['session_id'], old_session)
             self.assertNotEqual(resumed['pid'], old_agent_pid)
             self.assertEqual(command('issue', '--project', 'Worker fixture', '--json', 'view', '1')['issue']['assignee'], old_session)
-            runs = command('worker', '--id', identifier, '--json', 'status')['runs']
+            runs = command('worker', '--id', identifier, '--json', '--history', '20', 'status')['runs']
             self.assertTrue(any(r['state'] == 'cancelled' and r['finished_at'] is not None for r in runs))
             self.assertIsNone(supervisor.poll(), 'Supervisor exited during worker restart')
             worker.wait(timeout=10)
