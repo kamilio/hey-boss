@@ -572,7 +572,8 @@ pub(crate) fn ensure(path: &Path) -> Result<()> {
             "HEY_BOSS_FLEET_STATE",
             path.parent()
                 .unwrap_or(Path::new("."))
-                .join("database-service"),
+                .join("database-service")
+                .join(identity(path)),
         )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

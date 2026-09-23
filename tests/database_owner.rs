@@ -78,6 +78,76 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn standalone_databases_in_one_directory_have_independent_services() {
+    let root = std::env::temp_dir().join(format!("hb-multiple-process-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let mut fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    fixture.create("First database");
+    fixture.replacement = Some(fixture.connection().owner_pid().unwrap());
+    let second = fixture.root.join("second.db");
+    let output = fixture
+        .command(&["issue", "--json", "projects"])
+        .env("HEY_BOSS_ISSUE_DB", &second)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let connection = Connection::connect(&second).unwrap();
+    let pid = connection.owner_pid().unwrap();
+    assert_ne!(Some(pid), fixture.replacement);
+    drop(connection);
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+}
+
+#[test]
+fn staged_migration_does_not_leave_a_temporary_service_running() {
+    let root = std::env::temp_dir().join(format!("hb-migrate-process-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let mut fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    let output = fixture
+        .command(&[
+            "issue",
+            "migrate",
+            "--installation",
+            env!("CARGO_BIN_EXE_hey-boss"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Ok(connection) = Connection::connect(&fixture.root.join("issues.db")) {
+        fixture.replacement = Some(connection.owner_pid().unwrap());
+    }
+    assert!(
+        fixture.replacement.is_none(),
+        "Staged installer left a companion running"
+    );
+    let db = rusqlite::Connection::open(fixture.root.join("issues.db")).unwrap();
+    assert!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
 fn existing_service_owns_cli_writes_and_missing_service_recovers_automatically() {
     let root = std::env::temp_dir().join(format!("hb-owner-process-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();

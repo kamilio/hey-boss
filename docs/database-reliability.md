@@ -276,8 +276,10 @@ use the existing request-ID replay mechanism where applicable.
 A database schema generation change triggers the existing additive repair code
 inside the owner. Staged installers execute their migration code through an
 exclusive owner session before replacing binaries, so an older running service
-can still apply SQL supplied by a newer installer. SQLite primary/extended codes
-and issue error classifications survive the transport. Existing inode/sidecar
+can still apply SQL supplied by a newer installer. When no service exists yet,
+the installer hosts the owner for the migration's
+lifetime, leaving the installed fleet service to take ownership after replacement.
+SQLite primary/extended codes and issue error classifications survive the transport. Existing inode/sidecar
 validation applies before connections and maintenance access.
 
 The explicit `fleet database` maintenance driver uses a live owner when present.
