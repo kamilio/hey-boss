@@ -17,6 +17,8 @@ pub mod mindmap;
 pub mod notices;
 pub mod routes;
 pub mod syntax;
+#[cfg(test)]
+mod test_allocations;
 /// Shared worker terminal library, also available as the standalone worker-tui crate.
 pub mod worker_tui;
 use serde::{Deserialize, Serialize};

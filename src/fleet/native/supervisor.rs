@@ -124,37 +124,9 @@ impl Supervisor {
             .unwrap_or(json!({}))
     }
     pub fn status(&self) -> Result<Value> {
-        let db = self.ctx.db()?;
-        let signals = replica::rows(
-            &db,
-            "SELECT * FROM fleet_signals ORDER BY created_at DESC LIMIT 100",
-            &[],
-        )?;
-        let conflicts = replica::rows(
-            &db,
-            "SELECT id,node,seq,table_name,reason,created_at,substr(data,1,8192) AS saved_change FROM fleet_conflicts WHERE resolved=0 ORDER BY created_at DESC LIMIT 100",
-            &[],
-        )?;
-        let state = self.state.lock().unwrap();
-        let mut machines = vec![
-            json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"workers":state.local,"pending":0,"build":state.build}),
-        ];
-        for (host, m) in &state.machines {
-            if host == "local" {
-                continue;
-            }
-            let mut m = m.clone();
-            if m["role"] == "agent" {
-                m["role"] = json!("companion");
-            }
-            machines.push(m);
-        }
-        Ok(
-            json!({"ok":true,"supervisor":self.ctx.node,"controller":self.ctx.node,"epoch":state.epoch,"sequence":state.sequence,"desired_build":state.desired_build,"machines":machines,"events":state.events,"signals":signals,"conflicts":conflicts}),
-        )
+        self.snapshot(None)
     }
     pub fn overview(&self) -> Result<Value> {
-        let mut status = self.status()?;
         let visible = replica::rows(
             &self.ctx.db()?,
             "SELECT id FROM projects WHERE hidden_at IS NULL",
@@ -163,45 +135,81 @@ impl Supervisor {
         .iter()
         .filter_map(|r| r["id"].as_str().map(str::to_owned))
         .collect::<BTreeSet<_>>();
-        for m in status["machines"].as_array_mut().unwrap() {
-            for w in m["workers"].as_array_mut().into_iter().flatten() {
-                let runs = w["runs"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|r| visible.contains(r["project_id"].as_str().unwrap_or("")))
-                    .map(crate::agent_conversations::compact_run)
-                    .collect::<Vec<_>>();
-                w["runs"] = json!(runs);
-                w["chiefs"] = json!(
-                    w["chiefs"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|r| visible.contains(r["project_id"].as_str().unwrap_or("")))
-                        .map(|r| {
-                            let mut v = r.clone();
-                            for key in ["summary", "last_event"] {
-                                v[key] = json!(
-                                    r[key]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .chars()
-                                        .take(1000)
-                                        .collect::<String>()
-                                );
-                            }
-                            v
-                        })
-                        .collect::<Vec<_>>()
-                );
+        self.snapshot(Some(&visible))
+    }
+    // A visible-project scope selects the compact projection. Project before
+    // cloning: discarded event arrays must never enter the response allocation.
+    fn snapshot(&self, visible: Option<&BTreeSet<String>>) -> Result<Value> {
+        let db = self.ctx.db()?;
+        let signals = replica::rows(
+            &db,
+            "SELECT * FROM fleet_signals ORDER BY created_at DESC LIMIT 100",
+            &[],
+        )?;
+        let conflicts = replica::rows(
+            &db,
+            if visible.is_some() {
+                "SELECT id,node,seq,table_name,reason,created_at FROM fleet_conflicts WHERE resolved=0 ORDER BY created_at DESC LIMIT 100"
+            } else {
+                "SELECT id,node,seq,table_name,reason,created_at,substr(data,1,8192) AS saved_change FROM fleet_conflicts WHERE resolved=0 ORDER BY created_at DESC LIMIT 100"
+            },
+            &[],
+        )?;
+        let state = self.state.lock().unwrap();
+        let mut local = json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"build":state.build});
+        local["workers"] = Value::Array(match visible {
+            Some(projects) => state
+                .local
+                .iter()
+                .map(|w| overview_worker(w, projects))
+                .collect(),
+            None => state.local.clone(),
+        });
+        let mut machines = vec![local];
+        for (host, machine) in &state.machines {
+            if host == "local" {
+                continue;
             }
+            let mut machine = match visible {
+                Some(projects) => {
+                    let mut projected = Value::Object(
+                        machine
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .filter(|(key, _)| key.as_str() != "workers")
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    );
+                    if let Some(workers) = machine["workers"].as_array() {
+                        projected["workers"] = Value::Array(
+                            workers
+                                .iter()
+                                .map(|w| overview_worker(w, projects))
+                                .collect(),
+                        );
+                    } else if let Some(workers) = machine.get("workers") {
+                        projected["workers"] = workers.clone();
+                    }
+                    projected
+                }
+                None => machine.clone(),
+            };
+            if machine["role"] == "agent" {
+                machine["role"] = json!("companion");
+            }
+            machines.push(machine);
         }
-        status["events"] = json!([]);
-        for c in status["conflicts"].as_array_mut().unwrap() {
-            c.as_object_mut().unwrap().remove("saved_change");
-        }
-        Ok(status)
+        let mut result = json!({"ok":true,"supervisor":self.ctx.node,"controller":self.ctx.node,"epoch":state.epoch,"sequence":state.sequence,"desired_build":state.desired_build});
+        result["machines"] = Value::Array(machines);
+        result["events"] = Value::Array(if visible.is_some() {
+            vec![]
+        } else {
+            state.events.iter().cloned().collect()
+        });
+        result["signals"] = Value::Array(signals);
+        result["conflicts"] = Value::Array(conflicts);
+        Ok(result)
     }
     fn conversation(&self, request: &Value) -> Result<Value> {
         let taking_over = request["kind"] == "takeover";
@@ -1110,6 +1118,49 @@ impl Supervisor {
         Ok(())
     }
 }
+fn overview_worker(worker: &Value, visible: &BTreeSet<String>) -> Value {
+    let mut result = Value::Object(
+        worker
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| !matches!(key.as_str(), "runs" | "chiefs"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    result["runs"] = Value::Array(
+        worker["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| visible.contains(r["project_id"].as_str().unwrap_or("")))
+            .map(crate::agent_conversations::compact_run)
+            .collect(),
+    );
+    result["chiefs"] = Value::Array(
+        worker["chiefs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| visible.contains(r["project_id"].as_str().unwrap_or("")))
+            .map(|r| {
+                let mut value = r.clone();
+                for key in ["summary", "last_event"] {
+                    value[key] = json!(
+                        r[key]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(1000)
+                            .collect::<String>()
+                    );
+                }
+                value
+            })
+            .collect(),
+    );
+    result
+}
 fn definition(w: &Value) -> Value {
     json!({"id":w["id"],"config":w["config"],"intent":if w["config"]["enabled"]==true{"running"}else{"pause"}})
 }
@@ -1282,6 +1333,69 @@ mod tests {
             );
         }
         (directory, app)
+    }
+
+    #[test]
+    fn overview_preserves_local_and_remote_metadata_and_chief_fields() {
+        let (_directory, app) = test_supervisor();
+        app.ctx.db().unwrap().execute_batch(
+            "INSERT INTO projects(id,name,next_number) VALUES('Atlas','Atlas',1);
+             INSERT INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at) VALUES('conflict','peer',1,'issues','private body','Conflict',1);
+             INSERT INTO fleet_signals VALUES('signal','peer','worker','pause','pending',NULL,1);"
+        ).unwrap();
+        let worker = json!({"id":"worker","kind":"service","pid":1,"build":"worker-build","config":{"concurrency":2},"active":1,"free":1,"eligible":3,"upgrading":false,"updated_at":2,"version":4,"future_metadata":{"keep":true},"runs":[{"id":"run","project_id":"Atlas","actor_id":"actor","session_id":"session","events":["private event"]}],"chiefs":[{"id":"chief","kind":"chief","project_id":"Atlas","worker_id":"worker","machine":"peer","enabled":true,"next_at":10,"session_id":"chief-session","summary":"Done","last_event":"Done","future_metadata":"keep"}]});
+        {
+            let mut state = app.state.lock().unwrap();
+            state.local = vec![worker.clone()];
+            state.machines.insert("peer".into(), json!({"host":"peer","role":"agent","state":"connected","heartbeat":1,"build":"companion-build","configuration_error":null,"desired_revision":"revision","desired_workers":[{"id":"worker","config":{"concurrency":2}}],"future_metadata":{"keep":true},"workers":[worker]}));
+            state.machines.insert(
+                "local".into(),
+                json!({"host":"local","workers":[{"id":"stale-local"}]}),
+            );
+            state.events.push_back(json!({"id":1,"detail":"event"}));
+        }
+        let full = app.status().unwrap();
+        let overview = app.overview().unwrap();
+        assert_eq!(overview["machines"].as_array().unwrap().len(), 2);
+        for (index, machine) in overview["machines"].as_array().unwrap().iter().enumerate() {
+            for (key, value) in full["machines"][index].as_object().unwrap() {
+                if key != "workers" {
+                    assert_eq!(machine.get(key), Some(value), "{key}");
+                }
+            }
+            let worker = &machine["workers"][0];
+            for (key, value) in full["machines"][index]["workers"][0].as_object().unwrap() {
+                if !matches!(key.as_str(), "runs" | "chiefs") {
+                    assert_eq!(worker.get(key), Some(value), "{key}");
+                }
+            }
+            assert_eq!(
+                worker["chiefs"],
+                full["machines"][index]["workers"][0]["chiefs"]
+            );
+            assert_eq!(worker["runs"][0]["actor_id"], "actor");
+            assert_eq!(worker["runs"][0]["session_id"], "session");
+            assert!(worker["runs"][0].get("events").is_none());
+        }
+        assert_eq!(overview["machines"][1]["role"], "companion");
+        assert_eq!(overview["signals"], full["signals"]);
+        assert_eq!(full["events"].as_array().unwrap().len(), 1);
+        assert_eq!(overview["events"], json!([]));
+        let mut conflict = full["conflicts"][0].clone();
+        assert_eq!(
+            conflict.as_object_mut().unwrap().remove("saved_change"),
+            Some(json!("private body"))
+        );
+        assert_eq!(overview["conflicts"], json!([conflict]));
+    }
+
+    #[test]
+    fn overview_does_not_allocate_copies_of_discarded_run_events() {
+        let (_directory, app) = large_report_supervisor();
+        let (overview, allocated) = crate::test_allocations::measure(|| app.overview().unwrap());
+        let encoded = serde_json::to_vec(&overview).unwrap().len();
+        eprintln!("overview: {allocated} requested Rust allocation bytes; {encoded} encoded bytes");
+        assert!(allocated < 8 * 1024 * 1024, "{allocated} allocation bytes");
     }
 
     #[test]

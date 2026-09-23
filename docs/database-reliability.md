@@ -131,6 +131,13 @@ The regression also covers individually valid machine reports whose combined
 full status exceeds the 16 MiB transport limit while their overview fits.
 Oversized full-status requests now receive a small JSON error on the control
 socket instead of an empty response that fails client parsing.
+The supervisor also builds the compact projection directly from stored machine
+activity, avoiding temporary copies of discarded normal run events and conflict
+bodies. With 375 normal runs across three valid machine reports, the identical
+1.22 MB encoded overview fell from 52.8 MB to 4.4 MB of requested Rust allocation
+bytes. This measures allocation work rather than resident memory or latency;
+the regression bounds that work without a timing threshold. Worker metadata
+and complete Chief projections remain available to native mobile clients.
 
 ## Ongoing verification
 
