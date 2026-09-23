@@ -111,8 +111,9 @@ Never change worker controls to discover allocation. `--force` is an explicit
 takeover override requiring authorization; never use it to resolve an allocation
 or synchronization denial. Ordinary claims protect offline reservations.
 
-The reserved `yolo` label is controlled only by Boss in the web UI's **Agent
-permissions** section. Do not add/remove it with CLI labels or batch triage.
+The reserved `yolo` label is controlled only by Boss in the web UI's **Assign
+tags** picker, or removed with the tag's × button. Its lightning icon and amber
+color distinguish it from ordinary tags. Do not add/remove it with CLI labels or batch triage.
 YOLO grants full access without sandboxing or approval prompts to the next worker
 attempt, including resumed sessions. Boss can disable it to restore Auto on the
 next attempt; running agents keep their current permissions.

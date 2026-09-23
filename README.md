@@ -405,12 +405,12 @@ explicit reopening. Pending agent approval requests also appear as Blocked.
 
 ## Upgrading every machine
 
-Boss can enable **YOLO** under **Agent permissions** in the issue web UI. The
+Boss can add **YOLO** in **Assign tags** in the issue web UI. The
 amber YOLO label marks an issue whose next worker attempt runs without a sandbox
-or approval prompts, including a resumed Codex session. Enabling it requires an
-explicit confirmation; it stays enabled until Boss disables it. Changes affect
+or approval prompts, including a resumed Codex session. Selecting the tag enables
+it directly; it stays enabled until Boss removes the tag. Changes affect
 the next attempt, not an agent already running. Ordinary CLI labels, agent edits,
-and batch triage cannot grant or change YOLO. Disabling it restores the normal
+and batch triage cannot grant or change YOLO. Removing the tag restores the normal
 workspace sandbox and Auto approval review on the next attempt. This permission
 control does not reopen, claim, or retry an issue automatically.
 
