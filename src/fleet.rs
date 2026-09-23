@@ -207,7 +207,8 @@ pub fn run(action: &Action) -> std::io::Result<()> {
 fn database(path: &std::path::Path) -> std::io::Result<()> {
     use rusqlite::types::{Value as SqlValue, ValueRef};
     use std::io::BufRead;
-    let connection = rusqlite::Connection::open(path).map_err(std::io::Error::other)?;
+    crate::issues::Store::create_database_if_missing(path).map_err(std::io::Error::other)?;
+    let connection = crate::issues::Store::open_connection(path).map_err(std::io::Error::other)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(10))
         .map_err(std::io::Error::other)?;

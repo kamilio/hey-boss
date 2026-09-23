@@ -60,7 +60,7 @@ impl Context {
         Ok(ctx)
     }
     pub fn db(&self) -> Result<Connection> {
-        let db = Connection::open(&self.path)?;
+        let db = Store::open_connection(&self.path)?;
         db.busy_timeout(Duration::from_secs(10))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
         Ok(db)
@@ -636,6 +636,34 @@ pub(super) mod tests {
             stop: Arc::new(AtomicBool::new(false)),
         };
         (root, ctx, store)
+    }
+    #[test]
+    fn direct_fleet_connections_reject_database_name_aliases() {
+        let (root, mut ctx, store) = test_context();
+        let original = ctx.path.clone();
+        let alias = root.join("second.db");
+        fs::hard_link(&original, &alias).unwrap();
+        ctx.path = alias.clone();
+        let error = ctx
+            .db()
+            .expect_err("Fleet accepted hard-linked database name");
+        assert!(error.to_string().contains("hard link"), "{error}");
+        assert!(!root.join("second.db-wal").exists());
+        assert!(!root.join("second.db-shm").exists());
+        assert_sqlite_locked(&original);
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        assert!(ctx.db().is_err(), "Fleet accepted symbolic database name");
+        fs::remove_file(alias).unwrap();
+        ctx.path = root.join("missing.db");
+        assert!(
+            ctx.db().is_err(),
+            "Fleet silently recreated a missing database"
+        );
+        assert!(!ctx.path.exists());
+        assert_sqlite_locked(&original);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn fleet_json_reads_reject_aliases_without_releasing_sqlite_locks() {
