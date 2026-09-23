@@ -268,7 +268,9 @@ multiplying control-character bodies beyond the frame limit.
 No database service configuration is required. A client first uses the running
 owner, starts the installed fleet service if needed, and bootstraps the existing
 companion daemon for a standalone CLI installation. Idle sessions reconnect after
-an owner restart. Graceful service shutdown lets active transactions finish;
+an owner restart. Running services repeat the owner election when a peer exits,
+so an existing supervisor or companion can take over without a manual restart.
+Graceful service shutdown lets active transactions finish;
 abandoned transaction leases expire. A mutation whose response is lost is never
 blindly replayed. The caller receives an error for an uncertain outcome and can
 use the existing request-ID replay mechanism where applicable.

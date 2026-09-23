@@ -38,7 +38,9 @@ fn run_inner(action: &super::Action) -> Result<()> {
                 install: false
             }
     ) {
-        crate::database::Owner::start(&crate::issues::database_path()?)?
+        Some(crate::database::Owner::host(
+            &crate::issues::database_path()?,
+        )?)
     } else {
         None
     };

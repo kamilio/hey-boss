@@ -456,7 +456,7 @@ fn replay_delay(failures: u32) -> Duration {
 
 pub fn serve(state: PathBuf) -> Result<(), String> {
     let _database_owner =
-        hey_boss::database::Owner::start(&state.join("issues.db")).map_err(|e| e.to_string())?;
+        hey_boss::database::Owner::host(&state.join("issues.db")).map_err(|e| e.to_string())?;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(state.join("queue")).map_err(|e| e.to_string())?;

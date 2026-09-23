@@ -82,6 +82,32 @@ fn disconnected_session_rolls_back_and_releases_writer() {
 }
 
 #[test]
+fn existing_service_takes_ownership_when_the_elected_peer_exits() {
+    let mut fixture = Fixture::new();
+    let path = fixture.directory.join("issues.db");
+    let mut service = Owner::host(&path).unwrap();
+    fixture.owner.stop();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(db) = Connection::connect(&path) {
+            assert_eq!(
+                db.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                42
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Existing service did not take ownership"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    service.stop();
+    assert!(Connection::connect(&path).is_err());
+}
+
+#[test]
 fn owner_election_does_not_replace_a_live_socket() {
     let fixture = Fixture::new();
     assert!(
