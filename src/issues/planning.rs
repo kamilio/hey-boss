@@ -142,6 +142,19 @@ fn lock(path: &Path, nonblocking: bool) -> Result<File> {
     Ok(file)
 }
 fn protect_database_files(database: &Path, plan: &Plan) -> Result<()> {
+    protect_database_paths(
+        database,
+        [
+            plan.file(),
+            lock_path(plan),
+            plan.file().with_extension("hey-boss-sync-paused"),
+        ],
+    )
+}
+pub(crate) fn protect_database_paths<P: AsRef<Path>>(
+    database: &Path,
+    paths: impl IntoIterator<Item = P>,
+) -> Result<()> {
     // Inspect inode identity without opening a raw descriptor: even closing a
     // read-only alias would release this process's SQLite record locks.
     let mut protected = Vec::new();
@@ -154,16 +167,14 @@ fn protect_database_files(database: &Path, plan: &Plan) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    for path in [
-        plan.file(),
-        lock_path(plan),
-        plan.file().with_extension("hey-boss-sync-paused"),
-    ] {
-        match fs::metadata(&path) {
+    for path in paths {
+        let path = path.as_ref();
+        match fs::metadata(path) {
             Ok(metadata) if protected.contains(&(metadata.dev(), metadata.ino())) => {
-                return Err(Error::invalid(
-                    "Plan files and sync markers must not alias the active issue database or its sidecars",
-                ));
+                return Err(Error::invalid(format!(
+                    "Auxiliary file {} must not alias the active issue database or its sidecars",
+                    path.display(),
+                )));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

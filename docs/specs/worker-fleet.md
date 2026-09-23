@@ -123,8 +123,12 @@ final reconciliation MUST reject plan or sync-marker inode aliases to the
 active issue database, WAL and shared-memory files before opening them through
 non-SQLite file APIs. Interactive planning and background plan sync MUST reject
 such aliases to the configured local issue database before opening sync locks
-or writing plan contents and sync markers. Database files MUST NOT be replaced
-or relinked while connections are active.
+or writing plan contents and sync markers. Fleet lifecycle locks MUST reject
+inode aliases to their context's database and its WAL/shared-memory files before
+opening a non-SQLite descriptor. Rejection MUST preserve locks held by existing
+SQLite connections. Ordinary lifecycle lock contention MUST retain nonblocking
+and bounded-wait behavior. Database files MUST NOT be replaced or relinked while
+connections are active.
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
@@ -204,6 +208,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Contract | Required evidence |
 | --- | --- |
 | Terminology and compatibility | Supervisor/companion help and legacy aliases; new status labels and old saved roles; worker restart preserves supervisor |
+| Database inode safety | Separate-process fcntl and journal-mode probes after another Store opens; plan/sync-marker and lifecycle-lock hard-link/symlink aliases to main, WAL and shared memory; concurrent creation, rejected paths, preserved header/draft and ordinary Markdown/nonblocking lifecycle locks |
 | Durable offline changes | Disconnect, mutate and restart, reconnect, verify exactly one canonical result |
 | Exclusive pickup | Supervisor and two replicas compete; only allocated machine reserves |
 | Filtered pickup | Small selected queues beside large unrelated queues, early candidates in a large selected queue, cross-project global priority, duplicate project IDs, unrestricted pickup, missing projects and limit boundaries |

@@ -31,6 +31,13 @@ text and does not establish the writer behind the historical zeroed header.
 These checks protect existing aliases; the fleet still assumes database files
 are not replaced or relinked during an operation.
 
+The same separate-process probe reproduced lock loss through a fleet lifecycle
+lock hard-linked to the main database. Closing that raw lock descriptor let the
+probe acquire a write lock while the SQLite store remained open. Fleet lifecycle
+locks now use the shared inode guard before opening their descriptor; hard links
+and symlinks to main/WAL/shared memory are rejected. Ordinary nonblocking lock
+contention and subsequent reacquisition remain valid.
+
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
 writer responsible for that damage has not been established. The subsequent
@@ -164,6 +171,12 @@ existing limits, errors and complete response bytes.
 The eight-hour September 23 reliability audit uses a private database with four
 writer processes, a reader and periodic quick-check/foreign-key checks. An
 isolated supervisor adds concurrent same-process store opens and journal
-maintenance, with no workers or SSH inventory. These soaks remain in progress
-until their scheduled deadline; intermediate clean checks are not final soak
-results. Production integrity and fleet convergence are checked separately.
+maintenance, with no workers or SSH inventory. The initial writer segment stopped
+when its external SQLite checker, which had no busy timeout, returned
+`SQLITE_BUSY`. A full check with bundled SQLite then passed, with no foreign-key
+violations and 69,502 durable events (69,498 synthetic edits plus four seed
+events). The same database and inode are retained. A resumed writer segment uses
+the bundled checker with its ten-second busy timeout and tracks new writes and
+reads separately. It and the isolated supervisor remain scheduled until the
+audit deadline; intermediate results are not final soak results. Production
+integrity and fleet convergence are checked separately.

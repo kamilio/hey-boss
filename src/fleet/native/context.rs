@@ -135,11 +135,13 @@ impl Context {
         }
     }
     pub fn lock(&self, name: &str, wait: bool) -> Result<Option<Lock>> {
+        let path = self.state.join(name);
+        crate::issues::planning::protect_database_paths(&self.path, [&path])?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
-            .open(self.state.join(name))?;
+            .open(path)?;
         let deadline = Instant::now() + Duration::from_secs(40);
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -561,6 +563,102 @@ pub(super) fn committed_source_build(source: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::BufReader;
+    #[test]
+    fn sqlite_lock_probe() {
+        let Some(path) = std::env::var_os("HEY_BOSS_FLEET_LOCK_PROBE_DB") else {
+            return;
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) },
+            -1,
+            "Fleet auxiliary file close released another SQLite connection's locks"
+        );
+        assert!(matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EACCES | libc::EAGAIN)
+        ));
+    }
+    fn assert_sqlite_locked(path: &Path) {
+        let probe = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fleet::native::context::tests::sqlite_lock_probe",
+                "--nocapture",
+            ])
+            .env("HEY_BOSS_FLEET_LOCK_PROBE_DB", path)
+            .output()
+            .unwrap();
+        assert!(
+            probe.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&probe.stdout),
+            String::from_utf8_lossy(&probe.stderr)
+        );
+    }
+    #[test]
+    fn fleet_lock_aliases_are_rejected_without_releasing_sqlite_locks() {
+        let root =
+            std::env::temp_dir().join(format!("hey-boss-fleet-lock-alias-{}", id().unwrap()));
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        let ctx = Context {
+            home: root.clone(),
+            state,
+            desired: root.join("fleet.json"),
+            binary: std::env::current_exe().unwrap(),
+            path: path.clone(),
+            node: "test".into(),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let lock = ctx.state.join("fleet-worker-control.lock");
+        for suffix in ["", "-wal", "-shm"] {
+            for symbolic in [false, true] {
+                let target = root.join(format!("issues.db{suffix}"));
+                if symbolic {
+                    std::os::unix::fs::symlink(&target, &lock).unwrap();
+                } else {
+                    fs::hard_link(&target, &lock).unwrap();
+                }
+                let result = ctx.lock("fleet-worker-control.lock", false);
+                let rejected = result.is_err();
+                drop(result);
+                assert_sqlite_locked(&path);
+                assert!(
+                    rejected,
+                    "Fleet lock accepted database alias {suffix}, symbolic={symbolic}"
+                );
+                fs::remove_file(&lock).unwrap();
+            }
+        }
+        let held = ctx
+            .lock("fleet-worker-control.lock", false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            ctx.lock("fleet-worker-control.lock", false)
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        drop(
+            ctx.lock("fleet-worker-control.lock", false)
+                .unwrap()
+                .unwrap(),
+        );
+        assert_sqlite_locked(&path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
     struct Fragmented<R>(R);
     impl<R: Read> Read for Fragmented<R> {
         fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
