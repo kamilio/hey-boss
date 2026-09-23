@@ -132,7 +132,7 @@ fn blocked_lifecycle_preserves_history_and_requires_reopening() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
