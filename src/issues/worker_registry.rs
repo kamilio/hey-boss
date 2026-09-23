@@ -194,6 +194,37 @@ fn checkout(db: &Connection, c: &Settings, p: &Project) -> Result<String> {
 }
 
 impl Store {
+    /// Return machine activity from one snapshot without repeating the overview.
+    pub(crate) fn fleet_workers(&self) -> Result<Vec<Value>> {
+        retry_contention(Instant::now() + CONTENTION_BUDGET, || {
+            let legacy_runtime: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get(0))?;
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.db,
+                if legacy_runtime {
+                    TransactionBehavior::Immediate
+                } else {
+                    TransactionBehavior::Deferred
+                },
+            )?;
+            migrate_runtime(&tx)?;
+            let mut workers = worker_overview(&tx)?;
+            for worker in &mut workers {
+                let config: Settings = serde_json::from_value(worker["config"].clone())?;
+                let Value::Object(mut activity) =
+                    worker_activity(&tx, worker["id"].as_str(), &config)?
+                else {
+                    unreachable!("worker activity is an object")
+                };
+                // The machine protocol exposes capacity and activity, while
+                // queue diagnostics belong to the public status response.
+                activity.remove("queue");
+                worker.as_object_mut().unwrap().extend(activity);
+            }
+            tx.commit()?;
+            Ok(workers)
+        })
+    }
+
     /// Refresh text dependencies only. Workspace/delivery choices are fixed for
     /// an active task: changing them halfway through would invalidate its work.
     pub(crate) fn worker_prompt_config(&self, job: &Job) -> Result<ProjectConfig> {
@@ -284,7 +315,7 @@ fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
-fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
+fn worker_overview(db: &Connection) -> Result<Vec<Value>> {
     let mut stmt=db.prepare("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL) FROM issue_workers w ORDER BY updated_at DESC,id LIMIT 100")?;
     let rows = stmt
         .query_map([], |r| {
@@ -307,45 +338,14 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
             w["upgrading"] = json!(db.query_row("SELECT EXISTS(SELECT 1 FROM issue_worker_runtime r JOIN issue_workers w ON w.id=r.worker_id WHERE w.id=?1 AND r.owner_pid=w.owner_pid AND r.owner_start=w.owner_start)", [w["id"].as_str().unwrap()], |r| r.get::<_,bool>(0))?);
         }
     }
-    let selected = if id == Some("new") {
-        None
-    } else {
-        id.map(str::to_owned).or_else(|| {
-            workers
-                .first()
-                .and_then(|w| w["id"].as_str())
-                .map(str::to_owned)
-        })
-    };
-    let (config, version, kind) = if let Some(id) = &selected {
-        read_settings(db, id)?
-    } else {
-        (
-            Settings {
-                projects: vec![p.id.clone()],
-                directory: directory(db, p)?,
-                name: format!("{} worker", p.name),
-                ..Settings::default()
-            },
-            0,
-            "managed".into(),
-        )
-    };
-    let mut stmt =
-        db.prepare("SELECT id,name FROM projects WHERE id IN (SELECT value FROM json_each(?1))")?;
-    let projects = stmt
-        .query_map([serde_json::to_string(&config.projects)?], |r| {
-            Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?}))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(workers)
+}
+fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -> Result<Value> {
     let active: i64 = db.query_row(
         "SELECT count(*) FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL",
         [&selected],
         |r| r.get(0),
     )?;
-    let upgrading = workers
-        .iter()
-        .any(|w| w["id"].as_str() == selected.as_deref() && w["upgrading"] == true);
     let mut stmt = db.prepare(STATUS_RUNS)?;
     let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for run in &mut runs {
@@ -380,6 +380,47 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let queue = json!({"open":open,"assigned":assigned,"tag_filtered":tag_filtered,"waiting":open-assigned-tag_filtered-eligible,"eligible":eligible});
+    let chiefs = super::super::chief::status(db, selected)?;
+    Ok(
+        json!({"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"chiefs":chiefs}),
+    )
+}
+fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
+    let workers = worker_overview(db)?;
+    let selected = if id == Some("new") {
+        None
+    } else {
+        id.map(str::to_owned).or_else(|| {
+            workers
+                .first()
+                .and_then(|w| w["id"].as_str())
+                .map(str::to_owned)
+        })
+    };
+    let (config, version, kind) = if let Some(id) = &selected {
+        read_settings(db, id)?
+    } else {
+        (
+            Settings {
+                projects: vec![p.id.clone()],
+                directory: directory(db, p)?,
+                name: format!("{} worker", p.name),
+                ..Settings::default()
+            },
+            0,
+            "managed".into(),
+        )
+    };
+    let mut stmt =
+        db.prepare("SELECT id,name FROM projects WHERE id IN (SELECT value FROM json_each(?1))")?;
+    let projects = stmt
+        .query_map([serde_json::to_string(&config.projects)?], |r| {
+            Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?}))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let upgrading = workers
+        .iter()
+        .any(|w| w["id"].as_str() == selected.as_deref() && w["upgrading"] == true);
     let mut fleet: Value = db.query_row("SELECT role,node,(SELECT count(*) FROM fleet_outbox) FROM fleet_meta WHERE id=1", [], |r| Ok(json!({"role":r.get::<_,String>(0)?,"node":r.get::<_,String>(1)?,"pending_changes":r.get::<_,i64>(2)?})))?;
     fleet["supervisor_connection"] =
         crate::fleet::worker_connection(fleet["role"].as_str().unwrap_or_default());
@@ -390,10 +431,9 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
     } else if fleet["role"] == crate::fleet::COMPANION_ROLE {
         fleet["role"] = json!("companion");
     }
-    let chiefs = super::super::chief::status(db, selected.as_deref())?;
-    Ok(
-        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"chiefs":chiefs,"project":p,"projects":projects}),
-    )
+    let mut result = worker_activity(db, selected.as_deref(), &config)?;
+    result.as_object_mut().unwrap().extend(json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"project":p,"projects":projects}).as_object().unwrap().clone());
+    Ok(result)
 }
 pub(super) fn execute(
     db: &Connection,
@@ -1076,6 +1116,15 @@ mod tests {
             assert_eq!(status["upgrading"], true);
             assert_eq!(status["runs"][0]["session_id"], "saved-session");
             assert_eq!(status["runs"][0]["actor_id"], "agent");
+            store
+                .db
+                .execute("DELETE FROM issue_worker_runtime WHERE worker_id=?1", [&id])
+                .unwrap();
+            store.db.execute("UPDATE issue_workers SET config=json_set(config,'$.enabled',json('false'),'$.upgrading',json('true')) WHERE id=?1", [&id]).unwrap();
+            let fleet = store.fleet_workers().unwrap();
+            assert_eq!(fleet[0]["upgrading"], true);
+            assert_eq!(fleet[0]["config"]["enabled"], true);
+            assert_eq!(fleet[0]["runs"][0]["session_id"], "saved-session");
             assert!(reserve(&mut store, "unit", Some(&id)).unwrap().is_none());
             // Exercise the reservation path with a newly written legacy marker,
             // before any status/open path has had a chance to migrate it.
@@ -1097,6 +1146,153 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn fleet_poll_work_is_linear_in_the_number_of_workers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+            unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(100, Ordering::Relaxed);
+            0
+        }
+        let root = std::env::temp_dir().join(format!("hb-fleet-poll-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            let config = serde_json::to_string(&Settings {
+                concurrency: 2,
+                ..Settings::default()
+            })
+            .unwrap();
+            for n in 1..=100 {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,?3)", params![format!("worker-{n:03}"),config,n]).unwrap();
+            }
+            store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id),owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL);
+                UPDATE issue_workers SET owner_pid=123,owner_start='same-owner' WHERE id='worker-050';
+                INSERT INTO issue_worker_runtime VALUES('worker-050',123,'same-owner');").unwrap();
+            let steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let started = std::time::Instant::now();
+            let result = store.fleet_workers();
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            let elapsed = started.elapsed();
+            let workers = result.unwrap();
+            assert_eq!(workers.len(), 100);
+            assert_eq!(workers[0]["id"], "worker-100");
+            assert_eq!(workers[99]["id"], "worker-001");
+            for worker in &workers {
+                assert_eq!(worker["active"], 0);
+                assert_eq!(worker["free"], 2);
+                assert_eq!(worker["eligible"], 0);
+                assert!(worker["runs"].as_array().unwrap().is_empty());
+                assert!(worker["chiefs"].as_array().unwrap().is_empty());
+                assert_eq!(worker["upgrading"], worker["id"] == "worker-050");
+            }
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!(
+                "100-worker fleet poll: fewer than {} VM steps in {elapsed:?}",
+                steps + 100
+            );
+            assert!(
+                steps < 100_000,
+                "Fleet poll repeatedly scanned unrelated workers: {steps} VM steps"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fleet_poll_capacity_and_activity_share_one_wal_snapshot() {
+        struct ConcurrentStart {
+            writer: Connection,
+            started: std::cell::Cell<bool>,
+        }
+        unsafe extern "C" fn start_run(
+            kind: u32,
+            context: *mut std::ffi::c_void,
+            statement: *mut std::ffi::c_void,
+            _: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int {
+            if kind != rusqlite::ffi::SQLITE_TRACE_STMT {
+                return 0;
+            }
+            let state = unsafe { &*context.cast::<ConcurrentStart>() };
+            let sql =
+                unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast())) }
+                    .to_string_lossy();
+            if sql.starts_with("SELECT count(*) FROM worker_runs WHERE worker_id")
+                && !state.started.replace(true)
+            {
+                // Commit from a different WAL connection between overview and details.
+                let result = state.writer.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id) VALUES('concurrent','named:Snapshot QA',1,'{\"issue\":{\"title\":\"Task\"}}','agent','running',1,'start','unit',1,1,'worker-b')", []);
+                if result.is_err() {
+                    state.started.set(false);
+                }
+            }
+            0
+        }
+        let root = std::env::temp_dir().join(format!("hb-fleet-snapshot-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Snapshot QA','Snapshot QA',2,0,0);
+                INSERT INTO agents VALUES('agent','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Snapshot QA',1,'Task','','open','agent',0,0,1,'[]');").unwrap();
+            let config = serde_json::to_string(&Settings::default()).unwrap();
+            for id in ["worker-a", "worker-b"] {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)", params![id,config]).unwrap();
+            }
+            let mut concurrent = ConcurrentStart {
+                writer: Connection::open(root.join("issues.db")).unwrap(),
+                started: std::cell::Cell::new(false),
+            };
+            concurrent
+                .writer
+                .pragma_update(None, "foreign_keys", true)
+                .unwrap();
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    store.db.handle(),
+                    rusqlite::ffi::SQLITE_TRACE_STMT,
+                    Some(start_run),
+                    (&mut concurrent as *mut ConcurrentStart).cast(),
+                );
+            }
+            let result = store.fleet_workers();
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(store.db.handle(), 0, None, std::ptr::null_mut());
+            }
+            assert!(
+                concurrent.started.get(),
+                "The concurrent writer did not commit during polling"
+            );
+            let workers = result.unwrap();
+            assert!(
+                workers
+                    .iter()
+                    .all(|w| w["active"] == 0 && w["runs"].as_array().unwrap().is_empty()),
+                "Polling combined capacity and activity from different database snapshots"
+            );
+            let next = store.fleet_workers().unwrap();
+            let updated = next.iter().find(|w| w["id"] == "worker-b").unwrap();
+            assert_eq!(updated["active"], 1);
+            assert_eq!(updated["runs"][0]["id"], "concurrent");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn status_includes_every_active_codex_and_only_twenty_finished_runs() {
         let root = std::env::temp_dir().join(format!("hb-worker-status-{}", random_id().unwrap()));
@@ -1162,6 +1358,13 @@ mod tests {
                 .map(|r| r["id"].as_str().unwrap())
                 .collect();
             assert_eq!(ids, expected);
+            let fleet = store.fleet_workers().unwrap();
+            assert_eq!(fleet.len(), 1);
+            let mut expected_worker = s["workers"][0].clone();
+            for key in ["active", "free", "eligible", "runs", "chiefs"] {
+                expected_worker[key] = s[key].clone();
+            }
+            assert_eq!(fleet[0], expected_worker);
             // Large old history must not change the result or make status
             // scan every finished attempt. Use nonmonotonic finish times.
             db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)

@@ -95,20 +95,9 @@ impl Context {
         })?)
     }
     pub fn workers(&self) -> Result<Vec<Value>> {
-        let mut store = Store::open(&self.path)?;
-        let status = self.rpc_store(&mut store, json!({"action":"workers","worker_id":null}))?;
-        let mut workers = status["workers"]
-            .as_array()
-            .ok_or_else(|| invalid("Invalid worker overview"))?
-            .clone();
+        let store = Store::open(&self.path)?;
+        let mut workers = store.fleet_workers()?;
         for w in &mut workers {
-            let selected =
-                self.rpc_store(&mut store, json!({"action":"workers","worker_id":w["id"]}))?;
-            for k in ["active", "free", "eligible", "runs", "chiefs", "upgrading"] {
-                if let Some(v) = selected.get(k) {
-                    w[k] = v.clone();
-                }
-            }
             if let Some(pid) = w["pid"].as_u64()
                 && !alive(pid as u32)
             {
@@ -560,6 +549,78 @@ mod tests {
             source_build(&root).unwrap()
         );
     }
+    #[test]
+    #[ignore = "Profiles an explicitly supplied database through a private backup"]
+    fn profile_machine_activity_poll() {
+        let source = PathBuf::from(
+            std::env::var_os("HEY_BOSS_PROFILE_DB").expect("Set HEY_BOSS_PROFILE_DB"),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "hb-machine-poll-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        let db = Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+        db.backup("main", &path, None).unwrap();
+        drop(db);
+        let ctx = Context {
+            home: root.clone(),
+            state: root.clone(),
+            desired: root.join("desired.json"),
+            binary: std::env::current_exe().unwrap(),
+            path,
+            node: "profile".into(),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let repeated_status = || {
+            let mut store = Store::open(&ctx.path).unwrap();
+            let status = ctx
+                .rpc_store(&mut store, json!({"action":"workers","worker_id":null}))
+                .unwrap();
+            let mut workers = status["workers"].as_array().unwrap().clone();
+            for worker in &mut workers {
+                let detail = ctx
+                    .rpc_store(
+                        &mut store,
+                        json!({"action":"workers","worker_id":worker["id"]}),
+                    )
+                    .unwrap();
+                for key in ["active", "free", "eligible", "runs", "chiefs", "upgrading"] {
+                    worker[key] = detail[key].clone();
+                }
+                if let Some(pid) = worker["pid"].as_u64()
+                    && !alive(pid as u32)
+                {
+                    worker["pid"] = Value::Null;
+                }
+            }
+            workers
+        };
+        let expected = repeated_status();
+        assert_eq!(ctx.workers().unwrap(), expected);
+        let mut old = Vec::new();
+        let mut batched = Vec::new();
+        for _ in 0..7 {
+            let start = Instant::now();
+            assert_eq!(repeated_status(), expected);
+            old.push(start.elapsed());
+            let start = Instant::now();
+            assert_eq!(ctx.workers().unwrap(), expected);
+            batched.push(start.elapsed());
+        }
+        old.sort();
+        batched.sort();
+        eprintln!(
+            "{} workers: repeated public status median {:?}; coherent poll median {:?}",
+            expected.len(),
+            old[3],
+            batched[3]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn bounded_frames_reject_oversize_requests_and_truncated_json() {
         let mut reader = std::io::Cursor::new(vec![b'x'; crate::issues::WIRE_LIMIT + 1]);

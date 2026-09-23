@@ -67,6 +67,13 @@ writer lock. Connection, configuration and worker changes MUST remain durable;
 a failed save MUST remain eligible for retry even when subsequent fields are
 identical. Every successful snapshot save MUST include the latest heartbeat.
 
+Each machine activity poll MUST read worker capacity, runs, chief activity and
+upgrade state from one coherent database snapshot. A poll SHOULD read the
+bounded worker overview once rather than repeat it for each worker. Machine
+activity polling SHOULD NOT load unrelated public-status data, such as the
+durable outgoing journal count. Existing machine activity fields and bounded
+recent history MUST remain compatible with older peers.
+
 ## Configuration
 
 The supervisor MUST derive its inventory from the existing machine configuration and distribute the supervisor identity, companion role, configuration revision, desired worker settings, and software build. Invalid configuration MUST leave the previous valid configuration active and expose an error. Companions MUST persist configuration atomically. The supervisor MUST reconcile reachable machines on startup, reconnect, configuration changes, and source changes. Deployment failures MUST be visible and retried with backoff. Explicit deployment MUST remain available.
@@ -122,6 +129,7 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 | Signals | Pause/resume/stop/restart acknowledgments and duplicate signal replay |
 | Connectivity | Heartbeat, EOF, timeout, and reconnect state transitions |
 | Machine persistence | Heartbeat-only updates retain current liveness without rewriting snapshots; identical updates during another write; failed-save retry retains worker and configuration state |
+| Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, public-status activity parity and legacy upgrade marker migration |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria
