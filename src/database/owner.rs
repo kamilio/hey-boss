@@ -551,7 +551,7 @@ fn execute(
 /// Start an already-installed service when its socket is temporarily unavailable.
 /// Bare CLI installations bootstrap the existing companion daemon automatically.
 pub(crate) fn ensure(path: &Path) -> Result<()> {
-    if Connection::connect(path).is_ok() {
+    if connected(path)? {
         return Ok(());
     }
     prepare_parent(path)?;
@@ -570,14 +570,14 @@ pub(crate) fn ensure(path: &Path) -> Result<()> {
     if unsafe { libc::flock(startup.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(error(std::io::Error::last_os_error().to_string()));
     }
-    if Connection::connect(path).is_ok() {
+    if connected(path)? {
         return Ok(());
     }
     let service_started = start_installed_service(path);
     if service_started {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
-            if Connection::connect(path).is_ok() {
+            if connected(path)? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -621,7 +621,7 @@ pub(crate) fn ensure(path: &Path) -> Result<()> {
     let mut child = command.spawn().map_err(|e| error(e.to_string()))?;
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        if Connection::connect(path).is_ok() {
+        if connected(path)? {
             return Ok(());
         }
         if let Some(status) = child.try_wait().map_err(|e| error(e.to_string()))? {
@@ -647,6 +647,14 @@ pub(crate) fn ensure(path: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(error("Database service did not become ready"))
+}
+
+fn connected(path: &Path) -> Result<bool> {
+    match Connection::connect(path) {
+        Ok(_) => Ok(true),
+        Err(e) if super::permission_denied(&e) => Err(e),
+        Err(_) => Ok(false),
+    }
 }
 
 fn start_installed_service(path: &Path) -> bool {

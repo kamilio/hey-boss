@@ -274,6 +274,8 @@ Graceful service shutdown lets active transactions finish;
 abandoned transaction leases expire. A mutation whose response is lost is never
 blindly replayed. The caller receives an error for an uncertain outcome and can
 use the existing request-ID replay mechanism where applicable.
+Socket permission errors are returned immediately and never start replacement
+services. Existing agent approval and sandbox rules still apply.
 
 A database schema generation change triggers the existing additive repair code
 inside the owner. Staged installers execute their migration code through an
