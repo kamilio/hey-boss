@@ -871,17 +871,17 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         (
             None,
             false,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.\n\nFor required validation, exit 0 alone is not success: require a normal exit and fresh completion evidence for the expected task graph. Treat interrupted, cancelled, timed-out, or incompletely reported runs as incomplete. Do not advance dependent steps until the required checks are verified; keep existing hooks and project gates enabled.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
         ),
         (
             Some("/goal"),
             true,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.\n\nFor required validation, exit 0 alone is not success: require a normal exit and fresh completion evidence for the expected task graph. Treat interrupted, cancelled, timed-out, or incompletely reported runs as incomplete. Do not advance dependent steps until the required checks are verified; keep existing hooks and project gates enabled.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
         ),
         (
             Some("/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}"),
             true,
-            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.\n\nFor required validation, exit 0 alone is not success: require a normal exit and fresh completion evidence for the expected task graph. Treat interrupted, cancelled, timed-out, or incompletely reported runs as incomplete. Do not advance dependent steps until the required checks are verified; keep existing hooks and project gates enabled.",
+            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
         ),
     ] {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
