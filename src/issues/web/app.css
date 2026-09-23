@@ -707,12 +707,82 @@ dialog::backdrop {
 }
 .detail-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 225px;
+  grid-template-columns: minmax(0, 1fr) 260px;
   gap: 32px;
 }
 .detail-main {
   min-width: 0;
 }
+.issue-section-heading,
+.issue-description .comment-header h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -.15px;
+}
+.issue-work,
+.issue-resources {
+  min-width: 0;
+  padding: 18px;
+  margin-bottom: 20px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+}
+.issue-work > .issue-section-heading,
+.issue-resources > .issue-section-heading {
+  margin-bottom: 20px;
+}
+.issue-work .side-section,
+.sidebar .issue-resources .side-section {
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+}
+.issue-work .side-section:last-child,
+.sidebar .issue-resources .side-section:last-child {
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+.issue-context {
+  min-width: 0;
+  padding: 0 4px;
+}
+.issue-context > summary,
+.pr-add > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+.issue-context > summary::-webkit-details-marker,
+.pr-add > summary::-webkit-details-marker { display: none; }
+.issue-context > summary::before,
+.pr-add > summary::before {
+  content: "›";
+  font-size: 18px;
+  transition: transform .15s;
+}
+.issue-context[open] > summary::before,
+.pr-add[open] > summary::before { transform: rotate(90deg); }
+.issue-context > .origin-card { margin-top: 12px; }
+.pr-add summary svg { width: 14px; height: 14px; }
+.pr-add[open] > summary { margin-bottom: 8px; }
+.discussion-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 26px 0 16px;
+}
+.discussion-heading .history-section { margin: 0; }
+.issue-overflow-menu button.danger { color: var(--danger); }
 .comment-card {
   border-radius: 13px;
   border: 1px solid #8092a929;
@@ -1487,7 +1557,8 @@ dialog::backdrop {
   flex-wrap: wrap;
   gap: 8px;
 }
-.sidebar .button {
+.sidebar .button,
+.issue-work .button {
   font-size: 11px;
   min-height: 32px;
   padding: 6px 10px;
@@ -1661,7 +1732,7 @@ dialog::backdrop {
 }
 @media (max-width: 900px) {
   .detail-layout {
-    grid-template-columns: minmax(0, 1fr) 185px;
+    grid-template-columns: minmax(0, 1fr) 225px;
     gap: 22px;
   }
   .detail-top h1 {
@@ -1788,6 +1859,7 @@ dialog::backdrop {
     flex-direction: column;
     gap: 23px;
   }
+  .detail-layout > .sidebar { display: block; }
   .sidebar {
     display: flex;
     flex-wrap: wrap;
