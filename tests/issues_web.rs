@@ -179,6 +179,37 @@ impl Drop for Web {
 }
 
 #[test]
+fn native_web_view_uses_boss_machine_identity_in_allocation_diagnostics() {
+    let web = Web::start();
+    let created =
+        web.ok(json!({"action":"create","title":"Native web allocation","body":"","labels":[]}));
+    let number = created["issue"]["number"].as_i64().unwrap();
+    let machine = web.ok(json!({"action":"whoami"}))["agent"]["machine"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
+    // The HTTP server's native Boss actor is independent of the replica metadata.
+    db.execute(
+        "UPDATE fleet_meta SET role='controller',node='replica-machine'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO fleet_allocations VALUES(?1,?2,?3)",
+        rusqlite::params![web.project, number, machine],
+    )
+    .unwrap();
+    let view = web.ok(json!({"action":"view","number":number}));
+    let allocation = web.ok(json!({"action":"allocation","number":number,"machine":machine}));
+    assert_eq!(view["allocation"], allocation["allocation"]);
+    assert_eq!(view["allocation"]["reason"], "allocated_here");
+    assert_eq!(view["allocation"]["caller_machine"], machine);
+    assert_eq!(view["allocation"]["store_machine"], "replica-machine");
+    assert_eq!(view["issue"], created["issue"]);
+}
+
+#[test]
 fn yolo_is_a_versioned_boss_web_action_and_not_an_ordinary_label() {
     let web = Web::start();
     let created =

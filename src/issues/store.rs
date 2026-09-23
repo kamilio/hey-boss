@@ -1414,6 +1414,9 @@ impl Store {
                 now,
             )?,
             Operation::View { number } => {
+                // Forwarded reads retain the initiating actor. Actorless internal
+                // reads continue to inspect from this store's native machine.
+                let caller = actor.map(|actor| actor.machine.as_str());
                 let issue = get_issue(&tx, &project.id, *number, true)?;
                 if issue.deleted_at.is_some()
                     && let Some(destination) = transfer::destination(&tx, &project.id, *number)?
@@ -1442,7 +1445,7 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,None)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
+                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
             }
             Operation::Comments {
                 number,
