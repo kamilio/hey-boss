@@ -1,6 +1,6 @@
 use super::{
     Result,
-    context::{Context, atomic_json, hash, id, now, read_frame, read_json, send},
+    context::{Context, atomic_json, encode_frame, hash, id, now, read_frame, read_json, send},
     control, conversation, pull,
     replica::{self, invalid},
     takeover,
@@ -1108,11 +1108,11 @@ impl Supervisor {
             _ => Err(invalid("Unknown supervisor request")),
         };
         let result = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
-        let bytes = serde_json::to_vec(&result)?;
-        let bytes = if bytes.len() > crate::issues::WIRE_LIMIT {
-            serde_json::to_vec(&json!({"ok":false,"error":"Supervisor response exceeds 16 MiB"}))?
-        } else {
-            bytes
+        let bytes = match encode_frame(&result, crate::issues::WIRE_LIMIT)? {
+            Some(bytes) => bytes,
+            None => serde_json::to_vec(
+                &json!({"ok":false,"error":"Supervisor response exceeds 16 MiB"}),
+            )?,
         };
         stream.write_all(&bytes)?;
         Ok(())

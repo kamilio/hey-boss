@@ -56,6 +56,13 @@ The supervisor SHOULD build compact activity from retained fields directly so
 discarded event payloads do not consume temporary response memory. Compact
 projection MUST preserve worker metadata and machine configuration diagnostics
 used by existing clients.
+Frame encoders MUST stop encoding at the applicable encoded-byte limit and
+bound their output buffer capacity to that budget. SSH encoders MUST reserve
+one byte for the newline; local EOF-delimited control responses MAY use the
+full 16 MiB for JSON. Legacy pull size checks MUST use the same bounded encoding
+before rejecting an unsupported oversized pull or choosing verified streaming
+for a capable peer. Rejection MUST preserve the existing upgrade error and
+MUST NOT transmit a partial oversized pull.
 
 Companions supporting streamed pulls MUST advertise `pull_gzip_chunks` in
 `hello.capabilities`. The supervisor MAY send `pull_begin`, ordered `pull_chunk`
@@ -196,7 +203,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Filtered pickup | Small selected queues beside large unrelated queues, early candidates in a large selected queue, cross-project global priority, duplicate project IDs, unrestricted pickup, missing projects and limit boundaries |
 | Allocation refresh | Full pool over a large queue avoids scanning unallocated issues; overlapping filters retain distinct total slots; unclaimed expiry, claim deadlines and ownership remain correct |
 | Replay safety | Lose acknowledgment and replay; comments and mutations remain unique; saved issue and global-setting responses during another writer; different-payload rejection; concurrent cache misses; attachment cleanup after committed removal |
-| Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation |
+| Streamed snapshots | Oversized rows, interrupted transfer, concurrent local edit, malformed chunk order, digest and gzip validation; bounded legacy/incremental preflight allocations with unchanged upgrade rejection and streamed body, cursor and receipts |
 | Journal retention | Bounded batches, durable floor rollback, stale-cursor snapshot, stable high watermark, companion protection, receipt replay after pruning, idle maintenance during another write and unchanged snapshot after compaction |
 | Conflicts | Concurrent same-field edits and changed requirements reject overwrite/closure |
 | Configuration | Revision change reaches companion, survives restart, and queues offline |
@@ -207,6 +214,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Worker build provenance | Compiled owner build, legacy registration invalidation, stale owner records, PID reuse, owner removal and unknown legacy builds |
 | Manager build provenance | A supervisor starting after the installed CLI is replaced still reports its compiled runtime build; companions announce their compiled build |
 | Agent overview transport | Individually valid machine reports exceeding the aggregate full-status frame limit; bounded full-status error over the control socket; compact response retains assignment identity, Chief fields, worker/machine metadata, visibility and Unicode bounds; deterministic allocation budget for discarded events; one compact request for current projections, legacy fallback on any machine, empty runs, explicit nulls and transport errors; CLI collection/conversation lookup over current and legacy sockets |
+| Frame encoding memory | Exact encoded-byte limits, UTF-8 and escapes, valid large payload buffer capacity, oversized bulk/aggregate allocation budgets, no partial SSH output and unchanged protocol version; complete valid local status response |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria

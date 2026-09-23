@@ -1,5 +1,9 @@
 //! Bounded snapshot transport; only a verified complete pull reaches replication.
-use super::{Result, context::send, replica::invalid};
+use super::{
+    Result,
+    context::{encode_frame, send},
+    replica::invalid,
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
 use serde_json::{Value, json};
@@ -23,8 +27,7 @@ pub(super) fn send_pull(
     frame["payload"] = payload;
     frame["receipts"] = Value::Array(receipts);
     if !supports_chunks || !snapshot {
-        let bytes = serde_json::to_vec(&frame)?;
-        if bytes.len() < crate::issues::WIRE_LIMIT {
+        if let Some(bytes) = encode_frame(&frame, crate::issues::WIRE_LIMIT - 1)? {
             writer.write_all(&bytes)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
@@ -228,6 +231,48 @@ mod tests {
         frames
     }
 
+    #[test]
+    fn oversized_legacy_pull_rejects_without_allocating_the_full_encoded_body() {
+        let payload = json!({"tables":{"issues":[{"body":"x".repeat(crate::issues::WIRE_LIMIT + 1)}]},"cursor":7});
+        let mut output = vec![];
+        let (result, allocated) =
+            crate::test_allocations::measure(|| send_pull(&mut output, payload, vec![], false));
+        eprintln!("oversized legacy pull: {allocated} requested Rust allocation bytes");
+        assert!(result.unwrap_err().to_string().contains("upgrading"));
+        assert!(output.is_empty());
+        assert!(allocated < 1024 * 1024, "{allocated} allocation bytes");
+    }
+    #[test]
+    fn oversized_incremental_pull_streams_without_an_unbounded_preflight_buffer() {
+        let payload =
+            json!({"changes":[{"body":"x".repeat(crate::issues::WIRE_LIMIT + 1)}],"cursor":7});
+        let mut output = vec![];
+        let (result, allocated) = crate::test_allocations::measure(|| {
+            send_pull(
+                &mut output,
+                payload,
+                vec![json!({"seq":3,"state":"accepted"})],
+                true,
+            )
+        });
+        result.unwrap();
+        eprintln!("oversized incremental pull: {allocated} requested Rust allocation bytes");
+        assert!(allocated < 12 * 1024 * 1024, "{allocated} allocation bytes");
+        let mut reader = PullReader::default();
+        let mut completed = None;
+        for frame in frames(&output) {
+            if let Some(frame) = reader.receive(frame).unwrap() {
+                assert!(completed.is_none());
+                completed = Some(frame);
+            }
+        }
+        let completed = completed.unwrap();
+        assert_eq!(completed["payload"]["cursor"], 7);
+        assert_eq!(completed["receipts"], json!([{"seq":3,"state":"accepted"}]));
+        let body = completed["payload"]["changes"][0]["body"].as_str().unwrap();
+        assert_eq!(body.len(), crate::issues::WIRE_LIMIT + 1);
+        assert!(body.bytes().all(|byte| byte == b'x'));
+    }
     #[test]
     fn small_pulls_keep_legacy_protocol_and_new_peers_accept_ordinary_frames() {
         let payload = json!({"changes":[],"allocations":[],"ranges":[],"cursor":9});
