@@ -1,4 +1,4 @@
-//! One short organizing turn per hour, independent of issue reservations.
+//! One organizing turn per hour, independent of issue reservations.
 use crate::issues::{Error, Result, Store, worker};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
@@ -21,6 +21,8 @@ pub(in crate::issues) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS project_c
  project_id TEXT NOT NULL REFERENCES projects(id),machine TEXT NOT NULL,cwd TEXT NOT NULL,
  session_id TEXT,next_at INTEGER NOT NULL DEFAULT 0,owner_pid INTEGER,owner_start TEXT,
  pid INTEGER,process_start TEXT,state TEXT NOT NULL DEFAULT 'idle',summary TEXT NOT NULL DEFAULT '',
+ worker_id TEXT REFERENCES issue_workers(id),started_at INTEGER,finished_at INTEGER,
+ last_event TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(project_id,machine));";
 const INTERVAL_MS: i64 = 60 * 60 * 1000;
 type Reservation = (
@@ -29,7 +31,49 @@ type Reservation = (
     Option<String>,
     Option<u32>,
     Option<String>,
+    Option<String>,
 );
+
+pub(in crate::issues) fn migrate(db: &rusqlite::Connection) -> Result<()> {
+    let columns = db
+        .prepare("SELECT name FROM pragma_table_info('project_chiefs')")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let additions = [
+        ("worker_id", "TEXT REFERENCES issue_workers(id)"),
+        ("started_at", "INTEGER"),
+        ("finished_at", "INTEGER"),
+        ("last_event", "TEXT NOT NULL DEFAULT ''"),
+    ];
+    let complete = additions
+        .iter()
+        .all(|(name, _)| columns.iter().any(|c| c == name));
+    // Older installed workers may resume without updating the new ownership fields.
+    // Healthy opens remain read-only; reconcile only an unambiguous live owner.
+    let matching_owner = "SELECT MIN(w.id) FROM issue_workers w WHERE w.owner_pid=project_chiefs.owner_pid AND w.owner_start=project_chiefs.owner_start AND w.machine=project_chiefs.machine HAVING COUNT(*)=1";
+    let needs_reconcile = complete && db.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM project_chiefs WHERE state='running' AND ({matching_owner}) IS NOT NULL AND (worker_id IS NOT ({matching_owner}) OR started_at IS NULL))"),
+        [], |r| r.get::<_, bool>(0),
+    )?;
+    if complete && !needs_reconcile {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    for (name, definition) in additions {
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_chiefs') WHERE name=?1)",
+            [name],
+            |r| r.get::<_, bool>(0),
+        )? {
+            tx.execute_batch(&format!(
+                "ALTER TABLE project_chiefs ADD COLUMN {name} {definition};"
+            ))?;
+        }
+    }
+    tx.execute(&format!("UPDATE project_chiefs SET worker_id=({matching_owner}),started_at=COALESCE(started_at,next_at-?1) WHERE state='running' AND ({matching_owner}) IS NOT NULL AND (worker_id IS NOT ({matching_owner}) OR started_at IS NULL)"), [INTERVAL_MS])?;
+    tx.commit()?;
+    Ok(())
+}
 
 #[derive(Clone)]
 pub(in crate::issues) struct Job {
@@ -47,15 +91,19 @@ impl Store {
         worker_id: Option<&str>,
     ) -> Result<Option<Job>> {
         let candidates = self.chief_candidates(worker_id)?;
-        for (project, cwd, prompt) in candidates {
+        for (project, cwd, prompt, worker_id) in candidates {
             if !Path::new(&cwd).is_dir() {
                 continue;
             }
             // Empty/disabled/not-due projects do not acquire a writer lock.
             let old: Option<Reservation> = self.db.query_row(
-                "SELECT next_at,owner_pid,owner_start,pid,process_start FROM project_chiefs WHERE project_id=?1 AND machine=?2",
-                params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-            if let Some((next, owner, start, pid, process_start)) = &old {
+                "SELECT next_at,owner_pid,owner_start,pid,process_start,worker_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
+                params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+            if let Some((next, owner, start, pid, process_start, assigned_worker)) = &old {
+                if let Some(assigned) = assigned_worker.as_deref().filter(|assigned| *assigned != worker_id)
+                    && self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE id=?1 AND stop_requested=0 AND json_extract(config,'$.enabled')=1 AND (json_array_length(config,'$.projects')=0 OR EXISTS(SELECT 1 FROM json_each(config,'$.projects') WHERE value=?2)))", params![assigned,project], |r| r.get::<_,bool>(0))? {
+                    continue;
+                }
                 if owner.zip(start.as_deref()).is_some_and(|(pid, start)| {
                     crate::agents::process_identity(pid).as_deref() == Some(start)
                 }) {
@@ -82,8 +130,8 @@ impl Store {
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             // An optimistic comparison makes concurrent schedulers contend only for due work.
             let current: Option<Reservation> = tx.query_row(
-                "SELECT next_at,owner_pid,owner_start,pid,process_start FROM project_chiefs WHERE project_id=?1 AND machine=?2",
-                params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+                "SELECT next_at,owner_pid,owner_start,pid,process_start,worker_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
+                params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
             if current != old {
                 continue;
             }
@@ -95,7 +143,8 @@ impl Store {
             if !enabled {
                 continue;
             }
-            tx.execute("INSERT INTO project_chiefs(project_id,machine,cwd,owner_pid,owner_start,next_at,state) VALUES(?1,?2,?3,?4,?5,?6,'running') ON CONFLICT(project_id,machine) DO UPDATE SET session_id=CASE WHEN cwd=excluded.cwd THEN session_id ELSE NULL END,cwd=excluded.cwd,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,pid=NULL,process_start=NULL,next_at=excluded.next_at,state='running',summary=''",params![project,machine,cwd,owner,start,worker::now()+INTERVAL_MS])?;
+            let started = worker::now();
+            tx.execute("INSERT INTO project_chiefs(project_id,machine,cwd,owner_pid,owner_start,next_at,state,worker_id,started_at,last_event) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,?8,'Launching Chief') ON CONFLICT(project_id,machine) DO UPDATE SET session_id=CASE WHEN cwd=excluded.cwd THEN session_id ELSE NULL END,cwd=excluded.cwd,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,pid=NULL,process_start=NULL,next_at=excluded.next_at,state='running',summary='',worker_id=excluded.worker_id,started_at=excluded.started_at,finished_at=NULL,last_event=excluded.last_event",params![project,machine,cwd,owner,start,started+INTERVAL_MS,worker_id,started])?;
             let session = tx.query_row(
                 "SELECT session_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
                 params![project, machine],
@@ -113,9 +162,62 @@ impl Store {
         Ok(None)
     }
     fn chief_update(&self, job: &Job, state: &str, summary: &str) -> Result<()> {
-        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?3,state=?4,summary=?5 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,worker::now()+INTERVAL_MS,state,summary])?;
+        let finished = worker::now();
+        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?3,state=?4,summary=?5,finished_at=?6 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,finished+INTERVAL_MS,state,summary,finished])?;
         Ok(())
     }
+}
+
+pub(in crate::issues) fn status(
+    db: &rusqlite::Connection,
+    worker: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut stmt = db.prepare("SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id FROM project_chiefs c JOIN projects p ON p.id=c.project_id WHERE c.worker_id=?1 ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine")?;
+    Ok(stmt.query_map([worker], |r| {
+        let project: String = r.get(0)?;
+        let machine: String = r.get(2)?;
+        let state: String = r.get(3)?;
+        let running = state == "running";
+        let next: i64 = r.get(8)?;
+        let finished: Option<i64> = r.get(7)?;
+        Ok(serde_json::json!({
+            "id":format!("chief:{machine}:{project}"),"kind":"chief",
+            "project_id":project,"project_name":r.get::<_,String>(1)?,
+            "machine":machine,"worker_id":r.get::<_,Option<String>>(11)?,
+            "title":"Organizing project","state":state,"pid":r.get::<_,Option<u32>>(4)?,
+            "session_id":r.get::<_,Option<String>>(5)?,"started_at":r.get::<_,Option<i64>>(6)?,
+            "finished_at":if running { None } else { Some(finished.unwrap_or(next-INTERVAL_MS)) },
+            "next_at":next,"summary":r.get::<_,String>(9)?,"last_event":r.get::<_,String>(10)?
+        }))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn event_activity(event: &Value) -> Option<String> {
+    let message = match event["type"].as_str()? {
+        "thread.started" => "Chief conversation started".to_owned(),
+        "item.started" | "item.completed" => {
+            let item = &event["item"];
+            match item["type"].as_str()? {
+                "agent_message" | "reasoning" => item["text"].as_str()?.to_owned(),
+                "command_execution" => format!(
+                    "Running command: {}",
+                    item["command"].as_str().unwrap_or("command")
+                ),
+                "mcp_tool_call" => format!(
+                    "Using {}.{}",
+                    item["server"].as_str().unwrap_or("tool"),
+                    item["tool"].as_str().unwrap_or("call")
+                ),
+                _ => return None,
+            }
+        }
+        "error" | "turn.failed" => event["message"]
+            .as_str()
+            .or(event["error"]["message"].as_str())?
+            .to_owned(),
+        _ => return None,
+    };
+    Some(message.chars().take(4000).collect())
 }
 
 pub(in crate::issues) fn execute(path: PathBuf, job: Job, stop: Arc<AtomicBool>) {
@@ -185,7 +287,6 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                     }
                 }
             });
-            let deadline = Instant::now() + Duration::from_secs(30 * 60);
             let mut thread_started = false;
             let mut completed = false;
             let mut summary = String::new();
@@ -202,47 +303,53 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                 } else {
                     false
                 };
-                if stop.load(Ordering::Relaxed) || disabled || Instant::now() >= deadline {
+                if stop.load(Ordering::Relaxed) || disabled {
                     return Err(Error::new(
                         "cancelled",
                         "Chief stopped; the saved thread will be resumed on its next scheduled pass",
                     ));
                 }
                 match receive.recv_timeout(Duration::from_millis(200)) {
-                    Ok(event) => match event["type"].as_str().unwrap_or("") {
-                        "thread.started" => {
-                            let id = event["thread_id"].as_str().ok_or_else(|| {
-                                Error::new("worker_error", "Chief returned no thread ID")
-                            })?;
-                            if session.as_deref().is_some_and(|saved| saved != id) {
-                                return Err(Error::new(
-                                    "worker_error",
-                                    "Chief resumed a different thread",
-                                ));
+                    Ok(event) => {
+                        if let Some(activity) = event_activity(&event) {
+                            store.db.execute("UPDATE project_chiefs SET last_event=?3 WHERE project_id=?1 AND machine=?2", params![job.project,job.machine,activity])?;
+                        }
+                        match event["type"].as_str().unwrap_or("") {
+                            "thread.started" => {
+                                let id = event["thread_id"].as_str().ok_or_else(|| {
+                                    Error::new("worker_error", "Chief returned no thread ID")
+                                })?;
+                                if session.as_deref().is_some_and(|saved| saved != id) {
+                                    return Err(Error::new(
+                                        "worker_error",
+                                        "Chief resumed a different thread",
+                                    ));
+                                }
+                                thread_started = true;
+                                store.db.execute("UPDATE project_chiefs SET session_id=?3 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,id])?;
                             }
-                            thread_started = true;
-                            store.db.execute("UPDATE project_chiefs SET session_id=?3 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,id])?;
+                            "item.completed" if event["item"]["type"] == "agent_message" => {
+                                summary = event["item"]["text"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(4000)
+                                    .collect();
+                            }
+                            "turn.completed" => completed = true,
+                            "error" | "turn.failed" => {
+                                let message = event["message"]
+                                    .as_str()
+                                    .or(event["error"]["message"].as_str())
+                                    .unwrap_or("Chief turn failed");
+                                missing |=
+                                    message.to_lowercase().contains("no saved session found")
+                                        || message.to_lowercase().contains("thread not found");
+                                summary = message.chars().take(4000).collect();
+                            }
+                            _ => {}
                         }
-                        "item.completed" if event["item"]["type"] == "agent_message" => {
-                            summary = event["item"]["text"]
-                                .as_str()
-                                .unwrap_or("")
-                                .chars()
-                                .take(4000)
-                                .collect();
-                        }
-                        "turn.completed" => completed = true,
-                        "error" | "turn.failed" => {
-                            let message = event["message"]
-                                .as_str()
-                                .or(event["error"]["message"].as_str())
-                                .unwrap_or("Chief turn failed");
-                            missing |= message.to_lowercase().contains("no saved session found")
-                                || message.to_lowercase().contains("thread not found");
-                            summary = message.chars().take(4000).collect();
-                        }
-                        _ => {}
-                    },
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         if child.try_wait()?.is_some() {
@@ -293,6 +400,93 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn another_worker_cannot_take_over_the_next_chief_pass() {
+        let root =
+            std::env::temp_dir().join(format!("hb-chief-owner-{}", worker::random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY,owner_pid INTEGER,owner_start TEXT);
+                INSERT INTO projects(id,name,next_number) VALUES('named:Chief','Chief',1);
+                INSERT INTO project_settings(project_id,prompt,version,chief_enabled) VALUES('named:Chief','Work',1,1);").unwrap();
+            let config = serde_json::to_string(&worker::Settings {
+                enabled: true,
+                projects: vec!["named:Chief".into()],
+                directory: root.to_string_lossy().into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for id in ["first", "second"] {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'cli',?2,1,0)", params![id,config]).unwrap();
+            }
+            let first = store.reserve_chief("unit", Some("first")).unwrap().unwrap();
+            assert!(
+                store
+                    .reserve_chief("unit", Some("second"))
+                    .unwrap()
+                    .is_none()
+            );
+            store.chief_update(&first, "idle", "Done").unwrap();
+            store
+                .db
+                .execute("UPDATE project_chiefs SET next_at=0,session_id='saved'", [])
+                .unwrap();
+            assert!(
+                store
+                    .reserve_chief("unit", Some("second"))
+                    .unwrap()
+                    .is_none()
+            );
+            let resumed = store.reserve_chief("unit", Some("first")).unwrap().unwrap();
+            assert_eq!(resumed.session.as_deref(), Some("saved"));
+            store.chief_update(&resumed, "idle", "Done").unwrap();
+            store.db.execute_batch("UPDATE issue_workers SET stop_requested=1 WHERE id='first'; UPDATE project_chiefs SET next_at=0;").unwrap();
+            let transferred = store
+                .reserve_chief("unit", Some("second"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                transferred.session.as_deref(),
+                Some("saved"),
+                "A stopped owner hands off the same conversation"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_live_chief_is_attached_to_its_existing_worker() {
+        let root =
+            std::env::temp_dir().join(format!("hb-chief-migrate-{}", worker::random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch("DROP TABLE project_chiefs;
+                CREATE TABLE project_chiefs(project_id TEXT,machine TEXT,cwd TEXT,session_id TEXT,next_at INTEGER,owner_pid INTEGER,owner_start TEXT,pid INTEGER,process_start TEXT,state TEXT,summary TEXT,PRIMARY KEY(project_id,machine));
+                INSERT INTO projects(id,name,next_number) VALUES('named:Chief','Chief',1);
+                INSERT INTO issue_workers(id,kind,config,version,owner_pid,owner_start,machine,updated_at) VALUES('owner','cli','{}',1,123,'start','unit',0);
+                INSERT INTO project_chiefs VALUES('named:Chief','unit','/workspace','existing-thread',3600001,123,'start',456,'chief-start','running','');").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let chiefs = status(&store.db, Some("owner")).unwrap();
+        assert_eq!(chiefs[0]["session_id"], "existing-thread");
+        assert_eq!(chiefs[0]["pid"], 456);
+        assert_eq!(chiefs[0]["started_at"], 1);
+        assert!(chiefs[0]["finished_at"].is_null());
+        // An older installed worker can resume after the columns were added.
+        store.db.execute_batch("INSERT INTO issue_workers(id,kind,config,version,owner_pid,owner_start,machine,updated_at) VALUES('new-owner','cli','{}',1,789,'new-start','unit',0);
+            UPDATE project_chiefs SET owner_pid=789,owner_start='new-start';").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(status(&store.db, Some("owner")).unwrap().is_empty());
+        let chiefs = status(&store.db, Some("new-owner")).unwrap();
+        assert_eq!(chiefs[0]["session_id"], "existing-thread");
+        assert_eq!(chiefs[0]["started_at"], 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn chief_reservations_respect_scope_controls_and_idle_writer_contention() {
         let root =

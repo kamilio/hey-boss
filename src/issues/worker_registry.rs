@@ -215,10 +215,12 @@ impl Store {
     pub(crate) fn chief_candidates(
         &self,
         worker_id: Option<&str>,
-    ) -> Result<Vec<(String, String, String)>> {
-        let mut stmt = self.db.prepare("SELECT config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start)")?;
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let mut stmt = self.db.prepare("SELECT id,config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start)")?;
         let settings = stmt
-            .query_map([worker_id], |r| r.get::<_, String>(0))?
+            .query_map([worker_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut projects_stmt = self.db.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL ORDER BY p.id")?;
         let projects = projects_stmt
@@ -230,13 +232,10 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut result = Vec::new();
-        for text in settings {
+        for (worker_id, text) in settings {
             let config: Settings = serde_json::from_str(&text)?;
             for project in &projects {
                 if !config.projects.is_empty() && !config.projects.contains(&project.id) {
-                    continue;
-                }
-                if result.iter().any(|(id, _, _)| id == &project.id) {
                     continue;
                 }
                 let cwd = checkout(&self.db, &config, project)?;
@@ -247,7 +246,7 @@ impl Store {
                     .as_str()
                     .unwrap()
                     .to_owned();
-                result.push((project.id.clone(), cwd, prompt));
+                result.push((project.id.clone(), cwd, prompt, worker_id.clone()));
             }
         }
         Ok(result)
@@ -390,8 +389,9 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
     } else if fleet["role"] == crate::fleet::COMPANION_ROLE {
         fleet["role"] = json!("companion");
     }
+    let chiefs = super::super::chief::status(db, selected.as_deref())?;
     Ok(
-        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"project":p,"projects":projects}),
+        json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"chiefs":chiefs,"project":p,"projects":projects}),
     )
 }
 pub(super) fn execute(
@@ -935,7 +935,7 @@ mod tests {
             store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('multi','cli',?1,1,0)", [serde_json::to_string(&settings).unwrap()]).unwrap();
             let chiefs = store.chief_candidates(Some("multi")).unwrap();
             assert_eq!(chiefs.len(), 2);
-            for (id, cwd, _) in chiefs {
+            for (id, cwd, _, _) in chiefs {
                 assert_eq!(cwd, directories[&id].as_str().unwrap());
             }
         }

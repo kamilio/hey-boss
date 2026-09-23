@@ -8,6 +8,13 @@ IDs, not separate destinations with the same name.
 Worker dashboards, terminal titles and plain-text status show project names;
 JSON retains the storage keys for compatibility.
 
+Chief runs an organizing pass outside issue concurrency and resumes its saved
+conversation about an hour after the pass finishes. It has no elapsed-time limit.
+Its owning worker shows Chief in Active agents, with the session, process and
+latest activity. Other workers on the same machine do not start or display a
+second Chief. Ownership stays with that worker between passes; if it is stopped,
+another worker can resume the saved conversation.
+
 The registry rejects duplicate names even when another process writes directly.
 Name reuse is silent: it creates neither another project nor a warning record.
 Upgrades discard old warnings about aliases that never became projects. Paired

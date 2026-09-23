@@ -206,6 +206,53 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
         .trim()
         .parse()
         .unwrap();
+    let status = f
+        .command()
+        .args(["worker", "--json", "status"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["active"], 0, "Chief does not consume an issue slot");
+    assert_eq!(status["chiefs"][0]["state"], "running");
+    assert_eq!(status["chiefs"][0]["pid"], pid);
+    assert_eq!(status["chiefs"][0]["session_id"], "chief-saved-thread");
+    assert_eq!(status["chiefs"][0]["kind"], "chief");
+    let second = start(false);
+    wait_for(|| {
+        db.query_row(
+            "SELECT count(*) FROM issue_workers WHERE owner_pid=?1",
+            [second.0.id()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    });
+    let second_id: String = db
+        .query_row(
+            "SELECT id FROM issue_workers WHERE owner_pid=?1",
+            [second.0.id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let status = f
+        .command()
+        .args(["worker", "--id", &second_id, "--json", "status"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(
+        status["chiefs"].as_array().unwrap().is_empty(),
+        "Only the owning worker displays Chief"
+    );
+    assert_eq!(
+        db.query_row("SELECT pid FROM project_chiefs", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        pid,
+        "Starting another worker keeps the existing Chief process"
+    );
+    drop(second);
     f.cli(&["settings", "set", "--no-chief"]);
     wait_for(|| unsafe { libc::kill(pid as i32, 0) } != 0);
     drop(worker);

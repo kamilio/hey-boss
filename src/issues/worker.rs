@@ -1660,6 +1660,20 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch Codex → manual claim → implement → finish",
         v["config"]["tags"], v["eligible"]
     );
+    if let Some(chiefs) = v["chiefs"].as_array() {
+        for chief in chiefs {
+            println!(
+                "{} Chief · {} · no issue slots · Codex {} · {}",
+                chief["project_name"].as_str().unwrap_or(""),
+                chief["state"].as_str().unwrap_or(""),
+                chief["session_id"].as_str().unwrap_or("launching"),
+                chief["last_event"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| chief["summary"].as_str().unwrap_or(""))
+            );
+        }
+    }
     if let Some(runs) = v["runs"].as_array() {
         let active = runs.iter().filter(|run| run["finished_at"].is_null());
         let recent = runs

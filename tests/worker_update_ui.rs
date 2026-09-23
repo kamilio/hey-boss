@@ -3,6 +3,49 @@ use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 
 #[test]
+fn running_chief_is_selectable_and_visible_without_using_issue_slots() {
+    let mut app = Dashboard::default();
+    app.apply(json!({
+        "worker_id": "test", "workers": [{
+            "id": "test", "pid": 123, "active": 0,
+            "config": {"name": "Poe", "enabled": true, "concurrency": 2,
+                "projects": ["named:poe2"]}
+        }], "runs": [], "chiefs": [{
+            "id": "chief:poe2", "kind": "chief", "project_name": "poe2",
+            "title": "Organizing project", "state": "running", "pid": 456,
+            "session_id": "chief-thread", "started_at": 0, "finished_at": null,
+            "last_event": "Checking attached PRs"
+        }], "fleet": {"supervisor_connection": {"state": "local"}}
+    }));
+    assert_eq!(app.run_id.as_deref(), Some("chief:poe2"));
+    for (width, height) in [(48, 12), (80, 24), (120, 36)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(text.contains("Chief"), "{width} × {height}: {text}");
+        assert!(text.contains("0 busy · 2 available"), "{text}");
+        assert!(!text.contains("poe2 #null"), "{text}");
+        if width >= 80 {
+            assert!(text.contains("Checking attached PRs"), "{text}");
+            assert!(text.contains("chief-thread"), "{text}");
+        }
+    }
+    app.history = true;
+    assert!(
+        app.runs().is_empty(),
+        "An active Chief is absent from issue history"
+    );
+}
+
+#[test]
 fn update_and_pause_states_remain_distinct_at_supported_terminal_sizes() {
     for (width, height) in [(48, 12), (80, 24), (120, 36)] {
         for (draining, enabled, expected) in [
