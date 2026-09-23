@@ -30,7 +30,7 @@ impl Fixture {
             .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent-inbox.sock"))
             .env(
                 "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
             )
             .env("HEY_BOSS_TEST_CLI", self.notification_cli())
             .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -95,7 +95,7 @@ impl Fixture {
                         self.root.join("codex.sh")
                     } else {
                         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                            .join("tests/fixtures/codex-worker.py")
+                            .join("tests/fixtures/codex-worker.mjs")
                     },
                 )
                 .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -481,7 +481,7 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
                 .env(
                     "HEY_BOSS_CODEX",
                     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/fixtures/codex-worker.py"),
+                        .join("tests/fixtures/codex-worker.mjs"),
                 )
                 .env_remove("HEY_BOSS_ISSUE_HOST")
                 .args(["worker", "--json"])
@@ -595,6 +595,29 @@ fn completed_pr_worker_keeps_fix_open_and_hands_it_to_boss() {
 }
 
 #[test]
+fn completed_partial_deliveries_do_not_resolve_the_issue() {
+    for mode in ["partial", "partial-goal"] {
+        let f = Fixture::new(mode);
+        f.setup(&[
+            "--prompt",
+            "/goal Claim and implement {{issue_command}}. Commit and push a partial fix",
+        ]);
+        let mut worker = f.worker();
+        let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        assert_eq!(status["runs"][0]["state"], "completed", "{status}");
+        // Open successful deliveries retain the existing immediate pickup admission.
+        assert_eq!(status["eligible"], 1, "{status}");
+        worker.stop();
+        let view = f.cli(&["view", "1"]);
+        assert_eq!(view["issue"]["state"], "open", "{view}");
+        assert!(view["issue"]["assignee"].is_null());
+        assert!(view["issue"]["closed_at"].is_null());
+        assert!(view["issue"]["closed_by"].is_null());
+        assert_eq!(view["comments"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
 fn codex_protocol_goal_completion_and_prompt_variables() {
     let f = Fixture::new("completed");
     f.setup(&["--prompt", "/goal"]);
@@ -624,7 +647,7 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
+        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close 1` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open."
     );
     w.stop();
 }
@@ -702,7 +725,7 @@ fn custom_prompt_slash_goal_preserves_all_lines() {
     let objective = goal["params"]["objective"].as_str().unwrap();
     assert_eq!(
         objective,
-        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
+        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close 1` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open."
     );
     let turn = t.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(
@@ -980,6 +1003,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         }
         const claim = spawnSync(process.env.HEY_BOSS_TEST_CLI, ['issue','--project','Worker fixture','--agent',`codex:${session}`,'claim','1','--json']);
         if (claim.status !== 0) throw new Error(claim.stderr.toString());
+        const close = spawnSync(process.env.HEY_BOSS_TEST_CLI, ['issue','--project','Worker fixture','--agent',`codex:${session}`,'close','1','--json']);
+        if (close.status !== 0) throw new Error(close.stderr.toString());
         send({id:request.id,result:{turn:{id:'turn'}}});
         send({method:'item/completed',params:{threadId:session,item:{type:'agentMessage',text:JSON.stringify({status:'completed',summary:'Recovery verified'})}}});
         send({method:'turn/completed',params:{threadId:session,turn:{id:'turn',status:'completed'}}});
@@ -1139,6 +1164,7 @@ while IFS= read -r message; do
             esac ;;
         *'"method":"turn/start"'*)
             "$HEY_BOSS_TEST_CLI" issue --project 'Worker fixture' --agent codex:saved-session claim 1 --json >/dev/null || exit 1
+            "$HEY_BOSS_TEST_CLI" issue --project 'Worker fixture' --agent codex:saved-session close 1 --json >/dev/null || exit 1
             printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn"}}}'
             printf '%s\n' '{"method":"item/completed","params":{"threadId":"saved-session","item":{"type":"agentMessage","text":"{\"status\":\"completed\",\"summary\":\"Resumed without transferring history\"}"}}}'
             printf '%s\n' '{"method":"turn/completed","params":{"threadId":"saved-session","turn":{"id":"turn","status":"completed"}}}' ;;
@@ -1364,7 +1390,7 @@ fn private_issue_database_does_not_modify_default_fleet_configuration() {
             .env("HEY_BOSS_ISSUE_DB", &f.db)
             .env(
                 "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
             )
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_FLEET_STATE")
@@ -2185,7 +2211,7 @@ fn codex_sqlite_startup_contention_retries_the_same_reservation() {
     let f = Fixture::new("codex-sqlite-startup");
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
     f.setup(&["--concurrency", "1"]);
-    let mock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py");
+    let mock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs");
     let wrapper = f.root.join("codex.sh");
     fs::write(&wrapper, format!("#!/bin/sh\nif [ ! -f startup-retried ]; then\n touch startup-retried\n printf 'Error: failed to initialize sqlite state runtime: database is locked\\n' >&2\n exit 1\nfi\nexec '{}' \"$@\"\n", mock.display())).unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();

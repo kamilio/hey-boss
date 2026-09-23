@@ -44,7 +44,7 @@ impl Web {
             .env("HEY_BOSS_INBOX_SOCKET", root.join("inbox.sock"))
             .env(
                 "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
             )
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -871,17 +871,17 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         (
             None,
             false,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
         ),
         (
             Some("/goal"),
             true,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
         ),
         (
             Some("/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}"),
             true,
-            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main.",
+            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
         ),
     ] {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));

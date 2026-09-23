@@ -352,7 +352,14 @@ the preview, claims, and worker sessions use the same composition.
 
 Worker completion still respects delivery mode: a completed PR-mode run keeps an
 owned issue open and assigns it to Boss, preserving links and history. Boss-owned
-open issues are excluded from worker pickup. Non-PR completion closes normally.
+open issues are excluded from worker pickup. Completing a worker run or its native
+goal records successful delivery; it does not resolve an issue. For non-PR and
+artifact tasks, the owning agent must explicitly run `hey-boss issue close NUMBER`
+after verifying every issue requirement. The default Main and Plan prompts explain
+this decision; custom workflow prompts should do the same. A partial delivery stays
+open, retains its completed run and report, and releases the claim for further work
+under the existing retry admission rules. No summary prose is interpreted as a
+resolution decision.
 Attachment purposes distinguish fixes and prerequisites from supporting evidence.
 Workers do not merge PRs.
 

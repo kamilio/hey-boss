@@ -43,7 +43,7 @@ impl Fixture {
             .env_remove("HEY_BOSS_FLEET_SUPERVISED")
             .env(
                 "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.py"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
             )
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"));
         c

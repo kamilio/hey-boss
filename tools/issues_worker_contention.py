@@ -2,7 +2,7 @@
 """Stress independent CLI workers against one isolated durable issue queue."""
 import argparse,json,os,pathlib,shutil,signal,sqlite3,subprocess,time
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--cli',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--workers',type=int,default=10);p.add_argument('--issues',type=int,default=120);a=p.parse_args()
-os.umask(0o077);root=a.output.resolve();root.mkdir(exist_ok=False,parents=True);cli=a.cli.resolve();fixture=root/'codex-fixture.py';shutil.copy2('tests/fixtures/codex-worker.py',fixture);fixture.chmod(0o700)
+os.umask(0o077);root=a.output.resolve();root.mkdir(exist_ok=False,parents=True);cli=a.cli.resolve();fixture=root/'codex-fixture.mjs';shutil.copy2('tests/fixtures/codex-worker.mjs',fixture);fixture.chmod(0o700)
 env=dict(os.environ,HEY_BOSS_ISSUE_DB=str(root/'issues.db'),HEY_BOSS_STATE_DIR=str(root/'state'),HEY_BOSS_FLEET_STATE=str(root/'fleet'),HEY_BOSS_CODEX=str(fixture),HEY_BOSS_TEST_CLI=str(cli));env.pop('HEY_BOSS_ISSUE_HOST',None)
 (root/'mode.txt').write_text('completed');workers=[];handles=[];peak=0;peaks={};started=time.monotonic()
 def issue(*args):

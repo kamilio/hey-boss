@@ -452,52 +452,40 @@ impl Store {
         };
         if (own || handed_off) && issue.deleted_at.is_none() && issue.state == "open" {
             let report = format!("### Worker {}\n\n{}", state, summary);
-            if state == "completed" && !job.requires_pr() {
+            // Delivery/goal completion is not an issue-resolution decision.
+            // Only the owning agent's explicit Close may resolve the issue.
+            mutate(
+                &tx,
+                &job.project,
+                &job.actor,
+                &Operation::Comment {
+                    number: job.number(),
+                    body: report,
+                },
+                now(),
+            )?;
+            if state == "completed" && job.requires_pr() {
                 mutate(
                     &tx,
                     &job.project,
                     &job.actor,
-                    &Operation::Close {
+                    &Operation::AssignBoss {
                         number: job.number(),
-                        comment: Some(report),
                         force: false,
                     },
                     now(),
                 )?;
-            } else {
+            } else if own {
                 mutate(
                     &tx,
                     &job.project,
                     &job.actor,
-                    &Operation::Comment {
+                    &Operation::Unassign {
                         number: job.number(),
-                        body: report,
+                        force: false,
                     },
                     now(),
                 )?;
-                if state == "completed" && job.requires_pr() {
-                    mutate(
-                        &tx,
-                        &job.project,
-                        &job.actor,
-                        &Operation::AssignBoss {
-                            number: job.number(),
-                            force: false,
-                        },
-                        now(),
-                    )?;
-                } else if own {
-                    mutate(
-                        &tx,
-                        &job.project,
-                        &job.actor,
-                        &Operation::Unassign {
-                            number: job.number(),
-                            force: false,
-                        },
-                        now(),
-                    )?;
-                }
             }
         }
         let approval_hold = summary.starts_with("Codex needs input or approval:");
@@ -1048,6 +1036,54 @@ mod tests {
     }
 
     #[test]
+    fn successful_partial_delivery_keeps_issue_open_without_reading_summary_prose() {
+        for summary in [
+            "Pushed the partial fix. Filter and citeproc engines remain unimplemented.",
+            "Implemented everything. Meaningful checks passed.",
+        ] {
+            let mut f = HandoffFixture::new(false);
+            f.store.worker_finish(&f.job, "completed", summary).unwrap();
+            assert_eq!(f.state(), "completed");
+            assert_eq!(f.issue().state, "open");
+            assert!(f.issue().assignee.is_none());
+            assert!(f.issue().closed_at.is_none());
+            assert!(f.issue().closed_by.is_none());
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM events WHERE action='closed'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT body FROM comments ORDER BY id DESC LIMIT 1",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                format!("### Worker completed\n\n{summary}")
+            );
+            f.store
+                .worker_finish(&f.job, "completed", "Duplicate delivery")
+                .unwrap();
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+    }
+
+    #[test]
     fn pr_completion_hands_open_issue_to_boss_and_preserves_history() {
         let mut f = HandoffFixture::new(true);
         f.store
@@ -1168,16 +1204,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_pr_closure_and_non_pr_completion_still_close() {
+    fn explicit_owning_closure_preserves_completed_deliveries_in_both_modes() {
         for prs in [false, true] {
             let mut f = HandoffFixture::new(prs);
-            if prs {
-                f.apply(Operation::Close {
-                    number: 1,
-                    comment: Some("Source/group explicitly completed".into()),
-                    force: false,
-                });
-            }
+            f.apply(Operation::Close {
+                number: 1,
+                comment: Some("Source/group explicitly completed".into()),
+                force: false,
+            });
             f.store
                 .worker_finish(&f.job, "completed", "Finished.")
                 .unwrap();
@@ -1188,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_tasks_close_without_prs_and_changed_task_intent_blocks_completion() {
+    fn artifact_delivery_requires_explicit_closure_and_changed_intent_blocks_completion() {
         for changed in [false, true] {
             let mut f = HandoffFixture::new(true);
             f.job.issue["labels"] = json!(["task:plan"]);
@@ -1205,7 +1239,7 @@ mod tests {
             f.store
                 .worker_finish(&f.job, "completed", "Artifact saved.")
                 .unwrap();
-            assert_eq!(f.issue().state, if changed { "open" } else { "closed" });
+            assert_eq!(f.issue().state, "open");
             assert_eq!(f.state(), if changed { "blocked" } else { "completed" });
             assert!(f.issue().assignee.is_none());
         }

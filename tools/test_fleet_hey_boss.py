@@ -696,7 +696,7 @@ class FleetTests(unittest.TestCase):
         state = self.root / 'restart-state'
         config = self.root / 'inventory.json'
         config.write_text('{"ssh_hosts":[]}')
-        environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.root / 'restart.db'), 'HEY_BOSS_FLEET_STATE': str(state), 'HEY_BOSS_FLEET_CONFIG': str(config), 'HEY_BOSS_FLEET_DESIRED': str(self.root / 'restart-desired.json'), 'HEY_BOSS_CODEX': str(ROOT / 'tests/fixtures/codex-worker.py'), 'HEY_BOSS_TEST_CLI': str(BINARY)}
+        environment = {**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.root / 'restart.db'), 'HEY_BOSS_FLEET_STATE': str(state), 'HEY_BOSS_FLEET_CONFIG': str(config), 'HEY_BOSS_FLEET_DESIRED': str(self.root / 'restart-desired.json'), 'HEY_BOSS_CODEX': str(ROOT / 'tests/fixtures/codex-worker.mjs'), 'HEY_BOSS_TEST_CLI': str(BINARY)}
         environment.pop('HEY_BOSS_ISSUE_HOST', None)
         def command(*args):
             result = subprocess.run([str(BINARY), *args], env=environment, cwd=self.root, text=True, capture_output=True, timeout=20)

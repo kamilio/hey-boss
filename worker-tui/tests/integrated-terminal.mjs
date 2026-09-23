@@ -13,7 +13,7 @@ const binary = process.env.HEY_BOSS_TUI_TEST_BINARY ?? path.join(root, "target/d
 const temporary = await mkdtemp(path.join(os.tmpdir(), "hey-boss-integrated-tui-"));
 const output = path.join(root, "worker-tui/target/terminal-qa");
 const env = { ...process.env, TERM: "xterm-256color", HEY_BOSS_ISSUE_DB: path.join(temporary, "issues.db"),
-  HEY_BOSS_CODEX: path.join(root, "tests/fixtures/codex-worker.py"), HEY_BOSS_TEST_CLI: binary };
+  HEY_BOSS_CODEX: path.join(root, "tests/fixtures/codex-worker.mjs"), HEY_BOSS_TEST_CLI: binary };
 delete env.HEY_BOSS_ISSUE_HOST;
 delete env.HEY_BOSS_FLEET_STATE;
 delete env.HEY_BOSS_FLEET_MANAGED;
