@@ -1101,9 +1101,11 @@ impl Supervisor {
         };
         let result = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
         let bytes = serde_json::to_vec(&result)?;
-        if bytes.len() > crate::issues::WIRE_LIMIT {
-            return Err(invalid("Supervisor response exceeds 16 MiB"));
-        }
+        let bytes = if bytes.len() > crate::issues::WIRE_LIMIT {
+            serde_json::to_vec(&json!({"ok":false,"error":"Supervisor response exceeds 16 MiB"}))?
+        } else {
+            bytes
+        };
         stream.write_all(&bytes)?;
         Ok(())
     }
@@ -1257,9 +1259,8 @@ mod tests {
         (directory, app)
     }
 
-    #[test]
-    fn overview_preserves_agent_identity_without_transporting_event_payloads() {
-        let (_directory, app) = test_supervisor();
+    fn large_report_supervisor() -> (TestDirectory, Supervisor) {
+        let (directory, app) = test_supervisor();
         app.ctx.db().unwrap().execute_batch(
             "INSERT INTO projects(id,name,next_number) VALUES('Atlas','Atlas',1),('Hidden','Hidden',1); UPDATE projects SET hidden_at=1 WHERE id='Hidden';"
         ).unwrap();
@@ -1280,6 +1281,27 @@ mod tests {
                 json!({"host":host,"state":"connected","workers":workers}),
             );
         }
+        (directory, app)
+    }
+
+    #[test]
+    fn oversized_status_returns_a_bounded_error_over_the_control_socket() {
+        let (_directory, app) = large_report_supervisor();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(b"{\"kind\":\"status\"}\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        app.handle(server).unwrap();
+        let mut bytes = vec![];
+        client.read_to_end(&mut bytes).unwrap();
+        assert!(bytes.len() < 1024, "{}", bytes.len());
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["ok"], false);
+        assert!(error["error"].as_str().unwrap().contains("exceeds 16 MiB"));
+    }
+
+    #[test]
+    fn overview_preserves_agent_identity_without_transporting_event_payloads() {
+        let (_directory, app) = large_report_supervisor();
         let full = app.status().unwrap();
         let overview = app.overview().unwrap();
         let full_bytes = serde_json::to_vec(&full).unwrap().len();
