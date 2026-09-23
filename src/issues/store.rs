@@ -925,6 +925,9 @@ impl Store {
             db.execute_batch(super::chief::SCHEMA)?;
         }
         super::chief::migrate(&db)?;
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs_worker' AND type='index')", [], |r| r.get::<_,bool>(0))? {
+            db.execute_batch(super::chief::ACTIVITY_INDEX)?;
+        }
         agent_launches::migrate(&db)?;
         status::migrate(&db)?;
         provenance::migrate(&db)?;

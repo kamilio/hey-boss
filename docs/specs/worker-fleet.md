@@ -74,6 +74,9 @@ bounded worker overview once rather than repeat it for each worker. Machine
 activity polling SHOULD NOT load unrelated public-status data, such as the
 durable outgoing journal count. Existing machine activity fields and bounded
 recent history MUST remain compatible with older peers.
+Chief status for a selected worker SHOULD use an indexed worker lookup rather
+than scan unrelated project chiefs. It MUST preserve hidden-project filtering,
+running-first ordering and existing lifecycle fields.
 
 ## Configuration
 
