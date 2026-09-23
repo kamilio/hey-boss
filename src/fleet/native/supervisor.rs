@@ -962,6 +962,22 @@ impl Supervisor {
         Ok(())
     }
     fn tick(self: &Arc<Self>) -> Result<()> {
+        // A newer installer can migrate the store while this process still has
+        // the old schema code loaded. Check before any reconciliation so that
+        // incompatible database work cannot prevent the service manager reload.
+        if std::env::var("HEY_BOSS_FLEET_SUPERVISED").as_deref() == Ok("1")
+            && self.ctx.build()? != self.state.lock().unwrap().build
+        {
+            self.event(
+                "local",
+                "deployment",
+                "Supervisor reloading updated software",
+            );
+            self.ctx
+                .stop
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Ok(());
+        }
         let hosts = self.ctx.inventory()?;
         let observed: Vec<_> = self
             .state
@@ -1102,18 +1118,6 @@ impl Supervisor {
                 }
             }
         }
-        if std::env::var("HEY_BOSS_FLEET_SUPERVISED").as_deref() == Ok("1")
-            && self.ctx.build()? != self.state.lock().unwrap().build
-        {
-            self.event(
-                "local",
-                "deployment",
-                "Supervisor reloading updated software",
-            );
-            self.ctx
-                .stop
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
         Ok(())
     }
     fn scheduler(self: Arc<Self>) {
@@ -1165,10 +1169,13 @@ impl Supervisor {
     }
     fn maintenance(self: Arc<Self>) {
         while !self.ctx.stopped() {
-            if let Err(e) = self.save_machines() {
+            if let Err(e) = self.tick() {
                 self.event("local", "error", &e.to_string());
             }
-            if let Err(e) = self.tick() {
+            if self.ctx.stopped() {
+                break;
+            }
+            if let Err(e) = self.save_machines() {
                 self.event("local", "error", &e.to_string());
             }
             self.ctx.wait(Duration::from_secs(5));
@@ -1808,6 +1815,112 @@ mod tests {
                 .count(),
             1100
         );
+    }
+
+    #[test]
+    fn installed_replacement_reload_precedes_incompatible_schema_work() {
+        const PROBE: &str = "HEY_BOSS_SUPERVISOR_RELOAD_PROBE";
+        if std::env::var_os(PROBE).is_none() {
+            // Isolate the service environment from other tests without mutating
+            // process-global environment variables in a multithreaded runner.
+            for supervised in ["1", "0"] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "fleet::native::supervisor::tests::installed_replacement_reload_precedes_incompatible_schema_work",
+                        "--nocapture",
+                    ])
+                    .env(PROBE, "1")
+                    .env("HEY_BOSS_FLEET_SUPERVISED", supervised)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "supervised={supervised}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        let supervised = std::env::var("HEY_BOSS_FLEET_SUPERVISED").unwrap() == "1";
+        for installed in ["test", "replacement", "lookup-failure"] {
+            let (_directory, mut fixture) = test_supervisor();
+            fixture.ctx.binary = fixture.ctx.state.join("replacement-cli");
+            let script = if installed == "lookup-failure" {
+                "#!/bin/sh\nexit 1\n".to_owned()
+            } else {
+                format!("#!/bin/sh\nprintf '%s\\n' '{installed}'\n")
+            };
+            std::fs::write(&fixture.ctx.binary, script).unwrap();
+            std::fs::set_permissions(&fixture.ctx.binary, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let mut worker = TestTransport(Command::new("sleep").arg("60").spawn().unwrap());
+            let local = json!({"id":"worker","pid":worker.0.id(),"active":1,
+                "config":{"enabled":true},"runs":[{"id":"run","session_id":"session","number":132}]});
+            fixture.state.lock().unwrap().local = vec![local.clone()];
+            // Simulate a newer installer migrating the store while this loaded
+            // supervisor remains alive. Never change a production database.
+            let db = fixture.ctx.db().unwrap();
+            let schema: i64 = db
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            db.pragma_update(None, "user_version", schema + 1).unwrap();
+            drop(db);
+            assert!(
+                fixture
+                    .ctx
+                    .workers()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Incompatible issue database")
+            );
+            let app = Arc::new(fixture);
+            let result = app.tick();
+            let reload = supervised && installed == "replacement";
+            if reload {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.contains(if supervised && installed == "lookup-failure" {
+                        "CLI build lookup failed"
+                    } else {
+                        "Incompatible issue database"
+                    }),
+                    "{error}"
+                );
+            }
+            assert_eq!(app.ctx.stopped(), reload);
+            let state = app.state.lock().unwrap();
+            assert_eq!(state.local, vec![local]);
+            assert_eq!(
+                state.local_updated, 0.0,
+                "Reload is not a fresh worker observation"
+            );
+            assert_eq!(
+                state
+                    .events
+                    .iter()
+                    .filter(|e| e["detail"] == "Supervisor reloading updated software")
+                    .count(),
+                usize::from(reload)
+            );
+            drop(state);
+            worker.assert_alive();
+            let db = app.ctx.db().unwrap();
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                schema + 1
+            );
+            if reload {
+                assert!(
+                    !app.ctx.state.join("fleet-main.json").exists(),
+                    "Old supervisor rewrote worker configuration before reload"
+                );
+            }
+        }
     }
 
     #[test]
