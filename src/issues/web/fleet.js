@@ -47,7 +47,13 @@ function chiefState(entry, now = Date.now()) {
 function agentState(entry) {
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
   if (entry.run.kind === 'chief') return entry.run.state === 'running' ? 'Running' : entry.run.state === 'idle' ? 'Completed' : entry.run.state === 'failed' ? 'Needs attention' : 'Stopped';
+  if (entry.run.state === 'infrastructure_blocked') return 'Approval service unavailable';
   return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
+}
+function approvalHolds(group) {
+  const attempts=[...group.active,...group.history];
+  return group.history.filter(entry=>entry.run.state==='infrastructure_blocked' &&
+    !attempts.some(other=>other.run.number===entry.run.number && (other.run.started_at||0)>(entry.run.started_at||0)));
 }
 // Assignment links resolve once, then use the normal device/run conversation URL.
 function assignedAgentEntry(data, query) {
@@ -73,7 +79,7 @@ function deviceView(data, project, now = Date.now()) {
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, approvalHolds, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -107,11 +113,11 @@ if (typeof document !== 'undefined') (() => {
   const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
   function card(entry, history=false) {
     const {run,machine}=entry;
-    const a=element('a',history?'agent-card history-card':'agent-card');a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;
+    const a=element('a',(history?'agent-card history-card':'agent-card')+(run.state==='infrastructure_blocked'?' is-held':''));a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;
     const top=element('div','agent-card-top');top.append(stateBadge(entry),element('span','location-label',machine.hostname||machine.host));
     const title=element('h3','',run.title||'Preparing your task');
     const activity=run.last_event||'';
-    const preview=element('p','agent-preview',run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
+    const preview=element('p','agent-preview',run.state==='infrastructure_blocked'?'Automatic pickup is on hold. Restore the approval service, then reopen the issue to continue the saved session.':run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
     const bottom=element('div','agent-card-bottom');bottom.append(element('span','',`Issue #${run.number}`),element('span','open-conversation',history?'Read conversation →':'Open conversation →'));
     a.append(top,title,preview,bottom);return a;
   }
@@ -124,8 +130,9 @@ if (typeof document !== 'undefined') (() => {
     $('overview-note').textContent=groups.some(p=>p.active.length)?'A little closer to done. See what’s moving.':'Your projects, and the work behind them.';
     const sections=groups.map(group=>{
       const section=element('section','project-section');
+      const holds=approvalHolds(group);
       const heading=element('div','project-heading');const title=element('div');
-      title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':'Recent work'));
+      title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':holds.length?'Waiting for approval service':'Recent work'));
       const issues=element('a','project-issues','View issues →');issues.href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:group.id});
       heading.append(title,issues);section.append(heading);
       for(const entry of group.chiefs){
@@ -145,6 +152,7 @@ if (typeof document !== 'undefined') (() => {
         if(run.session_id){const a=element('a','chief-conversation',run.state==='running'?'Open conversation →':'Read last conversation →');a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;chief.append(a);}
         section.append(chief);
       }
+      if(holds.length){section.append(element('h3','agents-section-label','Waiting for approval service'));const held=element('div','agent-grid');for(const entry of holds)held.append(card(entry,true));section.append(held);}
       if(group.active.length||group.chiefs.length)section.append(element('h3','agents-section-label','Active agents'));
       const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);
       if(!group.active.length&&group.chiefs.length)section.append(element('p','chief-owner','No active issue agents.'));
@@ -240,7 +248,7 @@ if (typeof document !== 'undefined') (() => {
     $('session-state').replaceChildren(stateBadge(selected));
     $('session-issue').hidden=!run.number;
     $('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
-    $('session-status').textContent=!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
+    $('session-status').textContent=run.state==='infrastructure_blocked'?'Automatic pickup is on hold. Restore the approval service, then reopen the issue to continue the saved session.':!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
     renderTakeover();
     if(!loaded&&!loading)loadConversation();
   }

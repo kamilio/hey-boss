@@ -1352,6 +1352,69 @@ fn worker_queue_accounts_for_tags_and_excludes_blocked_subtasks() {
 }
 
 #[test]
+fn approval_outage_recovered_in_the_same_turn_does_not_override_resolution() {
+    let f = Fixture::new("approval-outage-recovered");
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let finished = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(finished["runs"][0]["state"], "completed");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    worker.stop();
+}
+
+#[test]
+fn approval_service_outages_hold_pickup_and_resume_only_after_reopening() {
+    for mode in ["approval-outage-summary", "approval-outage-tool"] {
+        let f = Fixture::new(mode);
+        f.setup(&[]);
+        // Start from the previous database/view to exercise installed upgrades.
+        let old_db = rusqlite::Connection::open(&f.db).unwrap();
+        let old_readiness = include_str!("../src/issues/subtask-readiness.sql")
+            .replace("r.state='infrastructure_blocked' OR ", "")
+            .replace(
+                "failures.state NOT IN ('completed','infrastructure_blocked')",
+                "failures.state!='completed'",
+            );
+        old_db.execute_batch(&old_readiness).unwrap();
+        old_db.pragma_update(None, "user_version", 13).unwrap();
+        drop(old_db);
+        let mut worker = f.worker();
+        let first = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        assert_eq!(
+            first["runs"][0]["state"], "infrastructure_blocked",
+            "{first}"
+        );
+        let session = first["runs"][0]["session_id"].clone();
+        let issue = f.cli(&["view", "1"]);
+        assert_eq!(issue["issue"]["state"], "blocked");
+        assert!(issue["comments"].as_array().unwrap().iter().any(|c| {
+            c["body"]
+                .as_str()
+                .unwrap()
+                .contains("does not consume an implementation retry")
+        }));
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        db.execute("UPDATE worker_runs SET finished_at=0", [])
+            .unwrap();
+        assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
+        // Even a changed issue that cannot be automatically blocked stays held.
+        db.execute("UPDATE issues SET state='open',manual_blocked=0", [])
+            .unwrap();
+        assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
+        fs::write(f.root.join("mode.txt"), "delay").unwrap();
+        f.cli(&["reopen", "1"]);
+        let resumed = f.wait(|s| s["active"] == 1 && s["runs"][0]["state"] == "running");
+        assert_eq!(resumed["runs"][0]["session_id"], session);
+        assert!(
+            f.transcript()
+                .iter()
+                .any(|r| r["method"] == "thread/resume" && r["params"]["threadId"] == session)
+        );
+        worker.stop();
+    }
+}
+
+#[test]
 fn approval_hold_is_not_retried_automatically_even_after_delay() {
     let f = Fixture::new("approval-hold");
     fs::write(f.root.join("mode.txt"), "approval").unwrap();

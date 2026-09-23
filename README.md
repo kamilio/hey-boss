@@ -409,6 +409,14 @@ restoring a blocker blocks it again. Subtasks remain blocking until every reacha
 unfinished descendant closes. A manual block without linked issues requires
 explicit reopening. Pending agent approval requests also appear as Blocked.
 
+An unavailable automatic approval service puts unfinished worker attempts on an
+infrastructure hold, shown as **Approval service unavailable**. This holds pickup
+on the first affected attempt and does not consume an implementation retry. The
+saved Codex session, checkout, and issue history remain available. Restore the
+approval service, then explicitly reopen the issue to resume that session. Policy
+denials remain ordinary approval decisions; an infrastructure hold grants no
+permissions and never bypasses approval.
+
 ## Upgrading every machine
 
 Boss can add **YOLO** in **Assign tags** in the issue web UI. The

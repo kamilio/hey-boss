@@ -1,6 +1,7 @@
 //! Worker reservations share the issue transaction and SQLite's write lock.
 use super::*;
 use crate::issues::worker::{Job, ProjectConfig, now};
+use crate::issues::worker_infrastructure;
 pub(super) const HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_issue_history ON worker_runs(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 type ActiveProcess = (Job, Option<u32>, Option<String>);
 
@@ -431,6 +432,15 @@ impl Store {
                 "Issue ownership or requirements changed while Codex worked. Review the session before closing.\n\n{summary}"
             );
         }
+        if matches!(state, "blocked" | "failed" | "startup_failed")
+            && worker_infrastructure::approval_unavailable(&summary)
+        {
+            state = worker_infrastructure::STATE;
+        }
+        let infrastructure_hold = state == worker_infrastructure::STATE;
+        if infrastructure_hold {
+            summary = format!("{}\n\n{summary}", worker_infrastructure::GUIDANCE);
+        }
         // Count unsuccessful attempts in this open cycle, not cancellations or
         // pre-launch reservations. Reopening is an explicit fresh retry budget.
         let exhausted = if matches!(state, "failed" | "blocked" | "claim_timeout") {
@@ -489,7 +499,7 @@ impl Store {
             }
         }
         let approval_hold = summary.starts_with("Codex needs input or approval:");
-        if (exhausted || approval_hold)
+        if (exhausted || approval_hold || infrastructure_hold)
             && issue.state == "open"
             && issue.deleted_at.is_none()
             && (own || issue.assignee.is_none())
@@ -510,7 +520,9 @@ impl Store {
                 &Operation::Block {
                     blockers: None,
                     number: job.number(),
-                    comment: Some(if approval_hold {
+                    comment: Some(if infrastructure_hold {
+                        summary.clone()
+                    } else if approval_hold {
                         format!(
                             "{summary}\n\nResolve this request, then reopen the issue to resume pickup."
                         )
@@ -767,6 +779,7 @@ mod tests {
             "unlaunched",
             "unlaunched_current",
             "cancelled",
+            "infrastructure_blocked",
             "unassigned",
             "new_owner",
             "changed_scope",
@@ -775,6 +788,8 @@ mod tests {
             for n in 0..if mode == "fourth" { 3 } else { 4 } {
                 let state = if mode == "cancelled" {
                     "cancelled"
+                } else if mode == "infrastructure_blocked" {
+                    "infrastructure_blocked"
                 } else {
                     "failed"
                 };
@@ -1400,6 +1415,65 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn captured_approval_outages_do_not_exhaust_implementation_retries() {
+        let summaries = [
+            "Automatic approval review itself cannot access configured wisp-alpha (404); this is service failure, not an unsafe-action verdict. Final review sweep/check confirmation and cleanup remain pending. Preserve worktree and logs for continuation.",
+            "Approval review cannot execute: configured wisp-alpha model returns404. Restore approval-model routing to finish enabled-hook commit, fresh native verification, push and final CI/reviews.",
+            "Automatic approval review returned HTTP 404 for missing `wisp-alpha`, preventing the final CI read. Please restore the reviewer so I can finish.",
+            "Automatic approval review failed with HTTP 404 for missing `wisp-alpha`, preventing GitHub reads—not an unsafe-action rejection. Please restore the approval service so I can finish verification and cleanup.",
+            "Automatic approval review still fails with HTTP 404 for missing `wisp-alpha`, preventing GitHub CI/review reads. Restore the approval service to finish notification and cleanup.",
+            "Automatic approval review failed: configured model `wisp-alpha` is unavailable (404). Restore the approval service so I can apply the fixes and finish.",
+            "Automatic approval review rejected publication twice because `wisp-alpha` is unavailable (HTTP 404). Restore the approval service so I can finish.",
+        ];
+        for summary in summaries {
+            let mut f = HandoffFixture::new(false);
+            f.store
+                .db
+                .execute("UPDATE worker_runs SET session_id='saved-session'", [])
+                .unwrap();
+            for n in 0..4 {
+                f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES(?1,?2,1,'{}',?3,'failed',1,'start','unit',0,0,1)", params![format!("failed-{n}"), f.job.project.id, f.job.actor.id]).unwrap();
+                f.store.db.execute("INSERT INTO issue_agent_launches(project_id,issue_number,run_id,launched_at) VALUES(?1,1,?2,0)", params![f.job.project.id, format!("failed-{n}")]).unwrap();
+            }
+            f.store.db.execute("INSERT INTO issue_agent_launches(project_id,issue_number,run_id,launched_at) VALUES(?1,1,?2,0)", params![f.job.project.id, f.job.id]).unwrap();
+            f.store.worker_finish(&f.job, "blocked", summary).unwrap();
+            assert_eq!(f.state(), "infrastructure_blocked");
+            assert_eq!(f.issue().state, "blocked");
+            assert!(f.issue().assignee.is_none());
+            let comments = f
+                .store
+                .db
+                .prepare("SELECT body FROM comments WHERE project_id=?1 AND issue_number=1")
+                .unwrap()
+                .query_map([&f.job.project.id], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                !comments
+                    .iter()
+                    .any(|c| c.contains("Automatic retries exhausted"))
+            );
+            assert!(
+                comments
+                    .iter()
+                    .any(|c| c.contains("does not consume an implementation retry"))
+            );
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT session_id FROM worker_runs WHERE id=?1",
+                        [&f.job.id],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "saved-session"
+            );
+        }
     }
 
     #[test]
