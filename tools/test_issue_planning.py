@@ -143,6 +143,25 @@ class Planning(unittest.TestCase):
         self.assertEqual(self.cli('view','1')['issue'],before)
         self.assertFalse((self.checkout/'codex-args').exists())
 
+    def test_saved_plan_pause_marker_cannot_truncate_database(self):
+        self.cli('create', '--title', 'Safe title', '--body', 'Safe body', '--draft')
+        (self.checkout/'plan.md').write_text('# Safe title\n\nSafe body\n')
+        db = sqlite3.connect(self.db)
+        machine = db.execute("SELECT json_extract(metadata,'$.machine') FROM agents WHERE id='human:test'").fetchone()[0]
+        plan = {'path':'plan.md', 'checkout':str(self.checkout.resolve()), 'machine':machine, 'host':'local'}
+        db.execute('UPDATE issues SET plan=? WHERE number=1', (json.dumps(plan),))
+        db.commit()
+        db.close()
+        os.link(self.db, self.checkout/'plan.hey-boss-sync-paused')
+        code, out = self.human(['edit', '1', '--interactive'])
+        self.assertEqual(self.db.read_bytes()[:16], b'SQLite format 3\x00')
+        self.assertNotEqual(code, 0, out)
+        self.assertIn('must not alias', out)
+        issue = self.cli('view', '1')['issue']
+        self.assertTrue(issue['draft'])
+        self.assertEqual((issue['title'], issue['body']), ('Safe title', 'Safe body'))
+        self.assertFalse((self.checkout/'codex-args').exists())
+
     def test_remote_final_sync_is_required_and_uses_fleet_ssh_alias(self):
         self.cli('create','--title','Original','--draft')
         plan={'path':'plans/remote.md','checkout':'/remote/checkout','machine':'synthetic-remote','host':'unroutable-hostname'}

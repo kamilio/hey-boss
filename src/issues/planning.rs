@@ -141,17 +141,16 @@ fn lock(path: &Path, nonblocking: bool) -> Result<File> {
     }
     Ok(file)
 }
-fn protect_database_files(db: &Connection, plan: &Plan) -> Result<()> {
-    let Some(database) = db.path().filter(|path| !path.is_empty()) else {
-        return Ok(());
-    };
+fn protect_database_files(database: &Path, plan: &Plan) -> Result<()> {
     // Inspect inode identity without opening a raw descriptor: even closing a
     // read-only alias would release this process's SQLite record locks.
     let mut protected = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
-        match fs::metadata(format!("{database}{suffix}")) {
+        let mut path = database.as_os_str().to_owned();
+        path.push(suffix);
+        match fs::metadata(path) {
             Ok(metadata) => protected.push((metadata.dev(), metadata.ino())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !suffix.is_empty() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -174,9 +173,15 @@ fn protect_database_files(db: &Connection, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+fn protect_local_database(plan: &Plan) -> Result<()> {
+    protect_database_files(&super::database_path()?, plan)
+}
+
 fn local_read(db: &Connection, plan: &Plan) -> Result<(String, String)> {
     plan.validate()?;
-    protect_database_files(db, plan)?;
+    if let Some(database) = db.path().filter(|path| !path.is_empty()) {
+        protect_database_files(Path::new(database), plan)?;
+    }
     let _lock = lock(&lock_path(plan), true).map_err(|_| {
         Error::new(
             "plan_sync_busy",
@@ -313,6 +318,7 @@ fn call(sync: &Sync, operation: Operation) -> Result<Value> {
     }
 }
 fn sync_once(sync: &Sync, issue: &Value, plan: &Plan) -> Result<()> {
+    protect_local_database(plan)?;
     let (title, body) = read(plan)?;
     if issue["title"] != title || issue["body"] != body {
         call(
@@ -331,6 +337,7 @@ fn sync_once(sync: &Sync, issue: &Value, plan: &Plan) -> Result<()> {
     Ok(())
 }
 fn seed(plan: &Plan, issue: &Value) -> Result<()> {
+    protect_local_database(plan)?;
     fs::write(
         plan.file(),
         format!(
@@ -389,6 +396,9 @@ pub fn interactive(
             saved.checkout.display()
         )));
     }
+    if let Some(saved) = &saved {
+        protect_local_database(saved)?;
+    }
     // Existing owner blocks here during reconciliation. Hold its content lock until launch.
     let _existing_lock = saved
         .as_ref()
@@ -445,6 +455,7 @@ pub fn interactive(
         }
     };
     plan.validate()?;
+    protect_local_database(&plan)?;
     fs::create_dir_all(plan.file().parent().unwrap())?;
     let _new_lock = if saved
         .as_ref()
@@ -621,6 +632,7 @@ pub fn daemon() -> Result<()> {
             if plan.machine != super::identity::machine()? {
                 return Err(Error::invalid("Plan moved to another machine"));
             }
+            protect_local_database(&plan)?;
             let _lock = lock(&lock_path(&plan), false)?;
             if plan.file().with_extension("hey-boss-sync-paused").exists() {
                 return Ok(());
