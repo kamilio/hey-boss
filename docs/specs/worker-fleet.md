@@ -116,6 +116,13 @@ Pause MUST stop new pickup and retain active sessions. Resume MUST enable pickup
 
 ## Observability and Web Application
 
+Worker status SHOULD expose the build compiled into the registered owner
+process. A reported build MUST match the worker's registered PID and process
+start identity, including the actual current process identity. Owner registration
+or removal by a legacy CLI MUST invalidate stale build provenance even when
+assigned owner fields retain their previous values. Missing provenance MUST be
+reported as unknown; status MUST NOT infer a worker build from the installed CLI.
+
 The web view MUST show all configured machines, including offline machines; connection state; last heartbeat and synchronization; desired and applied configuration/build; active capacity; tasks; recent events; pending changes; conflicts; and signal acknowledgments. Worker history MUST be separated from active capacity. Browser mutations MUST use same-origin CSRF protection. Connected companions MUST send activity updates without requiring manual refresh.
 
 ## Failure Model
@@ -139,6 +146,7 @@ An unreachable host MUST remain visible and reconnect with bounded backoff. A pr
 | Connectivity | Heartbeat, EOF, timeout, and reconnect state transitions |
 | Machine persistence | Heartbeat-only updates retain current liveness without rewriting snapshots; identical updates during another write; failed-save retry retains worker and configuration state |
 | Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, public-status activity parity and legacy upgrade marker migration |
+| Worker build provenance | Compiled owner build, legacy registration invalidation, stale owner records, PID reuse, owner removal and unknown legacy builds |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria
