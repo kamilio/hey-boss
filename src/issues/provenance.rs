@@ -195,7 +195,7 @@ pub(super) fn capture(db: &Connection, actor: &Actor, now: i64) -> Result<String
     } else {
         source_run(db, actor, now)?
     };
-    Ok(json!({"actor_id":actor.id,"kind":actor.kind,"session_id":actor.session_id,"machine":actor.machine,"host":actor.host,"cwd":actor.cwd,"source":actor.source,"created_at":now,"invocation":actor.invocation,"run":run}).to_string())
+    Ok(json!({"actor_id":actor.id,"kind":actor.kind,"session_id":actor.session_id,"machine":actor.machine,"host":actor.host,"cwd":actor.cwd,"source":actor.source,"created_at":now,"invocation":actor.invocation,"run":run,"model":actor.model}).to_string())
 }
 
 #[cfg(test)]

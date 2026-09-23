@@ -1053,6 +1053,7 @@ pub(crate) fn preview(
             source: String::new(),
             invocation: None,
             creation_run: None,
+            model: None,
         },
         owner_pid: 0,
         owner_start: String::new(),

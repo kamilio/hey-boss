@@ -144,6 +144,7 @@ mod tests {
                 source: "synthetic recovery test".into(),
                 invocation: None,
                 creation_run: None,
+                model: None,
             };
             let request = |operation| Request {
                 version: 1,

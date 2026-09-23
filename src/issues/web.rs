@@ -138,6 +138,7 @@ pub fn serve(config: Config) -> Result<()> {
         source: "web interface".into(),
         invocation: None,
         creation_run: None,
+        model: None,
     };
     let backend = match config.host {
         Some(host) => {

@@ -295,28 +295,57 @@ fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
 
 /// Best-effort bounded metadata capture on the caller's device, before SSH.
 /// Tool text and arguments are deliberately excluded from persisted origins.
-pub(crate) fn invocation(session: &str) -> Option<crate::issues::Invocation> {
+pub(crate) fn creation_context(
+    session: &str,
+) -> (Option<crate::issues::Invocation>, Option<String>) {
+    capture_creation_context(session).unwrap_or_default()
+}
+fn capture_creation_context(
+    session: &str,
+) -> Option<(Option<crate::issues::Invocation>, Option<String>)> {
     if !valid_session(session) {
         return None;
     }
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))?;
-    invocation_at(&rollout(&home, session)?)
+    let (invocation, model) = rollout(&home, session)
+        .and_then(|path| creation_context_at(&path))
+        .unwrap_or_default();
+    Some((
+        invocation,
+        model.or_else(|| {
+            crate::agents::codex_model(&home, session)
+                .as_deref()
+                .and_then(model_name)
+        }),
+    ))
 }
-fn invocation_at(path: &Path) -> Option<crate::issues::Invocation> {
+
+fn model_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
+}
+
+fn creation_context_at(path: &Path) -> Option<(Option<crate::issues::Invocation>, Option<String>)> {
     let mut file = std::fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let base = size.saturating_sub(ENTRY_BYTES);
     file.seek(SeekFrom::Start(base)).ok()?;
-    let mut reader = BufReader::new(file);
+    // Snapshot the tail length: concurrent appends and oversized tool output
+    // cannot make this best-effort capture read or allocate without a bound.
+    let mut reader = BufReader::new(file.take(size - base));
+    let mut offset = base;
     if base > 0 {
         let mut partial = Vec::new();
         reader.read_until(b'\n', &mut partial).ok()?;
+        offset += partial.len() as u64;
     }
     let mut found = None;
+    let mut model = None;
     loop {
-        let offset = reader.stream_position().ok()?;
+        let record_offset = offset;
         let mut line = Vec::new();
         if reader.read_until(b'\n', &mut line).ok()? == 0 {
             break;
@@ -324,9 +353,13 @@ fn invocation_at(path: &Path) -> Option<crate::issues::Invocation> {
         if line.last() != Some(&b'\n') {
             break;
         }
+        offset += line.len() as u64;
         let Ok(record) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
+        if record["type"] == "turn_context" {
+            model = record["payload"]["model"].as_str().and_then(model_name);
+        }
         if record["type"] == "response_item"
             && matches!(
                 record["payload"]["type"].as_str(),
@@ -334,7 +367,7 @@ fn invocation_at(path: &Path) -> Option<crate::issues::Invocation> {
             )
         {
             found = Some(crate::issues::Invocation {
-                offset,
+                offset: record_offset,
                 call_id: record["payload"]["call_id"]
                     .as_str()
                     .filter(|s| !s.is_empty() && s.len() <= 256)
@@ -342,7 +375,7 @@ fn invocation_at(path: &Path) -> Option<crate::issues::Invocation> {
             });
         }
     }
-    found
+    Some((found, model))
 }
 #[cfg(test)]
 fn page(db: &Connection, home: &Path, run: &str, cursor: u64) -> Result<Value> {
@@ -986,6 +1019,44 @@ mod tests {
         assert!(!p.to_string().contains("ciphertext"));
     }
     #[test]
+    fn creation_model_uses_complete_turn_metadata_and_bounds_large_records() {
+        let f = Fixture::new();
+        let context = |model: &str| {
+            json!({"type":"turn_context","payload":{"model":model}}).to_string() + "\n"
+        };
+        std::fs::write(
+            &f.path,
+            context("gpt-old")
+                + &context("gpt-current")
+                + "{broken}\n"
+                + &json!({"type":"response_item","payload":{"model":"not-turn-metadata"}})
+                    .to_string()
+                + "\n"
+                + context("partial").trim_end(),
+        )
+        .unwrap();
+        assert_eq!(
+            creation_context_at(&f.path).unwrap().1.as_deref(),
+            Some("gpt-current")
+        );
+        std::fs::write(&f.path, context("gpt-old") + &context("bad\u{1b}model")).unwrap();
+        assert!(creation_context_at(&f.path).unwrap().1.is_none());
+        // Oversized tool lines cannot cause capture to scan the whole history.
+        let large = "x".repeat(ENTRY_BYTES as usize + 1);
+        std::fs::write(
+            &f.path,
+            context("outside-tail") + &large + "\n" + &context("gpt-tail"),
+        )
+        .unwrap();
+        assert_eq!(
+            creation_context_at(&f.path).unwrap().1.as_deref(),
+            Some("gpt-tail")
+        );
+        std::fs::write(&f.path, large).unwrap();
+        let (invocation, model) = creation_context_at(&f.path).unwrap();
+        assert!(invocation.is_none() && model.is_none());
+    }
+    #[test]
     fn invocation_metadata_and_anchored_history_use_exact_record_offsets() {
         let f = Fixture::new();
         let before = (0..100)
@@ -996,7 +1067,7 @@ mod tests {
             .map(|_| Fixture::line("assistant", &"new context ".repeat(3000)))
             .collect::<String>();
         std::fs::write(&f.path, before.clone() + &call + &after + "{\"type\":").unwrap();
-        let invocation = invocation_at(&f.path).unwrap();
+        let invocation = creation_context_at(&f.path).unwrap().0.unwrap();
         assert_eq!(invocation.offset, before.len() as u64);
         assert_eq!(invocation.call_id.as_deref(), Some("create-call"));
         let page = window_page(

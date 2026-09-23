@@ -1363,6 +1363,9 @@ pub(crate) fn print_text(value: &Value) {
                 );
             }
             if let Some(origin) = issue["origin"].as_object() {
+                if origin.get("model").is_some_and(Value::is_string) {
+                    println!("Creator model: {}", line(&origin["model"]));
+                }
                 println!(
                     "Origin: {} · {}",
                     line(&origin["host"]),
@@ -1532,7 +1535,7 @@ fn print_issue_line(issue: &Value) {
         .or_else(|| issue["assignee"].as_str())
         .unwrap_or("unassigned");
     println!(
-        "#{} [{}] {} · {} · {} agent launch{}",
+        "#{} [{}] {} · {} · {} agent launch{}{}",
         issue["number"],
         state,
         line(&issue["title"]),
@@ -1542,7 +1545,12 @@ fn print_issue_line(issue: &Value) {
             ""
         } else {
             "es"
-        }
+        },
+        issue["origin"]["model"]
+            .as_str()
+            .filter(|model| issue["origin"]["kind"] == "codex" && !model.trim().is_empty())
+            .map(|_| format!(" · created by Codex · {}", line(&issue["origin"]["model"])))
+            .unwrap_or_default()
     );
     if issue["origin_error"]["message"].is_string() {
         println!(

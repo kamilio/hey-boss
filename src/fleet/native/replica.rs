@@ -2384,6 +2384,7 @@ mod tests {
                         source: "test".into(),
                         invocation: None,
                         creation_run: None,
+                        model: None,
                     }),
                     operation: Operation::Create {
                         title: "Original".into(),
@@ -2432,6 +2433,7 @@ mod tests {
             source: "test".into(),
             invocation: None,
             creation_run: None,
+            model: None,
         };
         let mut store = Store::open(&main.path).unwrap();
         let mut call = |project: &str, operation: Value| {
