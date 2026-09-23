@@ -898,6 +898,7 @@ pub(super) fn reserve(
                 source: "unclaimed worker reservation".into(),
                 invocation: None,
                 creation_run: None,
+                model: None,
             };
             let issue = json!(get_issue(&tx, &project.id, number, false)?);
             // Thread rollouts and unfinished checkout edits belong to this host

@@ -169,6 +169,7 @@ fn resolve_with_discovery(
         source: String::new(),
         invocation: None,
         creation_run: None,
+        model: None,
     };
     let configured = explicit
         .map(str::to_owned)
@@ -236,14 +237,12 @@ pub fn creation_context(actor: &mut Actor) {
     if actor.session_id.is_none() {
         return;
     }
-    actor.invocation = (actor.kind == "codex")
-        .then(|| {
-            actor
-                .session_id
-                .as_deref()
-                .and_then(crate::agent_conversations::invocation)
-        })
-        .flatten();
+    if actor.kind == "codex" {
+        let context =
+            crate::agent_conversations::creation_context(actor.session_id.as_deref().unwrap());
+        actor.invocation = context.0;
+        actor.model = context.1;
+    }
     if let Ok(path) = super::database_path()
         && let Ok(db) = crate::database::Connection::open_with_flags(
             path,
@@ -441,6 +440,7 @@ mod tests {
             source: "test".into(),
             invocation: None,
             creation_run: None,
+            model: None,
         };
         assert!(actor.process_start.is_some());
         assert_eq!(presence(&actor, "local"), "running");

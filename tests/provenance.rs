@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 fn request(operation: Value) -> Request {
     serde_json::from_value(json!({"version":1,"project":{"id":"named:Origins","name":"Origins"},
-        "actor":{"id":"codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","kind":"codex","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","machine":"test","host":"test-host","pid":null,"process_start":null,"cwd":"/tmp","source":"CODEX_THREAD_ID","invocation":{"offset":123,"call_id":"call-create"}},
+        "actor":{"id":"codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","kind":"codex","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","machine":"test","host":"test-host","pid":null,"process_start":null,"cwd":"/tmp","source":"CODEX_THREAD_ID","model":"gpt-6-astra","invocation":{"offset":123,"call_id":"call-create"}},
         "operation":operation})).unwrap()
 }
 
@@ -30,6 +30,7 @@ fn creation_origin_survives_retries_edits_reopen_and_project_moves() {
             .unwrap()
             .as_str()
     );
+    assert_eq!(origin["model"], "gpt-6-astra");
     assert_eq!(origin["invocation"]["offset"], 123);
     assert_eq!(origin["actor_id"], create.actor.as_ref().unwrap().id);
     create.actor.as_mut().unwrap().invocation = None;
@@ -91,6 +92,7 @@ fn artifact_origin_is_persistent_and_human_creation_has_no_invented_session() {
     actor.kind = "human".into();
     actor.session_id = None;
     actor.invocation = None;
+    actor.model = None;
     let origin = store.execute(&human).unwrap()["issue"]["origin"].clone();
     assert_eq!(origin["actor_id"], "human:boss");
     assert!(origin["session_id"].is_null());

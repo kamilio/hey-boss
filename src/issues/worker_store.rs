@@ -589,6 +589,7 @@ mod tests {
                 source: "test".into(),
                 invocation: None,
                 creation_run: None,
+                model: None,
             };
             let project = Project {
                 id: "named:Handoff".into(),

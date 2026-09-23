@@ -30,6 +30,7 @@ impl Mobile {
             source: "phone".into(),
             invocation: None,
             creation_run: None,
+            model: None,
         });
         let request = Request {
             version: 1,

@@ -22,6 +22,7 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
         source: "test".into(),
         invocation: None,
         creation_run: None,
+        model: None,
     };
     let mut call = |project: &str, value: Value, key: Option<&str>| {
         store.execute(&Request {

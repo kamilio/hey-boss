@@ -145,6 +145,9 @@ pub struct Actor {
     pub invocation: Option<Invocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_run: Option<CreationRun>,
+    /// Model observed on the creating caller's device, never a config default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

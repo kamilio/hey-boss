@@ -826,6 +826,20 @@ fn codex_home() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".codex")))
 }
+
+/// Exact-thread metadata only. Older stores without a model column simply
+/// return None; opening a store never creates it or starts an agent process.
+pub(crate) fn codex_model(home: &Path, session: &str) -> Option<String> {
+    ThreadStore::open(home)?
+        .connection
+        .query_row(
+            "SELECT model FROM threads WHERE id = ?1",
+            [session],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+}
 struct ThreadRecord {
     title: Option<String>,
     rollout: Option<PathBuf>,
