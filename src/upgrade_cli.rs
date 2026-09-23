@@ -501,6 +501,9 @@ fn remote_apply(
 }
 
 fn build(snapshot: &Path, target: &Path) -> io::Result<PathBuf> {
+    // Git archives retain commit mtimes, which can predate a cached build of a
+    // different snapshot. Refresh the script so Cargo recomputes this build ID.
+    fs::File::open(snapshot.join("build.rs"))?.set_modified(SystemTime::now())?;
     let path = format!(
         "{}:/opt/homebrew/bin:{}",
         home()?.join(".cargo/bin").display(),
@@ -793,6 +796,56 @@ pub fn run(options: &Options) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archived_snapshots_refresh_the_cached_build_stamp() {
+        let temp = Temp::new().unwrap();
+        let target = temp.0.join("target");
+        let old = SystemTime::now() - std::time::Duration::from_secs(3600);
+        for (name, stamp) in [
+            ("first", "1111111111111111"),
+            ("second", "2222222222222222"),
+        ] {
+            let root = temp.0.join(name);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname='hey-boss'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("Cargo.lock"),
+                "version = 4\n[[package]]\nname = 'hey-boss'\nversion = '0.1.0'\n",
+            )
+            .unwrap();
+            fs::write(root.join("build.rs"), "fn main(){println!(\"cargo:rerun-if-changed=src\");let stamp=std::fs::read_to_string(\"src/stamp\").unwrap();println!(\"cargo:rustc-env=STAMP={stamp}\");}").unwrap();
+            fs::write(
+                root.join("src/main.rs"),
+                "fn main(){println!(\"hey-boss 0.1.0 (build {})\",env!(\"STAMP\"));}",
+            )
+            .unwrap();
+            fs::write(root.join("src/stamp"), stamp).unwrap();
+            for path in [
+                "Cargo.toml",
+                "Cargo.lock",
+                "build.rs",
+                "src/main.rs",
+                "src/stamp",
+                "src",
+            ] {
+                fs::File::open(root.join(path))
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
+            let binary = build(&root, &target).unwrap();
+            assert_eq!(
+                installed_id(&binary).as_deref(),
+                Some(stamp),
+                "The new archived snapshot must not reuse the earlier stamp"
+            );
+        }
+    }
     #[test]
     fn source_identity_matches_compiler_identity() {
         assert_eq!(
