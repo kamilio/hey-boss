@@ -81,6 +81,13 @@ rejected by its content-integrity check released SQLite's existing locks.
 Rejection now happens before opening main/WAL/shared-memory aliases, and ordinary
 downloads retain their integrity check and original bytes.
 
+The companion connection-status reader used by worker status and allocation
+diagnostics also reproduced main-file lock loss through a status JSON symlink.
+It now checks against the caller's actual SQLite connection before reading;
+aliases return the existing unknown-connection state. Separate-process tests
+verify main and SHM locks after main/WAL/SHM symlinks and an exact database-path
+collision. Ordinary fresh heartbeat JSON still reports connected.
+
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
 writer responsible for that damage has not been established. The subsequent
@@ -234,7 +241,7 @@ when its external SQLite checker, which had no busy timeout, returned
 violations and 69,502 durable events (69,498 synthetic edits plus four seed
 events). A resumed writer segment retains the same database and inode and uses
 the bundled checker with its ten-second busy timeout and tracks new writes and
-reads separately. A separate segment exercises the final guarded binary against
+reads separately. A separate segment exercises the guarded SQLite binary against
 a fresh private database. Each segment reports its actual start and end; none
 is described as an uninterrupted eight-hour writer soak. Joined writer segments
 check full integrity, foreign keys and exact event accounting: one durable event

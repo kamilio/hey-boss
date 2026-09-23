@@ -208,6 +208,122 @@ fn bundled_database_driver_rejects_database_name_aliases() {
 }
 
 #[test]
+fn shared_memory_lock_probe() {
+    let Some(path) = std::env::var_os("HEY_BOSS_SHM_LOCK_PROBE_FILE") else {
+        return;
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    assert_eq!(
+        unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) },
+        -1,
+        "SQLite's shared-memory locks were released while the Store is still open"
+    );
+    assert!(matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EACCES | libc::EAGAIN)
+    ));
+}
+
+fn assert_shared_memory_locked(path: &std::path::Path) {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push("-shm");
+    let probe = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "shared_memory_lock_probe", "--nocapture"])
+        .env("HEY_BOSS_SHM_LOCK_PROBE_FILE", sidecar)
+        .output()
+        .unwrap();
+    assert!(
+        probe.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&probe.stdout),
+        String::from_utf8_lossy(&probe.stderr)
+    );
+}
+
+#[test]
+fn connection_status_read_probe() {
+    let Some(path) = std::env::var_os("HEY_BOSS_CONNECTION_STATUS_PROBE_DB") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let store = Store::open(&path).unwrap();
+    let database = Connection::open(&path).unwrap();
+    assert_eq!(
+        hey_boss::fleet::worker_connection(hey_boss::fleet::COMPANION_ROLE, &database)["state"],
+        "unknown"
+    );
+    assert_database_locked(&path);
+    assert_shared_memory_locked(&path);
+    let status_path = hey_boss::fleet::socket_path()
+        .unwrap()
+        .with_file_name("fleet-agent-status.json");
+    if status_path != path {
+        fs::remove_file(&status_path).unwrap();
+        fs::write(
+            &status_path,
+            serde_json::to_vec(&serde_json::json!({
+                "connected_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64(),
+                "last_sync":17
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            hey_boss::fleet::worker_connection(hey_boss::fleet::COMPANION_ROLE, &database),
+            serde_json::json!({"state":"connected","last_sync":17})
+        );
+        assert_database_locked(&path);
+        assert_shared_memory_locked(&path);
+    }
+    drop(database);
+    drop(store);
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+}
+
+#[test]
+fn connection_status_reads_cannot_release_database_locks() {
+    for suffix in [Some(""), Some("-wal"), Some("-shm"), None] {
+        let root = temporary_directory();
+        let status = root.join("fleet-agent-status.json");
+        let path = if suffix.is_none() {
+            status.clone()
+        } else {
+            root.join("issues.db")
+        };
+        drop(Store::open(&path).unwrap());
+        if let Some(suffix) = suffix {
+            symlink(root.join(format!("issues.db{suffix}")), &status).unwrap();
+        }
+        let probe = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "connection_status_read_probe", "--nocapture"])
+            .env("HEY_BOSS_CONNECTION_STATUS_PROBE_DB", &path)
+            .env("HEY_BOSS_ISSUE_DB", &path)
+            .env("HEY_BOSS_FLEET_STATE", &root)
+            .output()
+            .unwrap();
+        assert!(
+            probe.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&probe.stdout),
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn reading_a_plan_alias_of_the_live_database_preserves_its_locks() {
     let root = temporary_directory();
     let path = root.join("issues.db");

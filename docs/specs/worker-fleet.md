@@ -151,6 +151,10 @@ marker.
 Stored attachment downloads MUST reject main/WAL/shared-memory inode aliases
 before opening a non-SQLite descriptor and MUST preserve existing SQLite locks.
 Ordinary downloads MUST retain their content-integrity check and original bytes.
+Worker status and allocation diagnostics MUST reject connection-status JSON
+aliases to their caller's actual main/WAL/shared-memory files before reading.
+An alias MUST report unknown connectivity and preserve SQLite main and SHM locks.
+Ordinary fresh heartbeat JSON MUST retain its connected state and last-sync value.
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
