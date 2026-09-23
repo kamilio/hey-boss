@@ -137,6 +137,9 @@ and distinguish `fleet_reserved` from `fleet_allocation_missing`; their structur
 `details` include the reserved machine, last known hostname, caller/store machine,
 replica role, connectivity and safe recovery guidance. A missing companion
 allocation may be stale: it never proves the supervisor has no reservation.
+`issue view NUMBER --json` includes the same allocation diagnostics. Remote
+inspection uses the initiating caller's machine, rather than the remote store's
+machine, just as normal claim protection does.
 Issue details show the reserved device, with reservation timing explained on
 hover or keyboard focus. Boss can use **Release reservation** on the supervisor
 to let another device pick up an unassigned issue. Stop any active worker attempt
