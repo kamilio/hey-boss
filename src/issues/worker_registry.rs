@@ -208,8 +208,23 @@ impl Store {
             )?;
             migrate_runtime(&tx)?;
             let mut workers = worker_overview(&tx)?;
+            // Queue counts depend on these sets, not the worker ID or capacity.
+            // Cache only within this transaction so each poll sees fresh data.
+            let mut eligible_counts = HashMap::new();
             for worker in &mut workers {
                 let config: Settings = serde_json::from_value(worker["config"].clone())?;
+                let mut projects = config.projects.clone();
+                let mut tags = config.tags.clone();
+                projects.sort_unstable();
+                projects.dedup();
+                tags.sort_unstable();
+                tags.dedup();
+                let eligible = match eligible_counts.entry((projects, tags)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        *entry.insert(worker_queue(&tx, &config)?["eligible"].as_i64().unwrap())
+                    }
+                };
                 let Value::Object(mut activity) =
                     worker_activity(&tx, worker["id"].as_str(), &config)?
                 else {
@@ -217,7 +232,7 @@ impl Store {
                 };
                 // The machine protocol exposes capacity and activity, while
                 // queue diagnostics belong to the public status response.
-                activity.remove("queue");
+                activity.insert("eligible".into(), json!(eligible));
                 worker.as_object_mut().unwrap().extend(activity);
             }
             tx.commit()?;
@@ -374,6 +389,13 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
                 .collect::<rusqlite::Result<Vec<_>>>()?
         );
     }
+    let chiefs = super::super::chief::status(db, selected)?;
+    Ok(
+        json!({"active":active,"free":(config.concurrency as i64-active).max(0),"runs":runs,"chiefs":chiefs}),
+    )
+}
+
+fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
     let (open, assigned, tag_filtered, eligible): (i64, i64, i64, i64) = db.query_row(
         &format!(
             "SELECT count(*),
@@ -390,10 +412,8 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
         ],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    let queue = json!({"open":open,"assigned":assigned,"tag_filtered":tag_filtered,"waiting":open-assigned-tag_filtered-eligible,"eligible":eligible});
-    let chiefs = super::super::chief::status(db, selected)?;
     Ok(
-        json!({"active":active,"free":(config.concurrency as i64-active).max(0),"eligible":eligible,"queue":queue,"runs":runs,"chiefs":chiefs}),
+        json!({"open":open,"assigned":assigned,"tag_filtered":tag_filtered,"waiting":open-assigned-tag_filtered-eligible,"eligible":eligible}),
     )
 }
 fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
@@ -443,6 +463,9 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
         fleet["role"] = json!("companion");
     }
     let mut result = worker_activity(db, selected.as_deref(), &config)?;
+    let queue = worker_queue(db, &config)?;
+    result["eligible"] = queue["eligible"].clone();
+    result["queue"] = queue;
     result.as_object_mut().unwrap().extend(json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"project":p,"projects":projects}).as_object().unwrap().clone());
     Ok(result)
 }
@@ -1282,6 +1305,117 @@ mod tests {
                 steps < 100_000,
                 "Fleet poll repeatedly scanned unrelated workers: {steps} VM steps"
             );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fleet_poll_reuses_equivalent_queue_filters_within_one_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+            unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(100, Ordering::Relaxed);
+            0
+        }
+        let root = std::env::temp_dir().join(format!("hb-fleet-queue-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:A','A',1001,0,0),('named:B','B',1001,0,0);
+                INSERT INTO agents VALUES('agent','{}',0);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+                SELECT p.id,x,'Task','','open','agent',0,0,1,CASE WHEN x%2=0 THEN '[\"ready\",\"urgent\"]' ELSE '[\"ready\"]' END FROM n CROSS JOIN projects p WHERE p.id IN ('named:A','named:B');").unwrap();
+            for n in 0..30 {
+                let (mut projects, mut tags): (Vec<String>, Vec<String>) = match n % 3 {
+                    0 => (vec!["named:A".into()], vec!["ready".into()]),
+                    1 => (
+                        vec!["named:A".into(), "named:B".into()],
+                        vec!["ready".into(), "urgent".into()],
+                    ),
+                    _ => (vec!["named:B".into()], vec!["urgent".into()]),
+                };
+                if n % 2 == 0 && !tags.is_empty() {
+                    projects.reverse();
+                    tags.reverse();
+                    tags.push(tags[0].clone());
+                }
+                let config = Settings {
+                    projects,
+                    tags,
+                    concurrency: n + 1,
+                    ..Settings::default()
+                };
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,?3)", params![format!("worker-{n:02}"), serde_json::to_string(&config).unwrap(), n]).unwrap();
+            }
+            let steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let result = store.fleet_workers();
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            let workers = result.unwrap();
+            assert_eq!(workers.len(), 30);
+            for w in &workers {
+                let n: u32 = w["id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("worker-")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert_eq!(w["eligible"], if n % 3 == 2 { 500 } else { 1000 });
+                assert_eq!(w["free"], w["config"]["concurrency"]);
+                assert!(w.get("queue").is_none());
+                let id = w["id"].as_str().unwrap();
+                let public = status(
+                    &store.db,
+                    Some(id),
+                    &Project {
+                        id: "named:A".into(),
+                        name: "A".into(),
+                    },
+                )
+                .unwrap();
+                for key in ["active", "free", "eligible", "runs", "chiefs"] {
+                    assert_eq!(w[key], public[key], "{id} {key}");
+                }
+            }
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!(
+                "30-worker, 2000-issue fleet poll: fewer than {} VM steps",
+                steps + 100
+            );
+            assert!(
+                steps < 1_000_000,
+                "Repeated queue scans used {steps} VM steps"
+            );
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:A',1001,'New task','','open','agent',0,0,1,'[\"ready\",\"urgent\"]')", []).unwrap();
+            for w in store.fleet_workers().unwrap() {
+                let n: u32 = w["id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("worker-")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert_eq!(
+                    w["eligible"],
+                    if n % 3 == 2 { 500 } else { 1001 },
+                    "next poll must refresh counts"
+                );
+            }
         }
         std::fs::remove_dir_all(root).unwrap();
     }
