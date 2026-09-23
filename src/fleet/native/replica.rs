@@ -793,31 +793,32 @@ fn canonical_append(
     identities: &BTreeMap<(String, i64), (String, i64)>,
 ) -> Result<Value> {
     let mut row = row.clone();
-    if let Some((origin, id)) = identities.get(&(table.into(), row["id"].as_i64().unwrap())) {
-        row["id"] = json!(id);
-        if table == "events" {
-            let mut data: Value = serde_json::from_str(row["data"].as_str().unwrap())?;
-            if let Some(comment_id) = data["comment_id"].as_i64()
-                && let Some((co, ci)) = identities.get(&("comments".into(), comment_id))
-            {
-                let resolution = matches!(
-                    row["action"].as_str(),
-                    Some("comment_resolved" | "comment_unresolved")
-                );
-                if resolution || co == origin {
-                    data["comment_id"] = json!(ci);
-                    if resolution {
-                        data["comment_origin"] = json!(co);
-                        data["comment_origin_id"] = json!(ci);
-                    }
-                    row["data"] = json!(data.to_string());
+    let local_id = row["id"].as_i64().unwrap();
+    let (origin, id) = identities
+        .get(&(table.into(), local_id))
+        .map(|(origin, id)| (origin.as_str(), *id))
+        .unwrap_or((own, local_id));
+    row["id"] = json!(id);
+    if table == "events" {
+        let mut data: Value = serde_json::from_str(row["data"].as_str().unwrap())?;
+        if let Some(comment_id) = data["comment_id"].as_i64()
+            && let Some((co, ci)) = identities.get(&("comments".into(), comment_id))
+        {
+            let resolution = matches!(
+                row["action"].as_str(),
+                Some("comment_resolved" | "comment_unresolved")
+            );
+            if resolution || co == origin {
+                data["comment_id"] = json!(ci);
+                if resolution {
+                    data["comment_origin"] = json!(co);
+                    data["comment_origin_id"] = json!(ci);
                 }
+                row["data"] = json!(data.to_string());
             }
         }
-        Ok(json!({"origin":origin,"row":row}))
-    } else {
-        Ok(json!({"origin":own,"row":row}))
     }
+    Ok(json!({"origin":origin,"row":row}))
 }
 fn identities(db: &Connection) -> Result<BTreeMap<(String, i64), (String, i64)>> {
     let mut ids = BTreeMap::new();
@@ -1600,6 +1601,36 @@ mod tests {
                 steps < 5000,
                 "A small pull scanned unrelated identities: {steps} VM steps in {elapsed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn new_local_resolution_canonicalizes_a_remote_comment_without_an_event_mapping() {
+        let f = Fixture::new();
+        f.capture();
+        f.db.execute_batch("INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(41,'named:Native fleet',1,'human:fixture','Offline comment',1);
+            INSERT INTO fleet_row_ids VALUES('offline','comments',77,41);
+            INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data) VALUES(51,'named:Native fleet',1,'human:fixture','comment_resolved',2,'{\"comment_id\":41}');").unwrap();
+        for payload in [
+            incremental(&f.db, "agent", 0).unwrap(),
+            snapshot(&f.db, "agent").unwrap(),
+        ] {
+            let event = if payload["changes"].is_array() {
+                &payload["changes"][1]["append"]
+            } else {
+                payload["tables"]["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e["row"]["id"] == 51)
+                    .unwrap()
+            };
+            assert_eq!(event["origin"], "main");
+            assert_eq!(event["row"]["id"], 51);
+            let data: Value = serde_json::from_str(event["row"]["data"].as_str().unwrap()).unwrap();
+            assert_eq!(data["comment_id"], 77);
+            assert_eq!(data["comment_origin"], "offline");
+            assert_eq!(data["comment_origin_id"], 77);
         }
     }
 
