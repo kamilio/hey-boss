@@ -169,6 +169,12 @@ impl Fixture {
         task["status"] = json!("ok");
         task["result"] = json!(answer);
     }
+    fn pause_pickup(&self) {
+        // The synthetic agent reports completion without closing its issue.
+        // Keep this fixture on one session even when immediate pickup is enabled.
+        let status = self.cli(&["worker", "status"]);
+        self.cli(&["worker", "pause", status["worker_id"].as_str().unwrap()]);
+    }
     fn replies(&self) -> Vec<Value> {
         fs::read_to_string(self.root.join("protocol.jsonl"))
             .unwrap_or_default()
@@ -235,6 +241,7 @@ fn connector_and_sign_in_answers_continue_the_original_session() {
         let f = Fixture::new(mode);
         let count = if mode == "connector-multi" { 2 } else { 1 };
         f.wait(|| f.tasks.lock().unwrap().len() == count);
+        f.pause_pickup();
         assert!(f.replies().is_empty());
         if mode.starts_with("signin") {
             let task = f.tasks.lock().unwrap()["notice-1"].clone();
@@ -296,6 +303,7 @@ fn approvals_keep_the_claim_and_continue_the_original_session() {
     for mode in ["command", "files", "permissions", "network", "ack-race"] {
         let f = Fixture::new(mode);
         f.wait(|| f.tasks.lock().unwrap().len() == 1);
+        f.pause_pickup();
         assert!(f.replies().is_empty());
         assert_eq!(f.cli(&["worker", "status"])["active"], 1);
         assert!(
@@ -344,6 +352,7 @@ fn approvals_keep_the_claim_and_continue_the_original_session() {
 fn concurrent_approvals_route_out_of_order_to_exact_callback_ids() {
     let f = Fixture::new("concurrent");
     f.wait(|| f.tasks.lock().unwrap().len() == 2);
+    f.pause_pickup();
     f.answer("notice-2", "Decline");
     f.wait(|| f.replies().len() == 1);
     assert_eq!(
