@@ -218,64 +218,96 @@ fn lookup_collections_preserve_blocked_and_all_state_filters() {
 fn lookup_agent_links_load_real_saved_conversation_and_filter_overview() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
-    let f = Fixture::new("agents");
-    f.execute(json!({"action":"create","title":"Agent task","body":"","labels":[]}));
-    let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-    let db = rusqlite::Connection::open(&f.db).unwrap();
-    db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,session_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('run-1','github.com/poe-platform/poe-code',1,'issue','human:boss',?1,'completed',1,'test','test',1,1)", [session]).unwrap();
-    let sessions = f.directory.join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    std::fs::write(sessions.join(format!("rollout-{session}.jsonl")), json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Saved reply"}]}}).to_string()+"\n").unwrap();
-    let listener = UnixListener::bind(f.directory.join("fleet.sock")).unwrap();
-    let thread = std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut input = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut input)
+    for legacy in [false, true] {
+        let f = Fixture::new(if legacy { "legacy-agents" } else { "agents" });
+        f.execute(json!({"action":"create","title":"Agent task","body":"","labels":[]}));
+        let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,session_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('run-1','github.com/poe-platform/poe-code',1,'issue','human:boss',?1,'completed',1,'test','test',1,1)", [session]).unwrap();
+        let sessions = f.directory.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join(format!("rollout-{session}.jsonl")), json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Saved reply"}]}}).to_string()+"\n").unwrap();
+        let listener = UnixListener::bind(f.directory.join("fleet.sock")).unwrap();
+        let thread = std::thread::spawn(move || {
+            for attempt in 0..if legacy { 4 } else { 2 } {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut input = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut input)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&input).unwrap()["kind"],
+                    if legacy && attempt % 2 == 1 {
+                        "status"
+                    } else {
+                        "overview"
+                    }
+                );
+                let run = json!({"id":"run-1","kind":"issue","next_at":null,"enabled":null,"project_id":"github.com/poe-platform/poe-code","project_name":"poe-code","number":1,"title":"Agent task","session_id":session,"actor_id":"human:boss","state":"completed","started_at":1,"finished_at":2,"summary":"Done","last_event":"Done"});
+                let mut hidden = run.clone();
+                hidden["id"] = json!("hidden");
+                hidden["project_id"] = json!("named:Hidden");
+                let mut runs = vec![run, hidden];
+                if legacy && attempt % 2 == 0 {
+                    for run in &mut runs {
+                        run.as_object_mut().unwrap().remove("actor_id");
+                        run.as_object_mut().unwrap().remove("session_id");
+                    }
+                }
+                stream.write_all(json!({"ok":true,"machines":[{"host":"local","state":"connected","workers":[{"id":"worker-1","pid":1,"runs":runs}]}]}).to_string().as_bytes()).unwrap();
+            }
+        });
+        for (url, entity) in [
+            (
+                "http://localhost/agents#project=github.com%2Fpoe-platform%2Fpoe-code",
+                "agents",
+            ),
+            (
+                "http://localhost/agents/session#host=local&run=run-1",
+                "agent",
+            ),
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+                .args(["lookup", url, "--json"])
+                .env("HEY_BOSS_ISSUE_DB", &f.db)
+                .env("HEY_BOSS_FLEET_STATE", &f.directory)
+                .env("CODEX_HOME", &f.directory)
+                .output()
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<Value>(&input).unwrap()["kind"],
-                "status"
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
-            stream.write_all(json!({"ok":true,"machines":[{"host":"local","state":"connected","workers":[{"id":"worker-1","pid":1,"runs":[{"id":"run-1","project_id":"github.com/poe-platform/poe-code","title":"Agent task"}]}]}]}).to_string().as_bytes()).unwrap();
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["route"]["entity"], entity);
+            if entity == "agent" {
+                assert_eq!(value["messages"][0]["text"], "Saved reply");
+            } else {
+                assert_eq!(
+                    value["machines"][0]["workers"][0]["runs"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    value["machines"][0]["workers"][0]["runs"][0]["session_id"],
+                    session
+                );
+                assert_eq!(
+                    value["machines"][0]["workers"][0]["runs"][0]["actor_id"],
+                    "human:boss"
+                );
+                assert_eq!(
+                    value["machines"][0]["workers"][0]["runs"][0]["title"],
+                    "Agent task"
+                );
+            }
         }
-    });
-    for (url, entity) in [
-        (
-            "http://localhost/agents#project=github.com%2Fpoe-platform%2Fpoe-code",
-            "agents",
-        ),
-        (
-            "http://localhost/agents/session#host=local&run=run-1",
-            "agent",
-        ),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
-            .args(["lookup", url, "--json"])
-            .env("HEY_BOSS_ISSUE_DB", &f.db)
-            .env("HEY_BOSS_FLEET_STATE", &f.directory)
-            .env("CODEX_HOME", &f.directory)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["route"]["entity"], entity);
-        if entity == "agent" {
-            assert_eq!(value["messages"][0]["text"], "Saved reply");
-        } else {
-            assert_eq!(
-                value["machines"][0]["workers"][0]["runs"][0]["title"],
-                "Agent task"
-            );
-        }
+        thread.join().unwrap();
     }
-    thread.join().unwrap();
 }
 
 #[test]
