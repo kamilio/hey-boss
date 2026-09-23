@@ -103,6 +103,13 @@ function initials(name) {
 function avatar(id) {
   return `<span class="avatar" title="${esc(id)}" aria-label="${esc(actorName(id))}">${esc(id === "human:boss" ? initials(actorName(id)) : own(id) ? "Y" : id.startsWith("codex:") ? "CX" : id.startsWith("claude:") ? "CL" : initials(actorName(id)))}</span>`;
 }
+const specialIssueTags = new Map([
+  ["yolo", {
+    name: "YOLO", icon: "bolt", className: "yolo-badge",
+    description: "No sandbox or approval prompts on the next agent attempt.",
+    action: "set_yolo",
+  }],
+]);
 function labelTone(name) {
   const known = {
     bug: 1,
@@ -120,7 +127,8 @@ function labelTone(name) {
   );
 }
 function label(name) {
-  if (name === "yolo") return `<span class="label yolo-badge" title="YOLO: no sandbox or approval prompts on the next agent attempt">${icon("bolt")}YOLO</span>`;
+  const special = specialIssueTags.get(name);
+  if (special) return `<span class="label ${special.className}" title="${esc(special.description)}">${icon(special.icon)}${esc(special.name)}</span>`;
   if (["task:plan", "task:research"].includes(name)) return `<span class="label task-kind-badge" title="Produces linked artifacts">Plan</span>`;
   return `<span class="label tone-${labelTone(name)}" title="${esc(name)}">${esc(name)}</span>`;
 }
