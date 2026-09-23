@@ -760,8 +760,9 @@ transfer before applying it in one transaction. Disconnects leave its previous
 data and cursor intact; local edits made during the download remain pending.
 Older companions must be upgraded if their initial snapshot exceeds the limit.
 
-The supervisor retains the latest 10,000 journal entries. Machines that fall
-behind this history receive a new snapshot; their offline edits and replay
+The supervisor retains the newest journal history fitting both 10,000 entries
+and 64 MiB of before/after JSON. Machines that fall behind this history receive
+a new snapshot; their offline edits and replay
 receipts remain durable. Pending local updates preserve their changed fields
 while unrelated fields receive canonical updates. Cleanup frees database pages
 for reuse without replacing the live database file.
