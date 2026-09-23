@@ -137,6 +137,8 @@ Service installation MUST reject service-definition inode aliases to its
 context's database, WAL and shared-memory files before writing the definition.
 On macOS it MUST also reject such aliases in the launchd output log before
 admitting the service.
+Worker output logs MUST reject these inode aliases before opening their
+descriptor or spawning a worker. Ordinary log append behavior MUST be preserved.
 
 Companions MUST pull canonical changes whenever a connection is available, after uploading durable local changes. Journal writes MUST commit in the same transaction as the domain change. Acknowledgments MUST be durable; replay after acknowledgment loss MUST not duplicate comments, events, or issue mutations. Incoming synchronization MUST not generate outgoing echoes.
 
