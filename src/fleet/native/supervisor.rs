@@ -1924,12 +1924,18 @@ mod tests {
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let slow = app.clone();
         let saving = std::thread::spawn(move || slow.update("slow", json!({"state":"connected"})));
+        // Do not probe persistence.try_lock(): save_machines uses try_lock too,
+        // so the observer could steal its one chance to begin the write.
+        let snapshot_started = || {
+            let state = app.state.lock().unwrap();
+            state.machines.contains_key("slow") && !state.machines_dirty
+        };
         let deadline = Instant::now() + Duration::from_secs(2);
-        while app.persistence.try_lock().is_ok() && Instant::now() < deadline {
+        while !snapshot_started() && Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(
-            app.persistence.try_lock().is_err(),
+            snapshot_started(),
             "snapshot never reached its serialized write"
         );
         let healthy = app.clone();
