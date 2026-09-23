@@ -37,14 +37,7 @@ pub(super) fn start_worker(ctx: &Context, worker: &Value) -> Result<u32> {
     let id = worker["id"]
         .as_str()
         .ok_or_else(|| invalid("Invalid worker ID"))?;
-    let logfile = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(ctx.state.join(format!(
-            "fleet-worker-{}.log",
-            &format!("{:x}", sha2::Sha256::digest(id.as_bytes()))[..24]
-        )))?;
+    let logfile = open_worker_log(ctx, id)?;
     let mut command = Command::new(&ctx.binary);
     command
         .args(["worker", "--id", id, "--json"])
@@ -96,6 +89,18 @@ pub(super) fn start_worker(ctx: &Context, worker: &Value) -> Result<u32> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+fn open_worker_log(ctx: &Context, id: &str) -> Result<std::fs::File> {
+    let path = ctx.state.join(format!(
+        "fleet-worker-{}.log",
+        &format!("{:x}", sha2::Sha256::digest(id.as_bytes()))[..24]
+    ));
+    ctx.protect_file(&path)?;
+    Ok(OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?)
 }
 use sha2::Digest;
 pub(super) fn control(ctx: &Context, id: &Value, command: &str) -> Result<Value> {
@@ -456,7 +461,53 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::context::tests::{assert_sqlite_locked, test_context};
     use super::*;
+    use std::{fs, io::Write};
+
+    #[test]
+    fn worker_log_aliases_are_rejected_before_output_or_lock_loss() {
+        let (root, ctx, store) = test_context();
+        let id = "worker-log-alias";
+        let log = ctx.state.join(format!(
+            "fleet-worker-{}.log",
+            &format!("{:x}", sha2::Sha256::digest(id.as_bytes()))[..24]
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            for symbolic in [false, true] {
+                let target = root.join(format!("issues.db{suffix}"));
+                if symbolic {
+                    std::os::unix::fs::symlink(&target, &log).unwrap();
+                } else {
+                    fs::hard_link(&target, &log).unwrap();
+                }
+                let before = fs::metadata(&target).unwrap().len();
+                let result = open_worker_log(&ctx, id);
+                if let Ok(mut output) = result {
+                    writeln!(output, "Synthetic worker output").unwrap();
+                    drop(output);
+                    assert_eq!(
+                        fs::metadata(&target).unwrap().len(),
+                        before,
+                        "Worker output changed SQLite file {suffix}"
+                    );
+                    panic!("Worker log alias was admitted");
+                }
+                assert!(result.unwrap_err().to_string().contains("must not alias"));
+                assert_sqlite_locked(&ctx.path);
+                fs::remove_file(&log).unwrap();
+            }
+        }
+        writeln!(open_worker_log(&ctx, id).unwrap(), "First line").unwrap();
+        writeln!(open_worker_log(&ctx, id).unwrap(), "Second line").unwrap();
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "First line\nSecond line\n"
+        );
+        assert_sqlite_locked(&ctx.path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn lifecycle_snapshot_reads_only_target_and_preserves_owned_agents() {

@@ -52,6 +52,11 @@ was a hard link to the main database. Installation now checks service-definition
 inode identity before writing, and on macOS checks the launchd output log before
 admitting the service. Private tests cover definitions linked to main/WAL/shared
 memory and reject a database-linked log without invoking the service manager.
+Worker output logs also check inode identity before opening their append
+descriptor or spawning the worker. A private regression reproduced output
+appended directly to a database-linked log; the guard rejects main/WAL/shared
+memory hard links and symlinks while preserving ordinary append behavior and
+SQLite locks.
 
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
