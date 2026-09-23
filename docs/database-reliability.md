@@ -152,6 +152,12 @@ Fragmented incoming frames also cap buffer growth at the existing 16 MiB limit.
 Rejecting a synthetic oversized frame delivered in 8 KiB fragments fell from
 67.1 MB to 33.5 MB of requested Rust allocation bytes. The reader preserves
 delimiter accounting, prefetched frames, UTF-8 and complete JSON at EOF.
+EOF-delimited control responses share the capped buffer. The previous reader
+grew to 32 MiB capacity to probe EOF even for an exactly 16 MiB body; a real
+Unix socket reproduced it. Full-limit and oversized fragmented bodies now stay
+within 16 MiB capacity and fell from 67.1 MB to 33.5 MB of requested allocation
+bytes. Empty EOF still allocates nothing, and both CLI callers retain their
+existing limits, errors and complete response bytes.
 
 ## Ongoing verification
 

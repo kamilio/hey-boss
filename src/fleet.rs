@@ -99,15 +99,8 @@ pub fn call(value: &Value) -> crate::issues::Result<Value> {
     serde_json::to_writer(&mut stream, value)?;
     stream.write_all(b"\n")?;
     stream.shutdown(std::net::Shutdown::Write)?;
-    let mut bytes = Vec::new();
-    stream
-        .take(crate::issues::WIRE_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > crate::issues::WIRE_LIMIT {
-        return Err(crate::issues::Error::invalid(
-            "Fleet response exceeds 16 MiB",
-        ));
-    }
+    let bytes = native::read_control_body(&mut stream)?
+        .ok_or_else(|| crate::issues::Error::invalid("Fleet response exceeds 16 MiB"))?;
     let result: Value = serde_json::from_slice(&bytes)?;
     if result["ok"] == false {
         return Err(crate::issues::Error::new(
