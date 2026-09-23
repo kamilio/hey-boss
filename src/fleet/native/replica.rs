@@ -1,7 +1,8 @@
 //! Transactional issue replication using the CLI's bundled SQLite.
 use super::Result;
+use crate::database::{Connection, params_from_iter};
 use rusqlite::{
-    Connection, OptionalExtension, params_from_iter,
+    OptionalExtension,
     types::{Value as SqlValue, ValueRef},
 };
 use serde_json::{Value, json};
@@ -885,7 +886,7 @@ pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
         return Ok(0);
     }
     let tx = if db.is_autocommit() {
-        Some(rusqlite::Transaction::new_unchecked(
+        Some(crate::database::Transaction::new_unchecked(
             db,
             rusqlite::TransactionBehavior::Immediate,
         )?)
@@ -919,7 +920,7 @@ fn journal_head(db: &Connection) -> Result<i64> {
 
 pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
     let tx = if db.is_autocommit() {
-        Some(db.unchecked_transaction()?)
+        Some(db.read_transaction()?)
     } else {
         None
     };
@@ -955,7 +956,7 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
 }
 pub(super) fn incremental(db: &Connection, node: &str, cursor: i64) -> Result<Value> {
     let tx = if db.is_autocommit() {
-        Some(db.unchecked_transaction()?)
+        Some(db.read_transaction()?)
     } else {
         None
     };

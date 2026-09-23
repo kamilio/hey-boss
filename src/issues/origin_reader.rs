@@ -1,5 +1,6 @@
 //! Optional historical metadata must never prevent reading an issue roster.
-use rusqlite::{Row, types::ValueRef};
+use crate::database::Row;
+use rusqlite::types::ValueRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -51,7 +52,7 @@ mod tests {
 
     #[test]
     fn nullable_and_invalid_metadata_are_read_without_exposing_raw_content() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let db = crate::database::Connection::open_in_memory().unwrap();
         for (raw, invalid) in [
             (Value::Null, false),
             (serde_json::json!({"session_id":"saved"}), false),

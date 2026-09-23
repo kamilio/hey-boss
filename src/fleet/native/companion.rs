@@ -200,7 +200,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
     // Closing the transport leaves detached workers and active agents alive.
     Ok(())
 }
-fn count(db: &rusqlite::Connection, table: &str) -> Result<i64> {
+fn count(db: &crate::database::Connection, table: &str) -> Result<i64> {
     Ok(db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?)
 }
 pub(super) fn daemon(ctx: Context) -> Result<()> {

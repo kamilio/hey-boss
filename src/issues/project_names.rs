@@ -40,7 +40,8 @@ pub(super) fn reconcile_git_metadata(db: &Connection) -> Result<()> {
     if !repair_needed {
         return Ok(());
     }
-    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    let tx =
+        crate::database::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     let mut released_names = Vec::new();
     for p in &projects {
         if empty_git_metadata(&tx, &p.id)?

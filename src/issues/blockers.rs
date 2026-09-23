@@ -1,6 +1,7 @@
 //! Linked dependencies and subtasks share the Blocked lifecycle.
 use super::{Error, Result};
-use rusqlite::{Connection, params};
+use crate::database::Connection;
+use rusqlite::params;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 

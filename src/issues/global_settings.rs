@@ -1,6 +1,7 @@
 //! Human profile shared by every project in the authoritative issue store.
 use super::{Error, Operation, Request, Result, identifier};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::database::Connection;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 pub(super) const SCHEMA: &str = "

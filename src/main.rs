@@ -757,6 +757,7 @@ fn main() {
 
 fn run() -> std::io::Result<()> {
     let cli = Cli::parse();
+    hey_boss::database::use_service();
     match &cli.command {
         Command::Lookup(options) => {
             if let Err(error) = lookup_cli::run(options) {

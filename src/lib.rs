@@ -7,6 +7,8 @@ pub mod agents;
 pub mod artifacts;
 pub mod attachments;
 pub(crate) mod codex_permissions;
+#[doc(hidden)]
+pub mod database;
 pub mod document;
 pub mod fleet;
 pub mod health;

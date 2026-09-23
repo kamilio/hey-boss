@@ -1,6 +1,7 @@
 //! Issue relationships remain separate from issue ownership and lifecycle.
 use super::{Actor, Error, Operation, Project, Result, create_issue, event, get_issue};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::database::Connection;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 

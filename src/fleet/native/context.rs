@@ -2,8 +2,8 @@ use super::{
     Result,
     replica::{self, invalid},
 };
+use crate::database::Connection;
 use crate::issues::{Actor, Operation, Project, Request, Store};
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{

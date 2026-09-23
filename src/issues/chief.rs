@@ -36,7 +36,7 @@ type Reservation = (
     Option<String>,
 );
 
-pub(in crate::issues) fn migrate(db: &rusqlite::Connection) -> Result<()> {
+pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()> {
     let columns = db
         .prepare("SELECT name FROM pragma_table_info('project_chiefs')")?
         .query_map([], |r| r.get::<_, String>(0))?
@@ -60,7 +60,7 @@ pub(in crate::issues) fn migrate(db: &rusqlite::Connection) -> Result<()> {
     if complete && !needs_reconcile {
         return Ok(());
     }
-    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     for (name, definition) in additions {
         if !tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_chiefs') WHERE name=?1)",
@@ -173,7 +173,7 @@ impl Store {
 const STATUS_QUERY: &str = "SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0) FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine";
 
 pub(in crate::issues) fn status(
-    db: &rusqlite::Connection,
+    db: &crate::database::Connection,
     worker: Option<&str>,
 ) -> Result<Vec<Value>> {
     let mut stmt = db.prepare(STATUS_QUERY)?;
@@ -575,7 +575,7 @@ mod tests {
             );
             store.chief_update(&job, "idle", "Done").unwrap();
             store.db.busy_timeout(Duration::from_millis(25)).unwrap();
-            let mut other = rusqlite::Connection::open(&path).unwrap();
+            let mut other = crate::database::Connection::open(&path).unwrap();
             let tx = other
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .unwrap();

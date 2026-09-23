@@ -30,6 +30,18 @@ fn save_upgrade_source(ctx: &Context, source: &std::path::Path) -> Result<()> {
     Ok(())
 }
 fn run_inner(action: &super::Action) -> Result<()> {
+    let _database_owner = if matches!(
+        action,
+        super::Action::Supervisor
+            | super::Action::Companion {
+                stdio: false,
+                install: false
+            }
+    ) {
+        crate::database::Owner::start(&crate::issues::database_path()?)?
+    } else {
+        None
+    };
     let ctx = Context::new()?;
     if matches!(
         action,
@@ -105,7 +117,7 @@ fn local_request(ctx: &Context, value: Value) -> Result<Value> {
 
 // The owner-private database transport also supports replica operations. This
 // lets rolling-upgrade regression fixtures exercise the native implementation.
-pub(super) fn replica_request(db: &rusqlite::Connection, request: &Value) -> Result<Value> {
+pub(super) fn replica_request(db: &crate::database::Connection, request: &Value) -> Result<Value> {
     let node = request["node"].as_str().unwrap_or("");
     match request["replica"].as_str() {
         Some("capture") => {

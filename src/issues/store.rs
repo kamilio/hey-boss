@@ -1,5 +1,6 @@
 use super::{Actor, BODY_LIMIT, Error, Operation, Project, Request, Result, identifier};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use crate::database::Connection;
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -305,7 +306,7 @@ struct Issue {
     #[serde(default)]
     blocker_numbers: Vec<i64>,
 }
-fn row_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
+fn row_issue(row: &crate::database::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
         manual_blocked: row.get("manual_blocked")?,
@@ -780,7 +781,31 @@ fn publish_database(staged: &Path, path: &Path) -> std::io::Result<()> {
 }
 
 impl Store {
+    pub(crate) fn schema_version() -> i64 {
+        SCHEMA_VERSION
+    }
+    pub(crate) fn into_database(self) -> Connection {
+        self.db
+    }
+
+    pub(crate) fn open_read_connection(path: &Path) -> Result<Connection> {
+        Self::validated_connection(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    }
+
     pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
+        Self::validated_connection(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+    }
+
+    fn validated_connection(path: &Path, mode: rusqlite::OpenFlags) -> Result<Connection> {
+        let path = Self::validate_database_path(path)?;
+        Ok(Connection::open_with_flags(
+            path,
+            mode | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?)
+    }
+
+    pub(crate) fn validate_database_path(path: &Path) -> Result<std::path::PathBuf> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_file() {
             return Err(Error::invalid("Issue database must be a regular file"));
@@ -807,12 +832,7 @@ impl Store {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?)
+        Ok(path)
     }
 
     fn finish_replay(&self, request: &Request, response: Value) -> Result<Value> {
@@ -825,7 +845,19 @@ impl Store {
         Ok(response)
     }
     pub fn open(path: &Path) -> Result<Self> {
-        retry_contention(Instant::now() + CONTENTION_BUDGET, || Self::open_once(path))
+        retry_contention(Instant::now() + CONTENTION_BUDGET, || {
+            Self::open_once(path, false)
+        })
+    }
+
+    /// Staged installers run their own migration code through the existing
+    /// owner's writer, before replacing any executable or restarting services.
+    pub fn migrate(path: &Path) -> Result<()> {
+        drop(retry_contention(
+            Instant::now() + CONTENTION_BUDGET,
+            || Self::open_once(path, true),
+        )?);
+        Ok(())
     }
 
     pub(crate) fn create_database_if_missing(path: &Path) -> Result<()> {
@@ -861,9 +893,28 @@ impl Store {
         Ok(())
     }
 
-    fn open_once(path: &Path) -> Result<Self> {
+    fn open_once(path: &Path, migrate: bool) -> Result<Self> {
+        if crate::database::remote_enabled() && !migrate {
+            if !path.exists() {
+                crate::database::owner::ensure(path)?;
+            }
+            let db = Self::open_connection(path)?;
+            let (app, version) = db.check_schema()?;
+            if app != APPLICATION_ID || version != SCHEMA_VERSION {
+                return Err(Error::invalid(
+                    "Incompatible issue database; use the matching hey-boss version",
+                ));
+            }
+            return Ok(Self {
+                db,
+                attachment_root: path.with_extension("attachments"),
+            });
+        }
         Self::create_database_if_missing(path)?;
         let mut db = Self::open_connection(path)?;
+        if migrate {
+            db.exclusive_session()?;
+        }
         // Short attempts limit how far the final wait can overrun the overall
         // contention deadline. Safe retry boundaries retain the six-second budget.
         db.busy_timeout(Duration::from_millis(250))?;
@@ -1095,8 +1146,7 @@ impl Store {
         if r.request_id.is_some()
             && r.actor.is_some()
             && let Some(response) = retry_contention(deadline, || {
-                let snapshot =
-                    rusqlite::Transaction::new_unchecked(&self.db, TransactionBehavior::Deferred)?;
+                let snapshot = self.db.read_transaction()?;
                 let project =
                     resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
                 cached_response(&snapshot, &project, r, &payload)
@@ -1126,7 +1176,11 @@ impl Store {
         // BEGIN IMMEDIATE is the safe retry boundary: guards are evaluated only
         // after this succeeds, and the mutation itself is executed exactly once.
         let tx = retry_contention(deadline, || {
-            Ok(rusqlite::Transaction::new_unchecked(&self.db, behavior)?)
+            Ok(if matches!(behavior, TransactionBehavior::Deferred) {
+                self.db.read_transaction()?
+            } else {
+                crate::database::Transaction::new_unchecked(&self.db, behavior)?
+            })
         })?;
         if matches!(
             r.operation,

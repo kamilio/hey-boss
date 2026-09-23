@@ -64,6 +64,9 @@ pub fn socket_path() -> std::io::Result<PathBuf> {
 /// Read the fleet's existing heartbeat without contacting the supervisor.
 /// Missing or unreadable status is unknown, never evidence of a live connection.
 pub fn worker_connection(role: &str, database: &rusqlite::Connection) -> Value {
+    worker_connection_path(role, database.path())
+}
+pub(crate) fn worker_connection_path(role: &str, database: Option<&str>) -> Value {
     use serde_json::json;
     if role != COMPANION_ROLE && role != "companion" {
         return json!({"state": if role == SUPERVISOR_ROLE || role == "supervisor" { "local" } else { "standalone" }});
@@ -72,7 +75,7 @@ pub fn worker_connection(role: &str, database: &rusqlite::Connection) -> Value {
         .ok()
         .and_then(|path| {
             let path = path.with_file_name("fleet-agent-status.json");
-            if let Some(database) = database.path().filter(|path| !path.is_empty()) {
+            if let Some(database) = database.filter(|path| !path.is_empty()) {
                 crate::issues::planning::protect_database_paths(
                     std::path::Path::new(database),
                     [&path],
@@ -217,8 +220,7 @@ pub fn run(action: &Action) -> std::io::Result<()> {
 fn database(path: &std::path::Path) -> std::io::Result<()> {
     use rusqlite::types::{Value as SqlValue, ValueRef};
     use std::io::BufRead;
-    crate::issues::Store::create_database_if_missing(path).map_err(std::io::Error::other)?;
-    let connection = crate::issues::Store::open_connection(path).map_err(std::io::Error::other)?;
+    let connection = crate::database::maintenance(path).map_err(std::io::Error::other)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(10))
         .map_err(std::io::Error::other)?;
@@ -279,9 +281,9 @@ fn database(path: &std::path::Path) -> std::io::Result<()> {
                 .collect();
             let mut rows = Vec::new();
             if columns.is_empty() {
-                statement.execute(rusqlite::params_from_iter(values))?;
+                statement.execute(crate::database::params_from_iter(values))?;
             } else {
-                let mut cursor = statement.query(rusqlite::params_from_iter(values))?;
+                let mut cursor = statement.query(crate::database::params_from_iter(values))?;
                 while let Some(row) = cursor.next()? {
                     let mut values = Vec::new();
                     for index in 0..columns.len() {

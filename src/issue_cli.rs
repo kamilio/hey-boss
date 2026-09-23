@@ -899,7 +899,7 @@ impl Options {
 pub fn run(options: &Options) -> Result<()> {
     if let Action::Migrate { installation } = &options.action {
         let path = issues::database_path_for_installation(&installation.canonicalize()?)?;
-        Store::open(&path)?;
+        Store::migrate(&path)?;
         if options.json {
             println!("{}", json!({"ok": true}));
         }

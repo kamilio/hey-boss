@@ -13,7 +13,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_agent_launches' AND type='table')", [], |r| r.get::<_, bool>(0))? {
         return Ok(());
     }
-    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     // Recheck after taking the lock: simultaneous startups may migrate together.
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_agent_launches' AND type='table')", [], |r| r.get::<_, bool>(0))? {
         tx.execute_batch(SCHEMA)?;

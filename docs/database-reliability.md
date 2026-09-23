@@ -248,3 +248,47 @@ check full integrity, foreign keys and exact event accounting: one durable event
 per committed edit, plus the seed events. Intermediate counters can differ from
 a checker's snapshot while writers are active; final counts are compared after
 joining them. Production integrity and fleet convergence are checked separately.
+
+## Service-owned database sessions
+
+The CLI now sends issue database operations to a private Unix socket hosted by an
+existing Rust service. The supervisor, companion, web service and queue broker
+can host it; an OS lock elects exactly one owner for the database. Workers, issue
+commands and replication use the same connection interface, including their
+existing transactions. SQLite remains the storage engine and keeps its current
+schema, WAL, durability settings and online backup support.
+
+The owner serializes writers in arrival order. A transaction keeps its writer
+lease until commit or rollback. Caller disconnect rolls it back before another
+writer proceeds. Read snapshots run on separate read-only connections and do
+not reserve the writer. Results stream in bounded frames, including large fleet
+snapshots; text and blobs use base64 inside the transport to avoid JSON escaping
+multiplying control-character bodies beyond the frame limit.
+
+No database service configuration is required. A client first uses the running
+owner, starts the installed fleet service if needed, and bootstraps the existing
+companion daemon for a standalone CLI installation. Idle sessions reconnect after
+an owner restart. Graceful service shutdown lets active transactions finish;
+abandoned transaction leases expire. A mutation whose response is lost is never
+blindly replayed. The caller receives an error for an uncertain outcome and can
+use the existing request-ID replay mechanism where applicable.
+
+A database schema generation change triggers the existing additive repair code
+inside the owner. Staged installers execute their migration code through an
+exclusive owner session before replacing binaries, so an older running service
+can still apply SQL supplied by a newer installer. SQLite primary/extended codes
+and issue error classifications survive the transport. Existing inode/sidecar
+validation applies before connections and maintenance access.
+
+The explicit `fleet database` maintenance driver uses a live owner when present.
+It still supports standalone private SQLite files without creating an issue
+schema in them. Ordinary application clients never fall back to writing the live
+database directly. Codex's own state database and the desktop notification
+history are separate stores and are not changed by this routing.
+
+Regression coverage includes competing writer sessions, concurrent WAL readers,
+disconnect rollback, lost commit responses, large streamed results, schema
+repair, staged migrations, owner election, reuse of an existing service PID and
+automatic recovery when that service exits. Rolling upgrades retain active
+agents; older workers adopt the new database routing when their executable
+reloads through the existing upgrade lifecycle.
