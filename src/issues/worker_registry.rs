@@ -490,7 +490,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
         .any(|w| w["id"].as_str() == selected.as_deref() && w["upgrading"] == true);
     let mut fleet: Value = db.query_row("SELECT role,node,(SELECT count(*) FROM fleet_outbox) FROM fleet_meta WHERE id=1", [], |r| Ok(json!({"role":r.get::<_,String>(0)?,"node":r.get::<_,String>(1)?,"pending_changes":r.get::<_,i64>(2)?})))?;
     fleet["supervisor_connection"] =
-        crate::fleet::worker_connection(fleet["role"].as_str().unwrap_or_default());
+        crate::fleet::worker_connection(fleet["role"].as_str().unwrap_or_default(), db);
     // Older dashboards read this key; retain it during mixed-version upgrades.
     fleet["controller_connection"] = fleet["supervisor_connection"].clone();
     if fleet["role"] == crate::fleet::SUPERVISOR_ROLE {

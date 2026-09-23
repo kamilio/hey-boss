@@ -177,7 +177,7 @@ pub(crate) fn allocation(
         );
     }
     Ok(
-        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role),"summary":summary,"inspect_command":command,"recovery":recovery}),
+        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role, db),"summary":summary,"inspect_command":command,"recovery":recovery}),
     )
 }
 

@@ -63,14 +63,24 @@ pub fn socket_path() -> std::io::Result<PathBuf> {
 
 /// Read the fleet's existing heartbeat without contacting the supervisor.
 /// Missing or unreadable status is unknown, never evidence of a live connection.
-pub fn worker_connection(role: &str) -> Value {
+pub fn worker_connection(role: &str, database: &rusqlite::Connection) -> Value {
     use serde_json::json;
     if role != COMPANION_ROLE && role != "companion" {
         return json!({"state": if role == SUPERVISOR_ROLE || role == "supervisor" { "local" } else { "standalone" }});
     }
     let status = socket_path()
         .ok()
-        .and_then(|path| std::fs::read(path.with_file_name("fleet-agent-status.json")).ok())
+        .and_then(|path| {
+            let path = path.with_file_name("fleet-agent-status.json");
+            if let Some(database) = database.path().filter(|path| !path.is_empty()) {
+                crate::issues::planning::protect_database_paths(
+                    std::path::Path::new(database),
+                    [&path],
+                )
+                .ok()?;
+            }
+            std::fs::read(path).ok()
+        })
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     let Some(status) = status else {
         return json!({"state":"unknown"});
