@@ -260,10 +260,14 @@ pub(crate) fn execute(
         }
         Operation::Download { id } => {
             let attachment = get(db, p, id)?;
+            let path = root.join(id);
+            if let Some(database) = db.path().filter(|path| !path.is_empty()) {
+                crate::issues::planning::protect_database_paths(Path::new(database), [&path])?;
+            }
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(root.join(id))?;
+                .open(path)?;
             if !file.metadata()?.is_file() {
                 return Err(Error::invalid("Stored attachment must be a regular file"));
             }

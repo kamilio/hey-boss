@@ -60,6 +60,11 @@ SQLite locks.
 The setup command applies the same check before writing its saved upgrade-source
 marker. A private regression reproduced database truncation through that marker;
 all main/WAL/shared-memory hard links and symlinks are now rejected before writing.
+Stored attachment downloads likewise check inode identity before opening their
+file descriptor. A private hard-link regression showed that even a download
+rejected by its content-integrity check released SQLite's existing locks.
+Rejection now happens before opening main/WAL/shared-memory aliases, and ordinary
+downloads retain their integrity check and original bytes.
 
 Two historical failures must be distinguished. The first database had a zeroed
 4,096-byte header and was recovered by restoring its schema catalog. The exact
