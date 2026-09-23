@@ -15,9 +15,9 @@ CREATE VIEW issue_pickup_ready AS
   SELECT latest.id FROM worker_runs latest WHERE latest.project_id=i.project_id AND latest.issue_number=i.number AND latest.finished_at IS NOT NULL
   ORDER BY latest.finished_at DESC,latest.started_at DESC,latest.id DESC LIMIT 1)
   AND r.state!='completed' AND r.retry_allowed=0 AND (
-   r.summary LIKE 'Codex needs input or approval:%'
+   r.state='infrastructure_blocked' OR r.summary LIKE 'Codex needs input or approval:%'
    OR r.finished_at+min(300000,30000*(1<<min(4,(
-    SELECT count(*)-1 FROM worker_runs failures WHERE failures.project_id=i.project_id AND failures.issue_number=i.number AND failures.finished_at IS NOT NULL AND failures.state!='completed'
+    SELECT count(*)-1 FROM worker_runs failures WHERE failures.project_id=i.project_id AND failures.issue_number=i.number AND failures.finished_at IS NOT NULL AND failures.state NOT IN ('completed','infrastructure_blocked')
    ))))>CAST(unixepoch('subsec')*1000 AS INTEGER)))
  AND NOT EXISTS(
   WITH RECURSIVE descendants(number) AS (

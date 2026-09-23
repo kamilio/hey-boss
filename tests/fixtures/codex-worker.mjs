@@ -74,7 +74,16 @@ for await (const line of createInterface({input: process.stdin})) {
   if (mode === 'approval') {
     send({id: 'approval-1', method: 'item/commandExecution/requestApproval', params: {threadId: session, command: 'synthetic privileged operation'}}); continue;
   }
-  const status = ['unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal'].includes(mode) ? 'completed' : mode;
+  if (['approval-outage-tool', 'approval-outage-recovered'].includes(mode)) {
+    send({method: 'item/completed', params: {threadId: session, item: {type: 'mcpToolCall', status: 'failed', result: {content: [{type: 'text', text: 'Automatic approval review failed: unexpected status 404 Not Found: The model `wisp-alpha` does not exist or you do not have access to it. The action was not executed because automatic approval review could not be completed.'}]}}}});
+  }
+  if (mode.startsWith('approval-outage') && mode !== 'approval-outage-recovered') {
+    const summary = mode === 'approval-outage-tool' ? 'Final verification cannot continue. Worktree and repairs retained.' : 'Automatic approval review still fails with HTTP 404 for missing `wisp-alpha`, preventing GitHub CI/review reads. Restore the approval service to finish notification and cleanup.';
+    send({method: 'item/completed', params: {threadId: session, item: {type: 'agentMessage', text: JSON.stringify({status: 'blocked', summary})}}});
+    send({method: 'turn/completed', params: {threadId: session, turn: {id: turn, status: 'completed'}}});
+    continue;
+  }
+  const status = ['unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered'].includes(mode) ? 'completed' : mode;
   const workerArgs = existsSync('worker-args.json') ? JSON.parse(readFileSync('worker-args.json', 'utf8')) : [];
   const artifact = issue?.labels.some(label => ['task:plan', 'task:research'].includes(label));
   if (status === 'completed' && issue && !mode.startsWith('partial') && (!workerArgs.includes('--prs') || artifact)) {

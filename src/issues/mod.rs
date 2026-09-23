@@ -13,6 +13,7 @@ mod store;
 pub mod web;
 pub mod worker;
 mod worker_approvals;
+mod worker_infrastructure;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

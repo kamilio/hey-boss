@@ -40,7 +40,7 @@ mod transfer;
 use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const CONTENTION_BUDGET: Duration = Duration::from_secs(6);
 
 fn cached_response(
@@ -2177,8 +2177,12 @@ fn mutate(
                     issue.version
                 )));
             }
-            if issue.state != "open" {
-                if issue.state == "blocked" {
+            let infrastructure_hold = issue.assignee.is_none() && db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND state='infrastructure_blocked' AND retry_allowed=0) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
+                params![project.id, number], |r| r.get(0),
+            )?;
+            if issue.state != "open" || infrastructure_hold {
+                if issue.state == "blocked" || infrastructure_hold {
                     // Explicitly reopening a blocker also releases old approval
                     // holds and cooldowns; it must actually resume eligibility.
                     db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL", params![project.id,number])?;

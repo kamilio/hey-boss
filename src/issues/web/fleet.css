@@ -24,6 +24,8 @@
 .agent-state.is-live { color:var(--green) }
 .agent-state.is-live::before { box-shadow:0 0 0 4px color-mix(in srgb,var(--green) 9%,transparent) }
 .agent-state.is-done { color:var(--green) }
+.is-held .agent-card-top { flex-wrap:wrap }
+.is-held .agent-preview { display:block }
 .location-label { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .agent-card h3 { font-size:18px; line-height:1.45; letter-spacing:-.02em; font-weight:600; margin:0; overflow-wrap:anywhere }
 .agent-preview { color:var(--muted); font-size:13px; line-height:1.7; margin:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere }

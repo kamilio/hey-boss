@@ -619,6 +619,7 @@ struct Codex {
     native_goal: bool,
     approvals: super::worker_approvals::Approvals,
     approval_items: VecDeque<(String, Value)>,
+    approval_outage: Option<String>,
 }
 impl Codex {
     fn spawn(path: &Path, job: &Job) -> Result<Self> {
@@ -662,6 +663,7 @@ impl Codex {
             native_goal: false,
             approvals: Default::default(),
             approval_items: VecDeque::new(),
+            approval_outage: None,
         })
     }
     fn suspend_goal(&mut self, state: &str) -> Result<Option<Value>> {
@@ -906,6 +908,7 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
                 "claim_timeout" => "claim_timeout",
                 "blocked" => "blocked",
                 "startup_failed" => "startup_failed",
+                "infrastructure_blocked" => "infrastructure_blocked",
                 _ => "failed",
             }
             .into(),
@@ -1179,6 +1182,21 @@ fn run_codex(
         }
     };
     let outcome = run_thread(&mut c, store, job, stop);
+    // Let the agent recover within its current turn. Only an unfinished result
+    // becomes a hold; a successful repair/completion remains successful.
+    let outcome = match (outcome, c.approval_outage.as_deref()) {
+        (Ok((state, summary)), Some(detail)) if state == "blocked" => Ok((
+            super::worker_infrastructure::STATE.into(),
+            format!("{summary}\n\n{detail}"),
+        )),
+        (Err(error), Some(detail)) if matches!(error.code.as_str(), "worker_error" | "blocked") => {
+            Err(Error::new(
+                super::worker_infrastructure::STATE,
+                format!("{}\n\n{detail}", error.message),
+            ))
+        }
+        (outcome, _) => outcome,
+    };
     if let Err(error) = &outcome {
         let state = if matches!(error.code.as_str(), "cancelled" | "claim_timeout") {
             "paused"
@@ -1356,6 +1374,12 @@ fn run_thread(
             claim_window_started = true;
         }
         match method {
+            "item/completed" if params["item"]["type"] != "agentMessage" => {
+                if let Some(detail) = super::worker_infrastructure::tool_failure(&params["item"]) {
+                    store.worker_event(&job.id, "Approval service unavailable; preserving continuation state if this attempt cannot finish", None)?;
+                    c.approval_outage = Some(detail);
+                }
+            }
             "thread/goal/updated" => {
                 store.worker_event(
                     &job.id,

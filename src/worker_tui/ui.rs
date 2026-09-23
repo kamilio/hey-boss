@@ -140,12 +140,20 @@ fn run_label(run: &Value) -> String {
     }
 }
 
+fn run_state(run: &Value) -> String {
+    if run["state"] == "infrastructure_blocked" {
+        "Approval service unavailable".into()
+    } else {
+        text(&run["state"])
+    }
+}
+
 fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         format!("{} · {}", run_label(run), text(&run["title"])),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     ))];
-    let status = text(&run["state"]);
+    let status = run_state(run);
     lines.push(Line::from(Span::styled(
         format!("{status}{}", elapsed(run, now_ms)),
         Style::default().fg(color(&status)),
@@ -439,7 +447,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
     let items: Vec<ListItem> = runs
         .iter()
         .map(|r| {
-            let status = text(&r["state"]);
+            let status = run_state(r);
             if compact_sessions {
                 return ListItem::new(Line::from(vec![
                     Span::raw(if r["kind"] == "chief" {
