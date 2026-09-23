@@ -890,6 +890,11 @@ impl Supervisor {
         });
     }
     fn deploy(&self, host: &str) -> Result<()> {
+        let desired = self.state.lock().unwrap().desired_build.clone();
+        let desired = desired
+            .as_str()
+            .filter(|build| !build.is_empty())
+            .ok_or_else(|| invalid("No desired published build for deployment"))?;
         self.update(host, json!({"deployment":"updating"}))?;
         self.event(host, "deployment", "Installing desired software");
         let mut command = Command::new(&self.ctx.binary);
@@ -914,12 +919,44 @@ impl Supervisor {
                 .to_owned()
                 .into());
         }
+        let target = target.unwrap();
+        let source = &report["source"];
+        let verified = &target["verified"];
+        let final_installation = &target["final_installation"];
+        let receipt_source = &verified["receipt"]["source"];
+        // A successful installer report may describe a different fetched release,
+        // or one superseded by a concurrent rollout. Neither is convergence.
+        if report["build"] != desired
+            || source["build"] != desired
+            || source["kind"] != "main"
+            || !source["commit"]
+                .as_str()
+                .is_some_and(|commit| !commit.is_empty())
+            || target["build"] != desired
+            || verified["build"] != desired
+            || verified != final_installation
+            || ["kind", "repository", "commit", "build"]
+                .iter()
+                .any(|key| source[*key] != receipt_source[*key])
+            || !target["error"].is_null()
+        {
+            return Err(invalid(&format!(
+                "Software deployment did not verify desired published build {desired}; reported {}",
+                report["build"]
+            )));
+        }
         self.update(
             host,
-            json!({"deployment":"current","deployment_error":null}),
+            json!({"deployment":"current","deployment_error":null,"retry_deploy_at":null}),
         )?;
         self.event(host, "deployment", "Software deployment complete");
-        if let Some((pid, _)) = self.state.lock().unwrap().connections.get(host) {
+        let state = self.state.lock().unwrap();
+        let matching_transport = state
+            .machines
+            .get(host)
+            .and_then(|machine| machine["build"].as_str())
+            .is_some_and(|build| build.contains(&format!("build {desired})")));
+        if !matching_transport && let Some((pid, _)) = state.connections.get(host) {
             unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
         }
         Ok(())
@@ -1011,7 +1048,7 @@ impl Supervisor {
         {
             {
                 let fingerprint =
-                    super::context::committed_source_build(std::path::Path::new(source.trim()))?;
+                    super::context::published_source_build(std::path::Path::new(source.trim()))?;
                 let build = &json!(fingerprint);
                 self.state.lock().unwrap().desired_build = build.clone();
                 let db = self.ctx.db()?;
@@ -1021,7 +1058,7 @@ impl Supervisor {
                     self.event(
                         "local",
                         "deployment",
-                        "Committed main changed; automatic deployment scheduled",
+                        "Published main changed; automatic deployment scheduled",
                     );
                 }
                 let needle = format!(
@@ -1410,6 +1447,251 @@ mod tests {
             );
         }
         (directory, app)
+    }
+
+    struct TestTransport(Child);
+    impl Drop for TestTransport {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    impl TestTransport {
+        fn assert_alive(&mut self) {
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < deadline {
+                assert!(
+                    self.0.try_wait().unwrap().is_none(),
+                    "Deployment killed the transport"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    fn deployment_fixture(status: &str) -> (TestDirectory, Supervisor, TestTransport, Value) {
+        let (directory, mut app) = test_supervisor();
+        app.ctx.binary = directory.0.join("upgrade-cli");
+        let transport = TestTransport(Command::new("sleep").arg("60").spawn().unwrap());
+        let (tx, _rx) = mpsc::sync_channel(1);
+        app.state
+            .lock()
+            .unwrap()
+            .connections
+            .insert("peer".into(), (transport.0.id(), tx));
+        app.state.lock().unwrap().desired_build = json!("desired");
+        app.update("peer", json!({"build":"hey-boss (build desired)","state":"connected","workers":[{"id":"worker","active":1}],"last_sync":123})).unwrap();
+        let installation = json!({"build":"desired","receipt":{"source":{"kind":"main","repository":"github.com/kamilio/hey-boss","commit":"published","build":"desired"},"generation":2}});
+        let report = json!({"build":"desired","source":installation["receipt"]["source"],"machines":[{"host":"peer","build":"desired","status":status,"error":null,"before":installation,"verified":installation,"final_installation":installation}]});
+        (directory, app, transport, report)
+    }
+
+    fn write_deployment_report(app: &Supervisor, report: &Value) {
+        // JSON is synthetic; single quotes cannot occur in these fixture values.
+        std::fs::write(
+            &app.ctx.binary,
+            format!("#!/bin/sh\nif [ \"$1\" = --version ]; then\n  printf '%s\\n' 'hey-boss (build {})'\nelse\n  printf '%s\\n' '{}'\nfi\n", report["build"].as_str().unwrap(), report),
+        )
+        .unwrap();
+        std::fs::set_permissions(&app.ctx.binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn deployment_refuses_an_older_published_report_without_cycling_transport() {
+        let (_directory, app, mut transport, mut report) = deployment_fixture("current");
+        report["build"] = json!("older-published");
+        report["source"]["build"] = json!("older-published");
+        let target = &mut report["machines"][0];
+        target["build"] = json!("older-published");
+        for key in ["before", "verified", "final_installation"] {
+            target[key]["build"] = json!("older-published");
+            target[key]["receipt"]["source"]["build"] = json!("older-published");
+        }
+        write_deployment_report(&app, &report);
+        let error = app.deploy("peer").unwrap_err();
+        assert!(error.to_string().contains("desired"), "{error}");
+        assert_ne!(app.machine("peer")["deployment"], "current");
+        transport.assert_alive();
+        assert_eq!(app.machine("peer")["workers"][0]["active"], 1);
+        assert_eq!(app.machine("peer")["last_sync"], 123);
+    }
+
+    #[test]
+    fn deployment_current_report_keeps_the_matching_transport() {
+        let (_directory, app, mut transport, report) = deployment_fixture("current");
+        write_deployment_report(&app, &report);
+        app.deploy("peer").unwrap();
+        assert_eq!(app.machine("peer")["deployment"], "current");
+        transport.assert_alive();
+    }
+
+    #[test]
+    fn deployment_refuses_inconsistent_final_build_or_source_receipt() {
+        for field in ["build", "source", "receipt", "missing-final", "development"] {
+            let (_directory, app, mut transport, mut report) = deployment_fixture("updated");
+            let final_installation = &mut report["machines"][0]["final_installation"];
+            match field {
+                "build" => final_installation["build"] = json!("superseding"),
+                "source" => {
+                    final_installation["receipt"]["source"]["commit"] = json!("different-source")
+                }
+                "missing-final" => *final_installation = Value::Null,
+                "receipt" => {
+                    final_installation["receipt"]["source"]["commit"] = json!("different-source");
+                    report["machines"][0]["verified"] =
+                        report["machines"][0]["final_installation"].clone();
+                }
+                "development" => {
+                    report["source"]["kind"] = json!("development");
+                    for key in ["verified", "final_installation"] {
+                        report["machines"][0][key]["receipt"]["source"]["kind"] =
+                            json!("development");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            write_deployment_report(&app, &report);
+            assert!(app.deploy("peer").is_err());
+            transport.assert_alive();
+        }
+    }
+
+    #[test]
+    fn deployment_updated_report_reconnects_an_old_transport() {
+        let (_directory, app, mut transport, report) = deployment_fixture("updated");
+        app.update("peer", json!({"build":"hey-boss (build old)"}))
+            .unwrap();
+        write_deployment_report(&app, &report);
+        app.deploy("peer").unwrap();
+        assert_eq!(app.machine("peer")["deployment"], "current");
+        assert!(!transport.0.wait().unwrap().success());
+    }
+
+    #[test]
+    fn owning_supervisor_converges_on_published_source_while_local_main_is_unpushed() {
+        let (directory, app, mut transport, report) = deployment_fixture("current");
+        let source = directory.0.join("source");
+        for name in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "build.rs",
+            "src/file",
+            "skills/hey-boss/file",
+            "tools/upgrade_hey_boss.py",
+            "tools/drain_github_issues.py",
+            "hey_boss_daemon.swift",
+            "package_hey_boss.swift",
+            "setup_hey_boss.swift",
+            "assets/file",
+        ] {
+            let file = source.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, name).unwrap();
+        }
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "published",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/hey-boss.git",
+        ]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let published = super::super::context::published_source_build(&source).unwrap();
+        std::fs::write(source.join("src/file"), "unpublished changes").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "unpushed",
+        ]);
+        std::fs::write(
+            app.ctx.state.join("upgrade-source"),
+            source.to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(app.ctx.state.join("companion-hosts"), "peer\n").unwrap();
+        let report: Value = serde_json::from_str(
+            &report
+                .to_string()
+                .replace("\"desired\"", &format!("\"{published}\"")),
+        )
+        .unwrap();
+        write_deployment_report(&app, &report);
+        let installed = format!("hey-boss (build {published})");
+        {
+            let mut state = app.state.lock().unwrap();
+            state.build = installed.clone();
+            // Do not spawn real installs if the regression requests an unpublished build.
+            state.deploying = true;
+        }
+        app.update("peer", json!({"build":installed})).unwrap();
+        let app = Arc::new(app);
+        app.tick().unwrap();
+        assert_eq!(app.state.lock().unwrap().desired_build, published);
+        app.deploy("peer").unwrap();
+        for _ in 0..3 {
+            app.tick().unwrap();
+            assert_eq!(app.machine("peer")["deployment"], "current");
+        }
+        transport.assert_alive();
+        assert_eq!(app.machine("peer")["workers"][0]["active"], 1);
+        assert_eq!(app.machine("peer")["last_sync"], 123);
+        assert_eq!(
+            replica::state_get(&app.ctx.db().unwrap(), "desired_build", Value::Null).unwrap(),
+            published
+        );
+    }
+
+    #[test]
+    fn deployment_mismatch_uses_the_normal_retry_budget() {
+        let (_directory, app, mut transport, mut report) = deployment_fixture("current");
+        report["build"] = json!("older-published");
+        write_deployment_report(&app, &report);
+        let app = Arc::new(app);
+        let started = now();
+        app.schedule_deploy("peer");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.state.lock().unwrap().deploying {
+            assert!(Instant::now() < deadline, "Deployment did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let machine = app.machine("peer");
+        assert_eq!(machine["deployment"], "failed");
+        assert!(
+            machine["deployment_error"]
+                .as_str()
+                .unwrap()
+                .contains("desired")
+        );
+        assert!(machine["retry_deploy_at"].as_f64().unwrap() >= started + 60.0);
+        transport.assert_alive();
     }
 
     #[test]
