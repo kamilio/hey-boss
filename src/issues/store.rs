@@ -853,6 +853,13 @@ impl Store {
     /// Staged installers run their own migration code through the existing
     /// owner's writer, before replacing any executable or restarting services.
     pub fn migrate(path: &Path) -> Result<()> {
+        // On a first upgrade, host the writer only for this preflight's lifetime.
+        // Never leave the staged executable running as the installed service.
+        let _owner = if crate::database::remote_enabled() {
+            crate::database::Owner::start(path)?
+        } else {
+            None
+        };
         drop(retry_contention(
             Instant::now() + CONTENTION_BUDGET,
             || Self::open_once(path, true),
