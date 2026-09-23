@@ -33,8 +33,8 @@ pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
 }
 pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for this issue at `{{worktree_path}}`, with branch `{{worktree_name}}` matching the directory name. Reuse that worktree and branch if they already exist, including when resuming this task; otherwise create them before editing files. Keep unrelated changes intact.";
 pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checkout.";
-pub const DEFAULT_MAIN_PROMPT: &str = "Commit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close {{number}}` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.";
-pub const DEFAULT_PRS_PROMPT: &str = "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {{number}} '<pr-url>'`.";
+pub const DEFAULT_MAIN_PROMPT: &str = "Commit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close {{number}}` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.\n\nFor required validation, exit 0 alone is not success: require a normal exit and fresh completion evidence for the expected task graph. Treat interrupted, cancelled, timed-out, or incompletely reported runs as incomplete. Do not advance dependent steps until the required checks are verified; keep existing hooks and project gates enabled.";
+pub const DEFAULT_PRS_PROMPT: &str = "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {{number}} '<pr-url>'`.\n\nFor required validation, exit 0 alone is not success: require a normal exit and fresh completion evidence for the expected task graph. Treat interrupted, cancelled, timed-out, or incompletely reported runs as incomplete. Do not advance dependent steps until the required checks are verified; keep existing hooks and project gates enabled.";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptOverrides {
@@ -2025,6 +2025,21 @@ mod tests {
             preview(&ProjectConfig::default(), &project(), task).0,
             preview(&ProjectConfig::default(), &project(), issue()).0
         );
+    }
+    #[test]
+    fn default_delivery_requires_complete_validation_for_main_and_prs() {
+        for prs_enabled in [false, true] {
+            let config = ProjectConfig {
+                prompt: "Implement {{number}} with the project's checks.".into(),
+                prs_enabled,
+                ..Default::default()
+            };
+            let text = preview(&config, &project(), issue()).0;
+            assert!(text.contains("exit 0 alone"), "{text}");
+            assert!(text.contains("incomplete"), "{text}");
+            assert!(text.contains("expected task graph"), "{text}");
+            assert!(text.contains("Do not advance dependent steps"), "{text}");
+        }
     }
     #[test]
     fn configured_prompts_are_the_complete_implementation_instructions() {

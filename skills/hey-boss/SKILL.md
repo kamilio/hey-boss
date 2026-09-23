@@ -64,6 +64,17 @@ progress. `issue reopen NUMBER` resumes eligibility
 
 ## Issue workers
 
+Treat interrupted, cancelled, timed-out, or incompletely reported validation as
+**incomplete**, even when the command returns exit 0. Do not advance dependent
+commit, push, deploy, or issue-close steps until the required checks are verified.
+Require a normal exit and fresh completion evidence for the expected task graph;
+missing tasks or summaries are not success. For Turbo, use a run-specific
+`--summarize` report and compare it with the intended tasks, including dependencies.
+Its run-level `exitCode: 0` and `failed: 0` can coexist with unfinished tasks.
+An `18 successful, 20 total` summary is incomplete. Preserve the command, exit
+status, interruption and completed/expected counts in the handoff, then rerun
+the required checks. Keep existing hooks and project gates enabled.
+
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
 
