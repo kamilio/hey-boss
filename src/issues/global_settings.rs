@@ -42,8 +42,11 @@ pub(super) fn configure(db: &Connection, name: &str, expected: Option<i64>) -> R
     Ok(result)
 }
 
-pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
-    let payload = serde_json::to_string(&request.operation)?;
+pub(super) fn cached_response(
+    db: &Connection,
+    request: &Request,
+    payload: &str,
+) -> Result<Option<Value>> {
     let identity = request.actor.as_ref().map(|actor| actor.id.as_str());
     if let (Some(key), Some(actor)) = (&request.request_id, identity) {
         let previous: Option<(String,String)> = db.query_row("SELECT payload,response FROM global_settings_requests WHERE actor=?1 AND request_id=?2", params![actor,key], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -53,9 +56,18 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
                     "Request ID was already used for a different global settings operation",
                 ));
             }
-            return Ok(serde_json::from_str(&response)?);
+            return Ok(Some(serde_json::from_str(&response)?));
         }
     }
+    Ok(None)
+}
+
+pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
+    let payload = serde_json::to_string(&request.operation)?;
+    if let Some(response) = cached_response(db, request, &payload)? {
+        return Ok(response);
+    }
+    let identity = request.actor.as_ref().map(|actor| actor.id.as_str());
     let result = match &request.operation {
         Operation::GlobalSettings => read(db)?,
         Operation::ConfigureGlobal {

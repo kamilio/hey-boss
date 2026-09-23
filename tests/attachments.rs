@@ -78,7 +78,18 @@ fn files_are_disk_backed_project_scoped_and_survive_restart_for_all_targets() {
             request(json!({"action":"attachment","operation":{"command":"download","id":id}}));
         other.project_override = Some("Other".into());
         assert_eq!(s.execute(&other).unwrap_err().code, "not_found");
-        files(&mut s, json!({"command":"remove","id":id}));
+        let mut removal =
+            request(json!({"action":"attachment","operation":{"command":"remove","id":id}}));
+        removal.request_id = Some(format!("remove-{}", target["kind"]));
+        let removed = s.execute(&removal).unwrap();
+        // Model a committed metadata removal whose final unlink needs retry.
+        let path = f.0.join("issues.attachments").join(id);
+        std::fs::write(&path, &binary).unwrap();
+        let writer = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(s.execute(&removal).unwrap(), removed);
+        assert!(!path.exists());
+        writer.execute_batch("ROLLBACK").unwrap();
         assert!(
             files(&mut s, json!({"command":"list","target":target}))["attachments"]
                 .as_array()
@@ -96,7 +107,11 @@ fn files_are_disk_backed_project_scoped_and_survive_restart_for_all_targets() {
     }
     let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
     let payload: String = db
-        .query_row("SELECT payload FROM requests LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT payload FROM requests WHERE request_id LIKE 'upload-%' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert!(
         !payload.contains("\"data\""),
