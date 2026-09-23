@@ -1,11 +1,12 @@
 // Run against an isolated issue web server on port 4782 with playwright-cli run-code.
 async page => {
   page.setDefaultTimeout(10000);
+  const origin = await page.evaluate(() => location.origin);
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
   page.on('pageerror', error => errors.push(error.message));
   page.on('dialog', dialog => dialog.accept());
-  await page.goto('http://127.0.0.1:4782/', {waitUntil:'domcontentloaded'});
+  await page.goto(origin + '/' , {waitUntil:'domcontentloaded'});
   await page.waitForFunction(() => model.csrf);
   const seed = await page.evaluate(async () => {
     const created = await api({action:'create', title:'Separate the runtime fix from investigation', body:'The fix restores runtime behavior. The investigation provides supporting evidence; review both PRs.', labels:[]}, 'PR Purpose QA');
@@ -15,7 +16,7 @@ async page => {
     }
     return {project,number};
   });
-  const detailURL = `http://127.0.0.1:4782/#project=${encodeURIComponent(seed.project)}&issue=${seed.number}`;
+  const detailURL = `${origin}/#project=${encodeURIComponent(seed.project)}&issue=${seed.number}`;
   await page.goto(detailURL, {waitUntil:'domcontentloaded'});
   await page.waitForSelector('[data-pr-purpose]');
   check(await page.locator('[data-pr-purpose]').count() === 4, 'All four purposes appear on attached links');
@@ -71,16 +72,16 @@ async page => {
   await page.locator('[data-remove-pr$="/15067"]').click();
   await page.waitForFunction(() => document.querySelectorAll('[data-pr-purpose]').length === 4 && !document.querySelector('[data-pr-purpose$="/15067"]'));
   check(await page.locator('[data-pr-purpose]').count() === 4, 'Removal preserves other classified links');
-  await page.goto(`http://127.0.0.1:4782/#project=${encodeURIComponent(seed.project)}`, {waitUntil:'domcontentloaded'});
+  await page.goto(`${origin}/#project=${encodeURIComponent(seed.project)}`, {waitUntil:'domcontentloaded'});
   await page.waitForSelector('.issue-pr-link');
   const issueLinks = page.locator(`.issue-row[data-issue-number="${seed.number}"] .issue-pr-link`);
-  check((await issueLinks.allTextContents()).some(text => text.includes('Supporting evidence')), 'List keeps evidence visible with its purpose');
-  check(await issueLinks.count() === 4, 'Every attached PR remains visible in list');
+  check(await issueLinks.locator('[href$="/15006"], [href$="/15065"]').count() === 0, 'List hides supporting evidence and prerequisite PRs');
+  check(await issueLinks.count() === 2, 'List retains fix and unspecified PRs');
   const unspecifiedLink = page.locator(`.issue-row[data-issue-number="${seed.number}"] .issue-pr-link[href$="/15066"]`);
   check((await unspecifiedLink.textContent()).trim() === 'example/runtime#15066', 'Unspecified PR shows only its identifier');
   check(await unspecifiedLink.locator('.pr-purpose-label').count() === 0, 'Unspecified PR has no empty badge');
   check(!(await unspecifiedLink.getAttribute('aria-label')).includes('Unspecified') && !(await unspecifiedLink.getAttribute('title')).includes('Unspecified'), 'Unspecified purpose is omitted from accessible name and tooltip');
-  check(await issueLinks.locator('.pr-purpose-label').count() === 3, 'Classified PRs retain their badges');
+  check(await issueLinks.locator('.pr-purpose-label').count() === 1, 'Fix PR retains its badge');
   for (const [width,scheme] of [[1440,'light'],[1440,'dark'],[390,'light'],[390,'dark'],[320,'light'],[320,'dark']]) {
     await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:scheme});
     check(await page.evaluate(() => document.documentElement.scrollWidth<=innerWidth), `List ${width}px fits`);

@@ -474,6 +474,7 @@ function emptyState() {
 }
 function listPullRequests(issue) {
   return (issue.pull_requests || [])
+    .filter(pr => !["prerequisite", "supporting-evidence"].includes(pr.purpose))
     .map((pr) => {
       let title = pr.url;
       try {
