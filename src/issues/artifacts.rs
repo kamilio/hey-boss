@@ -1,7 +1,8 @@
 use super::{body, get_issue};
 use crate::artifacts::Operation;
+use crate::database::Connection;
 use crate::issues::{Error, Project, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::io::Read;
 
@@ -13,7 +14,7 @@ CREATE INDEX IF NOT EXISTS artifact_comment_document ON artifact_comments(projec
 CREATE TABLE IF NOT EXISTS artifact_links(project_id TEXT NOT NULL,artifact_id TEXT NOT NULL,kind TEXT NOT NULL,target TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(project_id,artifact_id,kind,target),FOREIGN KEY(project_id,artifact_id) REFERENCES artifacts(project_id,id));
 CREATE INDEX IF NOT EXISTS artifact_link_target ON artifact_links(project_id,kind,target);
 ";
-fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+fn row(r: &crate::database::Row<'_>) -> rusqlite::Result<Value> {
     Ok(
         json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"version":r.get::<_,i64>(3)?,"archived":r.get::<_,bool>(4)?,"created_at":r.get::<_,i64>(5)?,"updated_at":r.get::<_,i64>(6)?}),
     )

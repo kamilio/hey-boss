@@ -10,7 +10,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     )? {
         return Ok(());
     }
-    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS agent_steering(request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES worker_runs(id),scope TEXT NOT NULL,text TEXT NOT NULL,issue_body TEXT,state TEXT NOT NULL DEFAULT 'queued',error TEXT,created_at INTEGER NOT NULL);")?;
     if !tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_steering') WHERE name='issue_body')",

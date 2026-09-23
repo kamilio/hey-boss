@@ -110,6 +110,11 @@ impl App {
 }
 
 pub fn serve(config: Config) -> Result<()> {
+    let _database_owner = if config.host.is_none() {
+        crate::database::Owner::start(&super::database_path()?)?
+    } else {
+        None
+    };
     use std::os::unix::process::CommandExt;
     let mobile_origin = config
         .mobile_origin

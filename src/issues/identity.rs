@@ -245,8 +245,10 @@ pub fn creation_context(actor: &mut Actor) {
         })
         .flatten();
     if let Ok(path) = super::database_path()
-        && let Ok(db) =
-            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        && let Ok(db) = crate::database::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
     {
         let _ = db.busy_timeout(std::time::Duration::from_millis(100));
         actor.creation_run = super::provenance::source_run(&db, actor, super::worker::now())

@@ -1,6 +1,7 @@
 //! Human planning sessions and one detached, file-authoritative sync owner.
 use super::{Error, Operation, Project, Request, Result, Store};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::database::Connection;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};

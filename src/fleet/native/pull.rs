@@ -425,7 +425,7 @@ mod tests {
         );
         // Upgrade the isolated backup with the same schema as live stores.
         drop(crate::issues::Store::open(&path).unwrap());
-        let db = rusqlite::Connection::open(&path).unwrap();
+        let db = crate::database::Connection::open(&path).unwrap();
         let started = Instant::now();
         let payload = super::super::replica::snapshot(&db, "profile").unwrap();
         let cursor = payload["cursor"].clone();

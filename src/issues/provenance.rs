@@ -1,6 +1,7 @@
 //! Immutable creation context. Never infer a caller from a project's newest run.
 use super::{Actor, Result};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use crate::database::Connection;
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
@@ -17,7 +18,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     if missing.is_empty() {
         return Ok(());
     }
-    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     for table in missing {
         if !tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='origin')",

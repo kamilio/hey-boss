@@ -314,7 +314,7 @@ fn worker_snapshot(id: &Value, read: impl FnOnce(Value) -> Result<Value>) -> Res
 
 fn apply_signal_locked(
     ctx: &Context,
-    db: &rusqlite::Connection,
+    db: &crate::database::Connection,
     message: &Value,
     old: Option<&Value>,
     progress: &Value,

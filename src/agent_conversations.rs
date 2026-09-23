@@ -1,6 +1,7 @@
 //! Read-only, bounded Codex history. Scheduler snapshots are never chat history.
+use crate::database::Connection;
 use crate::issues::{Error, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};

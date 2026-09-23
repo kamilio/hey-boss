@@ -199,14 +199,14 @@ impl Store {
     pub(crate) fn fleet_workers(&self) -> Result<Vec<Value>> {
         retry_contention(Instant::now() + CONTENTION_BUDGET, || {
             let legacy_runtime: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get(0))?;
-            let tx = rusqlite::Transaction::new_unchecked(
-                &self.db,
-                if legacy_runtime {
-                    TransactionBehavior::Immediate
-                } else {
-                    TransactionBehavior::Deferred
-                },
-            )?;
+            let tx = if legacy_runtime {
+                crate::database::Transaction::new_unchecked(
+                    &self.db,
+                    TransactionBehavior::Immediate,
+                )?
+            } else {
+                self.db.read_transaction()?
+            };
             migrate_runtime(&tx)?;
             let mut workers = worker_overview(&tx)?;
             // Queue counts depend on these sets, not the worker ID or capacity.
@@ -329,8 +329,9 @@ fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project,
     // only that global prefix, even when many projects are configured.
     let mut selected = std::collections::BinaryHeap::<(i64, i64, String, i64, String)>::new();
     for project in projects {
-        let read_row =
-            |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?));
+        let read_row = |r: &crate::database::Row<'_>| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        };
         let rows = if c.tags.is_empty() {
             stmt.query_map(params![project, limit], read_row)?
         } else {
@@ -445,7 +446,7 @@ fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
     ];
     let parameters = &parameters[..stmt.parameter_count()];
     let (open, assigned, tag_filtered, eligible): (i64, i64, i64, i64) = stmt
-        .query_row(rusqlite::params_from_iter(parameters), |r| {
+        .query_row(crate::database::params_from_iter(parameters), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
     Ok(
@@ -490,7 +491,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
         .any(|w| w["id"].as_str() == selected.as_deref() && w["upgrading"] == true);
     let mut fleet: Value = db.query_row("SELECT role,node,(SELECT count(*) FROM fleet_outbox) FROM fleet_meta WHERE id=1", [], |r| Ok(json!({"role":r.get::<_,String>(0)?,"node":r.get::<_,String>(1)?,"pending_changes":r.get::<_,i64>(2)?})))?;
     fleet["supervisor_connection"] =
-        crate::fleet::worker_connection(fleet["role"].as_str().unwrap_or_default(), db);
+        crate::fleet::worker_connection_path(fleet["role"].as_str().unwrap_or_default(), db.path());
     // Older dashboards read this key; retain it during mixed-version upgrades.
     fleet["controller_connection"] = fleet["supervisor_connection"].clone();
     if fleet["role"] == crate::fleet::SUPERVISOR_ROLE {
@@ -821,9 +822,7 @@ pub(super) fn reserve(
     }
     // Empty/full queues never request a write lock. Discover checkouts in a WAL
     // snapshot, then run Git/filesystem/process validation before reserving.
-    let tx = store
-        .db
-        .transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let tx = store.db.read_transaction()?;
     let mut prepared = HashMap::new();
     for (id, text) in ready_workers(&tx, worker_id)? {
         let settings: Settings = serde_json::from_str(&text)?;
@@ -1113,7 +1112,7 @@ mod tests {
                 .db
                 .busy_timeout(std::time::Duration::from_millis(25))
                 .unwrap();
-            let mut other = rusqlite::Connection::open(&path).unwrap();
+            let mut other = crate::database::Connection::open(&path).unwrap();
             let tx = other
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .unwrap();

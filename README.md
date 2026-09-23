@@ -167,6 +167,10 @@ allocation, worker controls, and the mobile bridge. Restarting either fleet
 service leaves independently running workers and agents alive. Python remains
 required for the source upgrade and GitHub import utilities; the old fleet
 implementation is retained only as a regression-test reference.
+Issue database writes are coordinated by one owner inside an existing local
+service. CLI commands, web requests, workers and replication connect to it
+automatically; no database server setup is needed. Reads remain available while
+another transaction writes, and the service starts automatically when absent.
 Standalone workers still use their local queue. `worker --host HOST --directory
 /remote/checkout` runs a worker and its Codex agents on that host.
 **Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,

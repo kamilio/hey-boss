@@ -16,7 +16,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     if exists(db)? {
         return Ok(());
     }
-    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     if !exists(&tx)? {
         tx.execute_batch(SCHEMA)?;
     }

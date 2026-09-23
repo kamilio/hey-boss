@@ -1381,7 +1381,7 @@ mod tests {
                 .unwrap();
 
             store.db.busy_timeout(Duration::from_millis(25)).unwrap();
-            let mut other = rusqlite::Connection::open(&path).unwrap();
+            let mut other = crate::database::Connection::open(&path).unwrap();
             let tx = other
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .unwrap();

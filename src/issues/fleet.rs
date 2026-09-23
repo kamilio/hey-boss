@@ -1,6 +1,7 @@
 //! Additive fleet metadata. No network filesystem or schema-version coupling.
 use super::{Error, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::database::Connection;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 pub(crate) const INDEXES: &str = concat!(
@@ -177,7 +178,7 @@ pub(crate) fn allocation(
         );
     }
     Ok(
-        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"authoritative":role!="agent","connection":crate::fleet::worker_connection(&role, db),"summary":summary,"inspect_command":command,"recovery":recovery}),
+        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"authoritative":role!="agent","connection":crate::fleet::worker_connection_path(&role, db.path()),"summary":summary,"inspect_command":command,"recovery":recovery}),
     )
 }
 

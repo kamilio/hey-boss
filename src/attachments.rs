@@ -1,7 +1,8 @@
 //! Disk-backed project files, shared by issues, mindmap nodes and artifacts.
+use crate::database::Connection;
 use crate::issues::{Error, Project, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -154,7 +155,7 @@ fn target_id(db: &Connection, p: &Project, t: &Target, upload: bool) -> Result<S
     };
     id.ok_or_else(|| Error::new("not_found", "Attachment target not found in this project"))
 }
-fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+fn row(r: &crate::database::Row<'_>) -> rusqlite::Result<Value> {
     Ok(
         json!({"id":r.get::<_,String>(0)?,"target":{"kind":r.get::<_,String>(1)?,"id":r.get::<_,String>(2)?},"name":r.get::<_,String>(3)?,"size":r.get::<_,i64>(4)?,"sha256":r.get::<_,String>(5)?,"author":r.get::<_,String>(6)?,"created_at":r.get::<_,i64>(7)?}),
     )

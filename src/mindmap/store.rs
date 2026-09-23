@@ -1,7 +1,8 @@
 use super::{get_issue, resolve_project};
+use crate::database::Connection;
 use crate::issues::{Error, Project, Result};
 use crate::mindmap::{BodyMode, Operation, ReadBudget, project_body};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -13,7 +14,7 @@ CREATE INDEX IF NOT EXISTS mindmap_reference_lookup ON mindmap_nodes(kind,refere
 CREATE INDEX IF NOT EXISTS issue_pr_canonical_url ON issue_pull_requests(rtrim(url,'/'),project_id,issue_number);
 ";
 const COLUMNS: &str = "id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at,display_label";
-fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+fn row(r: &crate::database::Row<'_>) -> rusqlite::Result<Value> {
     let mut node = json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"alias":r.get::<_,Option<String>>(2)?,"parent_id":r.get::<_,Option<String>>(3)?,"position":r.get::<_,i64>(4)?,"kind":r.get::<_,String>(5)?,"title":r.get::<_,String>(6)?,"body":r.get::<_,String>(7)?,"reference":r.get::<_,Option<String>>(8)?,"reference_project":r.get::<_,Option<String>>(9)?,"created_at":r.get::<_,i64>(10)?,"updated_at":r.get::<_,i64>(11)?,"automatic":false,"available":true});
     node["display_label"] = json!(r.get::<_, Option<String>>(12)?);
     Ok(node)
@@ -42,7 +43,7 @@ fn projected_columns(mode: BodyMode) -> String {
             .join(",")
     )
 }
-fn projected_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+fn projected_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Value> {
     let mut node = row(r)?;
     node["has_body"] = json!(r.get::<_, bool>(13)?);
     Ok(node)

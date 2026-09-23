@@ -89,6 +89,11 @@ impl From<std::io::Error> for Error {
 }
 impl From<rusqlite::Error> for Error {
     fn from(value: rusqlite::Error) -> Self {
+        if let rusqlite::Error::ToSqlConversionFailure(source) = &value
+            && let Some(domain) = source.downcast_ref::<Self>()
+        {
+            return domain.clone();
+        }
         let code = match &value {
             rusqlite::Error::SqliteFailure(error, _)
                 if matches!(
