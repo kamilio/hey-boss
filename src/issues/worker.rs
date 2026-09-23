@@ -336,6 +336,7 @@ impl Worker {
         let mut store = retry_database_busy(|| Store::open(&path))?;
         // Never free a slot until the old owned process has actually stopped.
         retry_database_busy(|| recover(&mut store, &machine))?;
+        retry_database_busy(|| store.recover_chiefs(&machine, worker_id.as_deref()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let upgrading = Arc::new(AtomicBool::new(false));
         let reload = Arc::new(AtomicBool::new(false));
@@ -348,7 +349,7 @@ impl Worker {
             let drain_marker = path.with_added_extension("drain-for-update");
             let mut update_pending = false;
             let mut handles: Vec<(String, thread::JoinHandle<()>)> = vec![];
-            let mut chiefs: Vec<thread::JoinHandle<()>> = vec![];
+            let mut chiefs: Vec<super::chief::Task> = vec![];
             let mut last_chief = Instant::now() - Duration::from_secs(5);
             let mut abandoned = Vec::new();
             let mut last_recovery = Instant::now();
@@ -369,7 +370,15 @@ impl Worker {
                     }
                 }
                 handles = active;
-                chiefs.retain_mut(|handle| !handle.is_finished());
+                chiefs.retain_mut(|task| match task.poll(&store) {
+                    Ok(finished) => !finished,
+                    Err(error) => {
+                        crate::worker_tui::diagnostics::report(format_args!(
+                            "Chief result: {error}"
+                        ));
+                        true
+                    }
+                });
                 abandoned.retain(|id| {
                     if let Err(e) = finalize_abandoned(&mut store, &machine, id) {
                         crate::worker_tui::diagnostics::report(format_args!(
@@ -435,11 +444,11 @@ impl Worker {
                 if last_chief.elapsed() >= Duration::from_secs(5) {
                     match store.reserve_chief(&machine, worker_id.as_deref()) {
                         Ok(Some(job)) => {
-                            let path = path.clone();
-                            let stop = stopped.clone();
-                            chiefs.push(thread::spawn(move || {
-                                super::chief::execute(path, job, stop)
-                            }));
+                            chiefs.push(super::chief::Task::start(
+                                path.clone(),
+                                job,
+                                stopped.clone(),
+                            ));
                         }
                         Ok(None) => {}
                         Err(error) => crate::worker_tui::diagnostics::report(format_args!(
@@ -478,8 +487,11 @@ impl Worker {
                     crate::worker_tui::diagnostics::report(format_args!("Worker recovery: {e}"));
                 }
             }
-            for handle in chiefs {
-                let _ = handle.join();
+            for mut task in chiefs {
+                task.join();
+                if let Err(error) = retry_database_busy(|| task.poll(&store)) {
+                    crate::worker_tui::diagnostics::report(format_args!("Chief result: {error}"));
+                }
             }
         });
         Ok(Self {

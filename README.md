@@ -354,7 +354,10 @@ failures retain the conversation and retry on the next hourly pass.
 sets the project prompt. Use `--no-chief` to disable it; an active pass is stopped.
 Workers on the same machine share one Chief reservation per project. Separate
 authoritative issue stores keep their own Chief configuration and conversation.
-Stopping a worker stops its owned Chief too. Passes have a thirty-minute limit.
+Stopping a worker stops its owned Chief too. Chief startup failures and thread
+crashes are recorded through the supervising worker, which retains results until
+they are saved. Worker reloads recover abandoned passes without losing the saved
+conversation. Chief uses no issue slots and has no pass deadline.
 
 ## URL lookup
 

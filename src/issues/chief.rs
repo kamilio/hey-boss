@@ -84,6 +84,8 @@ pub(in crate::issues) struct Job {
     cwd: String,
     prompt: String,
     session: Option<String>,
+    started_at: i64,
+    owner_start: String,
 }
 
 impl Store {
@@ -159,13 +161,71 @@ impl Store {
                 cwd,
                 prompt,
                 session,
+                started_at: started,
+                owner_start: start,
             }));
         }
         Ok(None)
     }
     fn chief_update(&self, job: &Job, state: &str, summary: &str) -> Result<()> {
+        // A crashed launch thread may have left a child behind. Keep ownership
+        // until that exact child has stopped, and never finalize a newer pass.
+        let child: Option<(Option<u32>, Option<String>)> = self.db.query_row(
+            "SELECT pid,process_start FROM project_chiefs WHERE project_id=?1 AND machine=?2 AND started_at=?3 AND owner_pid=?4 AND owner_start=?5 AND state='running'",
+            params![job.project,job.machine,job.started_at,std::process::id(),job.owner_start],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let Some((pid, start)) = child else {
+            return Ok(());
+        };
+        if let (Some(pid), Some(start)) = (pid, start) {
+            worker::stop_group(pid, &start)?;
+            // The launch thread may have panicked before Child::wait. Reap an
+            // exited child so a zombie cannot keep the reservation alive.
+            unsafe {
+                libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG);
+            }
+            if crate::agents::process_identity(pid).as_deref() == Some(&start) {
+                return Err(Error::new(
+                    "worker_error",
+                    "Chief process is still alive; its result and reservation were retained",
+                ));
+            }
+        }
         let finished = worker::now();
-        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?3,state=?4,summary=?5,finished_at=?6 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,finished+INTERVAL_MS,state,summary,finished])?;
+        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?3,state=?4,summary=?5,finished_at=?6,last_event=?5 WHERE project_id=?1 AND machine=?2 AND started_at=?7 AND owner_pid=?8 AND owner_start=?9 AND state='running'",params![job.project,job.machine,finished+INTERVAL_MS,state,summary,finished,job.started_at,std::process::id(),job.owner_start])?;
+        Ok(())
+    }
+
+    /// Called before starting any launch threads, including after exec reloads
+    /// that preserve the worker PID. Other live workers retain their Chiefs.
+    pub(in crate::issues) fn recover_chiefs(
+        &self,
+        machine: &str,
+        worker_id: Option<&str>,
+    ) -> Result<()> {
+        let owner_start = crate::agents::process_identity(std::process::id())
+            .ok_or_else(|| Error::new("worker_error", "Cannot identify Chief owner"))?;
+        let mut stmt = self.db.prepare("SELECT project_id,cwd,session_id,started_at FROM project_chiefs c WHERE machine=?1 AND (worker_id=?2 OR ?2 IS NULL AND EXISTS(SELECT 1 FROM issue_workers w WHERE w.id=c.worker_id AND w.kind='managed')) AND owner_pid=?3 AND owner_start=?4 AND state='running'")?;
+        let jobs = stmt
+            .query_map(
+                params![machine, worker_id, std::process::id(), owner_start],
+                |r| {
+                    Ok(Job {
+                        project: r.get(0)?,
+                        machine: machine.into(),
+                        cwd: r.get(1)?,
+                        session: r.get(2)?,
+                        started_at: r.get(3)?,
+                        owner_start: owner_start.clone(),
+                        prompt: String::new(),
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for job in jobs {
+            self.chief_update(&job, "blocked", "Chief worker reloaded before saving its result; the saved conversation will resume on the next pass")?;
+        }
         Ok(())
     }
 }
@@ -224,19 +284,70 @@ fn event_activity(event: &Value) -> Option<String> {
     Some(message.chars().take(4000).collect())
 }
 
-pub(in crate::issues) fn execute(path: PathBuf, job: Job, stop: Arc<AtomicBool>) {
-    let result = worker::retry_database_busy(|| Store::open(&path)).and_then(|mut store| {
-        let outcome = run(&path, &mut store, &job, &stop);
-        let (state, summary) = match &outcome {
+/// The scheduler owns completion, using its already-open store even when the
+/// launch cannot open another connection. A failed write retains the result.
+pub(in crate::issues) struct Task {
+    job: Job,
+    handle: Option<thread::JoinHandle<Result<String>>>,
+    outcome: Option<Result<String>>,
+}
+
+impl Task {
+    pub(in crate::issues) fn start(path: PathBuf, job: Job, stop: Arc<AtomicBool>) -> Self {
+        let launched = job.clone();
+        match thread::Builder::new().spawn(move || execute(path, launched, stop)) {
+            Ok(handle) => Self {
+                job,
+                handle: Some(handle),
+                outcome: None,
+            },
+            Err(error) => Self {
+                job,
+                handle: None,
+                outcome: Some(Err(error.into())),
+            },
+        }
+    }
+
+    pub(in crate::issues) fn join(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.outcome = Some(handle.join().unwrap_or_else(|panic| {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                Err(Error::new(
+                    "worker_error",
+                    format!("Chief launch thread panicked: {message}"),
+                ))
+            }));
+        }
+    }
+
+    pub(in crate::issues) fn poll(&mut self, store: &Store) -> Result<bool> {
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            self.join();
+        }
+        let Some(outcome) = &self.outcome else {
+            return Ok(false);
+        };
+        let (state, summary) = match outcome {
             Ok(summary) => ("idle", summary.as_str()),
             Err(error) => ("blocked", error.message.as_str()),
         };
-        worker::retry_database_busy(|| store.chief_update(&job, state, summary))?;
-        outcome
-    });
-    if let Err(error) = result {
-        crate::worker_tui::diagnostics::report(format_args!("Chief {}: {error}", job.project));
+        store.chief_update(&self.job, state, summary)?;
+        Ok(true)
     }
+}
+
+fn execute(path: PathBuf, job: Job, stop: Arc<AtomicBool>) -> Result<String> {
+    let mut store = worker::retry_database_busy(|| Store::open(&path))?;
+    run(&path, &mut store, &job, &stop)
 }
 
 fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<String> {
@@ -404,6 +515,198 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn launch_fixture() -> (PathBuf, Store, Job) {
+        let root =
+            std::env::temp_dir().join(format!("hb-chief-launch-{}", worker::random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let mut store = Store::open(&root.join("issues.db")).unwrap();
+        store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY,owner_pid INTEGER,owner_start TEXT);
+            INSERT INTO projects(id,name,next_number) VALUES('named:Chief','Chief',1);
+            INSERT INTO project_settings(project_id,prompt,version,chief_enabled) VALUES('named:Chief','Work',1,1);").unwrap();
+        let config = serde_json::to_string(&worker::Settings {
+            enabled: true,
+            projects: vec!["named:Chief".into()],
+            directory: root.to_string_lossy().into(),
+            ..Default::default()
+        })
+        .unwrap();
+        store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('owner','cli',?1,1,0)", [&config]).unwrap();
+        let job = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        store
+            .db
+            .execute("UPDATE project_chiefs SET session_id='saved-thread'", [])
+            .unwrap();
+        (root, store, job)
+    }
+
+    #[test]
+    fn chief_database_open_failure_does_not_leave_a_live_reservation() {
+        let (root, store, job) = launch_fixture();
+        // An installer upgrades the schema while the existing worker stays alive.
+        store.db.pragma_update(None, "user_version", 999).unwrap();
+        let mut task = Task::start(
+            root.join("issues.db"),
+            job,
+            Arc::new(AtomicBool::new(false)),
+        );
+        task.join();
+        assert!(task.poll(&store).unwrap());
+        let chiefs = status(&store.db, Some("owner")).unwrap();
+        assert_eq!(chiefs[0]["state"], "blocked");
+        assert!(
+            chiefs[0]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("Incompatible issue database")
+        );
+        assert!(chiefs[0]["finished_at"].is_i64());
+        assert_eq!(chiefs[0]["session_id"], "saved-thread");
+        assert!(
+            store
+                .db
+                .query_row(
+                    "SELECT owner_pid IS NULL AND pid IS NULL FROM project_chiefs",
+                    [],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chief_panics_and_failed_result_writes_are_supervised() {
+        let (root, mut store, job) = launch_fixture();
+        let handle = thread::spawn(|| panic!("synthetic launch failure"));
+        let mut task = Task {
+            job,
+            handle: Some(handle),
+            outcome: None,
+        };
+        task.join();
+        store.db.execute_batch("CREATE TRIGGER fail_chief_result BEFORE UPDATE OF state ON project_chiefs BEGIN SELECT RAISE(ABORT,'result write unavailable'); END;").unwrap();
+        assert!(task.poll(&store).is_err());
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["state"],
+            "running"
+        );
+        store
+            .db
+            .execute_batch("DROP TRIGGER fail_chief_result")
+            .unwrap();
+        assert!(task.poll(&store).unwrap());
+        let chief = &status(&store.db, Some("owner")).unwrap()[0];
+        assert_eq!(chief["state"], "blocked");
+        assert!(
+            chief["summary"]
+                .as_str()
+                .unwrap()
+                .contains("synthetic launch failure")
+        );
+        assert_eq!(chief["last_event"], chief["summary"]);
+        // A delayed completion must not overwrite the next pass.
+        store
+            .db
+            .execute("UPDATE project_chiefs SET next_at=0", [])
+            .unwrap();
+        let replacement = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE project_chiefs SET started_at=?1",
+                [replacement.started_at.max(task.job.started_at) + 1],
+            )
+            .unwrap();
+        assert!(task.poll(&store).unwrap());
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["state"],
+            "running"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chief_reload_recovers_only_its_own_abandoned_attempts() {
+        let (root, store, _job) = launch_fixture();
+        store
+            .recover_chiefs("unit", Some("another-worker"))
+            .unwrap();
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["state"],
+            "running"
+        );
+        store
+            .recover_chiefs("another-machine", Some("owner"))
+            .unwrap();
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["state"],
+            "running"
+        );
+        store.recover_chiefs("unit", Some("owner")).unwrap();
+        let chief = &status(&store.db, Some("owner")).unwrap()[0];
+        assert_eq!(chief["state"], "blocked");
+        assert_eq!(chief["session_id"], "saved-thread");
+        assert!(chief["finished_at"].is_i64());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chief_panic_stops_and_reaps_its_child_before_releasing_ownership() {
+        let (root, store, job) = launch_fixture();
+        let (send, receive) = mpsc::sync_channel(1);
+        let handle = thread::spawn(move || {
+            let child = Command::new("sleep")
+                .arg("120")
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            send.send((pid, crate::agents::process_identity(pid).unwrap()))
+                .unwrap();
+            panic!("synthetic failure after spawning Codex");
+        });
+        let (pid, start) = receive.recv().unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE project_chiefs SET pid=?1,process_start=?2",
+                params![pid, start],
+            )
+            .unwrap();
+        let mut task = Task {
+            job,
+            handle: Some(handle),
+            outcome: None,
+        };
+        task.join();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let saved = loop {
+            match task.poll(&store) {
+                Ok(done) => break done,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+                Err(error) => panic!("Chief result was not saved: {error}"),
+            }
+        };
+        assert!(saved);
+        assert!(crate::agents::process_identity(pid).is_none());
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["state"],
+            "blocked"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn chief_status_reads_only_the_selected_workers_projects() {
         let root =
