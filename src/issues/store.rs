@@ -705,20 +705,36 @@ impl Store {
                 .mode(0o700)
                 .create(parent)?;
         }
-        // Existing file permissions are preserved; fresh databases and their
-        // SQLite sidecars are private to the user.
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        if !file.metadata()?.is_file() {
+        // Never open/close a raw descriptor for a live database: POSIX close()
+        // releases this process's SQLite locks, including other connections'.
+        // Publish a closed private empty inode only when the database is absent.
+        if matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            let staged = path.with_extension(format!("create-{}", super::worker::random_id()?));
+            drop(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&staged)?,
+            );
+            let publish = fs::hard_link(&staged, path);
+            fs::remove_file(&staged)?;
+            match publish {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if !fs::symlink_metadata(path)?.is_file() {
             return Err(Error::invalid("Issue database must be a regular file"));
         }
-        let mut db = Connection::open(path)?;
+        let mut db = Connection::open_with_flags(
+            path.canonicalize()?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         db.busy_timeout(Duration::from_secs(2))?;
         db.pragma_update(None, "foreign_keys", true)?;
         let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
