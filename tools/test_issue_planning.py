@@ -156,7 +156,8 @@ class Planning(unittest.TestCase):
         code, out = self.human(['edit', '1', '--interactive'])
         self.assertEqual(self.db.read_bytes()[:16], b'SQLite format 3\x00')
         self.assertNotEqual(code, 0, out)
-        self.assertIn('must not alias', out)
+        self.assertIn('must not have hard links', out)
+        (self.checkout/'plan.hey-boss-sync-paused').unlink()
         issue = self.cli('view', '1')['issue']
         self.assertTrue(issue['draft'])
         self.assertEqual((issue['title'], issue['body']), ('Safe title', 'Safe body'))
