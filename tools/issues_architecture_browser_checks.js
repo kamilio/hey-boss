@@ -9,7 +9,7 @@ async page => {
   const {code} = await (await page.request.get(mobile + '/fixture/pairing')).json();
   check((await page.request.post(mobile + '/api/pair', {data: {code}})).ok(), 'Paired fixture authenticated');
   try {
-    for (const [mode, base] of [['desktop', 'http://127.0.0.1:48122/'], ['paired', mobile + '/issue-web/index.html']]) {
+    for (const [mode, base] of [['desktop', 'http://127.0.0.1:48122/'], ['paired', mobile + '/issues']]) {
       for (const number of [1, 2, 3, 4, 5, 6, 8]) {
         await page.goto(base + '?qa=' + Date.now() + '#project=named%3AIssue%20Design%20QA&issue=' + number);
         await page.locator('.issue-description').waitFor();
