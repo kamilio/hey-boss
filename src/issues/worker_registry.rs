@@ -793,11 +793,15 @@ pub(super) fn reserve(
             let issue = json!(get_issue(&tx, &project.id, number, false)?);
             // Thread rollouts and unfinished checkout edits belong to this host
             // and directory. A completed latest attempt starts fresh when reopened.
+            // A rejected startup schema cannot be recovered by resuming the same
+            // session again. Its server has stopped before worker_finish; retain
+            // its history and checkout, but let the next attempt start fresh.
             let resume_session: Option<String> = tx.query_row(
                 "SELECT coalesce(session_id,json_extract(job,'$.resume_session')) FROM worker_runs
                  WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
                   ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
-                 AND state!='completed' AND json_extract(job,'$.config.cwd')=?4",
+                 AND state!='completed' AND json_extract(job,'$.config.cwd')=?4
+                 AND NOT (state='failed' AND summary LIKE 'Codex turn/start:%ActiveTurnOutputSchemaMismatch%')",
                 params![project.id, number, machine, config.cwd], |r| r.get::<_, Option<String>>(0),
             ).optional()?.flatten();
             let job = Job {
