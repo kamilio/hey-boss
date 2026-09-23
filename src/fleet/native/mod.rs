@@ -85,49 +85,6 @@ fn run_inner(action: &super::Action) -> Result<()> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::context::tests::{assert_sqlite_locked, test_context};
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn setup_source_marker_aliases_cannot_truncate_sqlite_files() {
-        let (root, ctx, store) = test_context();
-        let source = root.join("source 🌍");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("Cargo.toml"), "[package]\nname='test'\n").unwrap();
-        let marker = ctx.state.join("upgrade-source");
-        for suffix in ["", "-wal", "-shm"] {
-            for symbolic in [false, true] {
-                let target = root.join(format!("issues.db{suffix}"));
-                if symbolic {
-                    std::os::unix::fs::symlink(&target, &marker).unwrap();
-                } else {
-                    fs::hard_link(&target, &marker).unwrap();
-                }
-                let before = fs::metadata(&target).unwrap().len();
-                let result = save_upgrade_source(&ctx, &source);
-                assert_eq!(
-                    fs::metadata(&target).unwrap().len(),
-                    before,
-                    "Source marker truncated SQLite file {suffix}"
-                );
-                assert!(result.unwrap_err().to_string().contains("must not alias"));
-                assert_sqlite_locked(&ctx.path);
-                fs::remove_file(&marker).unwrap();
-            }
-        }
-        save_upgrade_source(&ctx, &source).unwrap();
-        assert_eq!(
-            fs::read_to_string(marker).unwrap(),
-            format!("{}\n", source.canonicalize().unwrap().display())
-        );
-        assert_sqlite_locked(&ctx.path);
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-}
 fn local_request(ctx: &Context, value: Value) -> Result<Value> {
     let mut connection = UnixStream::connect(ctx.state.join("fleet.sock"))?;
     connection.set_read_timeout(Some(Duration::from_secs(15)))?;
@@ -198,5 +155,49 @@ pub(super) fn replica_request(db: &rusqlite::Connection, request: &Value) -> Res
             Ok(Value::Null)
         }
         _ => Err(replica::invalid("Unknown replica operation")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context::tests::{assert_sqlite_locked, test_context};
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn setup_source_marker_aliases_cannot_truncate_sqlite_files() {
+        let (root, ctx, store) = test_context();
+        let source = root.join("source 🌍");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("Cargo.toml"), "[package]\nname='test'\n").unwrap();
+        let marker = ctx.state.join("upgrade-source");
+        for suffix in ["", "-wal", "-shm"] {
+            for symbolic in [false, true] {
+                let target = root.join(format!("issues.db{suffix}"));
+                if symbolic {
+                    std::os::unix::fs::symlink(&target, &marker).unwrap();
+                } else {
+                    fs::hard_link(&target, &marker).unwrap();
+                }
+                let before = fs::metadata(&target).unwrap().len();
+                let result = save_upgrade_source(&ctx, &source);
+                assert_eq!(
+                    fs::metadata(&target).unwrap().len(),
+                    before,
+                    "Source marker truncated SQLite file {suffix}"
+                );
+                assert!(result.unwrap_err().to_string().contains("must not alias"));
+                assert_sqlite_locked(&ctx.path);
+                fs::remove_file(&marker).unwrap();
+            }
+        }
+        save_upgrade_source(&ctx, &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(marker).unwrap(),
+            format!("{}\n", source.canonicalize().unwrap().display())
+        );
+        assert_sqlite_locked(&ctx.path);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }
