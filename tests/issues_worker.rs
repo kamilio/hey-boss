@@ -907,6 +907,149 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
 }
 
 #[test]
+fn incompatible_startup_schema_uses_a_fresh_session_without_losing_history() {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, state, summary, fresh) in [
+        (
+            "schema-recovery",
+            "failed",
+            "Codex turn/start: \"failed to submit turn input: ActiveTurnOutputSchemaMismatch\"",
+            true,
+        ),
+        (
+            "schema-other-method",
+            "failed",
+            "Codex turn/steer: ActiveTurnOutputSchemaMismatch",
+            false,
+        ),
+        (
+            "schema-report",
+            "blocked",
+            "Codex turn/start: ActiveTurnOutputSchemaMismatch",
+            false,
+        ),
+        (
+            "schema-other-failure",
+            "failed",
+            "Codex turn/start: locked by another writer",
+            false,
+        ),
+    ] {
+        let f = Fixture::new(name);
+        f.setup(&[]);
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        let machine: String = db
+            .query_row(
+                "SELECT json_extract(metadata,'$.machine') FROM agents LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let job = serde_json::json!({"config":{"cwd":f.root.canonicalize().unwrap()}}).to_string();
+        for (id, session, finished) in [
+            ("older", "older-session", 1),
+            ("previous", "saved-session", 2),
+        ] {
+            db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,session_id,retry_allowed,summary) VALUES(?1,(SELECT id FROM projects LIMIT 1),1,?2,'old-agent',?3,1,'old-start',?4,0,0,?5,?6,1,?7)", rusqlite::params![id, job, if id == "older" {"cancelled"} else {state}, machine, finished, session, if id == "older" {"Older interrupted attempt"} else {summary}]).unwrap();
+        }
+        fs::write(
+            f.root.join("proof.txt"),
+            "Existing implementation stays intact",
+        )
+        .unwrap();
+        fs::write(f.root.join("fresh.txt"), fresh.to_string()).unwrap();
+        let script = f.root.join("codex.sh");
+        fs::write(&script, r#"#!/usr/bin/env node
+const fs = require('node:fs');
+const {spawnSync} = require('node:child_process');
+const readline = require('node:readline');
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+let session;
+readline.createInterface({input:process.stdin}).on('line', line => {
+    fs.appendFileSync('protocol.jsonl', line + '\n');
+    const request = JSON.parse(line);
+    if (request.method === 'initialize') send({id:request.id,result:{}});
+    if (request.method === 'thread/start' || request.method === 'thread/resume') {
+        session = request.params.threadId || 'fresh-session';
+        send({id:request.id,result:{thread:{id:session,turns:[]}}});
+    }
+    if (request.method === 'turn/start') {
+        if (fs.readFileSync('fresh.txt','utf8') === 'true' && session !== 'fresh-session') {
+            send({id:request.id,error:{code:-32600,message:'failed to submit turn input: ActiveTurnOutputSchemaMismatch'}});
+            return;
+        }
+        const claim = spawnSync(process.env.HEY_BOSS_TEST_CLI, ['issue','--project','Worker fixture','--agent',`codex:${session}`,'claim','1','--json']);
+        if (claim.status !== 0) throw new Error(claim.stderr.toString());
+        send({id:request.id,result:{turn:{id:'turn'}}});
+        send({method:'item/completed',params:{threadId:session,item:{type:'agentMessage',text:JSON.stringify({status:'completed',summary:'Recovery verified'})}}});
+        send({method:'turn/completed',params:{threadId:session,turn:{id:'turn',status:'completed'}}});
+    }
+});
+"#).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut worker = f.worker();
+        let finished =
+            f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["finished_at"].is_number());
+        assert_eq!(finished["runs"][0]["state"], "completed", "{finished}");
+        assert_eq!(
+            finished["runs"][0]["session_id"],
+            if fresh {
+                "fresh-session"
+            } else {
+                "saved-session"
+            },
+            "{name}"
+        );
+        let protocol = f.transcript();
+        let thread = protocol
+            .iter()
+            .find(|v| matches!(v["method"].as_str(), Some("thread/start" | "thread/resume")))
+            .unwrap();
+        assert_eq!(
+            thread["method"],
+            if fresh {
+                "thread/start"
+            } else {
+                "thread/resume"
+            }
+        );
+        let turn = protocol
+            .iter()
+            .find(|v| v["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(
+            turn["params"]["outputSchema"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            turn["params"]["outputSchema"]["required"],
+            serde_json::json!(["status", "summary"])
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT session_id,summary FROM worker_runs WHERE id='previous'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("saved-session".into(), summary.into())
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("proof.txt")).unwrap(),
+            "Existing implementation stays intact"
+        );
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+        let pid = finished["runs"][0]["pid"].as_u64().unwrap() as i32;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "Owned server must stop before a run finishes"
+        );
+        worker.stop();
+    }
+}
+
+#[test]
 fn a_completed_session_is_not_resumed_when_the_issue_is_reopened() {
     let f = Fixture::new("completed-session-reopen");
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
