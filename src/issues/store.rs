@@ -32,6 +32,8 @@ mod workers;
 mod artifacts;
 #[path = "batch.rs"]
 mod batch;
+#[path = "pr_monitor.rs"]
+mod pr_monitor;
 #[path = "project_names.rs"]
 mod project_names;
 #[path = "status.rs"]
@@ -99,6 +101,18 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     (
+        "global_settings",
+        "auto_close_merged_prs",
+        "INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "issue_pull_requests",
+        "status",
+        "TEXT NOT NULL DEFAULT 'unknown' CHECK(status IN ('unknown','open','closed','merged'))",
+    ),
+    ("issue_pull_requests", "checked_at", "INTEGER"),
+    ("issue_pull_requests", "error", "TEXT"),
+    (
         "issue_pull_requests",
         "purpose",
         "TEXT NOT NULL DEFAULT 'unspecified' CHECK(purpose IN ('unspecified','fix','prerequisite','supporting-evidence'))",
@@ -139,6 +153,7 @@ fn missing_additive_columns(
 ) -> Result<Vec<(&'static str, &'static str, &'static str)>> {
     let mut missing = Vec::new();
     for table in [
+        "global_settings",
         "issues",
         "project_settings",
         "mindmap_nodes",

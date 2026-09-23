@@ -5,38 +5,49 @@ use std::collections::HashMap;
 pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
 
-pub(super) fn stale_pr_capture(db: &Connection) -> Result<bool> {
-    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name IN ('fleet_capture_issue_pull_requests_INSERT','fleet_capture_issue_pull_requests_UPDATE','fleet_capture_issue_pull_requests_DELETE') AND (instr(sql,'''purpose'',')=0 OR (name='fleet_capture_issue_pull_requests_UPDATE' AND instr(sql,'OLD.\"purpose\" IS NEW.\"purpose\"')=0)))", [], |r| r.get(0))?)
+const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
+    (
+        "issue_pull_requests",
+        "project_id",
+        &["purpose", "status", "checked_at", "error"],
+    ),
+    ("global_settings", "id", &["auto_close_merged_prs"]),
+];
+fn capture_repairs(db: &Connection) -> Result<Vec<(String, String)>> {
+    let mut repairs = Vec::new();
+    for (table, key, columns) in CAPTURE_COLUMNS {
+        let triggers = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?1 AND name LIKE 'fleet_capture_%'")?
+            .query_map([table],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (name, original) in triggers {
+            let mut sql = original.clone();
+            for column in *columns {
+                if !sql.contains(&format!("'{column}',")) {
+                    for prefix in ["NEW", "OLD"] {
+                        sql = sql.replace(
+                            &format!("'{key}',{prefix}."),
+                            &format!("'{column}',{prefix}.\"{column}\",'{key}',{prefix}."),
+                        );
+                    }
+                }
+                let equal = format!("OLD.\"{column}\" IS NEW.\"{column}\"");
+                if name.ends_with("_UPDATE") && !sql.contains(&equal) {
+                    sql = sql.replace(" AND NOT (", &format!(" AND NOT ({equal} AND "));
+                }
+            }
+            if sql != original {
+                repairs.push((name, sql));
+            }
+        }
+    }
+    Ok(repairs)
 }
-
-// Run inside the additive migration's write transaction. Existing fleet
-// triggers retain their fixed column lists across ALTER TABLE and restart.
+pub(super) fn stale_pr_capture(db: &Connection) -> Result<bool> {
+    Ok(!capture_repairs(db)?.is_empty())
+}
+// Additive columns must also reach existing fleet capture triggers.
 pub(super) fn repair_pr_capture(db: &Connection) -> Result<()> {
-    let triggers = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('fleet_capture_issue_pull_requests_INSERT','fleet_capture_issue_pull_requests_UPDATE','fleet_capture_issue_pull_requests_DELETE')")?
-        .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (name, original) in triggers {
-        let mut sql = original.clone();
-        if !sql.contains("'purpose',") {
-            sql = sql
-                .replace(
-                    "json_object('project_id',NEW.",
-                    "json_object('purpose',NEW.\"purpose\",'project_id',NEW.",
-                )
-                .replace(
-                    "json_object('project_id',OLD.",
-                    "json_object('purpose',OLD.\"purpose\",'project_id',OLD.",
-                );
-        }
-        if name.ends_with("_UPDATE") && !sql.contains("OLD.\"purpose\" IS NEW.\"purpose\"") {
-            sql = sql.replace(
-                " AND NOT (",
-                " AND NOT (OLD.\"purpose\" IS NEW.\"purpose\" AND ",
-            );
-        }
-        if sql != original {
-            db.execute_batch(&format!("DROP TRIGGER {name}; {sql}"))?;
-        }
+    for (name, sql) in capture_repairs(db)? {
+        db.execute_batch(&format!("DROP TRIGGER {name}; {sql}"))?;
     }
     Ok(())
 }
@@ -750,8 +761,8 @@ pub(super) fn execute(
     }
 }
 pub(super) fn pull_requests(db: &Connection, p: &str, n: i64) -> Result<Vec<Value>> {
-    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
-    Ok(stmt.query_map(params![p,n],|r|Ok(json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"purpose":r.get::<_,String>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
+    Ok(stmt.query_map(params![p,n],|r|Ok(json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"purpose":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"checked_at":r.get::<_,Option<i64>>(5)?,"error":r.get::<_,Option<String>>(6)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 pub(super) fn claim_lock(
     db: &Connection,

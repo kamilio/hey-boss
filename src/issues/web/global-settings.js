@@ -1,6 +1,7 @@
 "use strict";
 let globalSettingsVersion = null,
   globalSettingsOriginal = null,
+  globalAutoCloseOriginal = true,
   globalSettingsSaving = false,
   globalSettingsSequence = 0,
   globalSettingsHost = null,
@@ -51,7 +52,7 @@ function initGlobalSettings() {
   function globalSettingsChanged() {
     const changed =
       globalSettingsOriginal !== null &&
-      $("#global-boss-name").value.trim() !== globalSettingsOriginal;
+      ($("#global-boss-name").value.trim() !== globalSettingsOriginal || $("#global-auto-close-prs").checked !== globalAutoCloseOriginal);
     $("#global-settings-submit").disabled = globalSettingsSaving || !changed;
     $("#global-settings-state").textContent = changed ? "Unsaved changes" : "";
   }
@@ -69,6 +70,7 @@ function initGlobalSettings() {
     globalSettingsHost = model.route.host || null;
     $("#global-boss-name").value = model.boss.name;
     $("#global-boss-name").disabled = true;
+    $("#global-auto-close-prs").disabled = true;
     $("#global-settings-submit").disabled = true;
     $("#global-settings-error").hidden = true;
     $("#global-settings-reload").hidden = true;
@@ -84,8 +86,11 @@ function initGlobalSettings() {
       if (sequence !== globalSettingsSequence) return;
       globalSettingsVersion = value.version;
       globalSettingsOriginal = value.boss_name;
+      globalAutoCloseOriginal = value.auto_close_merged_prs ?? true;
       $("#global-boss-name").value = value.boss_name;
+      $("#global-auto-close-prs").checked = globalAutoCloseOriginal;
       $("#global-boss-name").disabled = false;
+      $("#global-auto-close-prs").disabled = false;
       globalSettingsChanged();
       $("#global-boss-name").focus();
     } catch (error) {
@@ -95,6 +100,7 @@ function initGlobalSettings() {
       $("#global-settings-error").hidden = false;
     }
   };
+  $("#global-auto-close-prs").onchange = globalSettingsChanged;
   $("#global-boss-name").oninput = globalSettingsChanged;
   for (const selector of ["#global-settings-close", "#global-settings-cancel"])
     $(selector).onclick = closeGlobalSettings;
@@ -117,6 +123,7 @@ function initGlobalSettings() {
       if (sequence !== globalSettingsSequence) return;
       globalSettingsVersion = value.version;
       globalSettingsOriginal = value.boss_name;
+      globalAutoCloseOriginal = value.auto_close_merged_prs ?? true;
       globalSettingsPending = null;
       $("#global-settings-error").textContent =
         `Current name: ${value.boss_name}. Your draft is preserved.`;
@@ -133,11 +140,13 @@ function initGlobalSettings() {
     if (globalSettingsSaving || globalSettingsVersion === null) return;
     globalSettingsSaving = true;
     $("#global-boss-name").disabled = true;
+    $("#global-auto-close-prs").disabled = true;
     $("#global-settings-submit").disabled = true;
     $("#global-settings-state").textContent = "Saving…";
     try {
       const operation = {
         action: "configure_global",
+        auto_close_merged_prs: $("#global-auto-close-prs").checked,
         boss_name: $("#global-boss-name").value.trim(),
         if_version: globalSettingsVersion,
       };
@@ -153,6 +162,7 @@ function initGlobalSettings() {
       globalSettingsPending = null;
       globalSettingsVersion = value.version;
       globalSettingsOriginal = value.boss_name;
+      globalAutoCloseOriginal = value.auto_close_merged_prs ?? true;
       detailCache.clear();
       globalSettingsSaving = false;
       closeGlobalSettings();
@@ -166,6 +176,7 @@ function initGlobalSettings() {
     } finally {
       globalSettingsSaving = false;
       $("#global-boss-name").disabled = false;
+      $("#global-auto-close-prs").disabled = false;
       globalSettingsChanged();
     }
   };

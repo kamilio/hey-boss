@@ -1302,6 +1302,8 @@ pub(super) fn run(ctx: Context) -> Result<()> {
     std::thread::spawn(move || maintenance.maintenance());
     let mobile = ctx.clone();
     std::thread::spawn(move || super::mobile::run(mobile));
+    let monitor = ctx.clone();
+    std::thread::spawn(move || super::pr_monitor::run(monitor));
     while !ctx.stopped() {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -1584,6 +1586,7 @@ mod tests {
             "build.rs",
             "src/file",
             "skills/hey-boss/file",
+            "packages/hey-gh/file",
             "tools/upgrade_hey_boss.py",
             "tools/drain_github_issues.py",
             "hey_boss_daemon.swift",
