@@ -300,8 +300,9 @@ impl Store {
     }
 }
 // Callers constrain projects separately so their queries can use project indexes.
-const ELIGIBLE:&str="i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
- AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))";
+const ELIGIBLE: &str =
+    "i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL";
+const TAG_FILTER: &str = "AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))";
 // Finished attempts do not permanently exclude unfinished issues. Approval holds
 // still need explicit retry; other failures back off from 30 seconds to 5 minutes.
 pub(super) const PICKUP_READY: &str = "
@@ -320,15 +321,22 @@ fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project,
     } else {
         "i.project_id=?1"
     };
-    let mut stmt=db.prepare(&format!("SELECT i.sort_order,i.created_at,p.id,i.number,p.name FROM issues i JOIN projects p ON p.id=i.project_id WHERE {project_filter} AND {ELIGIBLE} {PICKUP_READY} ORDER BY i.sort_order,i.created_at,i.project_id,i.number LIMIT ?3"))?;
+    let tag_filter = if c.tags.is_empty() { "" } else { TAG_FILTER };
+    let limit_parameter = if c.tags.is_empty() { "?2" } else { "?3" };
+    let mut stmt=db.prepare(&format!("SELECT i.sort_order,i.created_at,p.id,i.number,p.name FROM issues i JOIN projects p ON p.id=i.project_id WHERE {project_filter} AND {ELIGIBLE} {tag_filter} {PICKUP_READY} ORDER BY i.sort_order,i.created_at,i.project_id,i.number LIMIT {limit_parameter}"))?;
     let tags = serde_json::to_string(&c.tags)?;
     // Each project's first N candidates suffice for the global first N. Keep
     // only that global prefix, even when many projects are configured.
     let mut selected = std::collections::BinaryHeap::<(i64, i64, String, i64, String)>::new();
     for project in projects {
-        for row in stmt.query_map(params![project, tags, limit], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })? {
+        let read_row =
+            |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?));
+        let rows = if c.tags.is_empty() {
+            stmt.query_map(params![project, limit], read_row)?
+        } else {
+            stmt.query_map(params![project, tags, limit], read_row)?
+        };
+        for row in rows {
             selected.push(row?);
             if limit >= 0 && selected.len() > limit as usize {
                 selected.pop();
@@ -412,22 +420,34 @@ fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
     } else {
         "i.project_id IN(SELECT value FROM json_each(?1))"
     };
-    let (open, assigned, tag_filtered, eligible): (i64, i64, i64, i64) = db.query_row(
-        &format!(
-            "SELECT count(*),
+    let tag_filter = if config.tags.is_empty() {
+        ""
+    } else {
+        TAG_FILTER
+    };
+    let tag_filtered = if config.tags.is_empty() {
+        "0"
+    } else {
+        "coalesce(sum(i.assignee IS NULL AND EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))),0)"
+    };
+    let mut stmt = db.prepare(&format!(
+        "SELECT count(*),
              coalesce(sum(i.assignee IS NOT NULL),0),
-             coalesce(sum(i.assignee IS NULL AND EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))),0),
-             coalesce(sum(CASE WHEN {ELIGIBLE} {PICKUP_READY} THEN 1 ELSE 0 END),0)
+             {tag_filtered},
+             coalesce(sum(CASE WHEN i.assignee IS NULL {tag_filter} {PICKUP_READY} THEN 1 ELSE 0 END),0)
              FROM issues i JOIN projects p ON p.id=i.project_id
              WHERE i.state='open' AND i.deleted_at IS NULL AND p.hidden_at IS NULL
              AND {project_filter}"
-        ),
-        params![
-            serde_json::to_string(&config.projects)?,
-            serde_json::to_string(&config.tags)?
-        ],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    )?;
+    ))?;
+    let parameters = [
+        serde_json::to_string(&config.projects)?,
+        serde_json::to_string(&config.tags)?,
+    ];
+    let parameters = &parameters[..stmt.parameter_count()];
+    let (open, assigned, tag_filtered, eligible): (i64, i64, i64, i64) = stmt
+        .query_row(rusqlite::params_from_iter(parameters), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
     Ok(
         json!({"open":open,"assigned":assigned,"tag_filtered":tag_filtered,"waiting":open-assigned-tag_filtered-eligible,"eligible":eligible}),
     )
@@ -1432,6 +1452,93 @@ mod tests {
                     "next poll must refresh counts"
                 );
             }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn untagged_queue_counts_preserve_lifecycle_filters_without_label_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+            unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1000, Ordering::Relaxed);
+            0
+        }
+        let root = std::env::temp_dir().join(format!("hb-untagged-queue-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number,hidden_at) VALUES('named:Queue','Queue',10001,NULL),('named:Hidden','Hidden',2,1);
+                INSERT INTO agents VALUES('agent','{}',0);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,draft,assignee,deleted_at)
+                SELECT 'named:Queue',x,'Task','',CASE WHEN x=3 THEN 'closed' ELSE 'open' END,'agent',0,0,1,
+                    CASE WHEN x%2=0 THEN '[\"ready\"]' ELSE '[]' END,x=1,CASE WHEN x=2 THEN 'agent' ELSE NULL END,CASE WHEN x=4 THEN 1 ELSE NULL END FROM n;
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+                VALUES('named:Hidden',1,'Hidden','','open','agent',0,0,1,'[\"ready\"]');").unwrap();
+            let config = Settings::default();
+            let steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    1000,
+                    Some(count_steps),
+                    (&steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let counts = worker_queue(&store.db, &config);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            assert_eq!(
+                counts.unwrap(),
+                json!({"open":9998,"assigned":1,"tag_filtered":0,"waiting":1,"eligible":9996})
+            );
+            assert_eq!(
+                candidates(&store.db, &config, 3)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, n)| n)
+                    .collect::<Vec<_>>(),
+                [5, 6, 7]
+            );
+            let filtered = Settings {
+                tags: vec!["ready".into()],
+                ..Settings::default()
+            };
+            assert_eq!(
+                worker_queue(&store.db, &filtered).unwrap(),
+                json!({"open":9998,"assigned":1,"tag_filtered":4999,"waiting":0,"eligible":4998})
+            );
+            assert_eq!(
+                candidates(&store.db, &filtered, 3)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, n)| n)
+                    .collect::<Vec<_>>(),
+                [6, 8, 10]
+            );
+            let selected = Settings {
+                projects: vec!["named:Queue".into()],
+                ..config
+            };
+            assert_eq!(
+                worker_queue(&store.db, &selected).unwrap(),
+                json!({"open":9998,"assigned":1,"tag_filtered":0,"waiting":1,"eligible":9996})
+            );
+            let steps = steps.load(Ordering::Relaxed);
+            eprintln!(
+                "10,000-issue unrestricted untagged queue count: fewer than {} VM steps",
+                steps + 1000
+            );
+            assert!(
+                steps < 1_500_000,
+                "Empty tag filters performed unnecessary row work: {steps} VM steps"
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }
