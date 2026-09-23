@@ -62,32 +62,6 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
     }
 }
 
-#[cfg(test)]
-mod contention_tests {
-    use super::*;
-
-    #[test]
-    fn an_exhausted_retry_retains_the_sqlite_failure_code() {
-        let cause = Error::from(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT),
-            Some("database is locked".into()),
-        ));
-        let mut attempts = 0;
-        let error = retry_contention(Instant::now(), || {
-            attempts += 1;
-            Err::<(), _>(cause.clone())
-        })
-        .unwrap_err();
-        assert_eq!(
-            attempts, 1,
-            "An expired retry must not start another attempt"
-        );
-        assert_eq!(error.code, "database_busy");
-        assert_eq!(error.details, cause.details);
-        assert!(error.message.contains("bounded retries"));
-        assert!(error.message.contains("SQLite 517"));
-    }
-}
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
@@ -2149,3 +2123,30 @@ CREATE INDEX issue_events ON events(project_id,issue_number,id);
 CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TEXT NOT NULL REFERENCES agents(id), request_id TEXT NOT NULL,
  payload TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(project_id,actor,request_id));
 ";
+
+#[cfg(test)]
+mod contention_tests {
+    use super::*;
+
+    #[test]
+    fn an_exhausted_retry_retains_the_sqlite_failure_code() {
+        let cause = Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT),
+            Some("database is locked".into()),
+        ));
+        let mut attempts = 0;
+        let error = retry_contention(Instant::now(), || {
+            attempts += 1;
+            Err::<(), _>(cause.clone())
+        })
+        .unwrap_err();
+        assert_eq!(
+            attempts, 1,
+            "An expired retry must not start another attempt"
+        );
+        assert_eq!(error.code, "database_busy");
+        assert_eq!(error.details, cause.details);
+        assert!(error.message.contains("bounded retries"));
+        assert!(error.message.contains("SQLite 517"));
+    }
+}
