@@ -292,6 +292,25 @@ fn comment_page(
 }
 const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers";
 
+// Keep list/registry reads off issue records whose bodies can span hundreds of
+// overflow pages. All persisted summary fields fit in this covering index.
+const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers)";
+
+fn list_query(search: bool) -> String {
+    let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
+    let body_search = if search {
+        " OR instr(lower(body),lower(?5))>0"
+    } else {
+        ""
+    };
+    format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) AS comment_count FROM issues WHERE project_id=?1
+        AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
+        AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
+        AND (?5 IS NULL OR instr(lower(title),lower(?5))>0{body_search})
+        AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
+        ORDER BY sort_order,number LIMIT ?7 OFFSET ?8")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
     number: i64,
@@ -1087,6 +1106,9 @@ impl Store {
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
         super::blockers::migrate(&mut db)?;
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index')", [], |r| r.get::<_,bool>(0))? {
+            db.execute_batch(SUMMARY_INDEX)?;
+        }
         Ok(Self {
             db,
             attachment_root: path.with_extension("attachments"),
@@ -1369,13 +1391,7 @@ impl Store {
                 } else {
                     assignee.as_deref()
                 };
-                let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
-                let mut stmt = tx.prepare(&format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) AS comment_count FROM issues WHERE project_id=?1
-                    AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
-                    AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
-                    AND (?5 IS NULL OR instr(lower(title),lower(?5))>0 OR instr(lower(body),lower(?5))>0)
-                    AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
-                    ORDER BY sort_order,number LIMIT ?7 OFFSET ?8"))?;
+                let mut stmt = tx.prepare(&list_query(search.is_some()))?;
                 let rows = stmt.query_map(
                     params![
                         project.id,
@@ -2339,6 +2355,42 @@ CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TE
 #[cfg(test)]
 mod contention_tests {
     use super::*;
+
+    #[test]
+    fn ordinary_lists_read_metadata_without_loading_issue_bodies() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-list-index-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let store = Store::open(&root.join("issues.db")).unwrap();
+        let plan = store
+            .db
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", list_query(false)))
+            .unwrap()
+            .query_map(
+                params![
+                    "named:test",
+                    "open",
+                    Option::<String>::None,
+                    false,
+                    Option::<String>::None,
+                    "[]",
+                    50,
+                    0
+                ],
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH issues USING COVERING INDEX")),
+            "Summary queries must not read body overflow pages: {plan:?}"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_exhausted_retry_retains_the_sqlite_failure_code() {
