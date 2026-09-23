@@ -168,7 +168,7 @@ class Planning(unittest.TestCase):
         plan={'path':'plans/remote.md','checkout':'/remote/checkout','machine':'synthetic-remote','host':'unroutable-hostname'}
         with sqlite3.connect(self.db) as db:
             db.execute('UPDATE issues SET plan=? WHERE number=1',(json.dumps(plan),))
-            db.execute('CREATE TABLE fleet_state(key TEXT PRIMARY KEY,value TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT)')
             db.execute('INSERT INTO fleet_state VALUES(?,?)',('machines',json.dumps({'devbox-alias':{'node':'synthetic-remote','host':'devbox-alias'}})))
         ssh=self.bin/'ssh'
         ssh.write_text('#!/bin/sh\ncat > ssh-request\nprintf "%s\\n" "$@" > ssh-args\nexit 255\n')
