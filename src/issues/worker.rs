@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const DEFAULT_PLAN_PROMPT: &str = "Claim and plan `{{issue_command}}`.\n\nProduce a concrete plan with scope, design, tradeoffs, implementation steps, and verification criteria.\n\nDeliver artifacts only; do not implement code, commit, push, or deploy. Save the result with `hey-boss artifact create --title '<title>' --body '<markdown>' --issue {{number}} --project {{project_arg}}`. Link every output artifact to this issue. When several related artifacts or topics benefit from an overview, organize and link them in a project mindmap using `hey-boss mm --project {{project_arg}}`. If the result identifies actionable work, create draft follow-up issues with `hey-boss issue create --draft --title '<title>' --body '<markdown>' --project {{project_arg}}` and reference the source artifact and this issue; do not start those issues. If drafts are unavailable, record proposed follow-ups in the artifact. Finish with links to the saved artifacts, any mindmap, and follow-up issues.";
+pub const DEFAULT_PLAN_PROMPT: &str = "Claim and plan `{{issue_command}}`.\n\nProduce a concrete plan with scope, design, tradeoffs, implementation steps, and verification criteria.\n\nDeliver artifacts only; do not implement code, commit, push, or deploy. Save the result with `hey-boss artifact create --title '<title>' --body '<markdown>' --issue {{number}} --project {{project_arg}}`. Link every output artifact to this issue. When several related artifacts or topics benefit from an overview, organize and link them in a project mindmap using `hey-boss mm --project {{project_arg}}`. If the result identifies actionable work, create draft follow-up issues with `hey-boss issue create --draft --title '<title>' --body '<markdown>' --project {{project_arg}}` and reference the source artifact and this issue; do not start those issues. If drafts are unavailable, record proposed follow-ups in the artifact. Finish with links to the saved artifacts, any mindmap, and follow-up issues. Close the issue with `hey-boss issue close {{number}}` only after all requested artifacts are complete and verified. A successful partial delivery must leave the issue open.";
 pub const DEFAULT_PROMPT: &str = "Claim and implement `{{issue_command}}`.";
 /// Stored as ordinary labels so task intent uses the existing durable fleet wire format.
 pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
@@ -33,8 +33,7 @@ pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
 }
 pub const DEFAULT_WORKTREE_PROMPT: &str = "Work in a dedicated Git worktree for this issue at `{{worktree_path}}`, with branch `{{worktree_name}}` matching the directory name. Reuse that worktree and branch if they already exist, including when resuming this task; otherwise create them before editing files. Keep unrelated changes intact.";
 pub const DEFAULT_CHECKOUT_PROMPT: &str = "Work in the project's existing checkout.";
-pub const DEFAULT_MAIN_PROMPT: &str =
-    "Commit your changes. If a Git remote is configured, push to main.";
+pub const DEFAULT_MAIN_PROMPT: &str = "Commit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close {{number}}` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.";
 pub const DEFAULT_PRS_PROMPT: &str = "Commit your changes, push a branch, open a pull request, and attach every PR with `hey-boss issue pr add {{number}} '<pr-url>'`.";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -2048,7 +2047,8 @@ mod tests {
     }
     fn with_workflow(base: &str) -> String {
         format!(
-            "{base}\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main."
+            "{base}\n\nWork in the project's existing checkout.\n\n{}",
+            DEFAULT_MAIN_PROMPT.replace("{{number}}", "7")
         )
     }
     fn issue() -> Value {
@@ -2146,7 +2146,7 @@ mod tests {
         assert_eq!(
             text,
             with_workflow("hey-boss issue view <number>. Keep issue view 123 literal.")
-                .replace("issue comment 7", "issue comment <number>")
+                .replace("issue close 7", "issue close <number>")
         );
     }
     #[test]

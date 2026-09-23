@@ -26,7 +26,7 @@ def main():
     root=args.output.resolve();root.mkdir(parents=True,exist_ok=False)
     runtime=pathlib.Path('/tmp')/('hb-soak-'+uuid.uuid4().hex[:10]); runtime.mkdir()
     cli=args.cli.resolve(); fixture=args.fixture.resolve()
-    env=dict(os.environ,HEY_BOSS_ISSUE_DB=str(root/'issues.db'),HEY_BOSS_INBOX_SOCKET=str(runtime/'native/daemon.sock'),HEY_BOSS_CODEX=str(pathlib.Path('tests/fixtures/codex-worker.py').resolve()),HEY_BOSS_TEST_CLI=str(cli))
+    env=dict(os.environ,HEY_BOSS_ISSUE_DB=str(root/'issues.db'),HEY_BOSS_INBOX_SOCKET=str(runtime/'native/daemon.sock'),HEY_BOSS_CODEX=str(pathlib.Path('tests/fixtures/codex-worker.mjs').resolve()),HEY_BOSS_TEST_CLI=str(cli))
     env.pop('HEY_BOSS_ISSUE_HOST',None)
     children=[]; handles=[]; failures=0; iterations=0; requests=0; samples=[]; worker_id=None; relay=None
     log=root/'samples.jsonl'
