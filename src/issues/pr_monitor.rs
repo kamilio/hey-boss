@@ -1,6 +1,14 @@
 //! Atomic completion of tasks whose explicitly classified fix PRs have merged.
 use super::*;
 
+fn merged_tasks(db: &Connection) -> Result<Vec<(Project, i64)>> {
+    if super::super::global_settings::read(db)?["auto_close_merged_prs"] != true {
+        return Ok(Vec::new());
+    }
+    Ok(db.prepare("SELECT i.project_id,p.name,i.number FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.state<>'closed' AND i.deleted_at IS NULL AND i.draft=0 AND EXISTS(SELECT 1 FROM issue_pull_requests pr WHERE pr.project_id=i.project_id AND pr.issue_number=i.number AND pr.purpose='fix') AND NOT EXISTS(SELECT 1 FROM issue_pull_requests pr WHERE pr.project_id=i.project_id AND pr.issue_number=i.number AND pr.purpose='fix' AND pr.status<>'merged')")?
+        .query_map([], |r| Ok((Project { id:r.get(0)?, name:r.get(1)? },r.get::<_,i64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 impl Store {
     pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<String>> {
         let mut query = self.db.prepare("SELECT DISTINCT pr.url FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND pr.status<>'merged' ORDER BY pr.url")?;
@@ -21,16 +29,16 @@ impl Store {
     }
 
     pub(crate) fn close_merged_pull_requests(&mut self, actor: &Actor) -> Result<usize> {
+        // Idle polling is a WAL read, so it cannot queue behind normal writes.
+        if merged_tasks(&self.db)?.is_empty() {
+            return Ok(0);
+        }
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if super::super::global_settings::read(&tx)?["auto_close_merged_prs"] != true {
-            return Ok(0);
-        }
         // Re-evaluate links and state while holding the writer lock. A new fix
         // attached during the network read must prevent premature completion.
-        let tasks = tx.prepare("SELECT i.project_id,p.name,i.number FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.state<>'closed' AND i.deleted_at IS NULL AND i.draft=0 AND EXISTS(SELECT 1 FROM issue_pull_requests pr WHERE pr.project_id=i.project_id AND pr.issue_number=i.number AND pr.purpose='fix') AND NOT EXISTS(SELECT 1 FROM issue_pull_requests pr WHERE pr.project_id=i.project_id AND pr.issue_number=i.number AND pr.purpose='fix' AND pr.status<>'merged')")?
-            .query_map([], |r| Ok((Project { id:r.get(0)?, name:r.get(1)? },r.get::<_,i64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let tasks = merged_tasks(&tx)?;
         if tasks.is_empty() {
             return Ok(0);
         }
@@ -116,6 +124,23 @@ mod tests {
             .execute("UPDATE issues SET state='closed' WHERE number=5", [])
             .unwrap();
         (store, actor, root)
+    }
+    #[test]
+    fn idle_pr_completion_does_not_wait_for_a_database_writer() {
+        let (mut store, actor, root) = fixture();
+        store
+            .db
+            .busy_timeout(std::time::Duration::from_millis(25))
+            .unwrap();
+        let mut writer = Connection::open(root.join("issues.db")).unwrap();
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(store.close_merged_pull_requests(&actor).unwrap(), 0);
+        drop(tx);
+        drop(writer);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn closes_only_after_all_fix_prs_merge_and_only_once() {
