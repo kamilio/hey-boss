@@ -125,6 +125,12 @@ fn assigned_session(db: &Connection, session: &str) -> Result<Option<Value>> {
 }
 
 pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
+    if run.starts_with("chief:") {
+        let owner: Option<String> = db.query_row("SELECT c.worker_id FROM project_chiefs c JOIN projects p ON p.id=c.project_id WHERE 'chief:'||c.machine||':'||c.project_id=?1 AND p.hidden_at IS NULL", [run], |r| r.get(0)).optional()?.flatten();
+        return Ok(super::chief::status(db, owner.as_deref())?
+            .into_iter()
+            .find(|r| r["id"] == run));
+    }
     let saved = db.query_row("SELECT r.id,r.project_id,p.name,r.issue_number,CASE WHEN json_valid(r.job) THEN json_extract(r.job,'$.issue.title') END,r.session_id,r.state,r.started_at,r.finished_at,r.actor_id FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",[run],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,Option<String>>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"started_at":r.get::<_,i64>(7)?,"finished_at":r.get::<_,Option<i64>>(8)?,"actor_id":r.get::<_,String>(9)?}))).optional()?;
     if saved.is_some() {
         return Ok(saved);

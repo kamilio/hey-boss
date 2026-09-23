@@ -104,7 +104,7 @@ impl Context {
         for w in &mut workers {
             let selected =
                 self.rpc_store(&mut store, json!({"action":"workers","worker_id":w["id"]}))?;
-            for k in ["active", "free", "eligible", "runs", "upgrading"] {
+            for k in ["active", "free", "eligible", "runs", "chiefs", "upgrading"] {
                 if let Some(v) = selected.get(k) {
                     w[k] = v.clone();
                 }

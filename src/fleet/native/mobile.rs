@@ -423,7 +423,7 @@ impl Mobile {
         let status = super::local_request(&self.ctx, json!({"kind":"overview"}))?;
         let mut machines = vec![];
         for m in status["machines"].as_array().into_iter().flatten() {
-            let workers=m["workers"].as_array().into_iter().flatten().map(|w|json!({"id":w["id"],"pid":w["pid"],"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})).collect::<Vec<_>>();
+            let workers=m["workers"].as_array().into_iter().flatten().map(|w|json!({"id":w["id"],"pid":w["pid"],"config":{"name":w["config"]["name"],"enabled":w["config"]["enabled"]},"chiefs":w["chiefs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>(),"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})).collect::<Vec<_>>();
             machines.push(json!({"host":m["host"],"hostname":m["hostname"],"state":m["state"],"heartbeat":m["heartbeat"],"workers":workers}));
         }
         self.call(

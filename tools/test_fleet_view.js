@@ -54,3 +54,15 @@ assert.deepEqual(deviceView({machines:[{host:'other',workers:[{config:{projects:
 assert.equal(deviceView({machines:[{host:'empty',workers:[]}]},null,now).length,1,'All-projects view keeps empty devices visible');
 assert.deepEqual(deviceView({},null,now),[]);
 console.log('Device controls scope and runtime checks passed');
+const {chiefState} = require('../src/issues/web/fleet.js');
+const chief = {id:'chief:local:named:Atlas',kind:'chief',project_id:'named:Atlas',project_name:'Atlas',state:'idle',finished_at:90000,next_at:now+15*60000};
+const chiefEntry = {run:chief,online:true,worker:{pid:12,config:{enabled:true}}};
+assert.equal(chiefState(chiefEntry,now),'Waiting · 15 minutes left');
+assert.equal(chiefState({...chiefEntry,run:{...chief,state:'running',finished_at:null}},now),'Running');
+assert.equal(chiefState({...chiefEntry,online:false},now),'Device disconnected');
+assert.equal(chiefState({...chiefEntry,worker:{pid:12,config:{enabled:false}}},now),'Paused');
+assert.equal(chiefState({...chiefEntry,run:{...chief,next_at:now-1}},now),'Waiting · Due now');
+const chiefGroups=projectView({machines:[{host:'local',state:'connected',heartbeat:99,workers:[{...atlasWorker,chiefs:[chief]}]}]},now);
+assert.equal(chiefGroups[0].chiefs[0].run.id,chief.id);
+assert.equal(chiefGroups[0].active.length,1,'Chief does not consume an issue slot');
+assert.equal(chiefGroups[0].history.length,0,'Chief has a separate last-pass presentation');

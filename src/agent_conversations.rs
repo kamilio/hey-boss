@@ -47,12 +47,14 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
     for machine in data["machines"].as_array_mut().into_iter().flatten() {
         for worker in machine["workers"].as_array_mut().into_iter().flatten() {
             let runs = worker["runs"].as_array().cloned().unwrap_or_default();
+            let chiefs = worker["chiefs"].as_array().cloned().unwrap_or_default();
             if let Some(object) = worker.as_object_mut() {
                 object.retain(|k, _| matches!(k.as_str(), "id" | "pid" | "config"));
             }
             // Retain the compact task list after dropping internal process counters.
             // The config is needed only for the collapsed device controls.
             worker["runs"] = Value::Array(runs_for_project(&runs, projects));
+            worker["chiefs"] = Value::Array(runs_for_project(&chiefs, projects));
         }
         if let Some(object) = machine.as_object_mut() {
             object.retain(|k, _| {
@@ -78,6 +80,9 @@ fn runs_for_project(runs: &[Value], projects: &HashSet<String>) -> Vec<Value> {
             let mut value = json!({});
             for key in [
                 "id",
+                "kind",
+                "next_at",
+                "enabled",
                 "project_id",
                 "project_name",
                 "number",
@@ -118,7 +123,11 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .flat_map(|w| w["runs"].as_array().into_iter().flatten())
+        .flat_map(|w| {
+            ["runs", "chiefs"]
+                .into_iter()
+                .flat_map(move |key| w[key].as_array().into_iter().flatten())
+        })
         .any(|r| r["id"] == run);
     let db = database(&crate::issues::database_path()?)?;
     let referenced = referenced_device(&db, machine, run)?;
@@ -329,7 +338,8 @@ pub(crate) fn window_page(
 ) -> Result<Value> {
     let cursor = window.cursor;
     let metadata = crate::issues::provenance::saved_run(db, run)?;
-    let saved: Option<Option<String>> = if run.starts_with("session:") {
+    let saved: Option<Option<String>> = if run.starts_with("session:") || run.starts_with("chief:")
+    {
         metadata
             .as_ref()
             .map(|r| r["session_id"].as_str().map(str::to_owned))
@@ -995,6 +1005,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn chief_conversation_reads_the_saved_thread_and_filters_hidden_projects() {
+        let f = Fixture::new();
+        f.db.execute_batch("CREATE TABLE project_settings(project_id TEXT,chief_enabled INTEGER); INSERT INTO project_settings VALUES('Atlas',1);
+            CREATE TABLE project_chiefs(project_id TEXT,machine TEXT,state TEXT,pid INTEGER,session_id TEXT,started_at INTEGER,finished_at INTEGER,next_at INTEGER,summary TEXT,last_event TEXT,worker_id TEXT);
+            INSERT INTO project_chiefs VALUES('Atlas','local','idle',NULL,'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',1,2,3600002,'Organized','Done','owner');").unwrap();
+        std::fs::write(
+            &f.path,
+            Fixture::line("assistant", "Chief finished its pass."),
+        )
+        .unwrap();
+        let result = window_page(&f.db, &f.root, "chief:local:Atlas", &Window::default()).unwrap();
+        assert_eq!(result["run"]["kind"], "chief");
+        assert_eq!(result["messages"][0]["text"], "Chief finished its pass.");
+        assert_eq!(result["run"]["next_at"], 3600002);
+        let compacted = compact(json!({"machines":[{"workers":[{"chiefs":[result["run"].clone(),json!({"project_id":"Hidden"})]}]}]}), &HashSet::from(["Atlas".into()])).unwrap();
+        assert_eq!(
+            compacted["machines"][0]["workers"][0]["chiefs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        f.db.execute("UPDATE projects SET hidden_at=1", []).unwrap();
+        assert!(window_page(&f.db, &f.root, "chief:local:Atlas", &Window::default()).is_err());
     }
     #[test]
     fn compact_overview_filters_hidden_projects_without_mutating_input() {
