@@ -202,7 +202,8 @@
   color: var(--muted);
   margin-top: 6px;
   display: flex;
-  gap: 5px;
+  align-items: center;
+  gap: 5px 8px;
   flex-wrap: wrap;
 }
 .issue-meta .issue-number {
@@ -1998,7 +1999,9 @@ dialog::backdrop {
 }
 .pr-link-title {
   min-width: 0;
-  max-width: calc(100% - 17px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pr-link a {
   overflow-wrap: anywhere;
@@ -2052,13 +2055,13 @@ dialog::backdrop {
   position: relative;
   z-index: 1;
   display: inline-flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  white-space: nowrap;
   align-items: center;
   gap: 4px;
   max-width: 100%;
   color: var(--accent);
   font-weight: 500;
-  overflow-wrap: anywhere;
 }
 .issue-pr-link svg {
   width: 13px;
