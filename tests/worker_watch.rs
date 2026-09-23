@@ -55,7 +55,17 @@ fn json_status_and_watch_limit_finished_attempts_without_hiding_live_work() {
     fixture.add_worker("chosen");
     let db = rusqlite::Connection::open(fixture.0.join("issues.db")).unwrap();
     db.execute(
+        "UPDATE issue_workers SET config=json_set(config,'$.concurrency',8) WHERE id='chosen'",
+        [],
+    )
+    .unwrap();
+    db.execute(
         "INSERT INTO projects(id,name,next_number) VALUES('named:QA','QA',1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO agents(id,metadata,last_seen) VALUES('fixture','{}',0)",
         [],
     )
     .unwrap();
@@ -71,6 +81,7 @@ fn json_status_and_watch_limit_finished_attempts_without_hiding_live_work() {
         (9, "paused", Some(9)),
         (10, "approval_waiting", Some(10)),
     ] {
+        db.execute("INSERT INTO issues(project_id,number,title,body,state,labels,version,created_by,created_at,updated_at,sort_order) VALUES('named:QA',?1,'QA attempt','','open','[]',1,'fixture',0,0,?1)", [n]).unwrap();
         db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) VALUES(?1,'named:QA',?2,'{\"issue\":{\"title\":\"QA attempt\"}}','agent',?3,?4,'start','qa',?2,0,'chosen',?5)", rusqlite::params![format!("run-{n}"), n, state, std::process::id(), finished]).unwrap();
     }
     for history in [0, 1, 3, 20] {
@@ -162,7 +173,8 @@ fn json_status_and_watch_limit_finished_attempts_without_hiding_live_work() {
                             .collect();
                         assert!(text.contains("QA attempt"), "{text}");
                         assert!(text.contains("q quit"), "{text}");
-                        assert_eq!(text.contains(" · history"), history_tab, "{text}");
+                        assert_eq!(text.contains("[History]"), history_tab, "{text}");
+                        assert_eq!(text.contains("[Active]"), !history_tab, "{text}");
                         println!("{width} × {height}, history {history_tab}:\n{text}");
                     }
                 }
