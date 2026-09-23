@@ -52,6 +52,10 @@ MUST propagate without being treated as an older projection.
 If an ordinary local control response exceeds the frame limit, the supervisor
 MUST send a bounded error response before writing any result bytes rather than
 close the socket with no response or transmit a partial result.
+The supervisor SHOULD build compact activity from retained fields directly so
+discarded event payloads do not consume temporary response memory. Compact
+projection MUST preserve worker metadata and machine configuration diagnostics
+used by existing clients.
 
 Companions supporting streamed pulls MUST advertise `pull_gzip_chunks` in
 `hello.capabilities`. The supervisor MAY send `pull_begin`, ordered `pull_chunk`
@@ -202,7 +206,7 @@ that tail MUST NOT wait indefinitely for an inherited open error stream.
 | Machine activity polling | Linear overview work for 100 workers, coherent capacity and activity during a concurrent WAL write, equivalent queue filter reuse with fresh counts on the next poll, indexed counts for explicit project filters, unrestricted and unknown-project behavior, public-status activity parity and legacy upgrade marker migration |
 | Worker build provenance | Compiled owner build, legacy registration invalidation, stale owner records, PID reuse, owner removal and unknown legacy builds |
 | Manager build provenance | A supervisor starting after the installed CLI is replaced still reports its compiled runtime build; companions announce their compiled build |
-| Agent overview transport | Individually valid machine reports exceeding the aggregate full-status frame limit; bounded full-status error over the control socket; compact response retains assignment identity, Chief fields, visibility and Unicode bounds; one compact request for current projections, legacy fallback on any machine, empty runs, explicit nulls and transport errors |
+| Agent overview transport | Individually valid machine reports exceeding the aggregate full-status frame limit; bounded full-status error over the control socket; compact response retains assignment identity, Chief fields, worker/machine metadata, visibility and Unicode bounds; deterministic allocation budget for discarded events; one compact request for current projections, legacy fallback on any machine, empty runs, explicit nulls and transport errors; CLI collection/conversation lookup over current and legacy sockets |
 | Web application | Responsive layout, accessible controls, live updates and CSRF rejection |
 
 ## Conformance Criteria
