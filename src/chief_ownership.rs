@@ -46,6 +46,14 @@ pub(crate) fn stop_unassigned(db: &Connection) -> Result<()> {
     for (pid, start) in children {
         crate::issues::worker::stop_group(pid, &start)?;
     }
+    // Older workers retain the last local worker assignment even between
+    // passes. Move only finished reservations to the supervisor's choice;
+    // active owners must still record their own completion. Probe first so
+    // normal heartbeats do not acquire the database writer.
+    let idle = db.prepare("SELECT c.project_id,a.worker_id FROM project_chiefs c JOIN fleet_chief_ownership a ON a.project_id=c.project_id JOIN fleet_meta m ON m.id=1 AND m.node=a.node AND m.node=c.machine JOIN issue_workers w ON w.id=a.worker_id WHERE a.revoking=0 AND c.state<>'running' AND c.owner_pid IS NULL AND c.pid IS NULL AND c.worker_id IS NOT a.worker_id")?.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (project, worker) in idle {
+        db.execute("UPDATE project_chiefs SET worker_id=?2 WHERE project_id=?1 AND machine=(SELECT node FROM fleet_meta WHERE id=1) AND state<>'running' AND owner_pid IS NULL AND pid IS NULL AND worker_id IS NOT ?2 AND EXISTS(SELECT 1 FROM fleet_chief_ownership a JOIN fleet_meta m ON m.id=1 AND m.node=a.node JOIN issue_workers w ON w.id=a.worker_id WHERE a.project_id=?1 AND a.worker_id=?2 AND a.revoking=0)", params![project,worker])?;
+    }
     Ok(())
 }
 
