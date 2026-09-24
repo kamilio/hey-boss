@@ -79,6 +79,9 @@ if [ "$2" = resume ] && [ "$3" = missing-thread ]; then
   exit 1
 fi
 printf '%s\n' '{"type":"thread.started","thread_id":"chief-saved-thread"}'
+if [ -f dead-parent ]; then sleep 120 & exit 7; fi
+if [ -f malformed ]; then printf 'not-json\n'; exit 0; fi
+if [ -f failed-completion ]; then printf '%s\n' '{"type":"turn.failed","error":{"message":"Failed despite later text"}}'; fi
 if [ -f hold ]; then
   echo $$ > chief.pid
   sleep 120
@@ -196,6 +199,26 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     );
     drop(worker);
     fs::remove_file(f.0.join("fail")).unwrap();
+    for mode in ["dead-parent", "malformed", "failed-completion"] {
+        let previous: i64 = db
+            .query_row("SELECT finished_at FROM project_chiefs", [], |r| r.get(0))
+            .unwrap();
+        fs::write(f.0.join(mode), "").unwrap();
+        db.execute("UPDATE project_chiefs SET next_at=0", [])
+            .unwrap();
+        let worker = start(false);
+        wait_for(|| {
+            db.query_row(
+                "SELECT state='blocked' AND finished_at>?1 FROM project_chiefs",
+                [previous],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        });
+        assert!(db.query_row("SELECT next_at-finished_at<=300000 AND owner_pid IS NULL AND pid IS NULL FROM project_chiefs",[],|r|r.get::<_,bool>(0)).unwrap());
+        drop(worker);
+        fs::remove_file(f.0.join(mode)).unwrap();
+    }
     fs::write(f.0.join("hold"), "").unwrap();
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
