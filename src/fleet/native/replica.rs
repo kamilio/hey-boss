@@ -148,16 +148,23 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         }
     }
     if table == "project_settings" {
+        let existing = current_row(db, table, &row)?;
         let m = row
             .as_object_mut()
             .ok_or_else(|| invalid("Invalid settings row"))?;
-        m.entry("drafts_enabled").or_insert(json!(1));
-        m.entry("plan_template")
-            .or_insert(json!("plans/{timestamp}-{number}.md"));
-        m.entry("worktree_enabled").or_insert(json!(0));
-        m.entry("prompt_overrides").or_insert(json!("{}"));
-        m.entry("chief_enabled").or_insert(json!(0));
-        m.entry("chief_prompt").or_insert(Value::Null);
+        // Old capture triggers omit additive fields. An omitted value is not
+        // an instruction to reset a setting already known by this replica.
+        for (column, default) in [
+            ("drafts_enabled", json!(1)),
+            ("plan_template", json!("plans/{timestamp}-{number}.md")),
+            ("worktree_enabled", json!(0)),
+            ("prompt_overrides", json!("{}")),
+            ("chief_enabled", json!(0)),
+            ("chief_prompt", Value::Null),
+        ] {
+            m.entry(column)
+                .or_insert_with(|| existing.get(column).cloned().unwrap_or(default));
+        }
     }
     if table == "issue_pull_requests" && row.get("purpose").is_none() {
         // Older peers cannot classify links; omitted metadata must not
@@ -257,25 +264,26 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
             .iter()
             .map(|r| r["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
+        let row_json = |prefix: Option<&str>| {
+            prefix
+                .map(|p| {
+                    format!(
+                        "json_object({})",
+                        columns
+                            .iter()
+                            .map(|c| format!("'{c}',{p}.\"{c}\""))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .unwrap_or("NULL".into())
+        };
+        let mut repaired = false;
         for (operation, before, after) in [
             ("INSERT", None, Some("NEW")),
             ("UPDATE", Some("OLD"), Some("NEW")),
             ("DELETE", Some("OLD"), None),
         ] {
-            let row_json = |prefix: Option<&str>| {
-                prefix
-                    .map(|p| {
-                        format!(
-                            "json_object({})",
-                            columns
-                                .iter()
-                                .map(|c| format!("'{c}',{p}.\"{c}\""))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        )
-                    })
-                    .unwrap_or("NULL".into())
-            };
             let different = if operation == "UPDATE" {
                 format!(
                     " AND NOT ({})",
@@ -288,7 +296,28 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
             } else {
                 String::new()
             };
-            db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS fleet_capture_{table}_{operation} AFTER {operation} ON {table} WHEN (SELECT syncing FROM fleet_meta WHERE id=1)=0{different} BEGIN INSERT INTO fleet_outbox(table_name,before_json,after_json,created_at) VALUES('{table}',{},{},CAST(strftime('%s','now') AS INTEGER)*1000); END;",row_json(before),row_json(after)))?;
+            let name = format!("fleet_capture_{table}_{operation}");
+            let sql = format!(
+                "CREATE TRIGGER {name} AFTER {operation} ON {table} WHEN (SELECT syncing FROM fleet_meta WHERE id=1)=0{different} BEGIN INSERT INTO fleet_outbox(table_name,before_json,after_json,created_at) VALUES('{table}',{},{},CAST(strftime('%s','now') AS INTEGER)*1000); END",
+                row_json(before),
+                row_json(after)
+            );
+            let existing: Option<String> = db
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    [&name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if existing.as_deref().map(|s| s.trim_end_matches(';')) != Some(sql.as_str()) {
+                repaired |= existing.is_some();
+                db.execute_batch(&format!("DROP TRIGGER IF EXISTS {name}; {sql};"))?;
+            }
+        }
+        if repaired && role == "controller" && *table == "project_settings" {
+            // Peers may already have acknowledged a truncated settings row.
+            // Republish current values once, in the same transaction as repair.
+            db.execute_batch(&format!("INSERT INTO fleet_outbox(table_name,after_json,created_at) SELECT '{table}',{},CAST(strftime('%s','now') AS INTEGER)*1000 FROM {table} AS replay;", row_json(Some("replay"))))?;
         }
     }
     ensure_metadata(db)?;
@@ -2950,6 +2979,100 @@ mod tests {
             rows(&agent.db, "SELECT status FROM issue_pull_requests", &[]).unwrap()[0]["status"],
             "merged"
         );
+    }
+
+    #[test]
+    fn capture_upgrade_repairs_and_republishes_missed_chief_settings() {
+        let main = Fixture::new();
+        main.db.execute("INSERT INTO project_settings(project_id,prompt,version) VALUES('named:Native fleet','Work',1)", []).unwrap();
+        main.db.execute_batch("ALTER TABLE project_settings DROP COLUMN chief_enabled; ALTER TABLE project_settings DROP COLUMN chief_prompt;").unwrap();
+        main.capture();
+        drop(Store::open(&main.path).unwrap());
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        main.db
+            .execute(
+                "UPDATE project_settings SET chief_enabled=1,chief_prompt='Organize',version=2",
+                [],
+            )
+            .unwrap();
+        let cursor = rows(
+            &main.db,
+            "SELECT coalesce(max(seq),0) AS seq FROM fleet_outbox",
+            &[],
+        )
+        .unwrap()[0]["seq"]
+            .as_i64()
+            .unwrap();
+        main.capture();
+        let repaired = incremental(&main.db, "agent", cursor).unwrap();
+        apply_pull(&agent.db, "agent", &repaired, &[]).unwrap();
+        let settings = rows(
+            &agent.db,
+            "SELECT chief_enabled,chief_prompt,version FROM project_settings",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            settings[0],
+            json!({"chief_enabled":1,"chief_prompt":"Organize","version":2})
+        );
+        let schema: i64 = main
+            .db
+            .pragma_query_value(None, "schema_version", |r| r.get(0))
+            .unwrap();
+        let cursor = repaired["cursor"].as_i64().unwrap();
+        main.capture();
+        assert_eq!(
+            main.db
+                .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            schema
+        );
+        assert!(
+            incremental(&main.db, "agent", cursor).unwrap()["changes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        main.db
+            .execute(
+                "UPDATE project_settings SET chief_enabled=0,chief_prompt=NULL",
+                [],
+            )
+            .unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &incremental(&main.db, "agent", cursor).unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT chief_enabled,chief_prompt FROM project_settings",
+                &[]
+            )
+            .unwrap()[0],
+            json!({"chief_enabled":0,"chief_prompt":null})
+        );
+    }
+
+    #[test]
+    fn legacy_settings_replay_preserves_fields_the_sender_does_not_know() {
+        let f = Fixture::new();
+        f.db.execute("INSERT INTO project_settings(project_id,prompt,version,chief_enabled,chief_prompt,worktree_enabled) VALUES('named:Native fleet','Work',1,1,'Organize',1)", []).unwrap();
+        let legacy = json!({"project_id":"named:Native fleet","prompt":"Updated","prs_enabled":0,"version":2,"boss_name":"Boss"});
+        put_row(&f.db, "project_settings", &legacy).unwrap();
+        assert_eq!(rows(&f.db, "SELECT chief_enabled,chief_prompt,worktree_enabled,prompt,version FROM project_settings", &[]).unwrap()[0], json!({"chief_enabled":1,"chief_prompt":"Organize","worktree_enabled":1,"prompt":"Updated","version":2}));
     }
 
     #[test]
