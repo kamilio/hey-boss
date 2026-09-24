@@ -1,19 +1,29 @@
 #!/bin/bash
 # Install only the health worker; preserve companion services and running agents.
 set -euo pipefail
-task_host=${1:?Usage: install-health-worker.sh SSH_HOST}
+task_host=${1:?Usage: install-health-worker.sh local|SSH_HOST}
 task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 task_ssh=(-T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
 if [[ -n ${HEY_BOSS_SSH_CONTROL_PATH:-} ]]; then task_ssh+=(-S "$HEY_BOSS_SSH_CONTROL_PATH"); fi
 if [[ $task_host == -* || $task_host == *[!a-zA-Z0-9@._:\[\]-]* ]]; then printf '%s\n' 'Invalid SSH host' >&2; exit 1; fi
-COPYFILE_DISABLE=1 tar --no-xattrs -czf - -C "$task_root" Cargo.toml Cargo.lock build.rs src skills/hey-boss README.md LICENSE tools/upgrade_hey_boss.py hey_boss_daemon.swift package_hey_boss.swift setup_hey_boss.swift assets |
-    ssh "${task_ssh[@]}" "$task_host" 'set -eu
+task_run() {
+    if [[ $task_host == local ]]; then
+        sh -c "$1"
+    else
+        ssh "${task_ssh[@]}" "$task_host" "$1"
+    fi
+}
+COPYFILE_DISABLE=1 tar --no-xattrs --exclude=target --exclude=node_modules -czf - -C "$task_root" Cargo.toml Cargo.lock build.rs src packages/hey-gh skills/hey-boss README.md LICENSE tools/upgrade_hey_boss.py tools/drain_github_issues.py hey_boss_daemon.swift package_hey_boss.swift setup_hey_boss.swift assets |
+    task_run 'set -eu
 umask 077
 stage=$(mktemp -d)
 trap '\''rm -rf "$stage"'\'' EXIT HUP INT TERM
 tar -xzf - -C "$stage"
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-export CARGO_TARGET_DIR="$stage/target"
+export CARGO_TARGET_DIR="$HOME/.cache/hey-boss/build"
+export CARGO_BUILD_JOBS=2
+# Reuse the regular upgrade cache without retaining build products in temp dirs.
+touch "$stage/build.rs"
 # Process/lock fixtures inspect global OS state; run them serially.
 cargo test --locked --manifest-path "$stage/Cargo.toml" --lib health -- --test-threads=1
 cargo build --locked --release --manifest-path "$stage/Cargo.toml"
