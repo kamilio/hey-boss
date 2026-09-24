@@ -187,7 +187,7 @@ pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
 /// Read-only snapshot of files/cwds owned by this user. Incomplete inspection fails closed.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
-    let o = output(
+    let o = super::output_with_limit(
         Command::new("lsof").args([
             "-nP",
             "-a",
@@ -199,6 +199,10 @@ pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
         // The same inventory protects cache deletion. Busy machines with many
         // test descriptors need the process inventory's 90-second allowance.
         Duration::from_secs(90),
+        // Mapped browser libraries repeat for every helper. The global inventory
+        // exceeded the ordinary command cap on a real 16 GiB Mac, disabling all
+        // cache and checkout cleanup. Still fail closed if this larger cap is hit.
+        64 * 1024 * 1024,
     )?;
     if !o.status.success() || !o.stderr.is_empty() {
         return Err(io::Error::other(
@@ -210,6 +214,8 @@ pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
         .lines()
         .filter_map(|s| s.strip_prefix("n/"))
         .map(|s| PathBuf::from(format!("/{s}")))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect())
 }
 fn modified(path: &Path) -> io::Result<u64> {
