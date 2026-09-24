@@ -209,6 +209,12 @@ fn checkout(db: &Connection, c: &Settings, p: &Project) -> Result<String> {
 impl Store {
     /// Return machine activity from one snapshot without repeating the overview.
     pub(crate) fn fleet_workers(&self) -> Result<Vec<Value>> {
+        self.fleet_workers_for(None)
+    }
+    pub(crate) fn fleet_workers_for(
+        &self,
+        ids: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Vec<Value>> {
         retry_contention(Instant::now() + CONTENTION_BUDGET, || {
             let legacy_runtime: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get(0))?;
             let tx = if legacy_runtime {
@@ -220,7 +226,7 @@ impl Store {
                 self.db.read_transaction()?
             };
             migrate_runtime(&tx)?;
-            let mut workers = worker_overview(&tx)?;
+            let mut workers = worker_overview_for(&tx, ids)?;
             let chief_projects = tx.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL")?.query_map([], |r| Ok(Project {id:r.get(0)?,name:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             // Queue counts depend on these sets, not the worker ID or capacity.
             // Cache only within this transaction so each poll sees fresh data.
@@ -376,27 +382,39 @@ fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project,
         .collect())
 }
 fn worker_overview(db: &Connection) -> Result<Vec<Value>> {
+    worker_overview_for(db, None)
+}
+fn worker_overview_for(
+    db: &Connection,
+    ids: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<Value>> {
     let builds_exist: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds')", [], |r| r.get(0))?;
     let build = if builds_exist {
         "(SELECT build FROM issue_worker_builds b WHERE b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start)"
     } else {
         "NULL"
     };
-    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start FROM issue_workers w ORDER BY updated_at DESC,id LIMIT 100"))?;
+    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start FROM issue_workers w WHERE (?1 IS NULL OR w.id IN (SELECT value FROM json_each(?1))) ORDER BY updated_at DESC,id LIMIT ?2"))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<u32>>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, u32>(6)?,
-                r.get::<_, Option<String>>(7)?,
-                r.get::<_, Option<String>>(8)?,
-            ))
-        })?
+        .query_map(
+            params![
+                ids.map(|ids| json!(ids).to_string()),
+                if ids.is_some() { -1 } else { 100 }
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<u32>>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, u32>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     // Runtime state is additive, so older CLIs can still read worker settings.
     let runtime_exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime')", [], |r| r.get(0))?;

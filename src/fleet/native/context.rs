@@ -95,8 +95,17 @@ impl Context {
         })?)
     }
     pub fn workers(&self) -> Result<Vec<Value>> {
+        self.workers_for(None)
+    }
+    pub fn workers_for(
+        &self,
+        ids: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Vec<Value>> {
         let store = Store::open(&self.path)?;
-        let mut workers = store.fleet_workers()?;
+        let mut workers = match ids {
+            Some(ids) => store.fleet_workers_for(Some(ids))?,
+            None => store.fleet_workers()?,
+        };
         let role: String =
             self.db()?
                 .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
