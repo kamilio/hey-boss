@@ -180,8 +180,7 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
                 "Choose an existing absolute checkout directory",
             ));
         }
-        let actual = identity::project(Path::new(path), &identity::machine()?)?;
-        if !project.starts_with("named:") && actual.id != *project {
+        if !checkout_matches_project(Path::new(path), project)? {
             return Err(Error::invalid(
                 "A worker checkout belongs to a different project",
             ));
@@ -191,6 +190,15 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
         codex_binary()?;
     }
     Ok(())
+}
+
+fn checkout_matches_project(path: &Path, project: &str) -> Result<bool> {
+    let machine = identity::machine()?;
+    let actual = identity::project(path, &machine)?;
+    // Adding an origin does not invalidate the saved identity of this same
+    // local checkout. Its existing issues still belong to that local project.
+    let local = format!("local:{machine}:{}", path.canonicalize()?.display());
+    Ok(project.starts_with("named:") || actual.id == project || local == project)
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -280,8 +288,7 @@ pub fn validate_config(c: &ProjectConfig, p: &Project) -> Result<()> {
             "Choose an existing absolute project directory",
         ));
     }
-    let actual = identity::project(&path.canonicalize()?, &identity::machine()?)?;
-    if !p.id.starts_with("named:") && actual.id != p.id {
+    if !checkout_matches_project(path, &p.id)? {
         return Err(Error::invalid(
             "The worker directory belongs to a different project. Choose this repository's checkout or worktree.",
         ));
@@ -2059,6 +2066,65 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_checkout_identity_survives_adding_a_remote() {
+        let root = std::env::temp_dir().join(format!("hb-worker-origin-{}", random_id().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let machine = identity::machine().unwrap();
+        let original = identity::project(&root, &machine).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/new-origin.git",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert_ne!(identity::project(&root, &machine).unwrap().id, original.id);
+        let mut settings = Settings {
+            projects: vec![original.id.clone()],
+            directories: [(original.id.clone(), root.to_string_lossy().into_owned())].into(),
+            ..Default::default()
+        };
+        assert!(validate_settings(&settings).is_ok());
+        let config = ProjectConfig {
+            cwd: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(validate_config(&config, &original).is_ok());
+        for unrelated in [
+            format!("local:another-machine:{}", root.display()),
+            format!("local:{machine}:/unrelated"),
+            "github.com/example/other-repo".into(),
+        ] {
+            settings.projects = vec![unrelated.clone()];
+            settings.directories = [(unrelated.clone(), config.cwd.clone())].into();
+            assert!(validate_settings(&settings).is_err());
+            assert!(
+                validate_config(
+                    &config,
+                    &Project {
+                        id: unrelated,
+                        name: "other".into()
+                    }
+                )
+                .is_err()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn database_contention_is_bounded_and_nonbusy_failures_are_not_replayed() {
         for code in ["database_busy", "database_error"] {
