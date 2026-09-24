@@ -417,7 +417,7 @@ if (typeof document !== 'undefined') (() => {
     const draft=steerDraft(),entry=steerTarget,token=generation,key=takeoverKey(entry);
     if(!draft.text.trim()||new TextEncoder().encode(draft.text).length>32000){$('steer-error').textContent='Enter an instruction of up to 32000 bytes.';$('steer-error').hidden=false;return;}
     const payload=JSON.stringify({host:entry.machine.host,run:entry.run.id,...draft});
-    if(steerRequest?.payload!==payload)steerRequest={payload,id:crypto.randomUUID()};
+    if(steerRequest?.payload!==payload)steerRequest={payload,id:HeyBossUI.requestId()};
     steerBusy=true;keepSteerDraft();$('steer-error').hidden=true;
     for(const control of $('steer-form').elements)control.disabled=true;
     // Sending should never hold the conversation behind a modal. Keep the draft
@@ -452,7 +452,7 @@ if (typeof document !== 'undefined') (() => {
     const b=event.target.closest('button[data-signal]');if(!b)return;
     if(b.dataset.signal==='stop'&&!confirm('Stop agents on this device? Their saved conversations will remain available.'))return;
     b.disabled=true;
-    try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:crypto.randomUUID()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
+    try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
   };
   addEventListener('hashchange',()=>{if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});

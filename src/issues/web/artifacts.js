@@ -12,7 +12,7 @@ const HeyBossArtifacts = (() => {
   let mobile = false;
   const author=value=>value==="human:boss"?"Boss":value.startsWith("human:")?value.slice(6):value.startsWith("codex:")?"Codex":value.startsWith("claude:")?"Claude":value;
   async function rpc(context,operation,reading,requestID) {
-    const payload = {project:context.project,operation,...(context.host?{host:context.host}:{}),request_id:reading?null:(requestID||crypto.randomUUID())};
+    const payload = {project:context.project,operation,...(context.host?{host:context.host}:{}),request_id:reading?null:(requestID||HeyBossUI.requestId())};
     let response;try { response = await fetch(mobile?"/api/artifact-requests":"/api/action",{method:"POST",headers:{"Content-Type":"application/json",...(mobile?{}:{"X-Hey-Boss-CSRF":context.csrf})},body:JSON.stringify(payload),signal:AbortSignal.timeout(20000)}); } catch(e) {throw failure("Connection interrupted. "+(reading?"Reconnect and try again.":"Retry this pending save with the same content after reconnecting."),!reading);}
     let value;try {value = await response.json();}catch(e){throw failure("Delivery could not be confirmed. "+(reading?"Reconnect and try again.":"Retry the pending save after reconnecting."),!reading);}
     if (!response.ok) throw Object.assign(failure(value.error?.message||value.error||"Could not connect; your draft is preserved.",response.status>=500),{code:value.error?.code});
@@ -207,7 +207,7 @@ const HeyBossArtifacts = (() => {
     async function documentAction(artifact,command,button,dialog) {
       const key=`${draftKey(artifact.id)}:action`,scope={...context},seq=generation;
       if(activeActions.has(key))return;
-      const pending=pendingActions.get(key)||drafts.get(key)||{operation:{command,id:artifact.id,if_version:artifact.version,...(command==="archive"?{archived:!artifact.archived}:{})},requestID:crypto.randomUUID()};
+      const pending=pendingActions.get(key)||drafts.get(key)||{operation:{command,id:artifact.id,if_version:artifact.version,...(command==="archive"?{archived:!artifact.archived}:{})},requestID:HeyBossUI.requestId()};
       if(pending.operation.command!==command){error(Error("An earlier action is pending. Retry that action before making another change."));dialog?.close();return;}
       pendingActions.set(key,pending);drafts.set(key,pending);activeActions.add(key);button.disabled=true;
       if(dialog){$("[role=alert]",dialog).hidden=true;$("[data-cancel]",dialog).disabled=true;dialog.oncancel=e=>e.preventDefault();}
@@ -262,7 +262,7 @@ const HeyBossArtifacts = (() => {
       const draft=drafts.get(draftKey(doc?.id));
       mode("editor");
       document.title=`${doc?"Edit "+doc.title:"New artifact"} · Hey Boss`;
-      $("#artifact-document").innerHTML=`<form id="artifact-editor" class="artifact-editor" data-version="${draft?.version||doc?.version||1}" data-request-id="${esc(draft?.requestID||crypto.randomUUID())}">
+      $("#artifact-document").innerHTML=`<form id="artifact-editor" class="artifact-editor" data-version="${draft?.version||doc?.version||1}" data-request-id="${esc(draft?.requestID||HeyBossUI.requestId())}">
         <header class="artifact-editor-toolbar"><button class="artifact-text-button" type="button" id="artifact-cancel">${icon("arrow-left")}Back</button><h1>${doc?"Edit artifact":"New artifact"}</h1><div class="artifact-editor-tools"><button class="button" type="button" id="artifact-preview" aria-pressed="false">Preview</button><button class="button artifact-import" type="button" id="artifact-import-open">Import</button><input id="artifact-import" type="file" accept=".md,.markdown,text/markdown,text/plain" hidden><button class="button primary" type="submit">Save</button></div></header>
         <div class="artifact-editor-paper"><label class="artifact-title-label" for="artifact-title">Title</label><input id="artifact-title" aria-label="Title" required maxlength="512" placeholder="Untitled artifact" value="${esc(draft?.title??doc?.title??"")}"><div id="artifact-write"><label class="artifact-body-label" for="artifact-body">Markdown</label><textarea id="artifact-body" placeholder="Start writing in Markdown…" spellcheck="true">${esc(draft?.body??doc?.body??"")}</textarea></div><div class="markdown artifact-reading" id="artifact-edit-preview" hidden></div></div><div id="artifact-conflict" class="artifact-conflict"></div></form>`;
       let saving=false,pending=draft?.pending||null;
@@ -279,7 +279,7 @@ const HeyBossArtifacts = (() => {
       };
       resizeEditor=autosize;
       const changed=()=>{
-        if(!saving&&!pending){$("#artifact-editor").dataset.requestId=crypto.randomUUID();pending=null;}
+        if(!saving&&!pending){$("#artifact-editor").dataset.requestId=HeyBossUI.requestId();pending=null;}
         const body=$("#artifact-body");if(!writingEditor&&body.style.height!=="65vh")autosize();
         status("Editing…");clearTimeout(draftTimer);draftTimer=setTimeout(keepDraft,300);
       };
@@ -316,7 +316,7 @@ const HeyBossArtifacts = (() => {
         pending ||= doc?{command:"edit",id:doc.id,title,body,if_version:Number(form.dataset.version)}:{command:"create",title,body,...target};
         form.dataset.pending=JSON.stringify(pending);keepDraft();saving=true;writingEditor?.readOnly(true);form.querySelectorAll("input,textarea,button").forEach(el=>el.disabled=true);status("Saving…");$("#artifact-error").hidden=true;
         try {const v=await api(context,pending,form.dataset.requestId);drafts.remove(key);if(!form.isConnected)return;doc=v.artifact;doc.result=v;editing=false;status("Saved");location.hash=new URLSearchParams({project:context.project,artifact:doc.id,...(context.host?{host:context.host}:{})});reading();}
-        catch(err){if(!form.isConnected)return;error(err);if(!err.uncertain){pending=null;form.dataset.pending="";form.dataset.requestId=crypto.randomUUID();keepDraft();}else{status("Save pending · retry with the same content to avoid duplicate documents");}if(doc&&err.code==="conflict"){ $("#artifact-conflict").innerHTML='<button class="button" id="artifact-load-latest" type="button">Load latest for comparison</button>';$("#artifact-load-latest").onclick=async()=>{try{const latest=await api(context,{command:"view",id:doc.id});if(!form.isConnected)return;const panel=$("#artifact-conflict");panel.innerHTML=`<h3>Latest saved revision ${latest.artifact.version}</h3><strong>${esc(latest.artifact.title)}</strong><pre>${esc(latest.artifact.body)}</pre><p>Merge the saved changes into your draft above, then use this revision to save.</p><button type="button" class="button" id="artifact-use-revision">Use revision ${latest.artifact.version} for merged draft</button>`;$("#artifact-use-revision").onclick=()=>{form.dataset.version=latest.artifact.version;form.dataset.requestId=crypto.randomUUID();pending=null;keepDraft();panel.innerHTML="<p>Latest revision selected. Review your merged draft and Save.</p>";};}catch(e){error(e);}};}}
+        catch(err){if(!form.isConnected)return;error(err);if(!err.uncertain){pending=null;form.dataset.pending="";form.dataset.requestId=HeyBossUI.requestId();keepDraft();}else{status("Save pending · retry with the same content to avoid duplicate documents");}if(doc&&err.code==="conflict"){ $("#artifact-conflict").innerHTML='<button class="button" id="artifact-load-latest" type="button">Load latest for comparison</button>';$("#artifact-load-latest").onclick=async()=>{try{const latest=await api(context,{command:"view",id:doc.id});if(!form.isConnected)return;const panel=$("#artifact-conflict");panel.innerHTML=`<h3>Latest saved revision ${latest.artifact.version}</h3><strong>${esc(latest.artifact.title)}</strong><pre>${esc(latest.artifact.body)}</pre><p>Merge the saved changes into your draft above, then use this revision to save.</p><button type="button" class="button" id="artifact-use-revision">Use revision ${latest.artifact.version} for merged draft</button>`;$("#artifact-use-revision").onclick=()=>{form.dataset.version=latest.artifact.version;form.dataset.requestId=HeyBossUI.requestId();pending=null;keepDraft();panel.innerHTML="<p>Latest revision selected. Review your merged draft and Save.</p>";};}catch(e){error(e);}};}}
         finally {saving=false;if(form.isConnected){writingEditor?.readOnly(!!pending);form.querySelectorAll("input,textarea,button").forEach(el=>el.disabled=false);if(pending){$("#artifact-title").disabled=true;$("#artifact-body").disabled=true;$("#artifact-import").disabled=true;$("#artifact-import-open").disabled=true;}}}
       };
       $("#artifact-editor").onkeydown=e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="s"){e.preventDefault();if(!saving)e.currentTarget.requestSubmit();}};
@@ -370,7 +370,7 @@ const HeyBossArtifacts = (() => {
         form.onsubmit=async e=>{
           e.preventDefault();if(button.disabled||!field.value.trim())return;
           button.disabled=true;
-          pending ||= {operation:{command:"comment",id:doc.id,parent:Number(form.dataset.reply),body:field.value},requestID:crypto.randomUUID()};
+          pending ||= {operation:{command:"comment",id:doc.id,parent:Number(form.dataset.reply),body:field.value},requestID:HeyBossUI.requestId()};
           field.readOnly=true;keep();
           try{const r=await api(context,pending.operation,pending.requestID);drafts.remove(key);if(!form.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Reply saved");}
           catch(err){if(!form.isConnected)return;button.disabled=false;if(!err.uncertain){pending=null;field.readOnly=false;keep();}error(err);if(err.uncertain)status("Reply pending · retry after reconnecting");}
@@ -435,7 +435,7 @@ const HeyBossArtifacts = (() => {
         if(!target.hasAttribute("tabindex")){target.tabIndex=-1;target.addEventListener("blur",()=>target.removeAttribute("tabindex"),{once:true});}
         target.focus({preventScroll:true});
       };
-      $("#artifact-comment-form").onsubmit=async e=>{e.preventDefault();const b=$("button[type=submit]",e.currentTarget);b.disabled=true;pendingComment ||= {operation:{command:"comment",id:doc.id,body:$("#artifact-comment").value,...(anchor||{})},requestID:crypto.randomUUID()};$("#artifact-comment").readOnly=true;$("#artifact-comment").dispatchEvent(new Event("input"));try{const r=await api(context,pendingComment.operation,pendingComment.requestID);drafts.remove(commentKey);if(!b.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Comment saved");}catch(e){if(!b.isConnected)return;b.disabled=false;if(!e.uncertain){pendingComment=null;$("#artifact-comment").readOnly=false;$("#artifact-comment").dispatchEvent(new Event("input"));}error(e);}};
+      $("#artifact-comment-form").onsubmit=async e=>{e.preventDefault();const b=$("button[type=submit]",e.currentTarget);b.disabled=true;pendingComment ||= {operation:{command:"comment",id:doc.id,body:$("#artifact-comment").value,...(anchor||{})},requestID:HeyBossUI.requestId()};$("#artifact-comment").readOnly=true;$("#artifact-comment").dispatchEvent(new Event("input"));try{const r=await api(context,pendingComment.operation,pendingComment.requestID);drafts.remove(commentKey);if(!b.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Comment saved");}catch(e){if(!b.isConnected)return;b.disabled=false;if(!e.uncertain){pendingComment=null;$("#artifact-comment").readOnly=false;$("#artifact-comment").dispatchEvent(new Event("input"));}error(e);}};
     }
     async function library(append=false) {
       const seq=++generation;status("Loading…");$("#artifact-error").hidden=true;$("#artifact-more").hidden=true;

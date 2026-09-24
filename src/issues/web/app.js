@@ -234,10 +234,7 @@ async function mutationKey(project, operation, host) {
   const bytes = new TextEncoder().encode(
     JSON.stringify([model.actor.id, project, operation, ...(host && host !== model.defaultHost ? [host] : [])]),
   );
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return HeyBossUI.sha256(bytes);
 }
 function persistPending() {
   storage.set(
@@ -249,7 +246,7 @@ async function mutate(operation, project = model.project.id, host = model.route.
   const key = await mutationKey(project, operation, host);
   let id = pendingMutation.get(key);
   if (!id) {
-    id = crypto.randomUUID();
+    id = HeyBossUI.requestId();
     pendingMutation.set(key, id);
     persistPending();
   }
