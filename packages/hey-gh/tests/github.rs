@@ -4066,8 +4066,10 @@ async fn account_detail_timeout_preserves_new_comments_and_last_good_threads() {
         let h = Harness::new().await;
         h.mode("account");
         let mut config = h.config();
-        config.report_timeout = Duration::from_millis(200);
-        config.request_timeout = Duration::from_millis(500);
+        // Leave time for the healthy sources to publish before the deliberately
+        // stalled source expires, including on a busy CI runner.
+        config.report_timeout = Duration::from_secs(2);
+        config.request_timeout = Duration::from_secs(4);
         config.max_attempts = 1;
         let c = Client::with_token(config, "synthetic-token".into()).unwrap();
         c.refresh_pr_status(Freshness::Revalidate, false)
@@ -4092,7 +4094,7 @@ async fn account_detail_timeout_preserves_new_comments_and_last_good_threads() {
         h.phase(4);
         let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
         api.watch_account(60).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(12), async {
             loop {
                 let page = c
                     .pr_status_page(None, None, 1000, Duration::ZERO)
@@ -4301,8 +4303,10 @@ async fn account_initial_checks_are_available_before_slow_detail_hydration_and_r
     h.mode("account-slow-one");
     h.phase(2);
     let mut config = h.config();
-    config.report_timeout = Duration::from_millis(150);
-    config.request_timeout = Duration::from_millis(500);
+    // Exercise cycle expiry at the blocked request, not during SQLite setup or
+    // discovery when the runner is contended. The request must outlive the cycle.
+    config.report_timeout = Duration::from_secs(2);
+    config.request_timeout = Duration::from_secs(4);
     config.max_attempts = 1;
     let c = Client::with_token(config, "synthetic-token".into()).unwrap();
     c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
@@ -4394,12 +4398,18 @@ async fn account_initial_checks_are_available_before_slow_detail_hydration_and_r
         "refresh cycle budget exhausted; retry queued; prior evidence retained"
     );
     assert_eq!(interrupted["complete"], false);
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while c.status().outstanding_requests != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     // Persisted resume starts after the timed-out PR, even on a new connection.
     drop(c);
     let mut config = h.config();
-    config.report_timeout = Duration::from_millis(150);
-    config.request_timeout = Duration::from_millis(500);
+    config.report_timeout = Duration::from_secs(2);
+    config.request_timeout = Duration::from_secs(4);
     config.max_attempts = 1;
     let c = Client::with_token(config, "synthetic-token".into()).unwrap();
     c.refresh_pr_status(Freshness::Revalidate, true)
@@ -6973,7 +6983,7 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
     h.mode("account-large");
     h.phase(2);
     let mut config = h.config();
-    config.report_timeout = Duration::from_secs(2);
+    config.report_timeout = Duration::from_secs(10);
     config.queue_timeout = Duration::from_secs(10);
     config.min_spacing = Duration::from_millis(5);
     let c = Client::with_token(config, "synthetic-token".into()).unwrap();
@@ -7028,7 +7038,8 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
     until(|| c.status().coalesced_requests > 0).await;
     h.mock.release.notify_waiters();
     assert!(gate.await.unwrap().is_ok());
-    let report = tokio::time::timeout(Duration::from_secs(2), foreground)
+    // Dispatch order below proves priority without a machine-speed assertion.
+    let report = tokio::time::timeout(Duration::from_secs(10), foreground)
         .await
         .unwrap()
         .unwrap();
