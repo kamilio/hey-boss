@@ -239,10 +239,12 @@ mod tests {
         for path in ["a", "b", "one", "two"] {
             std::fs::create_dir_all(root.join(path)).unwrap();
         }
+        // Layout validation does not need a locally installed agent CLI. The
+        // process integration tests cover running workers with a fixture agent.
         let mut input = json!([
-            {"id":"checkout-a","config":{"directory":"/work/a","projects":["named:One"],"enabled":true}},
-            {"id":"checkout-b","config":{"directory":"/work/b","projects":["named:One"],"enabled":true}},
-            {"id":"shared","config":{"projects":["named:One","named:Two"],"directories":{"named:One":"/work/one","named:Two":"/work/two"},"concurrency":2},"intent":"running"}
+            {"id":"checkout-a","config":{"directory":"/work/a","projects":["named:One"],"enabled":false}},
+            {"id":"checkout-b","config":{"directory":"/work/b","projects":["named:One"],"enabled":false}},
+            {"id":"shared","config":{"projects":["named:One","named:Two"],"directories":{"named:One":"/work/one","named:Two":"/work/two"},"concurrency":2,"enabled":false}}
         ]);
         input[0]["config"]["directory"] = json!(root.join("a"));
         input[1]["config"]["directory"] = json!(root.join("b"));
