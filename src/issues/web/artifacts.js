@@ -26,7 +26,7 @@ const HeyBossArtifacts = (() => {
         if(i===89) throw failure("Supervisor is offline or still processing. Your pending save is preserved; retry after reconnecting.",true);
       }
     }
-    if (!value.ok) throw Object.assign(Error(value.error?.message||"Could not save; your draft is preserved."),{code:value.error?.code});
+    if (!value.ok) throw Object.assign(failure(value.error?.message||"Could not save; your draft is preserved.",operation.action==="artifact"&&operation.operation.command==="delete"&&value.error?.code==="io_error"),{code:value.error?.code});
     return value;
   }
   const api=(context,operation,requestID)=>rpc(context,{action:"artifact",operation},reads.has(operation.command),requestID);
@@ -203,6 +203,53 @@ const HeyBossArtifacts = (() => {
     const picker=new HeyBossUI.ProjectPicker({onSelect:id=>{location.hash=new URLSearchParams({project:id});}});
     const draftKey=id=>`hey-boss-artifact-draft:${context.host||"local"}:${context.project}:${id||"new"}`;
     const drafts={get:key=>{try{return JSON.parse(localStorage.getItem(key));}catch{return null;}},set:(key,v)=>{try{localStorage.setItem(key,JSON.stringify(v));return true;}catch{return false;}},remove:key=>{try{localStorage.removeItem(key);}catch{}}};
+    const activeActions=new Set(),pendingActions=new Map();
+    async function documentAction(artifact,command,button,dialog) {
+      const key=`${draftKey(artifact.id)}:action`,scope={...context},seq=generation;
+      if(activeActions.has(key))return;
+      const pending=pendingActions.get(key)||drafts.get(key)||{operation:{command,id:artifact.id,if_version:artifact.version,...(command==="archive"?{archived:!artifact.archived}:{})},requestID:crypto.randomUUID()};
+      if(pending.operation.command!==command){error(Error("An earlier action is pending. Retry that action before making another change."));dialog?.close();return;}
+      pendingActions.set(key,pending);drafts.set(key,pending);activeActions.add(key);button.disabled=true;
+      if(dialog){$("[role=alert]",dialog).hidden=true;$("[data-cancel]",dialog).disabled=true;dialog.oncancel=e=>e.preventDefault();}
+      try {
+        const result=await api(scope,pending.operation,pending.requestID);
+        pendingActions.delete(key);drafts.remove(key);
+        if(command==="delete"){
+          const prefix=key.slice(0,-7);
+          try{for(const stored of Object.keys(localStorage))if(stored===prefix||stored.startsWith(prefix+":"))drafts.remove(stored);}catch{}
+        }
+        dialog?.close();
+        if(seq!==generation)return;
+        $("#artifact-error").hidden=true;
+        if(doc?.id===artifact.id){
+          if(command==="delete"){location.href=libraryURL();return;}
+          doc=result.artifact;doc.result=result;reading();
+        }else{
+          await library();
+          if(context.project!==scope.project||context.host!==scope.host||doc||editing)return;
+          ($(".artifact-row-link")||$("#artifact-empty-action")||$("#artifact-search"))?.focus({preventScroll:true});
+        }
+        status(command==="delete"?"Artifact permanently deleted":pending.operation.archived?"Artifact archived":"Artifact restored");
+      }catch(e){
+        if(!e.uncertain){pendingActions.delete(key);drafts.remove(key);}
+        if(seq!==generation)return;
+        const message=e.uncertain?"Delivery is unconfirmed. Retry this same action to confirm the result.":e.message;
+        if(dialog?.open){const panel=$("[role=alert]",dialog);panel.textContent=message;panel.hidden=false;button.textContent=e.uncertain?"Retry deletion":e.code==="conflict"?"Reload latest":"Delete permanently";if(e.code==="conflict")button.onclick=()=>{dialog.close();navigate();};}
+        else error(Error(message),e.code==="conflict"?navigate:()=>documentAction(artifact,command,button));
+      }finally{activeActions.delete(key);button.disabled=false;if(dialog){$("[data-cancel]",dialog).disabled=false;dialog.oncancel=null;}}
+    }
+    function confirmDelete(artifact,trigger) {
+      if($("#artifact-delete-dialog"))return;
+      const dialog=document.createElement("dialog");dialog.id="artifact-delete-dialog";dialog.className="artifact-delete-dialog";
+      dialog.setAttribute("aria-labelledby","artifact-delete-title");dialog.setAttribute("aria-describedby","artifact-delete-description");
+      dialog.innerHTML=`<h2 id="artifact-delete-title">Delete artifact permanently?</h2><p class="artifact-delete-name">${esc(artifact.title)}</p><p id="artifact-delete-description">This removes the document, comments, attached files, and links from issues and mindmaps. This cannot be undone.</p><p class="artifact-delete-hint">To keep it for later, use Archive instead.</p><p role="alert" hidden></p><div class="artifact-delete-actions"><button class="button" type="button" data-cancel autofocus>Cancel</button><button class="button danger" type="button" data-confirm>Delete permanently</button></div>`;
+      document.body.append(dialog);
+      $("[data-cancel]",dialog).onclick=()=>dialog.close();
+      $("[data-confirm]",dialog).onclick=e=>documentAction(artifact,"delete",e.currentTarget,dialog);
+      dialog.onclose=()=>{dialog.remove();if(trigger.isConnected)trigger.focus();};
+      trigger.focus({preventScroll:true});
+      dialog.showModal();
+    }
     function keepDraft() {
       clearTimeout(draftTimer);
       if(!editing)return;
@@ -291,7 +338,7 @@ const HeyBossArtifacts = (() => {
       const commentCount=v.comments.filter(c=>!c.parent&&!c.resolved).length;
       commentsOpen ??= false;
       $("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
-        <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel"><button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"hide")}${doc.archived?"Restore":"Archive"}</button></div></details></div></header>
+        <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel"><button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
       if(reuse)$("#artifact-reading").replaceWith(previous);
@@ -311,7 +358,8 @@ const HeyBossArtifacts = (() => {
       $("#artifact-edit").onclick=editor;
       $("#artifact-export").onclick=()=>{menu.open=false;const blob=new Blob([doc.body],{type:"text/markdown;charset=utf-8"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=(doc.title.replace(/[^\p{L}\p{N}_ -]/gu,"_")||"artifact")+".md";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
       const mutate=async(op,button)=>{button.disabled=true;try{const r=await api(context,op);if(!button.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Saved");}catch(e){button.disabled=false;error(e);}};
-      $("#artifact-archive").onclick=e=>mutate({command:"archive",id:doc.id,archived:!doc.archived,if_version:doc.version},e.currentTarget);
+      $("#artifact-archive").onclick=e=>documentAction(doc,"archive",e.currentTarget);
+      $("#artifact-delete").onclick=e=>{menu.open=false;confirmDelete(doc,$("summary",menu));};
       $("#artifact-document").querySelectorAll("[data-resolve]").forEach(b=>b.onclick=()=>mutate({command:"resolve",id:doc.id,comment_id:Number(b.dataset.resolve),resolved:b.dataset.resolved==="true"},b));
       $("#artifact-document").querySelectorAll("[data-reply]").forEach(form=>{
         const field=$("textarea",form),button=$("button",form),key=`${draftKey(doc.id)}:reply:${form.dataset.reply}`;
@@ -394,15 +442,18 @@ const HeyBossArtifacts = (() => {
       const list=$("#artifact-list");list.setAttribute("aria-busy","true");
       if(!list.children.length)list.innerHTML='<div class="artifact-loading" aria-hidden="true"><span></span><span></span><span></span></div>';
       try {const value=await api(context,{command:"list",query:$("#artifact-search").value,archived:$("#artifact-archived").checked,offset:append?offset:0});if(seq!==generation)return;rows=append?[...rows,...value.artifacts]:value.artifacts;offset=rows.length;
-        const query=$("#artifact-search").value.trim();
+        const query=$("#artifact-search").value.trim(),archived=$("#artifact-archived").checked;
         $("#artifact-new").hidden=!rows.length&&!query;
-        $("#artifact-list").innerHTML=rows.map(a=>`<a class="artifact-row" href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}"><span class="artifact-document-icon">${icon("docs")}</span><span class="artifact-row-content"><strong>${esc(a.title)}</strong><span class="artifact-row-meta">${a.archived?'<span class="artifact-badge">Archived</span>':""}Updated ${esc(date(a.updated_at))}</span></span><span class="artifact-row-arrow">${icon("arrow-right")}</span></a>`).join("")||`<div class="artifact-empty"><span class="artifact-empty-icon">${icon(query?"search":"docs")}</span><h2>${query?"No matching artifacts":"Your documents start here"}</h2><p>${query?"Try a different title or a phrase from the document.":"Keep plans, notes, and decisions together in your project."}</p><button class="button${query?"":" primary"}" type="button" id="artifact-empty-action">${query?"Clear search":"New artifact"}</button></div>`;
-        if($("#artifact-empty-action"))$("#artifact-empty-action").onclick=()=>{if(query){$("#artifact-search").value="";$("#artifact-search").focus();library();}else $("#artifact-new").click();};
+        $("#artifact-list").innerHTML=rows.map(a=>`<div class="artifact-row"><a class="artifact-row-link" href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}"><span class="artifact-document-icon">${icon("docs")}</span><span class="artifact-row-content"><strong>${esc(a.title)}</strong><span class="artifact-row-meta">${a.archived?'<span class="artifact-badge">Archived</span>':""}Updated ${esc(date(a.updated_at))}</span></span></a><div class="artifact-row-actions"><button class="icon-button" type="button" data-archive="${esc(a.id)}" aria-label="${a.archived?"Restore":"Archive"} ${esc(a.title)}" title="${a.archived?"Restore":"Archive"}">${icon(a.archived?"refresh":"archive")}</button><button class="icon-button artifact-danger" type="button" data-delete="${esc(a.id)}" aria-label="Delete ${esc(a.title)} permanently" title="Delete permanently…">${icon("trash")}</button></div></div>`).join("")||`<div class="artifact-empty"><span class="artifact-empty-icon">${icon(query?"search":"docs")}</span><h2>${query?"No matching artifacts":archived?"No archived artifacts":"Your documents start here"}</h2><p>${query?"Try a different title or a phrase from the document.":archived?"Archived documents appear here. Restore them whenever you need them.":"Keep plans, notes, and decisions together in your project."}</p><button class="button${query?"":" primary"}" type="button" id="artifact-empty-action">${query?"Clear search":archived?"Show active artifacts":"New artifact"}</button></div>`;
+        list.querySelectorAll("[data-archive]").forEach(b=>b.onclick=()=>documentAction(rows.find(a=>a.id===b.dataset.archive),"archive",b));
+        list.querySelectorAll("[data-delete]").forEach(b=>b.onclick=()=>confirmDelete(rows.find(a=>a.id===b.dataset.delete),b));
+        if($("#artifact-empty-action"))$("#artifact-empty-action").onclick=()=>{if(query){$("#artifact-search").value="";$("#artifact-search").focus();library();}else if(archived){$("#artifact-archived").checked=false;library();}else $("#artifact-new").click();};
         $("#artifact-more").hidden=!value.more;status(`${rows.length} ${rows.length===1?"document":"documents"}${value.more?" · more available":""}${query?" found":" · recently updated"}`);
       }catch(e){if(seq===generation){if($(".artifact-loading",list))list.replaceChildren();error(e,()=>library(append));}}
       finally{if(seq===generation)list.removeAttribute("aria-busy");}
     }
     async function navigate() {
+      $("#artifact-delete-dialog")?.close();
       clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
       const params=route(),id=HeyBossUI.projectId(boot.projects[0]?.id);project=boot.projects.find(p=>p.id===id)||boot.projects[0];
       if(!project){error(Error("No registered projects. Reconnect the supervisor to load project data."),()=>location.reload());return;}

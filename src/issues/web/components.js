@@ -61,6 +61,7 @@ const paths = {
     '<path d="M21 12a8.5 8.5 0 0 1-8.5 8.5 10 10 0 0 1-4-.8L3 21l1.4-5.2A8.5 8.5 0 1 1 21 12Z"/>',
   "arrow-right": '<path d="M4 12h16m-6-6 6 6-6 6"/>',
   "arrow-left": '<path d="M20 12H4m6-6-6 6 6 6"/>',
+  archive: '<path d="M3 3h18v5H3ZM5 8v13h14V8M10 12h4"/>',
   trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   edit: '<path d="m15 4 5 5M4 20l1-6L17 2l5 5L10 19l-6 1Z"/>',
