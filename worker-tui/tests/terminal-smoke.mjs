@@ -143,6 +143,9 @@ try {
   await session.type("sp");
   assert.deepEqual(await state(), {}, "Small-screen keys must not control workers");
   await session.resize(120, 36);
+  // Resize is asynchronous. Wait until the dashboard has left its small-screen
+  // guard before sending a key that the guard deliberately ignores.
+  await wait(session, "Completed attempts");
   await session.type("h");
   await wait(session, "Build dashboard");
   await ready(session);
