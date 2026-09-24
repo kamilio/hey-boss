@@ -602,6 +602,44 @@ mod tests {
     }
 
     #[test]
+    fn fleet_assignment_retargets_only_finished_local_chiefs() {
+        let (root, store, job) = launch_fixture();
+        store.db.execute_batch("INSERT INTO issue_workers(id,kind,config,version,updated_at) SELECT 'selected',kind,config,1,0 FROM issue_workers WHERE id='owner'; UPDATE fleet_meta SET role='agent',node='unit';").unwrap();
+        let assignment = crate::chief_ownership::Assignment {
+            project_id: "named:Chief".into(),
+            node: "unit".into(),
+            worker_id: "selected".into(),
+            generation: 1,
+            revoking: false,
+        };
+        crate::chief_ownership::apply(&store.db, std::slice::from_ref(&assignment)).unwrap();
+        crate::chief_ownership::stop_unassigned(&store.db).unwrap();
+        assert_eq!(status(&store.db, Some("owner")).unwrap().len(), 1);
+        store.chief_update(&job, "idle", "Completed pass").unwrap();
+        let previous = status(&store.db, Some("owner")).unwrap()[0].clone();
+        // The grant can arrive before the former owner records completion.
+        // Older workers consult this local assignment before trying to reserve.
+        crate::chief_ownership::stop_unassigned(&store.db).unwrap();
+        let selected = status(&store.db, Some("selected")).unwrap();
+        assert_eq!(
+            selected.len(),
+            1,
+            "The supervisor's worker must inherit the idle Chief"
+        );
+        for key in ["next_at", "session_id", "summary", "state"] {
+            assert_eq!(selected[0][key], previous[key]);
+        }
+        crate::chief_ownership::apply(&store.db, &[assignment]).unwrap();
+        let writer = rusqlite::Connection::open(root.join("issues.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store.db.busy_timeout(std::time::Duration::ZERO).unwrap();
+        crate::chief_ownership::stop_unassigned(&store.db).unwrap();
+        drop(writer);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn fleet_chief_requires_supervisors_selected_worker() {
         let (root, mut store, job) = launch_fixture();
         store.chief_update(&job, "idle", "Done").unwrap();
