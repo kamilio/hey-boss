@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
+#[cfg(test)]
+mod listener_tests;
+mod local_http;
+
 fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
     fn decode(input: &str) -> Result<String> {
         let mut bytes = Vec::new();
@@ -61,6 +65,7 @@ struct App {
     actor: Actor,
     token: String,
     authority: String,
+    local_ports: Vec<u16>,
     mobile_origin: Option<String>,
 }
 #[derive(Deserialize)]
@@ -156,6 +161,18 @@ pub fn serve(config: Config) -> Result<()> {
     let server = Server::http(("127.0.0.1", config.port))
         .map_err(|e| Error::new("io_error", e.to_string()))?;
     let authority = server.server_addr().to_ip().unwrap().to_string();
+    let mut servers = vec![server];
+    // Custom and ephemeral ports deliberately remain a single isolated service.
+    let (socket_activated, local_http_error) = if config.port == 4781 {
+        add_local_http(&mut servers, local_http::port_80())
+    } else {
+        (false, None)
+    };
+    let local_ports = servers
+        .iter()
+        .map(|server| server.server_addr().to_ip().unwrap().port())
+        .collect::<Vec<_>>();
+    let local_url = local_ports.contains(&80).then_some("http://hey-boss.test/");
     if let Backend::Local(path) = &backend {
         crate::agent_conversations::start_bridge(path.clone());
     }
@@ -167,6 +184,7 @@ pub fn serve(config: Config) -> Result<()> {
         actor,
         token: secret.iter().map(|b| format!("{b:02x}")).collect(),
         authority,
+        local_ports,
         mobile_origin,
     };
     let resolved = app.execute(
@@ -185,7 +203,7 @@ pub fn serve(config: Config) -> Result<()> {
     if config.json {
         println!(
             "{}",
-            json!({"ok":true,"url":url,"mobile_url":app.mobile_origin,"project":app.project,"actor":app.actor.id})
+            json!({"ok":true,"url":url,"local_url":local_url,"local_http_error":local_http_error,"mobile_url":app.mobile_origin,"project":app.project,"actor":app.actor.id})
         );
     } else {
         println!(
@@ -194,6 +212,9 @@ pub fn serve(config: Config) -> Result<()> {
         );
         if let Some(origin) = &app.mobile_origin {
             println!("Mobile · {origin}/ (requires private Tailscale Serve)");
+        }
+        if let Some(url) = local_url {
+            println!("Local · {url} (requires a 127.0.0.1 hey-boss.test hosts entry)");
         }
     }
     std::io::stdout().flush()?;
@@ -246,18 +267,70 @@ pub fn serve(config: Config) -> Result<()> {
             }
         });
     }
+    serve_requests(&servers, &app, &stop);
+    if reload.load(Ordering::Relaxed) {
+        // launchd retains the privileged socket. Exit normally so KeepAlive starts
+        // a new process that can activate it again (activation is once per process).
+        if socket_activated {
+            return Ok(());
+        }
+        let port = servers[0].server_addr().to_ip().unwrap().port().to_string();
+        let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+        for index in 0..args.len().saturating_sub(1) {
+            if args[index] == "--port" && args[index + 1] == "0" {
+                args[index + 1] = port.clone().into();
+            }
+        }
+        for arg in &mut args {
+            if arg == "--port=0" {
+                *arg = format!("--port={port}").into();
+            }
+        }
+        drop(servers);
+        drop(app);
+        return Err(std::process::Command::new(executable)
+            .args(args)
+            .exec()
+            .into());
+    }
+    Ok(())
+}
+
+fn add_local_http(
+    servers: &mut Vec<Server>,
+    listener: std::io::Result<(std::net::TcpListener, bool)>,
+) -> (bool, Option<String>) {
+    match listener.and_then(|(listener, activated)| {
+        Server::from_listener(listener, None)
+            .map(|server| (server, activated))
+            .map_err(std::io::Error::other)
+    }) {
+        Ok((server, activated)) => {
+            servers.push(server);
+            (activated, None)
+        }
+        Err(error) => {
+            let message = format!(
+                "Port 80 unavailable: {error}. Port 4781 remains available. For macOS administrator setup, see docs/local-http.md; do not run Hey Boss as root."
+            );
+            eprintln!("{message}");
+            (false, Some(message))
+        }
+    }
+}
+
+fn serve_requests(servers: &[Server], app: &Arc<App>, stop: &Arc<AtomicBool>) {
     std::thread::scope(|scope| {
-        for _ in 0..4 {
-            let app = &app;
-            let server = &server;
-            let stop = &stop;
-            scope.spawn(move || {
+        for server in servers {
+            for _ in 0..4 {
+                scope.spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match server.recv_timeout(Duration::from_millis(250)) {
                         Ok(Some(request))
                             if request.url().split('?').next() == Some("/api/fleet/events") =>
                         {
                             let app = Arc::clone(app);
+                            let stop = Arc::clone(stop);
                             std::thread::spawn(move || {
                                 if request.method() != &Method::Get || !allowed(&request, &app) {
                                     let _ = request.respond(Response::empty(403));
@@ -268,7 +341,7 @@ pub fn serve(config: Config) -> Result<()> {
                                         let mut output = request.into_writer();
                                         if output.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").and_then(|_| output.flush()).is_err() { return; }
                                         let mut bytes = [0u8; 8192];
-                                        loop {
+                                        while !stop.load(Ordering::Relaxed) {
                                             match stream.read(&mut bytes) {
                                                 Ok(0) | Err(_) => break,
                                                 Ok(n) => if output.write_all(&bytes[..n]).and_then(|_| output.flush()).is_err() { break; }
@@ -287,29 +360,9 @@ pub fn serve(config: Config) -> Result<()> {
                     }
                 }
             });
+            }
         }
     });
-    if reload.load(Ordering::Relaxed) {
-        let port = server.server_addr().to_ip().unwrap().port().to_string();
-        let mut args: Vec<_> = std::env::args_os().skip(1).collect();
-        for index in 0..args.len().saturating_sub(1) {
-            if args[index] == "--port" && args[index + 1] == "0" {
-                args[index + 1] = port.clone().into();
-            }
-        }
-        for arg in &mut args {
-            if arg == "--port=0" {
-                *arg = format!("--port={port}").into();
-            }
-        }
-        drop(server);
-        drop(app);
-        return Err(std::process::Command::new(executable)
-            .args(args)
-            .exec()
-            .into());
-    }
-    Ok(())
 }
 
 fn header<'a>(request: &'a tiny_http::Request, name: &str) -> Option<&'a str> {
@@ -362,23 +415,45 @@ fn validate_mobile_origin(origin: String) -> Result<String> {
     Ok(origin)
 }
 fn allowed(request: &tiny_http::Request, app: &App) -> bool {
-    let local = app.authority.replace("127.0.0.1", "localhost");
-    let origin = match header(request, "host") {
-        Some(host) if host == app.authority || host == local => format!("http://{host}"),
-        Some(host)
-            if app
-                .mobile_origin
+    same_origin(
+        header(request, "host"),
+        header(request, "origin"),
+        header(request, "sec-fetch-site"),
+        &app.local_ports,
+        app.mobile_origin.as_deref(),
+    )
+}
+
+fn same_origin(
+    host: Option<&str>,
+    origin: Option<&str>,
+    site: Option<&str>,
+    ports: &[u16],
+    mobile_origin: Option<&str>,
+) -> bool {
+    if site.is_some_and(|site| !["same-origin", "none"].contains(&site)) {
+        return false;
+    }
+    if let Some(authority) = host.and_then(|host| local_http::authority(host, ports)) {
+        return origin.is_none_or(|origin| {
+            origin
+                .strip_prefix("http://")
+                .and_then(|host| local_http::authority(host, ports))
                 .as_deref()
+                == Some(&authority)
+        });
+    }
+    // The explicit private HTTPS proxy policy stays independent of local HTTP.
+    let expected_origin = match host {
+        Some(host)
+            if mobile_origin
                 .is_some_and(|origin| origin.strip_prefix("https://") == Some(host)) =>
         {
-            app.mobile_origin.clone().unwrap()
+            mobile_origin.unwrap()
         }
         _ => return false,
     };
-    if header(request, "sec-fetch-site").is_some_and(|s| !["same-origin", "none"].contains(&s)) {
-        return false;
-    }
-    if header(request, "origin").is_some_and(|value| value != origin) {
+    if origin.is_some_and(|value| value != expected_origin) {
         return false;
     }
     true
