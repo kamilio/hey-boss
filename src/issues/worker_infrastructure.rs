@@ -6,17 +6,6 @@ pub(super) const GUIDANCE: &str = "Approval service unavailable. This attempt fa
 const DATABASE_GUIDANCE: &str = "Database service unavailable. This attempt failed and will retry automatically with exponential backoff. Its slot and claim are released; the saved session, checkout and issue history are retained. Before repeating an uncertain mutation, read and reconcile the current issue state or reuse its original request ID for deduplication. Never blindly replay a write whose outcome is unknown.";
 const PROXY_GUIDANCE: &str = "Model proxy unavailable. This attempt failed and will retry automatically with exponential backoff. Its slot and claim are released; the saved session, checkout and issue history are retained. A proxy recovery timeout is not an implementation result.";
 
-pub(crate) fn label(summary: &str) -> &'static str {
-    if summary.starts_with("Database service unavailable.") {
-        "Database service unavailable"
-    } else if summary.starts_with("Model proxy unavailable.") {
-        "Model proxy unavailable"
-    } else {
-        // Older approval holds have no explicit reason field.
-        "Approval service unavailable"
-    }
-}
-
 pub(super) fn database_unavailable(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
     // A sandbox/policy denial is not repaired by restoring the database.

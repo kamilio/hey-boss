@@ -144,7 +144,12 @@ fn run_state(run: &Value) -> String {
     if run["retry_at"].is_i64() {
         "Retry scheduled".into()
     } else if run["state"] == "infrastructure_blocked" {
-        crate::issues::worker_infrastructure::label(run["summary"].as_str().unwrap_or("")).into()
+        let summary = run["summary"].as_str().unwrap_or("");
+        ["Database service unavailable", "Model proxy unavailable"]
+            .into_iter()
+            .find(|label| summary.starts_with(label))
+            .unwrap_or("Approval service unavailable")
+            .into()
     } else {
         text(&run["state"])
     }
