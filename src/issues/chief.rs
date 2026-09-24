@@ -46,6 +46,7 @@ pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()>
         ("started_at", "INTEGER"),
         ("finished_at", "INTEGER"),
         ("last_event", "TEXT NOT NULL DEFAULT ''"),
+        ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
     ];
     let complete = additions
         .iter()
@@ -62,6 +63,7 @@ pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()>
         return Ok(());
     }
     let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let adding_retry = !columns.iter().any(|c| c == "retry_count");
     for (name, definition) in additions {
         if !tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_chiefs') WHERE name=?1)",
@@ -72,6 +74,9 @@ pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()>
                 "ALTER TABLE project_chiefs ADD COLUMN {name} {definition};"
             ))?;
         }
+    }
+    if adding_retry {
+        tx.execute("UPDATE project_chiefs SET retry_count=1,next_at=min(next_at,?1) WHERE state='blocked' AND owner_pid IS NULL",[worker::now()+30_000])?;
     }
     tx.execute(&format!("UPDATE project_chiefs SET worker_id=({matching_owner}),started_at=COALESCE(started_at,next_at-?1) WHERE state='running' AND ({matching_owner}) IS NOT NULL AND (worker_id IS NOT ({matching_owner}) OR started_at IS NULL)"), [INTERVAL_MS])?;
     crate::chief_ownership::migrate(&tx)?;
@@ -205,7 +210,7 @@ impl Store {
             }
         }
         let finished = worker::now();
-        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?3,state=?4,summary=?5,finished_at=?6,last_event=?5 WHERE project_id=?1 AND machine=?2 AND started_at=?7 AND owner_pid=?8 AND owner_start=?9 AND state='running'",params![job.project,job.machine,finished+INTERVAL_MS,state,summary,finished,job.started_at,std::process::id(),job.owner_start])?;
+        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?6+CASE WHEN ?4 IN ('idle','cancelled') THEN ?3 ELSE min(300000,30000*(1<<min(4,retry_count))) END,retry_count=CASE WHEN ?4 IN ('idle','cancelled') THEN 0 ELSE min(5,retry_count+1) END,state=?4,summary=?5,finished_at=?6,last_event=?5 WHERE project_id=?1 AND machine=?2 AND started_at=?7 AND owner_pid=?8 AND owner_start=?9 AND state='running'",params![job.project,job.machine,INTERVAL_MS,state,summary,finished,job.started_at,std::process::id(),job.owner_start])?;
         Ok(())
     }
 
@@ -351,7 +356,14 @@ impl Task {
         };
         let (state, summary) = match outcome {
             Ok(summary) => ("idle", summary.as_str()),
-            Err(error) => ("blocked", error.message.as_str()),
+            Err(error) => (
+                if error.code == "cancelled" {
+                    "cancelled"
+                } else {
+                    "blocked"
+                },
+                error.message.as_str(),
+            ),
         };
         store.chief_update(&self.job, state, summary)?;
         Ok(true)
@@ -403,12 +415,19 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                 loop {
                     let mut line = Vec::new();
                     match Read::take(&mut reader, 1024 * 1024 + 1).read_until(b'\n', &mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) if line.len() > 1024 * 1024 => break,
-                        _ => {
-                            if let Ok(value) = serde_json::from_slice::<Value>(&line)
-                                && send.send(value).is_err()
-                            {
+                        Ok(0) => break,
+                        Err(error) => {
+                            let _ = send.send(Err(error.to_string()));
+                            break;
+                        }
+                        Ok(_) => {
+                            let value = if line.len() > 1024 * 1024 || line.last() != Some(&b'\n') {
+                                Err("Chief returned an oversized or incomplete event".into())
+                            } else {
+                                serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())
+                            };
+                            let failed = value.is_err();
+                            if send.send(value).is_err() || failed {
                                 break;
                             }
                         }
@@ -417,6 +436,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
             });
             let mut thread_started = false;
             let mut completed = false;
+            let mut failed = false;
             let mut summary = String::new();
             let mut missing = false;
             let mut last_control = Instant::now() - Duration::from_secs(1);
@@ -438,7 +458,8 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                     ));
                 }
                 match receive.recv_timeout(Duration::from_millis(200)) {
-                    Ok(event) => {
+                    Ok(Err(error)) => return Err(Error::new("worker_error", error)),
+                    Ok(Ok(event)) => {
                         if let Some(activity) = event_activity(&event) {
                             store.db.execute("UPDATE project_chiefs SET last_event=?3 WHERE project_id=?1 AND machine=?2", params![job.project,job.machine,activity])?;
                         }
@@ -466,6 +487,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                             }
                             "turn.completed" => completed = true,
                             "error" | "turn.failed" => {
+                                failed = true;
                                 let message = event["message"]
                                     .as_str()
                                     .or(event["error"]["message"].as_str())
@@ -478,7 +500,14 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                             _ => {}
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if crate::agent_process::exited(pid)? {
+                            return Err(Error::new(
+                                "worker_error",
+                                "Chief exited before closing its event stream",
+                            ));
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         if child.try_wait()?.is_some() {
                             break;
@@ -492,7 +521,12 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
             if !thread_started && missing && session.is_some() {
                 return Err(Error::new("missing_thread", summary));
             }
-            if !status.success() || !completed || !thread_started {
+            if !status.success()
+                || !completed
+                || failed
+                || !thread_started
+                || summary.trim().is_empty()
+            {
                 return Err(Error::new(
                     "worker_error",
                     if summary.is_empty() {
@@ -722,6 +756,44 @@ mod tests {
                 )
                 .unwrap()
         );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chief_failures_back_off_and_success_restores_the_hourly_schedule() {
+        let (root, mut store, mut job) = launch_fixture();
+        for delay in [30_000, 60_000, 120_000, 240_000, 300_000, 300_000] {
+            store
+                .chief_update(&job, "blocked", "Agent disconnected")
+                .unwrap();
+            let wait: i64 = store
+                .db
+                .query_row("SELECT next_at-finished_at FROM project_chiefs", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(wait, delay);
+            assert!(
+                store
+                    .reserve_chief("unit", Some("owner"))
+                    .unwrap()
+                    .is_none()
+            );
+            store
+                .db
+                .execute("UPDATE project_chiefs SET next_at=0", [])
+                .unwrap();
+            job = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        }
+        store.chief_update(&job, "idle", "Verified pass").unwrap();
+        let wait: i64 = store
+            .db
+            .query_row("SELECT next_at-finished_at FROM project_chiefs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(wait, INTERVAL_MS);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
