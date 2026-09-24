@@ -96,6 +96,7 @@ pub fn run(o: &Options) -> Result<()> {
                 id: o.id.clone(),
                 history: o.history > 0,
                 owned_worker: false,
+                project_tabs: false,
             },
             cancelled,
         )

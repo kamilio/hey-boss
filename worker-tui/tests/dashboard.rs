@@ -466,3 +466,154 @@ fn initial_selection_uses_status_worker_and_owned_dashboard_stays_pinned() {
     app.apply(json!({"worker_id":"a", "workers":[{"id":"a"}], "runs":[]}));
     assert_eq!(app.worker_id.as_deref(), Some("b"));
 }
+
+fn project_snapshot() -> serde_json::Value {
+    json!({"ok":true,"project_tabs":true,"workers":[
+        {"id":"one","pid":1,"config":{"name":"One","enabled":true,"projects":["named:Alpha","named:Beta"],"concurrency":2},"runs":[
+            {"id":"a","worker_id":"one","project_id":"named:Alpha","title":"Alpha work","finished_at":null},
+            {"id":"b","worker_id":"one","project_id":"named:Beta","title":"Beta work","finished_at":null}]},
+        {"id":"two","pid":2,"config":{"name":"Two","enabled":true,"projects":["named:Alpha"],"concurrency":1},"runs":[
+            {"id":"a2","worker_id":"two","project_id":"named:Alpha","title":"Second Alpha","finished_at":null}]}]})
+}
+
+#[test]
+fn project_tabs_collect_every_worker_and_wrap_in_both_directions() {
+    let mut app = Dashboard::default();
+    app.apply(project_snapshot());
+    assert_eq!(app.project_ids(), ["named:Alpha", "named:Beta"]);
+    assert_eq!(app.project_id.as_deref(), Some("named:Alpha"));
+    assert_eq!(app.runs().len(), 2);
+    app.switch_project(-1);
+    assert_eq!(app.project_id.as_deref(), Some("named:Beta"));
+    assert_eq!(app.runs()[0]["id"], "b");
+    app.switch_project(1);
+    assert_eq!(app.project_id.as_deref(), Some("named:Alpha"));
+    app.navigate(1);
+    app.confirm(false);
+    assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "two");
+}
+
+#[test]
+fn project_selection_survives_refresh_and_removed_projects_fall_back() {
+    let mut app = Dashboard::default();
+    let mut value = project_snapshot();
+    app.apply(value.clone());
+    app.switch_project(1);
+    value["workers"].as_array_mut().unwrap().reverse();
+    app.apply(value.clone());
+    assert_eq!(app.project_id.as_deref(), Some("named:Beta"));
+    value["workers"].as_array_mut().unwrap().pop();
+    app.apply(value);
+    assert_eq!(app.project_id.as_deref(), Some("named:Alpha"));
+    assert_eq!(app.runs().len(), 1);
+}
+
+#[test]
+fn project_tab_header_is_visible_at_small_terminal_sizes() {
+    let mut app = Dashboard::default();
+    app.apply(project_snapshot());
+    app.switch_project(1);
+    let mut terminal = Terminal::new(TestBackend::new(48, 16)).unwrap();
+    terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(screen.contains("[Beta]"), "{screen}");
+    assert!(screen.contains("Shift+Tab"), "{screen}");
+    assert!(!screen.contains("Alpha work"), "{screen}");
+}
+
+#[test]
+fn worker_manager_can_remove_an_idle_worker_without_selecting_an_agent() {
+    let mut value = project_snapshot();
+    value["workers"][1]["runs"] = json!([]);
+    let mut app = Dashboard::default();
+    app.apply(value);
+    app.navigate_worker(1);
+    app.confirm_remove();
+    let removal = app.confirmation.unwrap();
+    assert_eq!(removal.worker_id, "two");
+    assert!(removal.graceful);
+    assert!(!removal.stop);
+}
+
+#[test]
+fn add_form_preserves_spaces_in_each_checkout_and_shares_slots() {
+    use hey_boss_worker_tui::{AddWorker, backend::Request};
+    let form = AddWorker {
+        id: "retry-id".into(),
+        fields: vec![
+            "Shared tools".into(),
+            "2".into(),
+            "/work/Tool One".into(),
+            "/work/Tool Two".into(),
+        ],
+        selected: 0,
+        error: None,
+    };
+    match form.request().unwrap() {
+        Request::AddWorker {
+            id,
+            name,
+            concurrency,
+            directories,
+        } => {
+            assert_eq!(name, "Shared tools");
+            assert_eq!(id, "retry-id");
+            assert_eq!(concurrency, 2);
+            assert_eq!(directories, ["/work/Tool One", "/work/Tool Two"]);
+        }
+        _ => panic!("Expected worker creation"),
+    }
+    assert!(AddWorker::default().request().is_err());
+}
+
+#[test]
+fn many_checkouts_keep_selected_worker_and_add_fields_visible_on_small_terminals() {
+    let mut app = Dashboard::default();
+    let mut value = project_snapshot();
+    let workers = value["workers"].as_array_mut().unwrap();
+    let base = workers[1].clone();
+    workers.clear();
+    for i in 0..9 {
+        let mut worker = base.clone();
+        worker["id"] = json!(format!("worker-{i}"));
+        worker["config"]["name"] = json!(format!("Checkout {i}"));
+        workers.push(worker);
+    }
+    app.apply(value);
+    app.manage_workers = true;
+    app.navigate_worker(8);
+    let mut terminal = Terminal::new(TestBackend::new(48, 16)).unwrap();
+    terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(screen.contains("Checkout 8"), "{screen}");
+    assert!(screen.contains("remove gracefully"), "{screen}");
+    let mut form = hey_boss_worker_tui::AddWorker::default();
+    for i in 0..8 {
+        form.fields
+            .push(format!("/Users/person/Workspace/long-checkout-{i}"));
+    }
+    form.selected = form.fields.len() - 1;
+    app.add_worker = Some(form);
+    terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(screen.contains("long-checkout-7"), "{screen}");
+    assert!(screen.contains("Enter add"), "{screen}");
+}

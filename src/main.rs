@@ -1,6 +1,7 @@
 mod agent_permissions;
 mod artifact_cli;
 mod attachment_cli;
+mod auto_workers_cli;
 mod autoconnect;
 mod broker;
 mod companion;
@@ -182,6 +183,8 @@ enum Command {
     Settings(issue_cli::GlobalOptions),
     /// Run an independent Codex issue worker with its own slots and tag filter.
     Worker(worker_cli::Options),
+    /// Run saved workers for this machine, with project tabs in one dashboard.
+    AutoWorkers(auto_workers_cli::Options),
     /// Machine health, orphan process harvesting, and safe worktree cleanup.
     Health {
         /// Run on a configured SSH client (macOS or Linux).
@@ -506,6 +509,7 @@ impl Cli {
             | Command::Settings(_)
             | Command::Fleet { .. }
             | Command::Worker(_)
+            | Command::AutoWorkers(_)
             | Command::Upgrade(_)
             | Command::Health { .. }
             | Command::ConfigureAgents { .. }
@@ -554,6 +558,7 @@ impl Cli {
             | Command::Settings(_)
             | Command::Fleet { .. }
             | Command::Worker(_)
+            | Command::AutoWorkers(_)
             | Command::Upgrade(_)
             | Command::Health { .. }
             | Command::ConfigureAgents { .. }
@@ -773,6 +778,13 @@ fn run() -> std::io::Result<()> {
         Command::Upgrade(options) => return upgrade_cli::run(options),
         Command::Fleet { action } => return hey_boss::fleet::run(action),
         Command::Secret(options) => return secret_cli::run(options),
+        Command::AutoWorkers(options) => {
+            if let Err(error) = auto_workers_cli::run(options) {
+                eprintln!("hey-boss auto-workers: {error}");
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
         Command::Worker(options) => {
             if let Err(error) = worker_cli::run(options) {
                 eprintln!("hey-boss worker: {error}");

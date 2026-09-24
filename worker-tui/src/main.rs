@@ -27,6 +27,9 @@ struct Options {
     /// Show recent attempts on startup.
     #[arg(long)]
     history: bool,
+    /// Show all configured workers grouped into project tabs.
+    #[arg(long, conflicts_with_all = ["host", "directory", "id"])]
+    projects: bool,
 }
 
 fn main() {
@@ -47,6 +50,7 @@ fn main() {
                     id: options.id,
                     history: options.history,
                     owned_worker: false,
+                    project_tabs: options.projects,
                 },
                 cancelled,
             )

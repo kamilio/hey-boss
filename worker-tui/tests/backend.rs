@@ -65,3 +65,31 @@ fn passes_worker_id_as_literal_argument_and_cancels_promptly() {
     );
     std::fs::remove_file(client.binary).unwrap();
 }
+
+#[test]
+fn project_controls_pass_paths_and_worker_ids_without_shell_interpretation() {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let add = client(
+        "test \"$1\" = auto-workers && test \"$2\" = --json && test \"$3\" = add && test \"$5\" = 'Tools' && test \"$7\" = 2 && test \"$9\" = '/work/one; literal' && test \"${11}\" = '/work/two space' || exit 2\nprintf '{\"ok\":true}'",
+        "project-add",
+    );
+    add.execute(
+        &Request::AddWorker {
+            id: "retry-id".into(),
+            name: "Tools".into(),
+            concurrency: 2,
+            directories: vec!["/work/one; literal".into(), "/work/two space".into()],
+        },
+        &cancelled,
+    )
+    .unwrap();
+    std::fs::remove_file(add.binary).unwrap();
+    let remove = client(
+        "test \"$1\" = auto-workers && test \"$3\" = remove && test \"$4\" = 'id; literal' || exit 2\nprintf '{\"ok\":true}'",
+        "project-remove",
+    );
+    remove
+        .execute(&Request::RemoveWorker("id; literal".into()), &cancelled)
+        .unwrap();
+    std::fs::remove_file(remove.binary).unwrap();
+}

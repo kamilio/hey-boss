@@ -7,6 +7,12 @@ and Pi sessions through one API, including resume, activity, steering, interrupt
 explicit approvals/input, and provider-neutral goal continuation. Issue workers
 continue using Codex; worker/task agent selection is deferred.
 
+Run `hey-boss auto-workers` to use this machine's saved workers in one dashboard.
+Tab / Shift+Tab switches project tabs; `a` adds a worker, and `w` then `d` removes
+one after its current agents and Chief finish. Reopening the dashboard reuses the
+same workers. Separate checkouts and shared multi-project pools retain their own
+slots. See [per-machine configuration and live controls](docs/auto-workers.md).
+
 The [worker terminal dashboard](worker-tui/README.md) shows the current worker, live sessions,
 activity, queue state, and worker controls. Run `hey-boss worker` to start a worker
 with the dashboard, or `hey-boss worker status` to watch existing workers.
