@@ -13,6 +13,147 @@ fn run(store: &mut Store, operation: Value) -> Value {
 }
 
 #[test]
+fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup() {
+    let dir = std::env::temp_dir().join(format!("hey-boss-artifact-delete-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("issues.db");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .execute(&request(
+            json!({"action":"create","title":"Keep issue","body":"","labels":[]}),
+        ))
+        .unwrap();
+    store.execute(&request(json!({"action":"mindmap","operation":{"command":"add","kind":"text","title":"Keep node","body":"","alias":"topic"}}))).unwrap();
+    let mut creation = request(
+        json!({"action":"artifact","operation":{"command":"create","title":"Junk","body":"Discard","issue":1}}),
+    );
+    creation.request_id = Some("create-junk".into());
+    let created = store.execute(&creation).unwrap();
+    let id = created["artifact"]["id"].as_str().unwrap();
+    run(&mut store, json!({"command":"link","id":id,"node":"topic"}));
+    let comment = run(
+        &mut store,
+        json!({"command":"comment","id":id,"body":"Thread"}),
+    );
+    run(
+        &mut store,
+        json!({"command":"comment","id":id,"body":"Reply","parent":comment["comments"][0]["id"]}),
+    );
+    let mut files = Vec::new();
+    for name in ["one.txt", "two.txt"] {
+        let value = store.execute(&request(json!({"action":"attachment","operation":{"command":"upload","target":{"kind":"artifact","id":id},"name":name,"data":"anVuaw=="}}))).unwrap();
+        files.push(value["attachment"]["id"].as_str().unwrap().to_owned());
+    }
+    let deletion = |version| {
+        request(
+            json!({"action":"artifact","operation":{"command":"delete","id":id,"if_version":version}}),
+        )
+    };
+    assert_eq!(
+        store.execute(&deletion(0)).unwrap_err().code,
+        "invalid_input"
+    );
+    let mut other = deletion(1);
+    other.project_override = Some("Other".into());
+    assert_eq!(store.execute(&other).unwrap_err().code, "not_found");
+    run(
+        &mut store,
+        json!({"command":"archive","id":id,"archived":true,"if_version":1}),
+    );
+    assert_eq!(store.execute(&deletion(1)).unwrap_err().code, "conflict");
+    assert_eq!(
+        run(&mut store, json!({"command":"view","id":id}))["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let mut deletion = deletion(2);
+    deletion.request_id = Some("delete-junk".into());
+    let result = store.execute(&deletion).unwrap();
+    assert_eq!(result["deleted"], id);
+    for file in &files {
+        let file_path = dir.join("issues.attachments").join(file);
+        assert!(!file_path.exists());
+        // A replay also completes an interrupted post-commit file unlink.
+        std::fs::write(file_path, "junk").unwrap();
+        assert_eq!(
+            store
+                .execute(&request(
+                    json!({"action":"attachment","operation":{"command":"download","id":file}})
+                ))
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+    }
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.execute(&deletion).unwrap(), result);
+    assert_eq!(store.execute(&creation).unwrap_err().code, "not_found");
+    for file in &files {
+        assert!(!dir.join("issues.attachments").join(file).exists());
+    }
+    assert_eq!(
+        store
+            .execute(&request(
+                json!({"action":"artifact","operation":{"command":"view","id":id}})
+            ))
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    for archived in [false, true] {
+        assert!(
+            run(&mut store, json!({"command":"list","archived":archived}))["artifacts"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(
+        run(&mut store, json!({"command":"links","issue":1}))["artifacts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        run(&mut store, json!({"command":"links","node":"topic"}))["artifacts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for table in [
+        "artifacts",
+        "artifact_comments",
+        "artifact_links",
+        "file_attachments",
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(db);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn guarded_edits_bound_contention_and_preserve_concurrent_versions() {
     let path = std::env::temp_dir().join(format!("hey-boss-contention-{}.db", std::process::id()));
     let mut store = Store::open(&path).unwrap();

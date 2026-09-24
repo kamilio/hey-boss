@@ -237,6 +237,7 @@ pub(super) fn execute(
         Operation::View { id }
         | Operation::Edit { id, .. }
         | Operation::Archive { id, .. }
+        | Operation::Delete { id, .. }
         | Operation::Comment { id, .. }
         | Operation::Resolve { id, .. }
         | Operation::Link { id, .. }
@@ -245,6 +246,31 @@ pub(super) fn execute(
     };
     let artifact = get(db, &p.id, id)?;
     match op {
+        Operation::Delete { if_version, .. } => {
+            if artifact["version"] != *if_version {
+                return Err(Error::conflict("Artifact changed; reload before deleting"));
+            }
+            let mut stmt = db.prepare("SELECT id FROM file_attachments WHERE project_id=?1 AND kind='artifact' AND target=?2")?;
+            let files = stmt
+                .query_map(params![p.id, id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            db.execute("DELETE FROM file_attachments WHERE project_id=?1 AND kind='artifact' AND target=?2", params![p.id, id])?;
+            db.execute(
+                "DELETE FROM artifact_comments WHERE project_id=?1 AND artifact_id=?2",
+                params![p.id, id],
+            )?;
+            db.execute(
+                "DELETE FROM artifact_links WHERE project_id=?1 AND artifact_id=?2",
+                params![p.id, id],
+            )?;
+            db.execute(
+                "DELETE FROM artifacts WHERE project_id=?1 AND id=?2",
+                params![p.id, id],
+            )?;
+            // Keep only file IDs in the receipt, so post-commit cleanup can be
+            // retried after interruption without retaining the deleted document.
+            return Ok(json!({"ok":true,"project":p,"deleted":id,"removed_files":files}));
+        }
         Operation::Edit {
             title,
             body: text,

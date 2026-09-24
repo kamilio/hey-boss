@@ -35,6 +35,10 @@ pub enum Operation {
         archived: bool,
         if_version: i64,
     },
+    Delete {
+        id: String,
+        if_version: i64,
+    },
     Comment {
         id: String,
         body: String,
@@ -113,7 +117,7 @@ impl Operation {
                 }
                 revision(*if_version)?;
             }
-            Self::Archive { id, if_version, .. } => {
+            Self::Archive { id, if_version, .. } | Self::Delete { id, if_version } => {
                 identifier(id, "artifact ID", 128)?;
                 revision(*if_version)?;
             }

@@ -4,6 +4,20 @@ import {HubStore} from './store.mjs';
 import {createApp} from './index.mjs';
 const project={id:'named:Artifacts',name:'Artifacts'};
 const payload={project:project.id,operation:{action:'artifact',operation:{command:'create',title:'Plan',body:'# Plan'}},request_id:'artifact-1'};
+test('permanent artifact deletion uses the paired mutation queue and replays its result',()=>{
+ const store=new HubStore();store.setIssueProjects([project]);
+ try {
+  const value={project:project.id,operation:{action:'artifact',operation:{command:'delete',id:'a-junk',if_version:2}},request_id:'delete-junk'};
+  assert.throws(()=>store.artifactRequest('phone',{...value,request_id:null}),/request ID/);
+  const queued=store.artifactRequest('phone',value);
+  assert.equal(queued.status,'pending');
+  assert.deepEqual(store.pendingArtifacts()[0].operation,value.operation);
+  assert.throws(()=>store.artifactRequest('other',value),/another request/);
+  store.finishArtifact(queued.id,{ok:true,deleted:'a-junk'});
+  assert.equal(store.artifactRequest('phone',value).result.deleted,'a-junk');
+  assert.equal(store.pendingArtifacts().length,0);
+ } finally {store.close();}
+});
 test('paired devices may read status history but cannot publish status',()=>{
  const store=new HubStore();store.setIssueProjects([project]);
  try {

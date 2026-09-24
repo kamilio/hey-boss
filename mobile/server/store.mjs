@@ -158,7 +158,7 @@ export class HubStore{
  }
  close(){this.db.close();}
  artifactRequest(device,value){return this.transaction(()=>{
-  const commands=['list','view','preview','create','edit','archive','comment','resolve','link','unlink','links'];
+  const commands=['list','view','preview','create','edit','archive','delete','comment','resolve','link','unlink','links'];
   const attachment=value?.operation?.action==='attachment'&&['list','upload','download','remove'].includes(value.operation.operation?.command);
   const resourceRead=['view','status_view','status_history'].includes(value?.operation?.action)||value?.operation?.action==='mindmap'&&['view','show'].includes(value.operation.operation?.command);
   if(!value||!attachment&&!resourceRead&&(value.operation?.action!=='artifact'||!commands.includes(value.operation.operation?.command))||value.host)throw new HubError(400,'Only project artifact operations are accepted');
