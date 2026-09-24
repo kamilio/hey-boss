@@ -42,17 +42,31 @@ function chiefState(entry, now = Date.now()) {
   if (entry.run.enabled === false) return 'Disabled';
   if (entry.worker.config?.enabled === false) return 'Paused';
   const minutes = Math.max(0, Math.ceil((entry.run.next_at - now) / 60000));
+  if (['blocked','failed'].includes(entry.run.state)) return retryLabel({retry_at:entry.run.next_at}, now);
   return 'Waiting · ' + (minutes ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left` : 'Due now');
+}
+function infrastructureLabel(run) {
+  return ['Database service unavailable', 'Model proxy unavailable'].find(label => (run.summary || '').startsWith(label)) || 'Approval service unavailable';
+}
+function infrastructureGuidance(run) {
+  const label = infrastructureLabel(run);
+  const service = label === 'Database service unavailable' ? 'database service' : label === 'Model proxy unavailable' ? 'model proxy' : 'approval service';
+  return 'The ' + service + ' failed during this attempt. ' + (run.retry_at != null ? 'The saved session will retry automatically.' : 'The attempt has ended; its saved session is retained.') + (service === 'database service' ? ' Read the current issue state before repeating any uncertain write.' : '');
+}
+function retryLabel(run, now = Date.now()) {
+  const seconds = Math.max(0, Math.ceil((run.retry_at - now) / 1000));
+  return seconds ? 'Retry in ' + (seconds < 60 ? seconds + 's' : Math.ceil(seconds / 60) + 'm') : 'Waiting to retry';
 }
 function agentState(entry) {
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
-  if (entry.run.kind === 'chief') return entry.run.state === 'running' ? 'Running' : entry.run.state === 'idle' ? 'Completed' : entry.run.state === 'failed' ? 'Needs attention' : 'Stopped';
-  if (entry.run.state === 'infrastructure_blocked') return 'Approval service unavailable';
+  if (entry.run.kind === 'chief') return entry.run.state === 'running' ? 'Running' : entry.run.state === 'idle' ? 'Completed' : ['failed','blocked'].includes(entry.run.state) ? 'Failed' : 'Stopped';
+  if (entry.run.retry_at != null) return retryLabel(entry.run);
+  if (entry.run.state === 'infrastructure_blocked') return infrastructureLabel(entry.run);
   return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
 }
-function approvalHolds(group) {
+function scheduledRetries(group) {
   const attempts=[...group.active,...group.history];
-  return group.history.filter(entry=>entry.run.state==='infrastructure_blocked' &&
+  return group.history.filter(entry=>entry.run.retry_at != null &&
     !attempts.some(other=>other.run.number===entry.run.number && (other.run.started_at||0)>(entry.run.started_at||0)));
 }
 // Assignment links resolve once, then use the normal device/run conversation URL.
@@ -79,7 +93,7 @@ function deviceView(data, project, now = Date.now()) {
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, approvalHolds, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -117,7 +131,7 @@ if (typeof document !== 'undefined') (() => {
     const top=element('div','agent-card-top');top.append(stateBadge(entry),element('span','location-label',machine.hostname||machine.host));
     const title=element('h3','',run.title||'Preparing your task');
     const activity=run.last_event||'';
-    const preview=element('p','agent-preview',run.state==='infrastructure_blocked'?'Automatic pickup is on hold. Restore the approval service, then reopen the issue to continue the saved session.':run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
+    const preview=element('p','agent-preview',run.state==='infrastructure_blocked'?infrastructureGuidance(run):run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
     const bottom=element('div','agent-card-bottom');bottom.append(element('span','',`Issue #${run.number}`),element('span','open-conversation',history?'Read conversation →':'Open conversation →'));
     a.append(top,title,preview,bottom);return a;
   }
@@ -130,9 +144,9 @@ if (typeof document !== 'undefined') (() => {
     $('overview-note').textContent=groups.some(p=>p.active.length)?'A little closer to done. See what’s moving.':'Your projects, and the work behind them.';
     const sections=groups.map(group=>{
       const section=element('section','project-section');
-      const holds=approvalHolds(group);
+      const holds=scheduledRetries(group);
       const heading=element('div','project-heading');const title=element('div');
-      title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':holds.length?'Waiting for approval service':'Recent work'));
+      title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':holds.length?'Scheduled retries':'Recent work'));
       const issues=element('a','project-issues','View issues →');issues.href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:group.id});
       heading.append(title,issues);section.append(heading);
       for(const entry of group.chiefs){
@@ -144,7 +158,7 @@ if (typeof document !== 'undefined') (() => {
         chief.append(top,owner);
         if(run.started_at!=null){
           const last=element('div','chief-last-pass');
-          const outcome=run.state==='running'?'Current pass':run.state==='idle'?'Last pass · Completed':run.state==='failed'?'Last pass · Needs attention':'Last pass · '+run.state;
+          const outcome=run.state==='running'?'Current pass':run.state==='idle'?'Last pass · Completed':['failed','blocked'].includes(run.state)?'Last pass · Failed':'Last pass · '+run.state;
           const time=element('time','',new Date(run.finished_at??run.started_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}));time.dateTime=new Date(run.finished_at??run.started_at).toISOString();
           last.append(element('span','',outcome),time);chief.append(last);
           if(run.summary||run.last_event)chief.append(element('p','agent-preview',run.summary||run.last_event));
@@ -152,7 +166,7 @@ if (typeof document !== 'undefined') (() => {
         if(run.session_id){const a=element('a','chief-conversation',run.state==='running'?'Open conversation →':'Read last conversation →');a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;chief.append(a);}
         section.append(chief);
       }
-      if(holds.length){section.append(element('h3','agents-section-label','Waiting for approval service'));const held=element('div','agent-grid');for(const entry of holds)held.append(card(entry,true));section.append(held);}
+      if(holds.length){section.append(element('h3','agents-section-label','Scheduled retries'));const held=element('div','agent-grid');for(const entry of holds)held.append(card(entry,true));section.append(held);}
       if(group.active.length||group.chiefs.length)section.append(element('h3','agents-section-label','Active agents'));
       const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);
       if(!group.active.length&&group.chiefs.length)section.append(element('p','chief-owner','No active issue agents.'));
@@ -248,7 +262,7 @@ if (typeof document !== 'undefined') (() => {
     $('session-state').replaceChildren(stateBadge(selected));
     $('session-issue').hidden=!run.number;
     $('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
-    $('session-status').textContent=run.state==='infrastructure_blocked'?'Automatic pickup is on hold. Restore the approval service, then reopen the issue to continue the saved session.':!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
+    $('session-status').textContent=run.state==='infrastructure_blocked'?infrastructureGuidance(run):!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
     renderTakeover();
     if(!loaded&&!loading)loadConversation();
   }

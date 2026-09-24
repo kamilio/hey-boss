@@ -36,15 +36,20 @@ assert.equal(projects[0].history.length,1);
 assert.equal(projects[1].active[0].online,false);
 assert.deepEqual(projectView({machines:[]},now),[]);
 console.log('Project grouping checks passed');
-const {agentState, approvalHolds} = require('../src/issues/web/fleet.js');
+const {agentState, scheduledRetries} = require('../src/issues/web/fleet.js');
 const held={run:{...projectRun,number:1,state:'infrastructure_blocked',finished_at:2},online:true};
 assert.equal(agentState(held),'Approval service unavailable');
 assert.equal(agentState({...held,online:false}),'Approval service unavailable','A finished infrastructure hold remains meaningful offline');
-assert.equal(approvalHolds({active:[],history:[held]}).length,1,'An outstanding hold is visible outside collapsed history');
-assert.equal(approvalHolds({active:[{run:{number:1,started_at:3}}],history:[held]}).length,0,'A resumed session supersedes the old hold');
-assert.equal(approvalHolds({active:[],history:[held,{run:{number:1,started_at:3,state:'completed'}}]}).length,0,'A later completion supersedes the old hold');
-assert.equal(approvalHolds({active:[{run:{number:2,started_at:3}}],history:[held]}).length,1,'Another issue does not hide the hold');
-console.log('Approval infrastructure status and outstanding hold checks passed');
+const retrying={...held,run:{...held.run,retry_at:Date.now()+30000}};
+assert.equal(scheduledRetries({active:[],history:[held]}).length,0,'An ended attempt is not a pending retry');
+assert.equal(scheduledRetries({active:[],history:[retrying]}).length,1,'An outstanding hold is visible outside collapsed history');
+assert.equal(scheduledRetries({active:[{run:{number:1,started_at:3}}],history:[retrying]}).length,0,'A resumed session supersedes the old hold');
+assert.equal(scheduledRetries({active:[],history:[retrying,{run:{number:1,started_at:3,state:'completed'}}]}).length,0,'A later completion supersedes the old hold');
+assert.equal(scheduledRetries({active:[{run:{number:2,started_at:3}}],history:[retrying]}).length,1,'Another issue does not hide the hold');
+for (const label of ['Database service unavailable', 'Model proxy unavailable']) {
+  assert.equal(agentState({...held,run:{...held.run,summary:label+'. Automatic pickup is held.'}}),label);
+}
+console.log('Infrastructure status and outstanding hold checks passed');
 const {deviceView} = require('../src/issues/web/fleet.js');
 const atlasWorker = {id:'atlas',pid:12,config:{projects:['named:Atlas'],directory:'/work/atlas',enabled:true,concurrency:2},runs:[projectRun]};
 const allProjects = {id:'all',pid:13,config:{projects:[],directory:'/work',enabled:true,concurrency:3},runs:[]};
@@ -75,3 +80,5 @@ const chiefGroups=projectView({machines:[{host:'local',state:'connected',heartbe
 assert.equal(chiefGroups[0].chiefs[0].run.id,chief.id);
 assert.equal(chiefGroups[0].active.length,1,'Chief does not consume an issue slot');
 assert.equal(chiefGroups[0].history.length,0,'Chief has a separate last-pass presentation');
+
+assert.match(agentState(retrying), /^Retry in /);

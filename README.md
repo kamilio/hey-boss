@@ -350,7 +350,8 @@ organizing pass each hour, outside issue concurrency. Its separate prompt covers
 issues, PR readiness, and mindmap maintenance; workers handle code changes.
 Chief finishes each pass without a goal and resumes the same saved Codex thread,
 including after worker restarts. A missing thread starts a replacement; ordinary
-failures retain the conversation and retry on the next hourly pass.
+failures retain the conversation and retry with exponential backoff from 30 seconds
+to five minutes. A successful pass restores the hourly schedule.
 
 `hey-boss issue settings set --chief --chief-prompt 'Review issues and PRs, then stop.'`
 sets the project prompt. Use `--no-chief` to disable it; an active pass is stopped.
@@ -430,13 +431,21 @@ restoring a blocker blocks it again. Subtasks remain blocking until every reacha
 unfinished descendant closes. A manual block without linked issues requires
 explicit reopening. Pending agent approval requests also appear as Blocked.
 
-An unavailable automatic approval service puts unfinished worker attempts on an
-infrastructure hold, shown as **Approval service unavailable**. This holds pickup
-on the first affected attempt and does not consume an implementation retry. The
-saved Codex session, checkout, and issue history remain available. Restore the
-approval service, then explicitly reopen the issue to resume that session. Policy
-denials remain ordinary approval decisions; an infrastructure hold grants no
-permissions and never bypasses approval.
+Agent crashes, startup failures, incomplete completion reports and service outages
+are failed attempts. Open tasks retry automatically after 30 seconds, one minute,
+two minutes, four minutes, then five minutes; there is no attempt limit. The
+retry deadline survives worker restarts. Once the owned process stops, its claim
+and slot are released, so other tasks can proceed during the delay. The dashboard
+shows scheduled retries and retains the failure reason in conversation history.
+Successful delivery requires a completed agent turn and an authoritative issue
+closure or attached fix PR. Posting text alone cannot mark a failed run successful.
+
+The saved Codex session, checkout and issue history remain available. Before
+repeating a database write with an unknown outcome, the resumed agent must read
+current state or reuse its original deduplication request ID. Worker results are
+saved locally before finalization; reconnection reconciles the atomic transaction,
+so a lost commit reply cannot duplicate a handoff. Explicit approval decisions,
+manual blocks and human ownership remain respected. Retrying grants no permissions.
 
 ## Upgrading every machine
 
