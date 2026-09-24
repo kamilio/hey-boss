@@ -72,6 +72,9 @@ try {
     await capture(session, `${cols}x${rows}`);
   }
   await session.resize(120,36);
+  // Wait for the expanded body before sending a control key. The tab header
+  // also exists in the previous 48x12 frame and cannot prove resize completed.
+  await wait(session, 'Activity · PgUp/PgDn');
   await session.type('w'); await wait(session, 'Shared workers');
   assert.ok(!(await session.screen()).contains('Dedicated Alpha'));
   await capture(session, 'workers'); await session.press('Escape');
