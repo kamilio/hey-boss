@@ -34,7 +34,11 @@ impl Fixture {
         // Pin the built inode across Cargo's atomic binary replacement. Unlike
         // copying in parallel tests, this opens no executable for writing that
         // another fork can briefly inherit and trigger Linux ETXTBSY.
-        fs::hard_link(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).unwrap();
+        if let Err(error) = fs::hard_link(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")) {
+            assert_eq!(error.raw_os_error(), Some(libc::EXDEV), "{error}");
+            let _guard = EXECUTABLE_SETUP.lock().unwrap();
+            fs::copy(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).unwrap();
+        }
         fs::write(root.join("mode.txt"), mode).unwrap();
         let listener = UnixListener::bind(root.join("inbox.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -171,7 +175,7 @@ impl Fixture {
     }
     fn pause_pickup(&self) {
         // The synthetic agent reports completion without closing its issue.
-        // Keep this fixture on one session even when immediate pickup is enabled.
+        // An answered approval continues that session; unresolved work then retries.
         let status = self.cli(&["worker", "status"]);
         self.cli(&["worker", "pause", status["worker_id"].as_str().unwrap()]);
     }
@@ -265,10 +269,7 @@ fn connector_and_sign_in_answers_continue_the_original_session() {
             f.replies(),
             vec![json!({"id":"approval-0","result":expected})]
         );
-        assert_eq!(
-            f.cli(&["worker", "status"])["runs"][0]["state"],
-            "completed"
-        );
+        assert_eq!(f.cli(&["worker", "status"])["runs"][0]["state"], "failed");
     }
 }
 
@@ -333,10 +334,7 @@ fn approvals_keep_the_claim_and_continue_the_original_session() {
         };
         f.answer("notice-1", answer);
         f.wait(|| f.finished());
-        assert_eq!(
-            f.cli(&["worker", "status"])["runs"][0]["state"],
-            "completed"
-        );
+        assert_eq!(f.cli(&["worker", "status"])["runs"][0]["state"], "failed");
         let replies = f.replies();
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0]["id"], "approval-0");

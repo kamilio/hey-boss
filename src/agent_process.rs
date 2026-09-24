@@ -12,6 +12,22 @@ use std::{
 const RECORD_BYTES: usize = 8 * 1024 * 1024;
 const STDERR_BYTES: usize = 4096;
 
+pub(crate) fn exited(pid: u32) -> io::Result<bool> {
+    let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut status,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(status.si_signo == libc::SIGCHLD)
+}
+
 pub(crate) struct Process {
     child: Child,
     input: Option<ChildStdin>,
@@ -142,7 +158,15 @@ impl Process {
             .ok_or_else(|| io::Error::other("Agent is stopped"))?;
         match inbox.recv_timeout(timeout) {
             Ok(value) => value.map(Some),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // A tool can inherit stdout after the agent itself has crashed.
+                // Observe exit without reaping: stop() still owns this exact
+                // process group and must not signal a reused PID.
+                if exited(self.child.id())? {
+                    return Err(self.failure("Agent exited before reporting completion"));
+                }
+                Ok(None)
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(self.failure("Agent disconnected before reporting completion"))
             }
@@ -219,6 +243,27 @@ fn group_has_no_live_processes(group: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_parent_with_descendant_holding_stdout_is_a_failure() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 20 & exit 7"]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match process.receive(Duration::from_millis(25)) {
+                Err(error) => {
+                    assert!(error.to_string().contains("exited"), "{error}");
+                    break;
+                }
+                Ok(_) => assert!(
+                    Instant::now() < deadline,
+                    "A dead process must not wait for its descendant's stdout"
+                ),
+            }
+        }
+        process.stop().unwrap();
+    }
 
     #[test]
     fn disconnected_process_reports_bounded_stderr() {

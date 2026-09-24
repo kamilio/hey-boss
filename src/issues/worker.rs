@@ -311,18 +311,30 @@ pub struct Worker {
     handle: Option<thread::JoinHandle<()>>,
 }
 
-/// Lifecycle writes must finish even when another SQLite writer outlasts the
-/// connection's busy timeout. Retry only contention, preserving other errors.
+/// Bound local contention retries so an outage cannot prevent worker shutdown.
+/// The scheduler reconciles saved results later with its own backoff.
 pub fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
-    loop {
+    for attempt in 0..3 {
         match operation() {
-            Err(error) if error.code == "database_busy" => {
+            Err(error) if error.code == "database_busy" && attempt < 2 => {
                 crate::worker_tui::diagnostics::report(format_args!(
                     "Worker database temporarily busy: {error}; waiting for the writer"
                 ));
-                thread::sleep(Duration::from_millis(200));
+                thread::sleep(Duration::from_millis(200 << attempt));
             }
             result => return result,
+        }
+    }
+    unreachable!()
+}
+
+fn reconnect_store(store: &mut Store, path: &Path, error: &Error) {
+    if super::worker_infrastructure::database_unavailable(&error.message) {
+        match Store::open(path) {
+            Ok(fresh) => *store = fresh,
+            Err(error) => {
+                crate::worker_tui::diagnostics::report(format_args!("Database reconnect: {error}"))
+            }
         }
     }
 }
@@ -364,7 +376,7 @@ impl Worker {
                 for (id, handle) in handles.drain(..) {
                     if handle.is_finished() {
                         let _ = handle.join();
-                        abandoned.push(id);
+                        abandoned.push((id, Instant::now(), Duration::from_secs(1)));
                     } else {
                         active.push((id, handle));
                     }
@@ -373,17 +385,24 @@ impl Worker {
                 chiefs.retain_mut(|task| match task.poll(&store) {
                     Ok(finished) => !finished,
                     Err(error) => {
+                        reconnect_store(&mut store, &path, &error);
                         crate::worker_tui::diagnostics::report(format_args!(
                             "Chief result: {error}"
                         ));
                         true
                     }
                 });
-                abandoned.retain(|id| {
+                abandoned.retain_mut(|(id, next, delay)| {
+                    if Instant::now() < *next {
+                        return true;
+                    }
                     if let Err(e) = finalize_abandoned(&mut store, &machine, id) {
+                        reconnect_store(&mut store, &path, &e);
                         crate::worker_tui::diagnostics::report(format_args!(
                             "Worker recovery: {e}"
                         ));
+                        *next = Instant::now() + *delay;
+                        *delay = (*delay * 2).min(Duration::from_secs(30));
                         true
                     } else {
                         false
@@ -403,6 +422,7 @@ impl Worker {
                     if let Some(id) = &worker_id
                         && let Err(e) = store.worker_set_upgrading(id, draining)
                     {
+                        reconnect_store(&mut store, &path, &e);
                         crate::worker_tui::diagnostics::report(format_args!(
                             "Worker upgrade status: {e}"
                         ));
@@ -468,9 +488,12 @@ impl Worker {
                         continue;
                     }
                     Ok(None) => {}
-                    Err(e) => crate::worker_tui::diagnostics::report(format_args!(
-                        "Worker scheduler: {e}"
-                    )),
+                    Err(e) => {
+                        reconnect_store(&mut store, &path, &e);
+                        crate::worker_tui::diagnostics::report(format_args!(
+                            "Worker scheduler: {e}"
+                        ));
+                    }
                 }
                 for _ in 0..5 {
                     if stopped.load(Ordering::Relaxed) {
@@ -590,7 +613,8 @@ fn finalize_abandoned(store: &mut Store, machine: &str, id: &str) -> Result<()> 
                 ));
             }
         }
-        store.worker_finish(
+        finish_recovered(
+            store,
             &job,
             "failed",
             "Worker exited before saving its result. Review the saved session before retrying.",
@@ -600,6 +624,15 @@ fn finalize_abandoned(store: &mut Store, machine: &str, id: &str) -> Result<()> 
 }
 pub(crate) fn recover(store: &mut Store, machine: &str) -> Result<()> {
     store.prune_workers(machine)?;
+    if let Some(path) = store.worker_database_path() {
+        for result in super::worker_results::pending(&path)? {
+            if result.job.machine == machine
+                && !alive(result.job.owner_pid, &result.job.owner_start)
+            {
+                finish_job(&path, store, &result.job, &result.state, &result.summary)?;
+            }
+        }
+    }
     for (job, pid, start) in store.worker_orphans(machine)? {
         if alive(job.owner_pid, &job.owner_start) {
             continue;
@@ -617,9 +650,15 @@ pub(crate) fn recover(store: &mut Store, machine: &str) -> Result<()> {
                 ));
             }
         }
-        store.worker_finish(&job,"interrupted","The worker service stopped unexpectedly. The saved Codex session and issue history are retained. Review or retry this issue.")?;
+        finish_recovered(
+            store,
+            &job,
+            "failed",
+            "The worker service stopped unexpectedly. The saved Codex session and issue history are retained for automatic retry.",
+        )?;
     }
     store.release_stale_claims(machine, now())?;
+    store.worker_release_automatic_holds(machine)?;
     Ok(())
 }
 
@@ -631,7 +670,7 @@ struct Codex {
     native_goal: bool,
     approvals: super::worker_approvals::Approvals,
     approval_items: VecDeque<(String, Value)>,
-    approval_outage: Option<String>,
+    infrastructure_outage: Option<String>,
 }
 impl Codex {
     fn spawn(path: &Path, job: &Job) -> Result<Self> {
@@ -675,7 +714,7 @@ impl Codex {
             native_goal: false,
             approvals: Default::default(),
             approval_items: VecDeque::new(),
-            approval_outage: None,
+            infrastructure_outage: None,
         })
     }
     fn suspend_goal(&mut self, state: &str) -> Result<Option<Value>> {
@@ -906,6 +945,13 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
         Ok(s) => s,
         Err(e) => {
             crate::worker_tui::diagnostics::report(format_args!("Worker {}: {e}", job.id));
+            if let Err(error) =
+                super::worker_results::save(path, &job, "startup_failed", &e.message)
+            {
+                crate::worker_tui::diagnostics::report(format_args!(
+                    "Saving startup failure: {error}"
+                ));
+            }
             return;
         }
     };
@@ -932,11 +978,68 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
                 .into(),
         ),
     };
-    if let Err(e) = retry_database_busy(|| store.worker_finish(&job, &state, &summary)) {
+    if let Err(e) = finish_job(path, &mut store, &job, &state, &summary) {
         crate::worker_tui::diagnostics::report(format_args!(
             "Worker {} could not finalize: {e}",
             job.id
         ))
+    }
+}
+
+pub(super) fn finish_job(
+    path: &Path,
+    store: &mut Store,
+    job: &Job,
+    state: &str,
+    summary: &str,
+) -> Result<()> {
+    let saved = super::worker_results::save(path, job, state, summary)?;
+    let mut reconnect = false;
+    for attempt in 0..2 {
+        let result = retry_database_busy(|| {
+            if reconnect {
+                *store = Store::open(path)?;
+                reconnect = false;
+            }
+            let child = store.worker_process_identity(&job.id)?;
+            if let Some((Some(pid), Some(start))) = child {
+                stop_group(pid, &start)?;
+                if alive(pid, &start) {
+                    return Err(Error::new(
+                        "worker_error",
+                        "Agent process is still alive; its result is saved and finalization will retry after it stops",
+                    ));
+                }
+            }
+            // worker_finish begins an atomic transaction and reads finished_at
+            // before writing anything. On a fresh connection this reconciles a
+            // lost COMMIT reply: committed results are returned without replay,
+            // and disconnected, rolled-back transactions can safely finish.
+            store.worker_finish(&saved.job, &saved.state, &saved.summary)
+        });
+        match result {
+            Err(error)
+                if attempt == 0
+                    && super::worker_infrastructure::database_unavailable(&error.message) =>
+            {
+                crate::worker_tui::diagnostics::report(format_args!(
+                    "Worker {} finalization awaiting database recovery; result retained, next attempt reconciles the saved run: {error}",
+                    job.id
+                ));
+                reconnect = true;
+            }
+            Ok(()) => return super::worker_results::remove(path, &job.id),
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+fn finish_recovered(store: &mut Store, job: &Job, state: &str, summary: &str) -> Result<()> {
+    if let Some(path) = store.worker_database_path() {
+        finish_job(&path, store, job, state, summary)
+    } else {
+        store.worker_finish(job, state, summary)
     }
 }
 // Use portable Git branch / directory characters and bound component lengths.
@@ -1065,6 +1168,13 @@ fn prompt(job: &Job) -> (String, bool, String) {
     prompt_with_config(job, &job.config)
 }
 fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
+    let (mut instructions, goal, objective) = task_prompt(job, config);
+    if job.resume_session.is_some() {
+        instructions.push_str("\n\nResume the saved work. If a previous database mutation had an unknown outcome, first read and reconcile the current issue state or reuse its original request ID for deduplication; never blindly replay it. If an infrastructure outage still prevents progress, report the active outage and retain the continuation state. An automatic retry never bypasses permissions or verification.");
+    }
+    (instructions, goal, objective)
+}
+fn task_prompt(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
     let rendered = template(&base_prompt(&config.prompt), job);
     let after_goal = rendered
         .trim_start()
@@ -1197,7 +1307,7 @@ fn run_codex(
     let outcome = run_thread(&mut c, store, job, stop);
     // Let the agent recover within its current turn. Only an unfinished result
     // becomes a hold; a successful repair/completion remains successful.
-    let outcome = match (outcome, c.approval_outage.as_deref()) {
+    let outcome = match (outcome, c.infrastructure_outage.as_deref()) {
         (Ok((state, summary)), Some(detail)) if state == "blocked" => Ok((
             super::worker_infrastructure::STATE.into(),
             format!("{summary}\n\n{detail}"),
@@ -1372,6 +1482,9 @@ fn run_thread(
         if params["threadId"].as_str().is_some_and(|id| id != session) {
             continue;
         }
+        if params["turnId"].as_str().is_some_and(|id| id != turn) {
+            continue;
+        }
         if !claim_window_started
             && matches!(
                 method,
@@ -1387,10 +1500,21 @@ fn run_thread(
             claim_window_started = true;
         }
         match method {
+            "error" if params["willRetry"] == false => {
+                return Err(Error::new(
+                    "worker_error",
+                    format!(
+                        "Codex reported a terminal error: {}",
+                        params["error"]["message"]
+                            .as_str()
+                            .unwrap_or("Unknown agent error")
+                    ),
+                ));
+            }
             "item/completed" if params["item"]["type"] != "agentMessage" => {
                 if let Some(detail) = super::worker_infrastructure::tool_failure(&params["item"]) {
-                    store.worker_event(&job.id, "Approval service unavailable; preserving continuation state if this attempt cannot finish", None)?;
-                    c.approval_outage = Some(detail);
+                    store.worker_event(&job.id, "Infrastructure unavailable; preserving continuation state if this attempt cannot finish", None)?;
+                    c.infrastructure_outage = Some(detail);
                 }
             }
             "thread/goal/updated" => {
@@ -1438,11 +1562,8 @@ fn run_thread(
                 final_text = params["item"]["text"].as_str().unwrap_or("").to_owned();
                 store.worker_event(&job.id, &final_text, None)?;
             }
-            "turn/started" => {
-                if let Some(id) = params["turn"]["id"].as_str() {
-                    turn = id.into();
-                }
-            }
+            // Only our acknowledged turn/start response changes the active turn.
+            // A delayed notification must not replace it with an earlier turn.
             "turn/completed" if params["turn"]["id"] == turn => {
                 if params["turn"]["status"] != "completed" {
                     return Err(Error::new(
@@ -1560,8 +1681,13 @@ fn run_thread(
                     )?;
                     store.worker_event(&job.id, "Checking goal progress", Some(&result["goal"]))?;
                     match result["goal"]["status"].as_str() {
-                        Some("complete") if !final_text.trim().is_empty() => {
-                            return Ok(("completed".into(), final_text));
+                        Some("complete") => {
+                            return Err(Error::new(
+                                "worker_error",
+                                format!(
+                                    "Codex completed its goal without a valid completion report.\n\n{final_text}"
+                                ),
+                            ));
                         }
                         Some("active") => {
                             let result=c.rpc("turn/start",turn_params(&session,"Continue pursuing the saved goal and the assigned issue. Return the required JSON status and summary only after completing and verifying the issue or identifying a blocker."),store,job,stop)?;
@@ -1585,7 +1711,7 @@ fn run_thread(
                     }
                 } else {
                     return Err(Error::new(
-                        "blocked",
+                        "worker_error",
                         format!(
                             "Codex ended without a completion report. Review the saved session.\n\n{final_text}"
                         ),
@@ -1821,7 +1947,7 @@ pub fn serve_instance_with_history(
         path: path.clone(),
         id: id.clone(),
     };
-    let worker = Worker::start_for(path, Some(id.clone()))?;
+    let worker = Worker::start_for(path.clone(), Some(id.clone()))?;
     install_signals_for_upgrade(worker.stop.clone(), Some(worker.reload.clone()))?;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output;
     if tty {
@@ -1860,7 +1986,11 @@ pub fn serve_instance_with_history(
         });
         let mut value = match value {
             Ok(value) => value,
-            Err(error) if error.code == "database_busy" => {
+            Err(error)
+                if error.code == "database_busy"
+                    || super::worker_infrastructure::database_unavailable(&error.message) =>
+            {
+                reconnect_store(&mut store, &path, &error);
                 eprintln!(
                     "Worker status temporarily unavailable: {error}; retrying without stopping sessions"
                 );
@@ -1897,7 +2027,16 @@ pub fn serve_instance_with_history(
     if !reload && !store.worker_shutdown_requested(&id)? {
         crate::fleet::record_local_worker(&id, None, "stop")?;
     }
-    retry_database_busy(|| store.unregister_worker(&id))?;
+    if let Err(error) = retry_database_busy(|| store.unregister_worker(&id)) {
+        if error.code != "database_busy"
+            && !super::worker_infrastructure::database_unavailable(&error.message)
+        {
+            return Err(error);
+        }
+        crate::worker_tui::diagnostics::report(format_args!(
+            "Worker stopped; database registration cleanup will be reconciled after recovery: {error}"
+        ));
+    }
     if reload {
         drop(_registration);
         let mut command = Command::new(reload_executable);
@@ -1919,6 +2058,25 @@ pub fn serve_instance_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn database_contention_is_bounded_and_nonbusy_failures_are_not_replayed() {
+        for code in ["database_busy", "database_error"] {
+            let mut attempts = 0;
+            let started = Instant::now();
+            let result: Result<()> = retry_database_busy(|| {
+                attempts += 1;
+                assert!(
+                    attempts <= 3,
+                    "Contention must not prevent shutdown forever"
+                );
+                Err(Error::new(code, "synthetic unavailable store"))
+            });
+            assert!(result.is_err());
+            assert_eq!(attempts, if code == "database_busy" { 3 } else { 1 });
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+    }
+
     #[test]
     fn worktree_variables_are_repeatable_safe_and_unique_per_issue() {
         let config = ProjectConfig {

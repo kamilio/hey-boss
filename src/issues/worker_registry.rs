@@ -142,8 +142,9 @@ pub(super) const PROJECT_DIRECTORIES: &str = "SELECT json_extract(metadata,'$.cw
  ORDER BY last_seen DESC LIMIT ?2";
 // Resolve the bounded set of IDs first. An outer worker_id/OR filter scans all
 // attempts even when the history subquery is indexed.
-const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at,r.actor_id
- FROM worker_runs r JOIN projects p ON p.id=r.project_id
+const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at,r.actor_id,
+ CASE WHEN r.retry_allowed=0 AND i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count
+ FROM worker_runs r JOIN projects p ON p.id=r.project_id JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number
  WHERE r.id IN(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL
  UNION ALL SELECT id FROM(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20))
  ORDER BY r.finished_at IS NOT NULL,r.started_at DESC,r.id DESC";
@@ -327,8 +328,8 @@ impl Store {
 const ELIGIBLE: &str =
     "i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL";
 const TAG_FILTER: &str = "AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))";
-// Finished attempts do not permanently exclude unfinished issues. Approval holds
-// still need explicit retry; other failures back off from 30 seconds to 5 minutes.
+// Failed attempts wait for their durable retry deadline without reserving capacity.
+// Explicit unanswered/declined input remains under the user's control.
 pub(super) const PICKUP_READY: &str = "
  AND i.draft=0
  AND NOT EXISTS(SELECT 1 FROM fleet_allocation_deadlines d WHERE d.project_id=i.project_id AND d.issue_number=i.number AND d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000)
@@ -417,7 +418,7 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
         |r| r.get(0),
     )?;
     let mut stmt = db.prepare(STATUS_RUNS)?;
-    let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?,"retry_at":r.get::<_,Option<i64>>(17)?,"retry_count":r.get::<_,i64>(18)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for run in &mut runs {
         if let Some(s) = run["goal"].as_str() {
             run["goal"] = serde_json::from_str(s)?;

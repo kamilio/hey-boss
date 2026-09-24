@@ -1,6 +1,51 @@
 use super::*;
 use std::{sync::mpsc, time::Duration};
 
+/// A private transport that disconnects immediately before or after COMMIT.
+/// All other requests go through the real database service protocol.
+pub(crate) fn lose_commit_response(
+    path: &Path,
+    commit: bool,
+) -> (Connection, std::thread::JoinHandle<()>) {
+    let Backend::Remote(remote) = Connection::connect(path).unwrap().backend else {
+        unreachable!()
+    };
+    let mut upstream = remote.stream.into_inner().unwrap();
+    let (client, server) = UnixStream::pair().unwrap();
+    let thread = std::thread::spawn(move || {
+        let mut server = BufReader::new(server);
+        while let Some(command) = wire::read::<Command>(&mut server).unwrap() {
+            let finishing = matches!(&command, Command::Batch { sql } if sql == "COMMIT");
+            if finishing && !commit {
+                break;
+            }
+            wire::write(upstream.get_mut(), &command).unwrap();
+            loop {
+                let reply = wire::read::<Reply>(&mut upstream).unwrap().unwrap();
+                if finishing {
+                    assert!(reply.error.is_none());
+                    return;
+                }
+                wire::write(server.get_mut(), &reply).unwrap();
+                if !reply.more {
+                    break;
+                }
+            }
+        }
+    });
+    (
+        Connection {
+            backend: Backend::Remote(Remote {
+                path: path.to_owned(),
+                stream: RefCell::new(Some(BufReader::new(client))),
+                transaction: Cell::new(false),
+                last_id: Cell::new(0),
+            }),
+        },
+        thread,
+    )
+}
+
 struct Fixture {
     directory: std::path::PathBuf,
     owner: Owner,
