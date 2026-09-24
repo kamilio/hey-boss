@@ -2,9 +2,13 @@
 use hey_boss_worker_tui::backend::{Client, Request};
 use std::{
     os::unix::fs::PermissionsExt,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
+
+// A concurrent fork can briefly inherit another test's writable script file.
+// Serialize these fixtures so Linux never sees that executable as ETXTBSY.
+static FIXTURES: Mutex<()> = Mutex::new(());
 
 fn client(script: &str, label: &str) -> Client {
     let path = std::env::temp_dir().join(format!("hey-boss-tui-{}-{label}", std::process::id()));
@@ -20,6 +24,7 @@ fn client(script: &str, label: &str) -> Client {
 
 #[test]
 fn rejects_invalid_payloads_and_bounds_hung_commands() {
+    let _fixtures = FIXTURES.lock().unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     for (label, script, expected) in [
         ("json", "printf 'bad'", "Invalid worker status"),
@@ -46,6 +51,7 @@ fn rejects_invalid_payloads_and_bounds_hung_commands() {
 
 #[test]
 fn passes_worker_id_as_literal_argument_and_cancels_promptly() {
+    let _fixtures = FIXTURES.lock().unwrap();
     let client = client(
         "test \"$1\" = worker && test \"$2\" = --json && test \"$3\" = --id && test \"$4\" = 'a; echo injected' && test \"$5\" = --history && test \"$6\" = 20 && test \"$7\" = status && test \"$#\" = 7 || exit 2\nprintf '{\"ok\":true,\"workers\":[],\"runs\":[]}'",
         "args",
@@ -68,6 +74,7 @@ fn passes_worker_id_as_literal_argument_and_cancels_promptly() {
 
 #[test]
 fn project_controls_pass_paths_and_worker_ids_without_shell_interpretation() {
+    let _fixtures = FIXTURES.lock().unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     let add = client(
         "test \"$1\" = auto-workers && test \"$2\" = --json && test \"$3\" = add && test \"$5\" = 'Tools' && test \"$7\" = 2 && test \"$9\" = '/work/one; literal' && test \"${11}\" = '/work/two space' || exit 2\nprintf '{\"ok\":true}'",
