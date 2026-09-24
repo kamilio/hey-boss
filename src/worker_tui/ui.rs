@@ -141,8 +141,10 @@ fn run_label(run: &Value) -> String {
 }
 
 fn run_state(run: &Value) -> String {
-    if run["state"] == "infrastructure_blocked" {
-        "Approval service unavailable".into()
+    if run["retry_at"].is_i64() {
+        "Retry scheduled".into()
+    } else if run["state"] == "infrastructure_blocked" {
+        crate::issues::worker_infrastructure::label(run["summary"].as_str().unwrap_or("")).into()
     } else {
         text(&run["state"])
     }
@@ -158,6 +160,14 @@ fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
         format!("{status}{}", elapsed(run, now_ms)),
         Style::default().fg(color(&status)),
     )));
+    if let Some(retry) = run["retry_at"].as_i64() {
+        let seconds = (retry - now_ms).max(0) / 1000;
+        lines.push(Line::from(if seconds == 0 {
+            "Waiting for pickup; saved session retained".into()
+        } else {
+            format!("Automatic retry in {seconds}s; saved session retained")
+        }));
+    }
     if run["kind"] == "chief" {
         lines.push(Line::from("Chief · no issue slots"));
         if let Some(session) = run["session_id"].as_str() {

@@ -75,7 +75,7 @@ impl Dashboard {
             .into_iter()
             .filter_map(|key| self.snapshot[key].as_array())
             .flatten()
-            .filter(|r| r["finished_at"].is_null() != self.history)
+            .filter(|r| (r["finished_at"].is_null() || r["retry_at"].is_i64()) != self.history)
             .collect()
     }
 
