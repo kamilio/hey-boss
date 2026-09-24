@@ -27,7 +27,9 @@ jobs:
       - run: npm run test:terminal
       - run: npm run test:activity
       - run: npm run test:projects
+      - run: node tests/tab-order-terminal.mjs
       - run: node tests/integrated-terminal.mjs
+      - run: node tests/resume-terminal.mjs
       - run: python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -36,4 +38,6 @@ jobs:
           path: |
             worker-tui/target/terminal-qa
             worker-tui/target/activity-qa
+            worker-tui/target/resume-qa
             worker-tui/target/project-tabs-qa
+            worker-tui/target/tab-order-qa
