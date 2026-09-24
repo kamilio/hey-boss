@@ -670,7 +670,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
-            json!({"kind":"configure","controller":self.ctx.node,"revision":revision,"workers":workers}),
+            json!({"kind":"configure","controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
@@ -817,12 +817,17 @@ impl Supervisor {
                     }
                     let current = self.configured(host, &workers)?;
                     let updated = control::revision(&self.ctx.node, &current);
-                    if updated != revision || !self.machine(host)["configuration_error"].is_null() {
+                    if updated != revision
+                        || !self.machine(host)["configuration_error"].is_null()
+                        || message["local_config"]
+                            .as_array()
+                            .is_some_and(|changes| !changes.is_empty())
+                    {
                         workers = current;
                         revision = updated;
                         send(
                             &mut input,
-                            json!({"kind":"configure","controller":self.ctx.node,"revision":revision,"workers":workers}),
+                            json!({"kind":"configure","controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -983,6 +988,9 @@ impl Supervisor {
             return Ok(());
         }
         let hosts = self.ctx.inventory()?;
+        let Some(worker_configuration) = self.ctx.lock("fleet-worker-control.lock", false)? else {
+            return Ok(());
+        };
         let observed: Vec<_> = self
             .state
             .lock()
@@ -1034,15 +1042,11 @@ impl Supervisor {
         let main = json!({"role":"controller","workers":desired,"revision":hash(&desired)});
         self.ctx
             .atomic_json(&self.ctx.state.join("fleet-main.json"), &main)?;
-        {
-            let Some(_lock) = self.ctx.lock("fleet-worker-control.lock", false)? else {
-                return Ok(());
-            };
-            let failures = control::configure_workers(&self.ctx, desired.as_array().unwrap())?;
-            if !failures.is_empty() {
-                self.event("local", "configuration", &failures.join("; "));
-            }
+        let failures = control::configure_workers(&self.ctx, desired.as_array().unwrap())?;
+        if !failures.is_empty() {
+            self.event("local", "configuration", &failures.join("; "));
         }
+        drop(worker_configuration);
         control::reconcile(&self.ctx, &main)?;
         replica::prune_journal(&self.ctx.db()?)?;
         for pending in replica::rows(

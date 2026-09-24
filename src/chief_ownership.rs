@@ -147,11 +147,14 @@ fn desired(
         };
         if !old.revoking {
             if enabled
-                && owner["workers"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|w| w["id"] == old.worker_id && eligible(owner, w, project))
+                && owner["workers"].as_array().into_iter().flatten().any(|w| {
+                    w["id"] == old.worker_id
+                        && (eligible(owner, w, project)
+                            || (w["intent"] == "drain"
+                                && w["stop_requested"] != true
+                                && w["pid"].as_u64().is_some_and(|pid| pid > 0)
+                                && running(w, project)))
+                })
             {
                 return Some(old.clone());
             }
@@ -237,6 +240,30 @@ mod tests {
     fn machine(node: &str) -> Value {
         json!({"node":node,"state":"connected","chief_ownership":[],"workers":[{"id":format!("worker-{node}"),"pid":123,"config":{"enabled":true,"projects":["project"]},"chief_projects":["project"],"chiefs":[]}]})
     }
+    #[test]
+    fn graceful_removal_keeps_the_chief_until_its_current_pass_finishes() {
+        let mut machines = vec![machine("a"), machine("b")];
+        let owner = desired("project", true, None, &machines).unwrap();
+        machines[0]["workers"][0]["config"]["enabled"] = json!(false);
+        machines[0]["workers"][0]["intent"] = json!("drain");
+        machines[0]["workers"][0]["chiefs"] = json!([{"project_id":"project","state":"running"}]);
+        assert_eq!(
+            desired("project", true, Some(&owner), &machines),
+            Some(owner.clone())
+        );
+        machines[0]["workers"][0]["chiefs"][0]["state"] = json!("idle");
+        assert!(
+            desired("project", true, Some(&owner), &machines)
+                .unwrap()
+                .revoking
+        );
+        assert!(
+            desired("project", false, Some(&owner), &machines)
+                .unwrap()
+                .revoking
+        );
+    }
+
     #[test]
     fn supervisor_selects_one_and_retains_it_across_reconnects() {
         let mut machines = vec![machine("b"), machine("a")];
