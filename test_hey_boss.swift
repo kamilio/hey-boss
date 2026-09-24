@@ -2122,11 +2122,13 @@ func auditSecretInput() {
     prompts.handle(request, disconnected); let pending = prompts.active.values.first!
     pending.entries[1].masked.stringValue = long
     Darwin.close(peers[0])
-    let disconnectDeadline = Date().addingTimeInterval(2)
+    // Wait for the polling callback even when the host is busy compiling.
+    // Completion still requires both removal and clearing the synthetic values.
+    let disconnectDeadline = Date().addingTimeInterval(10)
     while !prompts.active.isEmpty && Date() < disconnectDeadline {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
-    precondition(prompts.active.isEmpty && pending.entries.allSatisfy { $0.value.isEmpty })
+    precondition(prompts.active.isEmpty && pending.entries.allSatisfy { $0.value.isEmpty }, "Disconnected secret requests must be removed and their fields cleared")
     let ui = Interface(present: false)
     let item = Record(taskID: UUID().uuidString, kind: "prompt", question: "Enter a long answer", project: "Synthetic test", title: "Long text", description: "", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
     ui.add(item); let oldHeight = ui.question.frame.height

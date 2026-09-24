@@ -54,10 +54,9 @@ function prompt(text) {
     const event = provider === 'codex'
       ? {method:'item/agentMessage/delta',params:{threadId:session,delta:'INPUT_CLOSED'}}
       : {type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'INPUT_CLOSED'}};
-    // The surviving child keeps stdout open, but closes the last stdin reader.
-    // Wait for its marker before attempting a write to the broken input pipe.
-    spawn('/bin/sh', ['-c', `exec 0<&-; printf '%s\\n' '${JSON.stringify(event)}'; sleep 30`], {stdio:['inherit','inherit','ignore']});
-    process.exit(0);
+    // Keep the tracked PID alive while closing its input. Exiting the parent
+    // races the runtime's exit detector against a descendant's output marker.
+    process.execve('/bin/sh', ['/bin/sh', '-c', `exec 0<&-; printf '%s\\n' '${JSON.stringify(event)}'; sleep 30`], process.env);
   }
   if (text === 'duplicate requests') {
     for (const command of ['first command', 'different command']) {
