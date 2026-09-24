@@ -1085,6 +1085,16 @@ mod tests {
             for (id, cwd, _, _) in chiefs {
                 assert_eq!(cwd, directories[&id].as_str().unwrap());
             }
+            let fleet = store.fleet_workers().unwrap();
+            assert_eq!(fleet.len(), 1);
+            let mut advertised: Vec<_> = fleet[0]["chief_projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| id.as_str().unwrap())
+                .collect();
+            advertised.sort();
+            assert_eq!(advertised, ["named:Atlas", "named:Beacon"]);
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1948,6 +1958,7 @@ mod tests {
             for key in ["active", "free", "eligible", "runs", "chiefs"] {
                 expected_worker[key] = s[key].clone();
             }
+            expected_worker["chief_projects"] = json!([]);
             assert_eq!(fleet[0], expected_worker);
             // Large old history must not change the result or make status
             // scan every finished attempt. Use nonmonotonic finish times.
