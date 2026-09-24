@@ -595,7 +595,7 @@ fn completed_pr_worker_keeps_fix_open_and_hands_it_to_boss() {
 }
 
 #[test]
-fn completed_partial_deliveries_do_not_resolve_the_issue() {
+fn incomplete_deliveries_retry_without_success_comments() {
     for mode in ["partial", "partial-goal"] {
         let f = Fixture::new(mode);
         f.setup(&[
@@ -604,9 +604,9 @@ fn completed_partial_deliveries_do_not_resolve_the_issue() {
         ]);
         let mut worker = f.worker();
         let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
-        assert_eq!(status["runs"][0]["state"], "completed", "{status}");
-        // Open successful deliveries retain the existing immediate pickup admission.
-        assert_eq!(status["eligible"], 1, "{status}");
+        assert_eq!(status["runs"][0]["state"], "failed", "{status}");
+        // Incomplete deliveries release capacity but respect the retry deadline.
+        assert_eq!(status["eligible"], 0, "{status}");
         worker.stop();
         let view = f.cli(&["view", "1"]);
         assert_eq!(view["issue"]["state"], "open", "{view}");
@@ -616,7 +616,7 @@ fn completed_partial_deliveries_do_not_resolve_the_issue() {
         // Immediate pickup can admit another attempt before stop is observed;
         // its report is valid too. The completed partial delivery must be kept.
         assert!(
-            view["comments"]
+            !view["comments"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -782,7 +782,7 @@ fn unfinished_unassigned_issues_are_reserved_again_after_retry_delay() {
     ] {
         let db = rusqlite::Connection::open(&f.db).unwrap();
         db.execute(
-            "UPDATE worker_runs SET state=?1,finished_at=0,retry_allowed=0",
+            "UPDATE worker_runs SET state=?1,finished_at=0,retry_at=0,retry_allowed=0",
             [state],
         )
         .unwrap();
@@ -909,7 +909,11 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
         .map(|v| v["params"]["input"][0]["text"].clone())
         .collect();
     assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[0], prompts[1]);
+    let original = prompts[0].as_str().unwrap();
+    let resumed = prompts[1].as_str().unwrap();
+    assert!(resumed.starts_with(original));
+    assert!(resumed.contains("never blindly replay it"));
+    assert!(resumed.contains("never bypasses permissions or verification"));
     replacement.stop();
 }
 
@@ -926,7 +930,7 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
     worker.stop();
     let db = rusqlite::Connection::open(&f.db).unwrap();
-    db.execute("UPDATE worker_runs SET finished_at=0", [])
+    db.execute("UPDATE worker_runs SET finished_at=0,retry_at=0", [])
         .unwrap();
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     let mut replacement = f.worker();
@@ -1248,7 +1252,7 @@ fn stopping_a_killed_worker_recovers_its_orphaned_agent_and_claim() {
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
     let status = f.cli(&["worker", "status"]);
     assert_eq!(status["active"], 0);
-    assert_eq!(status["eligible"], 1);
+    assert_eq!(status["eligible"], 0);
 }
 
 #[test]
@@ -1268,8 +1272,8 @@ fn web_monitor_recovers_a_killed_worker_without_another_running_worker() {
             .unwrap(),
     );
     let recovered = f.wait(|s| s["active"] == 0);
-    assert_eq!(recovered["runs"][0]["state"], "interrupted");
-    assert_eq!(recovered["eligible"], 1);
+    assert_eq!(recovered["runs"][0]["state"], "failed");
+    assert_eq!(recovered["eligible"], 0);
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
 }
 
@@ -1363,64 +1367,151 @@ fn worker_queue_accounts_for_tags_and_excludes_blocked_subtasks() {
 }
 
 #[test]
-fn approval_outage_recovered_in_the_same_turn_does_not_override_resolution() {
-    let f = Fixture::new("approval-outage-recovered");
+fn text_and_issue_closure_do_not_override_failed_or_malformed_turns() {
+    for mode in [
+        "disconnect-after-text",
+        "failed-after-text",
+        "stale-turn-success",
+        "malformed-completion",
+        "terminal-error-event",
+    ] {
+        let f = Fixture::new(mode);
+        f.setup(&[]);
+        let mut worker = f.worker();
+        let result = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        assert_eq!(result["runs"][0]["state"], "failed", "{mode}: {result}");
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+        worker.stop();
+    }
+}
+
+#[test]
+fn infrastructure_outage_recovered_in_the_same_turn_does_not_override_resolution() {
+    for mode in [
+        "approval-outage-recovered",
+        "database-outage-recovered",
+        "proxy-outage-recovered",
+        "transient-error-recovered",
+    ] {
+        let f = Fixture::new(mode);
+        f.setup(&[]);
+        let mut worker = f.worker();
+        let finished = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        assert_eq!(finished["runs"][0]["state"], "completed");
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+        worker.stop();
+    }
+}
+
+#[test]
+fn a_waiting_retry_does_not_hold_capacity_needed_by_another_issue() {
+    let f = Fixture::new("retry-does-not-block-queue");
+    fs::write(f.root.join("mode.txt"), "disconnect").unwrap();
     f.setup(&[]);
     let mut worker = f.worker();
-    let finished = f.wait(|s| s["runs"][0]["finished_at"].is_number());
-    assert_eq!(finished["runs"][0]["state"], "completed");
-    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    let failed = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert_eq!(failed["active"], 0);
+    assert!(failed["runs"][0]["retry_at"].is_number());
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.cli(&["create", "--title", "Independent task"]);
+    f.wait(|s| {
+        s["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["number"] == 2 && r["state"] == "completed")
+    });
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "open");
+    assert_eq!(f.cli(&["view", "2"])["issue"]["state"], "closed");
     worker.stop();
 }
 
 #[test]
-fn approval_service_outages_hold_pickup_and_resume_only_after_reopening() {
-    for mode in ["approval-outage-summary", "approval-outage-tool"] {
+fn infrastructure_outages_retry_automatically_and_resume_after_recovery() {
+    for mode in [
+        "approval-outage-summary",
+        "approval-outage-tool",
+        "database-outage-summary",
+        "database-outage-tool",
+        "proxy-outage-summary",
+        "proxy-outage-tool",
+        "proxy-outage-rpc",
+    ] {
         let f = Fixture::new(mode);
         f.setup(&[]);
-        // Start from the previous database/view to exercise installed upgrades.
-        let old_db = rusqlite::Connection::open(&f.db).unwrap();
-        let old_readiness = include_str!("../src/issues/subtask-readiness.sql")
-            .replace("r.state='infrastructure_blocked' OR ", "")
-            .replace(
-                "failures.state NOT IN ('completed','infrastructure_blocked')",
-                "failures.state!='completed'",
-            );
-        old_db.execute_batch(&old_readiness).unwrap();
-        old_db.pragma_update(None, "user_version", 13).unwrap();
-        drop(old_db);
         let mut worker = f.worker();
         let first = f.wait(|s| s["runs"][0]["finished_at"].is_number());
         assert_eq!(
             first["runs"][0]["state"], "infrastructure_blocked",
             "{first}"
         );
+        assert!(first["runs"][0]["retry_at"].is_number());
         let session = first["runs"][0]["session_id"].clone();
-        let issue = f.cli(&["view", "1"]);
-        assert_eq!(issue["issue"]["state"], "blocked");
-        assert!(issue["comments"].as_array().unwrap().iter().any(|c| {
-            c["body"]
-                .as_str()
-                .unwrap()
-                .contains("does not consume an implementation retry")
-        }));
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "open");
+        assert_eq!(first["eligible"], 0);
+        assert_eq!(first["active"], 0);
         let db = rusqlite::Connection::open(&f.db).unwrap();
-        db.execute("UPDATE worker_runs SET finished_at=0", [])
-            .unwrap();
-        assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
-        // Even a changed issue that cannot be automatically blocked stays held.
-        db.execute("UPDATE issues SET state='open',manual_blocked=0", [])
-            .unwrap();
-        assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
-        fs::write(f.root.join("mode.txt"), "delay").unwrap();
-        f.cli(&["reopen", "1"]);
-        let resumed = f.wait(|s| s["active"] == 1 && s["runs"][0]["state"] == "running");
-        assert_eq!(resumed["runs"][0]["session_id"], session);
+        // Advance the persisted deadline; no user reopening or claim reset.
+        db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
+        let again = f.wait(|s| {
+            s["runs"][0]["id"] != first["runs"][0]["id"] && s["runs"][0]["finished_at"].is_number()
+        });
+        assert_eq!(again["runs"][0]["state"], "infrastructure_blocked");
+        assert_eq!(again["runs"][0]["session_id"], session);
+        assert_eq!(again["runs"][0]["retry_count"], 2);
+        fs::write(f.root.join("mode.txt"), "completed").unwrap();
+        db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
+        let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
+        assert_eq!(recovered["runs"][0]["session_id"], session);
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
         assert!(
             f.transcript()
                 .iter()
                 .any(|r| r["method"] == "thread/resume" && r["params"]["threadId"] == session)
         );
+        assert!(f.transcript().iter().any(|r| {
+            r["method"] == "turn/start"
+                && r["params"]["input"][0]["text"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("never blindly replay"))
+        }));
+        worker.stop();
+    }
+}
+
+#[test]
+fn manual_reopen_during_database_and_proxy_outages_preserves_session() {
+    for mode in ["database-outage-tool", "proxy-outage-rpc"] {
+        let f = Fixture::new(&format!("manual-reopen-{mode}"));
+        fs::write(f.root.join("mode.txt"), mode).unwrap();
+        f.setup(&[]);
+        let mut worker = f.worker();
+        let first = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        let session = first["runs"][0]["session_id"].clone();
+        assert_eq!(first["runs"][0]["state"], "infrastructure_blocked");
+        assert_eq!(first["eligible"], 0);
+        // Reopening explicitly permits an attempt without waiting for backoff.
+        // A continuing outage must retain its cause and the exact continuation.
+        f.cli(&["reopen", "1"]);
+        let repeated = f.wait(|s| {
+            s["runs"][0]["id"] != first["runs"][0]["id"] && s["runs"][0]["finished_at"].is_number()
+        });
+        assert_eq!(repeated["runs"][0]["state"], "infrastructure_blocked");
+        assert_eq!(repeated["runs"][0]["session_id"], session);
+        assert_eq!(repeated["runs"][0]["retry_count"], 1);
+        assert!(repeated["runs"][0]["retry_at"].is_number());
+        assert!(repeated["runs"][0]["summary"].as_str().unwrap().contains(
+            if mode.starts_with("database") {
+                "Database service unavailable"
+            } else {
+                "Model proxy unavailable"
+            }
+        ));
+        fs::write(f.root.join("mode.txt"), "completed").unwrap();
+        f.cli(&["reopen", "1"]);
+        let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
+        assert_eq!(recovered["runs"][0]["session_id"], session);
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
         worker.stop();
     }
 }
@@ -1767,6 +1858,9 @@ fn orphan_recovery_stops_process_and_preserves_session() {
     let _ = w.0.kill();
     let _ = w.0.wait();
     let mut replacement = f.worker();
+    f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
     f.wait(|s| {
         s["workers"]
             .as_array()
@@ -1784,7 +1878,7 @@ fn orphan_recovery_stops_process_and_preserves_session() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(old_state, "interrupted");
+    assert_eq!(old_state, "failed");
     let active_session: String = db.query_row("SELECT session_id FROM worker_runs WHERE owner_pid=?1 AND claimed_at IS NOT NULL AND finished_at IS NULL", [replacement.0.id()], |r| r.get(0)).unwrap();
     assert_eq!(active_session, session.as_str().unwrap());
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
@@ -2323,20 +2417,19 @@ fn stopping_worker_cancels_codex_sqlite_startup_retry() {
 }
 
 #[test]
-fn worker_shutdown_waits_for_writer_and_exits_successfully() {
+fn worker_shutdown_is_bounded_and_reconciles_saved_results_after_writer_recovers() {
     let f = Fixture::new("shutdown-writer-contention");
     fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
     f.setup(&[]);
     let mut worker = f.worker();
-    f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
+    let running = f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
+    let run_id = running["runs"][0]["id"].as_str().unwrap().to_owned();
     let db = rusqlite::Connection::open(&f.db).unwrap();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
     unsafe {
         libc::kill(worker.0.id() as i32, libc::SIGTERM);
     }
-    thread::sleep(Duration::from_secs(12));
-    db.execute_batch("ROLLBACK").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = worker.0.try_wait().unwrap() {
             assert!(
@@ -2351,10 +2444,28 @@ fn worker_shutdown_waits_for_writer_and_exits_successfully() {
         );
         thread::sleep(Duration::from_millis(25));
     }
-    let status = f.cli(&["worker", "status"]);
-    assert!(status["runs"][0]["finished_at"].is_number());
-    assert_eq!(status["runs"][0]["state"], "cancelled");
-    assert!(!status["config"]["enabled"].as_bool().unwrap());
+    // The writer remained unavailable throughout shutdown. Reconnection must
+    // reconcile the saved original result before a new reservation is allowed.
+    db.execute_batch("ROLLBACK").unwrap();
+    let mut replacement = f.worker();
+    f.wait(|_| {
+        db.query_row(
+            "SELECT finished_at IS NOT NULL FROM worker_runs WHERE id=?1",
+            [&run_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        db.query_row(
+            "SELECT state FROM worker_runs WHERE id=?1",
+            [&run_id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "cancelled"
+    );
+    replacement.stop();
 }
 
 #[test]

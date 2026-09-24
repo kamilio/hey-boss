@@ -5,6 +5,100 @@ use crate::issues::worker_infrastructure;
 pub(super) const HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_issue_history ON worker_runs(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 type ActiveProcess = (Job, Option<u32>, Option<String>);
 
+impl Store {
+    /// Release only a legacy scheduler-created hold whose authoritative block
+    /// event and exact comment still match the last failed run. Later human
+    /// changes, approval requests, dependencies and live agents are preserved.
+    pub(crate) fn worker_release_automatic_holds(&mut self, machine: &str) -> Result<()> {
+        const CANDIDATES: &str = "SELECT r.job,r.id FROM issues i
+         JOIN worker_runs r ON r.id=(SELECT id FROM worker_runs WHERE project_id=i.project_id AND issue_number=i.number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
+         JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=i.project_id AND issue_number=i.number ORDER BY id DESC LIMIT 1)
+         WHERE i.state='blocked' AND i.manual_blocked=1 AND i.deleted_at IS NULL AND i.assignee IS NULL
+         AND r.machine=?1 AND r.retry_count=0 AND r.retry_at IS NULL AND r.retry_allowed=0
+         AND r.state!='completed' AND r.summary NOT LIKE 'Codex needs input or approval:%'
+         AND e.action='blocked' AND e.actor=r.actor_id AND e.created_at BETWEEN r.started_at AND r.finished_at
+         AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=i.project_id AND live.issue_number=i.number AND live.finished_at IS NULL)
+         AND EXISTS(SELECT 1 FROM comments c WHERE c.project_id=i.project_id AND c.issue_number=i.number AND c.author=e.actor AND c.created_at=e.created_at AND c.id=(SELECT max(id) FROM comments WHERE project_id=i.project_id AND issue_number=i.number) AND
+          (c.body='Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup.'
+           OR r.state='infrastructure_blocked' AND c.body=r.summary AND c.body LIKE '%Automatic pickup is held; this run does not consume an implementation retry.%'))";
+        let read = |db: &Connection| -> Result<Vec<(String, String)>> {
+            Ok(db
+                .prepare(CANDIDATES)?
+                .query_map([machine], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+        if read(&self.db)?.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (job, id) in read(&tx)? {
+            let job: Job = serde_json::from_str(&job)?;
+            if super::super::blockers::has_dependencies(&tx, &job.project.id, job.number())? {
+                continue;
+            }
+            mutate(
+                &tx,
+                &job.project,
+                &job.actor,
+                &Operation::Reopen {
+                    number: job.number(),
+                    if_version: None,
+                },
+                now(),
+            )?;
+            tx.execute(
+                "UPDATE worker_runs SET retry_allowed=0,retry_count=1,retry_at=?2 WHERE id=?1",
+                params![id, now() + 30_000],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn worker_database_path(&self) -> Option<std::path::PathBuf> {
+        self.db.path().map(std::path::PathBuf::from)
+    }
+
+    pub(crate) fn worker_process_identity(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Option<u32>, Option<String>)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT pid,process_start FROM worker_runs WHERE id=?1 AND finished_at IS NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+}
+
+fn retry_count(db: &Connection, job: &Job) -> Result<i64> {
+    let previous: Option<(i64, bool, String)> = db.query_row(
+        "SELECT retry_count,retry_allowed,state FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1",
+        params![job.project.id,job.number()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional()?;
+    let Some((count, reset, state)) = previous else {
+        return Ok(1);
+    };
+    if reset || state == "completed" {
+        return Ok(1);
+    }
+    if count > 0 {
+        return Ok(count.saturating_add(1));
+    }
+    // Older attempts predate the counter. Four consecutive failures already
+    // reach the delay cap; never scan an unbounded run history during pickup.
+    let history = db.prepare("SELECT state,retry_allowed FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 4")?.query_map(params![job.project.id,job.number()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(1 + history
+        .iter()
+        .take_while(|(state, reset)| state != "completed" && !reset)
+        .count() as i64)
+}
+
 // Only the owning agent's deliberate handoff may finish after changing owners.
 // A human takeover must still stop the session and invalidate its completion.
 fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
@@ -79,13 +173,13 @@ fn status(db: &Connection, project: &Project) -> Result<Value> {
         [],
         |r| r.get(0),
     )?;
-    let mut stmt = db.prepare("SELECT id,issue_number,json_extract(job,'$.issue.title'),actor_id,session_id,state,pid,started_at,updated_at,finished_at,stop_requested,summary,last_event,goal FROM worker_runs WHERE project_id=?1 ORDER BY started_at DESC,id DESC LIMIT 20")?;
+    let mut stmt = db.prepare("SELECT r.id,r.issue_number,json_extract(r.job,'$.issue.title'),r.actor_id,r.session_id,r.state,r.pid,r.started_at,r.updated_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,CASE WHEN r.retry_allowed=0 AND i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count FROM worker_runs r JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number WHERE r.project_id=?1 ORDER BY r.started_at DESC,r.id DESC LIMIT 20")?;
     let rows = stmt.query_map([&project.id], |r| Ok(json!({
         "id":r.get::<_,String>(0)?,"number":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,
         "actor_id":r.get::<_,String>(3)?,"session_id":r.get::<_,Option<String>>(4)?,"state":r.get::<_,String>(5)?,
         "pid":r.get::<_,Option<u32>>(6)?,"started_at":r.get::<_,i64>(7)?,"updated_at":r.get::<_,i64>(8)?,
         "finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,
-        "summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?
+        "summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"retry_at":r.get::<_,Option<i64>>(14)?,"retry_count":r.get::<_,i64>(15)?
     })))?;
     let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     for run in &mut runs {
@@ -417,8 +511,9 @@ impl Store {
             && issue.closed_by.as_deref() == Some(&job.actor.id)
             && issue.deleted_at.is_none();
         let handed_off = own_pr_handoff(&tx, job, &issue)?;
-        let mut state = if own_closed { "completed" } else { state };
+        let mut state = state;
         let mut summary: String = summary.chars().take(16_000).collect();
+        let approval_hold = summary.starts_with("Codex needs input or approval:");
         if state == "completed"
             && !own_closed
             && ((!own && !handed_off)
@@ -432,48 +527,48 @@ impl Store {
                 "Issue ownership or requirements changed while Codex worked. Review the session before closing.\n\n{summary}"
             );
         }
+        if state == "completed" && !own_closed {
+            let delivered_pr = job.requires_pr() && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))",
+                params![job.project.id,job.number()], |r| r.get::<_,bool>(0),
+            )?;
+            if !delivered_pr {
+                state = "failed";
+                summary = format!(
+                    "Agent ended without resolving the issue or delivering its required PR. Saved work will be retried.\n\n{summary}"
+                );
+            }
+        }
         if matches!(state, "blocked" | "failed" | "startup_failed")
-            && worker_infrastructure::approval_unavailable(&summary)
+            && !approval_hold
+            && worker_infrastructure::unavailable(&summary).is_some()
         {
             state = worker_infrastructure::STATE;
         }
-        let infrastructure_hold = state == worker_infrastructure::STATE;
-        if infrastructure_hold {
-            summary = format!("{}\n\n{summary}", worker_infrastructure::GUIDANCE);
+        if state == worker_infrastructure::STATE {
+            summary = format!(
+                "{}\n\n{summary}",
+                worker_infrastructure::unavailable(&summary)
+                    .unwrap_or(worker_infrastructure::GUIDANCE)
+            );
         }
-        // Count unsuccessful attempts in this open cycle, not cancellations or
-        // pre-launch reservations. Reopening is an explicit fresh retry budget.
-        let exhausted = if matches!(state, "failed" | "blocked" | "claim_timeout") {
-            let failures: i64 = tx.query_row(
-                "SELECT count(*) FROM (SELECT 1 FROM worker_runs r WHERE r.project_id=?1 AND r.issue_number=?2
-                 AND r.finished_at IS NOT NULL AND r.state IN ('failed','blocked','claim_timeout')
-                 AND r.started_at>=coalesce((SELECT max(created_at) FROM events WHERE project_id=?1 AND issue_number=?2 AND action='reopened'),0)
-                 AND EXISTS(SELECT 1 FROM issue_agent_launches launches WHERE launches.project_id=r.project_id AND launches.issue_number=r.issue_number AND launches.run_id=r.id) LIMIT 4)",
-                params![job.project.id, job.number()], |r| r.get(0),
-            )?;
-            let launched: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM issue_agent_launches WHERE project_id=?1 AND issue_number=?2 AND run_id=?3)",
-                params![job.project.id, job.number(), job.id],
-                |r| r.get(0),
-            )?;
-            launched && failures >= 4
-        } else {
-            false
-        };
         if (own || handed_off) && issue.deleted_at.is_none() && issue.state == "open" {
-            let report = format!("### Worker {}\n\n{}", state, summary);
             // Delivery/goal completion is not an issue-resolution decision.
             // Only the owning agent's explicit Close may resolve the issue.
-            mutate(
-                &tx,
-                &job.project,
-                &job.actor,
-                &Operation::Comment {
-                    number: job.number(),
-                    body: report,
-                },
-                now(),
-            )?;
+            // Failed attempts remain in run history; retries must not flood the
+            // task with duplicate handoff comments or imply successful delivery.
+            if state == "completed" {
+                mutate(
+                    &tx,
+                    &job.project,
+                    &job.actor,
+                    &Operation::Comment {
+                        number: job.number(),
+                        body: format!("### Worker completed\n\n{summary}"),
+                    },
+                    now(),
+                )?;
+            }
             if state == "completed" && job.requires_pr() {
                 mutate(
                     &tx,
@@ -498,8 +593,7 @@ impl Store {
                 )?;
             }
         }
-        let approval_hold = summary.starts_with("Codex needs input or approval:");
-        if (exhausted || approval_hold || infrastructure_hold)
+        if approval_hold
             && issue.state == "open"
             && issue.deleted_at.is_none()
             && (own || issue.assignee.is_none())
@@ -520,24 +614,27 @@ impl Store {
                 &Operation::Block {
                     blockers: None,
                     number: job.number(),
-                    comment: Some(if infrastructure_hold {
-                        summary.clone()
-                    } else if approval_hold {
-                        format!(
-                            "{summary}\n\nResolve this request, then reopen the issue to resume pickup."
-                        )
-                    } else {
-                        "Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup.".into()
-                    }),
+                    comment: Some(format!(
+                        "{summary}\n\nResolve this request, then reopen the issue to resume pickup."
+                    )),
                     force: false,
                 },
                 now(),
             )?;
         }
         super::super::blockers::reconcile(&tx, &job.project.id, Some(&job.actor.id), now())?;
+        let finished = now();
+        let retrying =
+            !matches!(state, "completed" | "cancelled" | "interrupted") && !approval_hold;
+        let count = if retrying { retry_count(&tx, job)? } else { 0 };
+        let retry_at = (retrying
+            && issue.state == "open"
+            && issue.deleted_at.is_none()
+            && (own || issue.assignee.is_none()))
+        .then(|| finished + (30_000_i64 * (1 << count.saturating_sub(1).min(4))).min(300_000));
         tx.execute(
-            "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
-            params![job.id, state, summary, now()],
+            "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_count=?5,retry_at=?6,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
+            params![job.id, state, summary, finished, count, retry_at],
         )?;
         tx.execute("UPDATE agent_steering SET state='rejected',error='The agent stopped before this message was delivered. Saved issue and project instructions remain in place.' WHERE run_id=?1 AND state='queued'", [&job.id])?;
         tx.execute(
@@ -679,7 +776,279 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_reservation_without_registered_actor_can_finalize() {
+    fn legacy_automatic_holds_resume_but_manual_and_permission_blocks_remain() {
+        for mode in [
+            "exhausted",
+            "infrastructure",
+            "manual",
+            "approval",
+            "later-edit",
+        ] {
+            let mut f = HandoffFixture::new(false);
+            let summary = match mode {
+                "infrastructure" => {
+                    "Approval service unavailable. Automatic pickup is held; this run does not consume an implementation retry."
+                }
+                "manual" => "Waiting for a human decision",
+                "approval" => "Codex needs input or approval: permission denied",
+                _ => {
+                    "Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup."
+                }
+            };
+            f.apply(Operation::Block {
+                number: 1,
+                blockers: None,
+                comment: Some(summary.into()),
+                force: false,
+            });
+            f.store.db.execute("UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,retry_at=NULL,retry_count=0", params![f.job.id,if mode=="infrastructure" {"infrastructure_blocked"} else {"failed"},summary,now()]).unwrap();
+            if mode == "later-edit" {
+                f.apply(Operation::Comment {
+                    number: 1,
+                    body: "Keep this held; I am investigating".into(),
+                });
+            }
+            f.store.worker_release_automatic_holds("unit").unwrap();
+            assert_eq!(
+                f.issue().state,
+                if matches!(mode, "exhausted" | "infrastructure") {
+                    "open"
+                } else {
+                    "blocked"
+                },
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn exponential_retry_deadlines_survive_restarts_and_reset_after_manual_retry() {
+        let mut f = HandoffFixture::new(false);
+        for (attempt, delay) in [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]
+            .into_iter()
+            .enumerate()
+        {
+            if attempt > 0 {
+                f.apply(Operation::Claim {
+                    number: 1,
+                    force: false,
+                });
+                f.job.id = format!("retry-{attempt}");
+                f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES(?1,?2,1,?3,?4,'running',1,'start','unit',?5,?5)", params![f.job.id,f.job.project.id,serde_json::to_string(&f.job).unwrap(),f.job.actor.id,now()]).unwrap();
+            }
+            f.store
+                .worker_finish(&f.job, "failed", "Proxy disconnected")
+                .unwrap();
+            let path = f.root.join("issues.db");
+            f.store = Store::open(&path).unwrap();
+            let (wait, count): (i64, i64) = f
+                .store
+                .db
+                .query_row(
+                    "SELECT retry_at-finished_at,retry_count FROM worker_runs WHERE id=?1",
+                    [&f.job.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(wait, delay);
+            assert_eq!(count, attempt as i64 + 1);
+            assert!(f.issue().assignee.is_none());
+            // Ensure deterministic history ordering even on a millisecond clock.
+            f.store
+                .db
+                .execute(
+                    "UPDATE worker_runs SET finished_at=finished_at-1 WHERE id=?1",
+                    [&f.job.id],
+                )
+                .unwrap();
+        }
+        f.apply(Operation::Reopen {
+            number: 1,
+            if_version: None,
+        });
+        assert_eq!(retry_count(&f.store.db, &f.job).unwrap(), 1);
+        assert!(f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?1 AND number=1)", [&f.job.project.id], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn failed_database_finalization_keeps_the_original_result_for_later_recovery() {
+        let mut f = HandoffFixture::new(true);
+        let path = f.root.join("issues.db");
+        f.store.db.execute_batch("CREATE TRIGGER unavailable_result BEFORE UPDATE OF finished_at ON worker_runs BEGIN SELECT RAISE(ABORT,'database result stream disconnected'); END;").unwrap();
+        let start = std::time::Instant::now();
+        assert!(
+            crate::issues::worker::finish_job(
+                &path,
+                &mut f.store,
+                &f.job,
+                "completed",
+                "Verified before disconnect"
+            )
+            .is_err()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(f.state(), "running");
+        assert_eq!(
+            crate::issues::worker_results::pending(&path).unwrap().len(),
+            1
+        );
+        f.store
+            .db
+            .execute_batch("DROP TRIGGER unavailable_result")
+            .unwrap();
+        f.store = Store::open(&path).unwrap();
+        crate::issues::worker::recover(&mut f.store, "unit").unwrap();
+        assert_eq!(f.state(), "completed");
+        assert!(
+            crate::issues::worker_results::pending(&path)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM comments WHERE body LIKE '%Verified before disconnect%'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovery_uses_the_durable_result_once_instead_of_a_generic_crash() {
+        let mut f = HandoffFixture::new(true);
+        let path = f.root.join("issues.db");
+        crate::issues::worker_results::save(&path, &f.job, "completed", "Saved delivery").unwrap();
+        f.store = Store::open(&path).unwrap();
+        crate::issues::worker::finish_job(&path, &mut f.store, &f.job, "failed", "Worker died")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert!(
+            !path
+                .with_added_extension("worker-results")
+                .join(format!("{}.json", f.job.id))
+                .exists()
+        );
+        crate::issues::worker::finish_job(
+            &path,
+            &mut f.store,
+            &f.job,
+            "failed",
+            "Duplicate recovery",
+        )
+        .unwrap();
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM comments WHERE body LIKE '%Saved delivery%'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let mut wrong = f.job.clone();
+        wrong.issue["number"] = json!(2);
+        crate::issues::worker_results::save(&path, &f.job, "failed", "Original").unwrap();
+        assert!(
+            crate::issues::worker_results::save(&path, &wrong, "completed", "Wrong issue").is_err()
+        );
+    }
+
+    #[test]
+    fn failures_keep_retrying_without_blocking_or_retaining_capacity() {
+        let mut f = HandoffFixture::new(false);
+        for n in 0..6 {
+            f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES(?1,?2,1,'{}',?3,'failed',1,'start','unit',0,0,1)", params![format!("previous-{n}"),f.job.project.id,f.job.actor.id]).unwrap();
+        }
+        f.store.db.execute("INSERT INTO issue_agent_launches SELECT id,project_id,issue_number,started_at FROM worker_runs", []).unwrap();
+        f.store
+            .worker_finish(
+                &f.job,
+                "failed",
+                "Agent disconnected before reporting completion",
+            )
+            .unwrap();
+        assert_eq!(
+            f.issue().state,
+            "open",
+            "An agent failure must never require manual reopening"
+        );
+        assert!(f.issue().assignee.is_none());
+        assert_eq!(f.state(), "failed");
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM worker_runs WHERE finished_at IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let (finished, retry): (i64, i64) = f
+            .store
+            .db
+            .query_row(
+                "SELECT finished_at,retry_at FROM worker_runs WHERE id=?1",
+                [&f.job.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retry - finished, 300_000);
+        assert!(!f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?1 AND number=1)", [&f.job.project.id], |r| r.get::<_, bool>(0)).unwrap());
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET retry_at=0 WHERE id=?1", [&f.job.id])
+            .unwrap();
+        assert!(f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?1 AND number=1)", [&f.job.project.id], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn a_crash_after_closing_an_issue_is_still_a_failed_run() {
+        let mut f = HandoffFixture::new(false);
+        f.apply(Operation::Close {
+            number: 1,
+            comment: None,
+            force: false,
+        });
+        f.store
+            .worker_finish(&f.job, "failed", "Agent transport disconnected")
+            .unwrap();
+        assert_eq!(
+            f.state(),
+            "failed",
+            "Issue state cannot manufacture successful agent completion"
+        );
+        assert_eq!(
+            f.issue().state,
+            "closed",
+            "Do not undo an authoritative resolution"
+        );
+    }
+
+    #[test]
+    fn unfinished_delivery_is_not_recorded_as_success() {
+        let mut f = HandoffFixture::new(false);
+        f.store
+            .worker_finish(
+                &f.job,
+                "completed",
+                "Server was unavailable; remaining work is saved",
+            )
+            .unwrap();
+        assert_eq!(f.state(), "failed");
+        assert_eq!(f.issue().state, "open");
+        assert!(f.issue().assignee.is_none());
+    }
+
+    #[test]
+    fn repeatedly_failed_reservation_without_registered_actor_can_finalize() {
         let mut f = HandoffFixture::new(false);
         f.apply(Operation::Unassign {
             number: 1,
@@ -698,7 +1067,7 @@ mod tests {
         f.store
             .worker_finish(&f.job, "failed", "Session failed before attachment")
             .unwrap();
-        assert_eq!(f.issue().state, "blocked");
+        assert_eq!(f.issue().state, "open");
         assert!(f.issue().assignee.is_none());
         assert_eq!(f.state(), "failed");
         let version = f.issue().version;
@@ -717,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn fifth_unsuccessful_launch_blocks_and_reopen_resets_budget() {
+    fn fifth_failure_retries_and_explicit_reopen_resets_backoff() {
         let mut f = HandoffFixture::new(false);
         f.store
             .db
@@ -733,7 +1102,7 @@ mod tests {
         f.store
             .worker_finish(&f.job, "failed", "Still unable to resolve dependency")
             .unwrap();
-        assert_eq!(f.issue().state, "blocked");
+        assert_eq!(f.issue().state, "open");
         assert!(f.issue().assignee.is_none());
         let version = f.issue().version;
         f.store
@@ -774,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_budget_counts_real_launches_and_protects_changed_issues() {
+    fn retries_preserve_changed_issues_and_human_ownership() {
         for mode in [
             "fourth",
             "unlaunched",
@@ -830,15 +1199,7 @@ mod tests {
                     "Unsuccessful attempt",
                 )
                 .unwrap();
-            assert_eq!(
-                f.issue().state,
-                if mode == "unassigned" {
-                    "blocked"
-                } else {
-                    "open"
-                },
-                "{mode}"
-            );
+            assert_eq!(f.issue().state, "open", "{mode}");
             if mode == "new_owner" {
                 assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
             }
@@ -1052,14 +1413,14 @@ mod tests {
     }
 
     #[test]
-    fn successful_partial_delivery_keeps_issue_open_without_reading_summary_prose() {
+    fn partial_delivery_retries_without_trusting_summary_prose() {
         for summary in [
             "Pushed the partial fix. Filter and citeproc engines remain unimplemented.",
             "Implemented everything. Meaningful checks passed.",
         ] {
             let mut f = HandoffFixture::new(false);
             f.store.worker_finish(&f.job, "completed", summary).unwrap();
-            assert_eq!(f.state(), "completed");
+            assert_eq!(f.state(), "failed");
             assert_eq!(f.issue().state, "open");
             assert!(f.issue().assignee.is_none());
             assert!(f.issue().closed_at.is_none());
@@ -1084,7 +1445,7 @@ mod tests {
                         |r| r.get::<_, String>(0)
                     )
                     .unwrap(),
-                format!("### Worker completed\n\n{summary}")
+                "Existing history"
             );
             f.store
                 .worker_finish(&f.job, "completed", "Duplicate delivery")
@@ -1094,7 +1455,7 @@ mod tests {
                     .db
                     .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                2
+                1
             );
         }
     }
@@ -1256,7 +1617,7 @@ mod tests {
                 .worker_finish(&f.job, "completed", "Artifact saved.")
                 .unwrap();
             assert_eq!(f.issue().state, "open");
-            assert_eq!(f.state(), if changed { "blocked" } else { "completed" });
+            assert_eq!(f.state(), if changed { "blocked" } else { "failed" });
             assert!(f.issue().assignee.is_none());
         }
     }
@@ -1419,8 +1780,47 @@ mod tests {
     }
 
     #[test]
-    fn captured_approval_outages_do_not_exhaust_implementation_retries() {
+    fn finalization_reconciles_disconnects_before_and_after_commit() {
+        for commit in [false, true] {
+            let mut f = HandoffFixture::new(true);
+            let path = f.root.join("issues.db");
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (connection, transport) =
+                crate::database::tests::lose_commit_response(&path, commit);
+            f.store.db = connection;
+            crate::issues::worker::finish_job(
+                &path,
+                &mut f.store,
+                &f.job,
+                "completed",
+                "Verified delivery",
+            )
+            .unwrap();
+            transport.join().unwrap();
+            assert_eq!(f.state(), "completed");
+            // Reconciliation must neither duplicate a committed handoff nor
+            // omit a transaction that rolled back with the lost connection.
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM comments WHERE body LIKE '%Verified delivery%'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+            owner.stop();
+        }
+    }
+
+    #[test]
+    fn captured_infrastructure_outages_release_claims_and_retry() {
         let summaries = [
+            "Database service disconnected; write outcome may be unknown; mutations are never automatically replayed.",
+            "HTTP 504 from local hey-proxy: internal recovery time budget exhausted before a response could be forwarded.",
             "Automatic approval review itself cannot access configured wisp-alpha (404); this is service failure, not an unsafe-action verdict. Final review sweep/check confirmation and cleanup remain pending. Preserve worktree and logs for continuation.",
             "Approval review cannot execute: configured wisp-alpha model returns404. Restore approval-model routing to finish enabled-hook commit, fresh native verification, push and final CI/reviews.",
             "Automatic approval review returned HTTP 404 for missing `wisp-alpha`, preventing the final CI read. Please restore the reviewer so I can finish.",
@@ -1442,7 +1842,7 @@ mod tests {
             f.store.db.execute("INSERT INTO issue_agent_launches(project_id,issue_number,run_id,launched_at) VALUES(?1,1,?2,0)", params![f.job.project.id, f.job.id]).unwrap();
             f.store.worker_finish(&f.job, "blocked", summary).unwrap();
             assert_eq!(f.state(), "infrastructure_blocked");
-            assert_eq!(f.issue().state, "blocked");
+            assert_eq!(f.issue().state, "open");
             assert!(f.issue().assignee.is_none());
             let comments = f
                 .store
@@ -1458,10 +1858,16 @@ mod tests {
                     .iter()
                     .any(|c| c.contains("Automatic retries exhausted"))
             );
+            assert_eq!(comments, vec!["Existing history"]);
             assert!(
-                comments
-                    .iter()
-                    .any(|c| c.contains("does not consume an implementation retry"))
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT retry_at IS NOT NULL FROM worker_runs WHERE id=?1",
+                        [&f.job.id],
+                        |r| r.get::<_, bool>(0)
+                    )
+                    .unwrap()
             );
             assert_eq!(
                 f.store

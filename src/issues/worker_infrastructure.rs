@@ -1,8 +1,56 @@
-//! Approval infrastructure failures are holds, never implementation failures.
+//! Recognized service failures retain their cause and retry automatically.
 use serde_json::Value;
 
 pub(super) const STATE: &str = "infrastructure_blocked";
-pub(super) const GUIDANCE: &str = "Approval service unavailable. Automatic pickup is held; this run does not consume an implementation retry. The saved session, checkout and issue history are retained. Restore the approval service, then reopen the issue to resume the saved session. This hold grants no permissions and does not bypass approval.";
+pub(super) const GUIDANCE: &str = "Approval service unavailable. This attempt failed and will retry automatically with exponential backoff. Its slot and claim are released; the saved session, checkout and issue history are retained. Retrying grants no permissions and never bypasses approval.";
+const DATABASE_GUIDANCE: &str = "Database service unavailable. This attempt failed and will retry automatically with exponential backoff. Its slot and claim are released; the saved session, checkout and issue history are retained. Before repeating an uncertain mutation, read and reconcile the current issue state or reuse its original request ID for deduplication. Never blindly replay a write whose outcome is unknown.";
+const PROXY_GUIDANCE: &str = "Model proxy unavailable. This attempt failed and will retry automatically with exponential backoff. Its slot and claim are released; the saved session, checkout and issue history are retained. A proxy recovery timeout is not an implementation result.";
+
+pub(crate) fn label(summary: &str) -> &'static str {
+    if summary.starts_with("Database service unavailable.") {
+        "Database service unavailable"
+    } else if summary.starts_with("Model proxy unavailable.") {
+        "Model proxy unavailable"
+    } else {
+        // Older approval holds have no explicit reason field.
+        "Approval service unavailable"
+    }
+}
+
+pub(super) fn database_unavailable(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    // A sandbox/policy denial is not repaired by restoring the database.
+    if text.contains("operation not permitted") || text.contains("permission denied") {
+        return false;
+    }
+    [
+        "database service transport failed:",
+        "database service disconnected",
+        "database result stream disconnected",
+        "database transaction lost its connection",
+        "database service unavailable:",
+        "database service did not become ready",
+        "database service exited during startup",
+        "database service protocol mismatch",
+    ]
+    .iter()
+    .any(|pattern| text.contains(pattern))
+}
+
+pub(super) fn unavailable(text: &str) -> Option<&'static str> {
+    if database_unavailable(text) {
+        return Some(DATABASE_GUIDANCE);
+    }
+    let lower = text.to_ascii_lowercase();
+    if (lower.contains("hey-proxy") || lower.contains("model proxy"))
+        && lower.contains("recovery")
+        && lower.contains("budget")
+        && lower.contains("exhausted")
+    {
+        return Some(PROXY_GUIDANCE);
+    }
+    approval_unavailable(text).then_some(GUIDANCE)
+}
 
 pub(super) fn approval_unavailable(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
@@ -46,7 +94,7 @@ pub(super) fn tool_failure(item: &Value) -> Option<String> {
     };
     fn find(value: &Value) -> Option<String> {
         match value {
-            Value::String(s) if approval_unavailable(s) => Some(s.chars().take(4000).collect()),
+            Value::String(s) if unavailable(s).is_some() => Some(s.chars().take(4000).collect()),
             Value::Array(values) => values.iter().find_map(find),
             Value::Object(values) => values.values().find_map(find),
             _ => None,
@@ -98,6 +146,39 @@ mod tests {
             json!({"type":"agentMessage","text":text}),
         ] {
             assert!(tool_failure(&item).is_none());
+        }
+    }
+
+    #[test]
+    fn database_and_proxy_transport_failures_are_not_implementation_failures() {
+        for text in [
+            "Database service disconnected; write outcome may be unknown; mutations are never automatically replayed.",
+            "Database service transport failed: Broken pipe (os error 32). Write outcome may be unknown; mutations are never automatically replayed.",
+            "Database transaction lost its connection; its outcome cannot be replayed automatically",
+            "HTTP 504 from local hey-proxy: internal recovery time budget exhausted before a response could be forwarded.",
+        ] {
+            assert!(unavailable(text).is_some(), "{text}");
+            assert!(
+                tool_failure(
+                    &json!({"type":"commandExecution","exitCode":1,"aggregatedOutput":text})
+                )
+                .is_some()
+            );
+            assert!(
+                tool_failure(
+                    &json!({"type":"commandExecution","exitCode":0,"aggregatedOutput":text})
+                )
+                .is_none()
+            );
+        }
+        for text in [
+            "HTTP 504 from application under test",
+            "Broken pipe during unit test",
+            "Database constraint failed: UNIQUE constraint",
+            "hey-proxy returned HTTP 403: policy denied",
+            "cargo test failed: expected 504 from hey-proxy, got 200",
+        ] {
+            assert!(unavailable(text).is_none(), "{text}");
         }
     }
 }

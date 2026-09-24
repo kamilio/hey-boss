@@ -66,13 +66,44 @@ for await (const line of createInterface({input: process.stdin})) {
   send({id: msg.id, result});
   if (msg.method !== 'turn/start') continue;
   if (mode === 'disconnect') process.exit(9);
+  if (['disconnect-after-text','failed-after-text','stale-turn-success','malformed-completion','terminal-error-event'].includes(mode)) {
+    cli(['issue', '--json', '--agent', 'codex:' + session, 'close', String(issue.number)]);
+    const eventTurn = mode === 'stale-turn-success' ? 'stale-turn' : turn;
+    if (mode === 'stale-turn-success') send({method:'turn/started',params:{threadId:session,turn:{id:eventTurn}}});
+    send({method:'item/completed',params:{threadId:session,turnId:eventTurn,item:{type:'agentMessage',text:mode==='malformed-completion'?'invalid completion report':JSON.stringify({status:'completed',summary:'Looks done, but the transport has not finished'})}}});
+    if (mode === 'disconnect-after-text') process.exit(9);
+    if (mode === 'terminal-error-event') {
+      send({method:'error',params:{threadId:session,turnId:turn,willRetry:false,error:{message:'Model server is unavailable'}}});
+      continue;
+    }
+    if (mode === 'stale-turn-success') send({method:'turn/completed',params:{threadId:session,turn:{id:eventTurn,status:'completed'}}});
+    if (mode === 'malformed-completion') goal = {...goal,status:'complete'};
+    send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:mode==='malformed-completion'?'completed':'failed',error:{message:'actual active turn failed'}}}});
+    continue;
+  }
   if (mode === 'delay-model-start') await new Promise(resolve => setTimeout(resolve, 6000));
   if (['delay-unclaimed', 'delay-model-start'].includes(mode)) {
     send({method: 'item/started', params: {threadId: session, item: {type: 'reasoning'}}}); continue;
   }
   if (mode === 'delay') continue;
+  if (mode === 'transient-error-recovered') send({method:'error',params:{threadId:session,turnId:turn,willRetry:true,error:{message:'Temporary disconnect; retry in progress'}}});
   if (mode === 'approval') {
     send({id: 'approval-1', method: 'item/commandExecution/requestApproval', params: {threadId: session, command: 'synthetic privileged operation'}}); continue;
+  }
+  const outage = mode.startsWith('database-outage')
+    ? 'Database service transport failed: Broken pipe (os error 32). Write outcome may be unknown; mutations are never automatically replayed.'
+    : 'HTTP 504 from local hey-proxy: internal recovery time budget exhausted before a response could be forwarded.';
+  if (mode.startsWith('database-outage') || mode.startsWith('proxy-outage')) {
+    if (mode.endsWith('-rpc')) {
+      send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:'failed',error:{message:outage}}}});
+      continue;
+    }
+    if (!mode.endsWith('-summary')) send({method:'item/completed',params:{threadId:session,item:{type:'commandExecution',exitCode:1,aggregatedOutput:outage}}});
+    if (!mode.endsWith('-recovered')) {
+      send({method:'item/completed',params:{threadId:session,item:{type:'agentMessage',text:JSON.stringify({status:'blocked',summary:mode.endsWith('-summary')?outage:'Delivery cannot continue; saved work remains.'})}}});
+      send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:'completed'}}});
+      continue;
+    }
   }
   if (['approval-outage-tool', 'approval-outage-recovered'].includes(mode)) {
     send({method: 'item/completed', params: {threadId: session, item: {type: 'mcpToolCall', status: 'failed', result: {content: [{type: 'text', text: 'Automatic approval review failed: unexpected status 404 Not Found: The model `wisp-alpha` does not exist or you do not have access to it. The action was not executed because automatic approval review could not be completed.'}]}}}});
@@ -83,7 +114,7 @@ for await (const line of createInterface({input: process.stdin})) {
     send({method: 'turn/completed', params: {threadId: session, turn: {id: turn, status: 'completed'}}});
     continue;
   }
-  const status = ['unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered'].includes(mode) ? 'completed' : mode;
+  const status = ['unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered', 'database-outage-recovered', 'proxy-outage-recovered','transient-error-recovered'].includes(mode) ? 'completed' : mode;
   const workerArgs = existsSync('worker-args.json') ? JSON.parse(readFileSync('worker-args.json', 'utf8')) : [];
   const artifact = issue?.labels.some(label => ['task:plan', 'task:research'].includes(label));
   if (status === 'completed' && issue && !mode.startsWith('partial') && (!workerArgs.includes('--prs') || artifact)) {

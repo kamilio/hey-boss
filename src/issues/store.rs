@@ -100,6 +100,8 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    ("worker_runs", "retry_at", "INTEGER"),
+    ("worker_runs", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
     (
         "global_settings",
         "auto_close_merged_prs",
@@ -152,13 +154,11 @@ fn missing_additive_columns(
     db: &Connection,
 ) -> Result<Vec<(&'static str, &'static str, &'static str)>> {
     let mut missing = Vec::new();
-    for table in [
-        "global_settings",
-        "issues",
-        "project_settings",
-        "mindmap_nodes",
-        "issue_pull_requests",
-    ] {
+    for table in ADDITIVE_COLUMNS
+        .iter()
+        .map(|(table, _, _)| *table)
+        .collect::<BTreeSet<_>>()
+    {
         let mut statement = db.prepare("SELECT name FROM pragma_table_info(?1)")?;
         let columns = statement
             .query_map([table], |r| r.get::<_, String>(0))?
@@ -976,7 +976,8 @@ impl Store {
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
                 .is_empty()
-                || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?);
+                || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?
+                || !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_pickup_ready' AND instr(sql,'coalesce(r.retry_at')>0)", [], |r| r.get::<_, bool>(0))?);
         if version < SCHEMA_VERSION || needs_repair {
             db.pragma_update(None, "foreign_keys", false)?;
             let mut migrate = || -> Result<()> {
@@ -2278,12 +2279,12 @@ fn mutate(
                     issue.version
                 )));
             }
-            let infrastructure_hold = issue.assignee.is_none() && db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND state='infrastructure_blocked' AND retry_allowed=0) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
+            let retry_hold = issue.assignee.is_none() && db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND state!='completed' AND retry_allowed=0) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
                 params![project.id, number], |r| r.get(0),
             )?;
-            if issue.state != "open" || infrastructure_hold {
-                if issue.state == "blocked" || infrastructure_hold {
+            if issue.state != "open" || retry_hold {
+                if issue.state == "blocked" || retry_hold {
                     // Explicitly reopening a blocker also releases old approval
                     // holds and cooldowns; it must actually resume eligibility.
                     db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL", params![project.id,number])?;
