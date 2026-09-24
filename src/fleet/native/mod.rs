@@ -1,4 +1,5 @@
 //! Native fleet implementation. Protocol-v1 and durable filenames stay stable.
+mod auto_workers;
 mod companion;
 mod context;
 mod control;
@@ -14,6 +15,18 @@ mod takeover;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use context::Context;
 pub(super) use context::read_control_body;
+pub(super) fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
+    self::auto_workers::run(apply, config_only).map_err(std::io::Error::other)
+}
+pub(super) fn add_auto_worker(
+    settings: &crate::issues::worker::Settings,
+    id: Option<&str>,
+) -> std::io::Result<Value> {
+    self::auto_workers::add(settings, id).map_err(std::io::Error::other)
+}
+pub(super) fn remove_auto_worker(id: &str) -> std::io::Result<Value> {
+    self::auto_workers::remove(id).map_err(std::io::Error::other)
+}
 use serde_json::{Value, json};
 use std::{io::Write, os::unix::net::UnixStream, time::Duration};
 

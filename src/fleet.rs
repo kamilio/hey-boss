@@ -8,6 +8,20 @@ use std::path::PathBuf;
 
 mod native;
 
+/// Apply or inspect this machine's saved workers, retaining their stable IDs.
+pub fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
+    native::auto_workers(apply, config_only)
+}
+pub fn add_auto_worker(
+    settings: &crate::issues::worker::Settings,
+    id: Option<&str>,
+) -> std::io::Result<Value> {
+    native::add_auto_worker(settings, id)
+}
+pub fn remove_auto_worker(id: &str) -> std::io::Result<Value> {
+    native::remove_auto_worker(id)
+}
+
 // Persisted roles and protocol-v1 frames keep their original names so existing
 // installations can upgrade without losing state or starting a second service.
 pub const SUPERVISOR_ROLE: &str = "controller";

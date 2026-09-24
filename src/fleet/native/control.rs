@@ -115,6 +115,11 @@ pub(super) fn configure_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<
     )?;
     let mut failures = vec![];
     for desired in workers {
+        // Stopped definitions are durable tombstones, not new configurations.
+        // Their old checkout may no longer exist.
+        if desired["intent"] == "stop" {
+            continue;
+        }
         if changing.iter().any(|r| r["worker"] == desired["id"]) {
             failures.push(format!(
                 "{}: Worker restart in progress; configuration will retry",
@@ -159,7 +164,7 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
         );
     };
     let previous = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
-    let workers = message.get("workers").unwrap_or(&previous["workers"]);
+    let workers = retain_pending_changes(&previous, message)?;
     let configured = json!({"role":"agent","controller":message["controller"],"revision":message["revision"],"workers":workers});
     let failures = configure_workers(
         ctx,
@@ -174,10 +179,82 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
     replica::state_set(&ctx.db()?, "revision", &message["revision"])?;
     Ok(json!({"kind":"ack","revision":message["revision"]}))
 }
+
+// A local add/remove can happen after a heartbeat was sent but before its
+// configure reply arrives. Only clear revisions actually seen by the supervisor.
+fn retain_pending_changes(previous: &Value, message: &Value) -> Result<Value> {
+    let mut workers = message
+        .get("workers")
+        .unwrap_or(&previous["workers"])
+        .as_array()
+        .ok_or_else(|| invalid("Invalid worker configuration"))?
+        .clone();
+    for pending in previous["workers"].as_array().into_iter().flatten() {
+        let Some(revision) = pending["local_revision"].as_i64() else {
+            continue;
+        };
+        let id = pending["id"]
+            .as_str()
+            .ok_or_else(|| invalid("Invalid worker ID"))?;
+        if message.get("configuration_receipts").is_none()
+            && workers.iter().any(|w| {
+                w["id"] == id
+                    && w["config"] == pending["config"]
+                    && w["intent"] == pending["intent"]
+            })
+        {
+            continue;
+        }
+        let receipt = message["configuration_receipts"][id].as_i64().unwrap_or(0);
+        if receipt >= revision {
+            continue;
+        }
+        let mut pending = pending.clone();
+        pending["base_revision"] = message["revision"].clone();
+        if let Some(row) = workers.iter_mut().find(|w| w["id"] == id) {
+            *row = pending;
+        } else {
+            workers.push(pending);
+        }
+    }
+    Ok(json!(workers))
+}
+
+pub(super) fn configuration_receipts(changes: &Value) -> Value {
+    Value::Object(
+        changes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|change| {
+                Some((
+                    change["id"].as_str()?.to_owned(),
+                    json!(change["local_revision"].as_i64()?),
+                ))
+            })
+            .collect(),
+    )
+}
 pub(super) fn reconcile(ctx: &Context, config: &Value) -> Result<()> {
     let Some(_lock) = ctx.lock("fleet-worker-control.lock", false)? else {
         return Ok(());
     };
+    reconcile_locked(ctx, config).map(|_| ())
+}
+
+pub(super) fn apply_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<String>> {
+    let Some(_lock) = ctx.lock("fleet-worker-control.lock", true)? else {
+        unreachable!()
+    };
+    let failures = configure_workers(ctx, workers)?;
+    if !failures.is_empty() {
+        return Ok(failures);
+    }
+    reconcile_locked(ctx, &json!({"workers":workers}))
+}
+
+fn reconcile_locked(ctx: &Context, config: &Value) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
     let known = ctx.workers()?;
     let db = ctx.db()?;
     let changing = replica::rows(
@@ -199,6 +276,15 @@ pub(super) fn reconcile(ctx: &Context, config: &Value) -> Result<()> {
                     "pause"
                 });
         let result = match (intent, worker) {
+            ("drain", Some(w)) if !w["pid"].is_null() => {
+                if w["config"]["enabled"] == true {
+                    control(ctx, &desired["id"], "pause").map(|_| ())
+                } else if drained(w) {
+                    control(ctx, &desired["id"], "stop_worker").map(|_| ())
+                } else {
+                    Ok(())
+                }
+            }
             ("running", None) => start_worker(ctx, desired).map(|_| ()),
             ("running", Some(w)) if w["pid"].is_null() => start_worker(ctx, desired).map(|_| ()),
             ("pause", Some(w)) if !w["pid"].is_null() && w["config"]["enabled"] == true => {
@@ -210,13 +296,21 @@ pub(super) fn reconcile(ctx: &Context, config: &Value) -> Result<()> {
             _ => Ok(()),
         };
         if let Err(e) = result {
+            failures.push(format!("{}: {e}", desired["id"]));
             ctx.atomic_json(
                 &ctx.state.join("fleet-agent-error.json"),
                 &json!({"worker":desired["id"],"error":e.to_string(),"at":now()}),
             )?;
         }
     }
-    Ok(())
+    Ok(failures)
+}
+
+fn drained(worker: &Value) -> bool {
+    worker["active"].as_u64() == Some(0)
+        && worker["chiefs"]
+            .as_array()
+            .is_some_and(|chiefs| chiefs.iter().all(|chief| chief["state"] != "running"))
 }
 pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
     let Some(_lock) = ctx.lock("fleet-worker-control.lock", true)? else {
@@ -461,6 +555,33 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_configuration_cannot_undo_a_newer_graceful_removal() {
+        let old = json!({"workers":[{"id":"worker","intent":"drain","local_revision":12,"base_revision":"old"}]});
+        let reply = json!({"revision":"new","workers":[{"id":"worker","intent":"running"}],"configuration_receipts":{"worker":11}});
+        let kept = retain_pending_changes(&old, &reply).unwrap();
+        assert_eq!(kept[0]["intent"], "drain");
+        assert_eq!(kept[0]["base_revision"], "new");
+        assert_eq!(kept[0]["local_revision"], 12);
+        let acknowledged = json!({"revision":"done","workers":[{"id":"worker","intent":"drain"}],"configuration_receipts":{"worker":12}});
+        let done = retain_pending_changes(&old, &acknowledged).unwrap();
+        assert!(done[0].get("local_revision").is_none());
+        assert_eq!(done[0]["intent"], "drain");
+    }
+    #[test]
+    fn graceful_removal_waits_for_agents_and_chief_and_requires_known_activity() {
+        assert!(!super::drained(
+            &serde_json::json!({"active":1,"chiefs":[]})
+        ));
+        assert!(!super::drained(
+            &serde_json::json!({"active":0,"chiefs":[{"state":"running"}]})
+        ));
+        assert!(!super::drained(&serde_json::json!({"chiefs":[]})));
+        assert!(!super::drained(&serde_json::json!({"active":0})));
+        assert!(super::drained(
+            &serde_json::json!({"active":0,"chiefs":[{"state":"idle"}]})
+        ));
+    }
     use super::super::context::tests::{assert_sqlite_locked, test_context};
     use super::*;
     use std::{fs, io::Write};

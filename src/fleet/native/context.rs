@@ -97,7 +97,28 @@ impl Context {
     pub fn workers(&self) -> Result<Vec<Value>> {
         let store = Store::open(&self.path)?;
         let mut workers = store.fleet_workers()?;
+        let role: String =
+            self.db()?
+                .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
+                    row.get(0)
+                })?;
+        let saved = self.read_json(
+            &self.state.join(if role == "agent" {
+                "fleet-agent.json"
+            } else {
+                "fleet-main.json"
+            }),
+            json!({}),
+        )?;
         for w in &mut workers {
+            if let Some(definition) = saved["workers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|definition| definition["id"] == w["id"])
+            {
+                w["intent"] = definition["intent"].clone();
+            }
             if let Some(pid) = w["pid"].as_u64()
                 && !alive(pid as u32)
             {
