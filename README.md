@@ -464,6 +464,10 @@ and batch triage cannot grant or change YOLO. Removing the tag restores the norm
 workspace sandbox and Auto approval review on the next attempt. This permission
 control does not reopen, claim, or retry an issue automatically.
 
+For simultaneous `http://hey-boss.test/` and `http://127.0.0.1:4781/` access,
+see [local HTTP setup](docs/local-http.md). macOS uses a loopback-only launchd
+socket while the application continues running as your normal user.
+
 Run `hey-boss upgrade` on the Mac to update its CLI, desktop app, canonical agent
 skills, and every host in `~/.local/share/hey-boss/companion-hosts`. By default it
 fetches the latest upstream `main` and archives that commit. For development,
