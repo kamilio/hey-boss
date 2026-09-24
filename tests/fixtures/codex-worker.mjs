@@ -99,6 +99,10 @@ for await (const line of createInterface({input: process.stdin})) {
       continue;
     }
     if (!mode.endsWith('-summary')) send({method:'item/completed',params:{threadId:session,item:{type:'commandExecution',exitCode:1,aggregatedOutput:outage}}});
+    if (mode.endsWith('-approval')) {
+      send({id:'approval-after-outage',method:'item/commandExecution/requestApproval',params:{threadId:session,command:'synthetic privileged operation'}});
+      continue;
+    }
     if (!mode.endsWith('-recovered')) {
       send({method:'item/completed',params:{threadId:session,item:{type:'agentMessage',text:JSON.stringify({status:'blocked',summary:mode.endsWith('-summary')?outage:'Delivery cannot continue; saved work remains.'})}}});
       send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:'completed'}}});
