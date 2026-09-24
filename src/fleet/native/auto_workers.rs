@@ -73,22 +73,84 @@ fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'sta
             ctx.desired.display()
         )));
     }
-    Ok((source, definitions(&config)?, role))
+    let workers = config
+        .as_array()
+        .ok_or_else(|| replica::invalid("Worker configuration must contain a workers array"))?
+        .clone();
+    Ok((source, workers, role))
+}
+
+// Ownership is local and explicit. Fleet discovery must never enroll workers in
+// this dashboard, including workers added later from a separate terminal.
+fn owned_ids(ctx: &Context) -> Result<HashSet<String>> {
+    let saved = ctx.read_json(
+        &ctx.state.join("auto-workers.json"),
+        json!({"worker_ids":[]}),
+    )?;
+    let ids: Vec<String> = serde_json::from_value(saved["worker_ids"].clone())?;
+    Ok(ids.into_iter().collect())
+}
+fn save_owned_ids(ctx: &Context, ids: &HashSet<String>) -> Result<()> {
+    let mut ids: Vec<_> = ids.iter().collect();
+    ids.sort();
+    ctx.atomic_json(
+        &ctx.state.join("auto-workers.json"),
+        &json!({"worker_ids":ids}),
+    )
 }
 
 pub(super) fn run(apply: bool, config_only: bool) -> Result<Value> {
     let ctx = Context::new()?;
-    let (source, definitions, role) = configuration(&ctx)?;
+    // Read, persist intent and reconcile under the same control lock as removal
+    // and fleet configuration, so a launch cannot revive a concurrent removal.
+    let control_lock = if apply {
+        ctx.lock("fleet-worker-control.lock", true)?
+    } else {
+        None
+    };
+    let (fleet_source, mut all_definitions, role) = configuration(&ctx)?;
+    let ids = owned_ids(&ctx)?;
+    let selected: Vec<_> = all_definitions
+        .iter()
+        .filter(|w| w["id"].as_str().is_some_and(|id| ids.contains(id)))
+        .cloned()
+        .collect();
+    let mut definitions = definitions(&json!(selected))?;
+    let source = ctx.state.join("auto-workers.json");
     if config_only {
-        return Ok(json!({"ok":true,"machine":ctx.node,"source":source,"workers":definitions}));
+        return Ok(
+            json!({"ok":true,"machine":ctx.node,"source":source,"fleet_source":fleet_source,"workers":definitions}),
+        );
     }
     if apply {
-        let failures = control::apply_workers(&ctx, &definitions)?;
+        let mut resumed = Vec::new();
+        for worker in &mut definitions {
+            if worker["intent"] == "pause" {
+                worker["intent"] = json!("running");
+                worker["config"]["enabled"] = json!(true);
+                // Enabling pickup also requires an available agent executable.
+                validate_settings(&serde_json::from_value(worker["config"].clone())?)?;
+                resumed.push(worker["id"].as_str().unwrap().to_owned());
+            }
+        }
+        if !resumed.is_empty() {
+            for selected in &definitions {
+                if let Some(existing) = all_definitions
+                    .iter_mut()
+                    .find(|w| w["id"] == selected["id"])
+                {
+                    *existing = selected.clone();
+                }
+            }
+            save_changes(&ctx, role, all_definitions, &resumed)?;
+        }
+        let failures = control::apply_workers_locked(&ctx, &definitions)?;
         if !failures.is_empty() {
             return Err(replica::invalid(&failures.join("; ")));
         }
     }
-    let mut workers = ctx.workers()?;
+    drop(control_lock);
+    let mut workers = ctx.workers_for(Some(&ids))?;
     workers.retain(|worker| {
         definitions.iter().any(|definition| {
             definition["id"] == worker["id"]
@@ -141,7 +203,18 @@ pub(super) fn add(settings: &Settings, requested_id: Option<&str>) -> Result<Val
         None => format!("auto-{}", crate::issues::worker::random_id()?),
     };
     let worker = json!({"id":id,"config":settings,"intent":"running"});
+    let mut ids = owned_ids(&ctx)?;
     let existing = workers.iter().find(|w| w["id"] == id);
+    let registered: bool = ctx.db()?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_workers WHERE id=?1)",
+        [&id],
+        |row| row.get(0),
+    )?;
+    if (existing.is_some() || registered) && !ids.contains(&id) {
+        return Err(replica::invalid(
+            "Worker belongs to another launcher; choose a new ID",
+        ));
+    }
     if existing.is_some_and(|w| w["config"] != worker["config"] || w["intent"] != "running") {
         return Err(replica::invalid(
             "Worker ID already has different settings; use a new ID for a different worker",
@@ -168,7 +241,9 @@ pub(super) fn add(settings: &Settings, requested_id: Option<&str>) -> Result<Val
     }
     if is_new {
         workers.push(worker.clone());
-        save_change(&ctx, role, workers, &id)?;
+        ids.insert(id.clone());
+        save_owned_ids(&ctx, &ids)?;
+        save_changes(&ctx, role, workers, std::slice::from_ref(&id))?;
     }
     let failures = control::configure_workers(&ctx, std::slice::from_ref(&worker))?;
     if !failures.is_empty() {
@@ -189,6 +264,9 @@ pub(super) fn remove(id: &str) -> Result<Value> {
     let Some(_lock) = ctx.lock("fleet-worker-control.lock", true)? else {
         unreachable!()
     };
+    if !owned_ids(&ctx)?.contains(id) {
+        return Err(replica::invalid("Worker is not owned by auto-workers"));
+    }
     let (_, mut workers, role) = configuration(&ctx)?;
     let worker = workers
         .iter_mut()
@@ -197,7 +275,7 @@ pub(super) fn remove(id: &str) -> Result<Value> {
     worker["intent"] = json!("drain");
     worker["config"]["enabled"] = json!(false);
     let definition = worker.clone();
-    save_change(&ctx, role, workers, id)?;
+    save_changes(&ctx, role, workers, &[id.to_owned()])?;
     // Configuration disables pickup without setting stop_requested on live runs.
     let failures = control::configure_workers(&ctx, &[definition])?;
     if !failures.is_empty() {
@@ -206,7 +284,7 @@ pub(super) fn remove(id: &str) -> Result<Value> {
     Ok(json!({"ok":true,"worker_id":id,"state":"draining"}))
 }
 
-fn save_change(ctx: &Context, role: &str, workers: Vec<Value>, changed: &str) -> Result<()> {
+fn save_changes(ctx: &Context, role: &str, workers: Vec<Value>, changed: &[String]) -> Result<()> {
     let path = ctx.state.join(if role == "agent" {
         "fleet-agent.json"
     } else {
@@ -219,7 +297,7 @@ fn save_change(ctx: &Context, role: &str, workers: Vec<Value>, changed: &str) ->
         .as_array_mut()
         .unwrap()
         .iter_mut()
-        .filter(|w| w["id"] == changed)
+        .filter(|w| changed.iter().any(|id| w["id"] == *id))
     {
         worker["local_revision"] = json!(crate::issues::worker::now());
         worker["base_revision"] = base.clone();

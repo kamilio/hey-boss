@@ -13,12 +13,15 @@ use std::{
 };
 
 pub(super) fn ensure_worker(ctx: &Context, worker: &Value) -> Result<()> {
-    if !ctx.rpc(json!({"action":"workers","worker_id":null}))?["workers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|w| w["id"] == worker["id"])
-    {
+    let db = ctx.db()?;
+    let registered: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_workers WHERE id=?1)",
+        [worker["id"]
+            .as_str()
+            .ok_or_else(|| invalid("Invalid worker ID"))?],
+        |row| row.get(0),
+    )?;
+    if !registered {
         let created=ctx.rpc(json!({"action":"configure_worker","worker_id":null,"config":worker["config"],"if_version":null}))?;
         let db = ctx.db()?;
         // Update references as one transaction, retaining supervisor-issued identity.
@@ -242,10 +245,8 @@ pub(super) fn reconcile(ctx: &Context, config: &Value) -> Result<()> {
     reconcile_locked(ctx, config).map(|_| ())
 }
 
-pub(super) fn apply_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<String>> {
-    let Some(_lock) = ctx.lock("fleet-worker-control.lock", true)? else {
-        unreachable!()
-    };
+// The caller owns fleet-worker-control.lock across intent changes and apply.
+pub(super) fn apply_workers_locked(ctx: &Context, workers: &[Value]) -> Result<Vec<String>> {
     let failures = configure_workers(ctx, workers)?;
     if !failures.is_empty() {
         return Ok(failures);
@@ -255,7 +256,13 @@ pub(super) fn apply_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<Stri
 
 fn reconcile_locked(ctx: &Context, config: &Value) -> Result<Vec<String>> {
     let mut failures = Vec::new();
-    let known = ctx.workers()?;
+    let ids = config["workers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w["id"].as_str().map(str::to_owned))
+        .collect();
+    let known = ctx.workers_for(Some(&ids))?;
     let db = ctx.db()?;
     let changing = replica::rows(
         &db,
