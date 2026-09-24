@@ -105,9 +105,10 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
     }
     replica::install_capture(&db, "agent", &ctx.node)?;
     let output = Arc::new(Mutex::new(std::io::stdout()));
+    let chief_ownership = crate::chief_ownership::read(&db)?;
     reply(
         &output,
-        json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"workers":ctx.workers()?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
+        json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":ctx.workers()?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
     )?;
     let (tx, rx) = mpsc::sync_channel::<Value>(100);
     let signals = ctx.clone();
@@ -148,6 +149,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                         .map(Vec::as_slice)
                         .unwrap_or(&[]),
                 )?;
+                crate::chief_ownership::stop_unassigned(&db)?;
                 ctx.atomic_json(
                     &ctx.state.join("fleet-agent-status.json"),
                     &json!({"connected_at":now(),"last_sync":now()}),
@@ -185,13 +187,15 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                 )?;
             }
             Some("ping") => {
+                // Acknowledgment precedes observation of the stopped Chief.
+                let chief_ownership = crate::chief_ownership::read(&db)?;
                 ctx.atomic_json(
                     &ctx.state.join("fleet-agent-status.json"),
                     &json!({"connected_at":now(),"last_sync":replica::state_get(&db,"last_sync",Value::Null)?}),
                 )?;
                 reply(
                     &output,
-                    json!({"kind":"heartbeat","at":now(),"workers":ctx.workers()?,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
+                    json!({"kind":"heartbeat","at":now(),"chief_ownership":chief_ownership,"workers":ctx.workers()?,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
                 )?;
             }
             _ => return Err(invalid("Unknown fleet message kind")),

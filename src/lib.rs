@@ -6,6 +6,7 @@ pub mod agent_runtime;
 pub mod agents;
 pub mod artifacts;
 pub mod attachments;
+mod chief_ownership;
 pub(crate) mod codex_permissions;
 #[doc(hidden)]
 pub mod database;

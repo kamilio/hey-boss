@@ -58,6 +58,7 @@ pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()>
         [], |r| r.get::<_, bool>(0),
     )?;
     if complete && !needs_reconcile {
+        crate::chief_ownership::migrate(db)?;
         return Ok(());
     }
     let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
@@ -73,6 +74,7 @@ pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()>
         }
     }
     tx.execute(&format!("UPDATE project_chiefs SET worker_id=({matching_owner}),started_at=COALESCE(started_at,next_at-?1) WHERE state='running' AND ({matching_owner}) IS NOT NULL AND (worker_id IS NOT ({matching_owner}) OR started_at IS NULL)"), [INTERVAL_MS])?;
+    crate::chief_ownership::migrate(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -86,6 +88,7 @@ pub(in crate::issues) struct Job {
     session: Option<String>,
     started_at: i64,
     owner_start: String,
+    worker_id: String,
 }
 
 impl Store {
@@ -95,6 +98,11 @@ impl Store {
         worker_id: Option<&str>,
     ) -> Result<Option<Job>> {
         let candidates = self.chief_candidates(worker_id)?;
+        let standalone: bool = self.db.query_row(
+            "SELECT role='standalone' FROM fleet_meta WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
         for (project, cwd, prompt, worker_id) in candidates {
             if !Path::new(&cwd).is_dir() {
                 continue;
@@ -104,7 +112,7 @@ impl Store {
                 "SELECT next_at,owner_pid,owner_start,pid,process_start,worker_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
                 params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
             if let Some((next, owner, start, pid, process_start, assigned_worker)) = &old {
-                if let Some(assigned) = assigned_worker.as_deref().filter(|assigned| *assigned != worker_id)
+                if let Some(assigned) = assigned_worker.as_deref().filter(|assigned| standalone && *assigned != worker_id)
                     && self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE id=?1 AND stop_requested=0 AND json_extract(config,'$.enabled')=1 AND (json_array_length(config,'$.projects')=0 OR EXISTS(SELECT 1 FROM json_each(config,'$.projects') WHERE value=?2)))", params![assigned,project], |r| r.get::<_,bool>(0))? {
                     continue;
                 }
@@ -122,7 +130,10 @@ impl Store {
                         ));
                     }
                 }
-                if owner.is_none() && *next > worker::now() {
+                if owner.is_none()
+                    && *next > worker::now()
+                    && (standalone || assigned_worker.as_deref() == Some(&worker_id))
+                {
                     continue;
                 }
             }
@@ -144,7 +155,7 @@ impl Store {
                 [&project],
                 |r| r.get(0),
             )?;
-            if !enabled {
+            if !enabled || !crate::chief_ownership::allowed(&tx, &project, &worker_id)? {
                 continue;
             }
             let started = worker::now();
@@ -163,6 +174,7 @@ impl Store {
                 session,
                 started_at: started,
                 owner_start: start,
+                worker_id,
             }));
         }
         Ok(None)
@@ -206,7 +218,7 @@ impl Store {
     ) -> Result<()> {
         let owner_start = crate::agents::process_identity(std::process::id())
             .ok_or_else(|| Error::new("worker_error", "Cannot identify Chief owner"))?;
-        let mut stmt = self.db.prepare("SELECT project_id,cwd,session_id,started_at FROM project_chiefs c WHERE machine=?1 AND (worker_id=?2 OR ?2 IS NULL AND EXISTS(SELECT 1 FROM issue_workers w WHERE w.id=c.worker_id AND w.kind='managed')) AND owner_pid=?3 AND owner_start=?4 AND state='running'")?;
+        let mut stmt = self.db.prepare("SELECT project_id,cwd,session_id,started_at,COALESCE(worker_id,'') FROM project_chiefs c WHERE machine=?1 AND (worker_id=?2 OR ?2 IS NULL AND EXISTS(SELECT 1 FROM issue_workers w WHERE w.id=c.worker_id AND w.kind='managed')) AND owner_pid=?3 AND owner_start=?4 AND state='running'")?;
         let jobs = stmt
             .query_map(
                 params![machine, worker_id, std::process::id(), owner_start],
@@ -219,6 +231,7 @@ impl Store {
                         started_at: r.get(3)?,
                         owner_start: owner_start.clone(),
                         prompt: String::new(),
+                        worker_id: r.get(4)?,
                     })
                 },
             )?
@@ -414,7 +427,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                         "SELECT NOT chief_enabled FROM project_settings WHERE project_id=?1",
                         [&job.project],
                         |r| r.get::<_, bool>(0),
-                    )?
+                    )? || !crate::chief_ownership::allowed(&store.db, &job.project, &job.worker_id)?
                 } else {
                     false
                 };
@@ -538,6 +551,105 @@ mod tests {
             .execute("UPDATE project_chiefs SET session_id='saved-thread'", [])
             .unwrap();
         (root, store, job)
+    }
+
+    #[test]
+    fn companion_stops_revoked_chief_without_stopping_the_worker() {
+        let (root, store, job) = launch_fixture();
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start = crate::agents::process_identity(pid).unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE project_chiefs SET pid=?1,process_start=?2",
+                params![pid, start],
+            )
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE fleet_meta SET role='agent',node='unit'", [])
+            .unwrap();
+        let assignment = crate::chief_ownership::Assignment {
+            project_id: "named:Chief".into(),
+            node: "unit".into(),
+            worker_id: "owner".into(),
+            generation: 1,
+            revoking: false,
+        };
+        crate::chief_ownership::apply(&store.db, std::slice::from_ref(&assignment)).unwrap();
+        crate::chief_ownership::stop_unassigned(&store.db).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        crate::chief_ownership::apply(
+            &store.db,
+            &[crate::chief_ownership::Assignment {
+                generation: 2,
+                revoking: true,
+                ..assignment
+            }],
+        )
+        .unwrap();
+        crate::chief_ownership::stop_unassigned(&store.db).unwrap();
+        assert!(!child.wait().unwrap().success());
+        assert!(crate::agents::process_identity(std::process::id()).is_some());
+        store.chief_update(&job, "blocked", "Revoked").unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fleet_chief_requires_supervisors_selected_worker() {
+        let (root, mut store, job) = launch_fixture();
+        store.chief_update(&job, "idle", "Done").unwrap();
+        store.db.execute_batch("UPDATE project_chiefs SET next_at=0; UPDATE fleet_meta SET role='agent',node='unit';").unwrap();
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none(),
+            "A fleet worker must wait for the supervisor's assignment"
+        );
+        let assignment = crate::chief_ownership::Assignment {
+            project_id: "named:Chief".into(),
+            node: "unit".into(),
+            worker_id: "owner".into(),
+            generation: 1,
+            revoking: false,
+        };
+        crate::chief_ownership::apply(&store.db, std::slice::from_ref(&assignment)).unwrap();
+        let selected = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        crate::chief_ownership::apply(
+            &store.db,
+            &[crate::chief_ownership::Assignment {
+                generation: 2,
+                revoking: true,
+                ..assignment
+            }],
+        )
+        .unwrap();
+        assert!(!crate::chief_ownership::allowed(&store.db, "named:Chief", "owner").unwrap());
+        assert!(
+            store
+                .db
+                .execute("UPDATE project_chiefs SET last_event='legacy worker'", [])
+                .is_err(),
+            "Old workers must also obey revocation"
+        );
+        store
+            .chief_update(&selected, "blocked", "Reassigned")
+            .unwrap();
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
