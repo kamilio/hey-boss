@@ -53,7 +53,9 @@ impl Fixture {
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
         let peer = std::thread::spawn(move || {
-            let until = Instant::now() + Duration::from_secs(10);
+            // Project/origin discovery can take longer on a busy host. This
+            // fixture verifies routing, not a ten-second startup deadline.
+            let until = Instant::now() + Duration::from_secs(60);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -79,14 +81,15 @@ impl Fixture {
             request
         });
         let output = command.output().unwrap();
-        let request = peer.join().unwrap();
+        let request = peer.join();
         fs::remove_file(socket).unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        request
+        request.unwrap()
     }
     fn projects(&self) -> Value {
         let output = self
