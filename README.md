@@ -831,8 +831,11 @@ manager (and login or configured lingering).
 Install/update the backend on each SSH client with
 `tools/install-health-worker.sh HOST`. It builds and tests on that host, installs
 `~/.local/bin/hey-boss-health` atomically under the maintenance lock, and leaves
-companion services and agents running. The host needs Rust, a C compiler, Python 3,
+companion services and agents running. Builds reuse the regular upgrade cache
+with two compiler jobs instead of accumulating build products in temporary directories.
+The host needs Rust, a C compiler, Python 3,
 Git (and lsof on macOS). Linux inspects procfs directly. To reuse an existing SSH master, set `HEY_BOSS_SSH_CONTROL_PATH`.
+Pass `local` instead of a hostname to update this machine's dedicated worker.
 An updated remote `hey-boss` CLI also works when no dedicated worker is installed.
 Use the UI's **Add workspace…** or `health --host HOST add-root /remote/path` for
 repositories outside the default roots. Scheduling and cleanup settings are per host.
@@ -855,6 +858,10 @@ upstream connections are allowed only for the explicitly identified test fixture
 The harvester checks identity, activity and connections again before signalling
 and escalates from TERM to KILL only for the verified processes. Linux uses pidfds
 so a reused PID cannot redirect a signal to another process.
+Process checks continue at the configured interval while the worktree scan runs,
+so a large Git inventory cannot postpone harvesting for the entire disk scan.
+The maintenance lock remains held until both finish; process observations and
+cumulative cleanup counts are checkpointed after each check.
 **Codex, Claude, unknown processes, normal services, and personal browsers are
 never automatic targets.** A disconnected or idle agent is not proof of abandonment.
 
@@ -876,8 +883,9 @@ Cache inspection runs before the slower Git inventory. Quiet observations allow
 the actual duration of the previous completed check as well as the timer interval,
 so large inventories do not continually reset the cleanup grace period.
 Cleanup covers Chrome/Chrome Beta cache subdirectories, npm/pip/uv download
-caches, macOS Chrome signing copies, and stale hey-boss health test fixtures in
-the OS user temp directory. Signing copies must be inactive for an hour; other
+caches, macOS Chrome signing copies, Miniflare's randomly named `miniflare-<32 hex digits>`
+directories, and stale hey-boss health test fixtures in the OS user temp directory.
+Signing copies and Miniflare temp state must be inactive for an hour; other
 candidates for a day. It checks ownership, recent changes throughout each tree,
 open files, and stable identities across repeated observations, then rechecks
 before removal. Symlinked roots, incomplete inspections and oversized trees are
@@ -887,8 +895,10 @@ root-owned executable; all directories must still belong to the current user.
 Creating another hard link to a shared signing-copy file does not reset its age
 or quiet observation; directory activity and file identity, mode, size and
 modification time remain checked.
-Browser profiles, history, cookies, bookmarks, offline storage and arbitrary project artifacts are not
-cleanup targets. Use the cache checkbox or `configure --caches false` to disable.
+Personal browser profiles, history, cookies, bookmarks, offline storage, persistent
+project `.wrangler` state and arbitrary project artifacts are not cleanup targets.
+Disposable browser profiles inside abandoned Miniflare temp directories are included.
+Use the cache checkbox or `configure --caches false` to disable.
 The footer and CLI report measured **net free-space change** on the home volume.
 This includes concurrent writes and shared APFS blocks, rather than summing
 directory sizes that can substantially overstate reclaimed space.

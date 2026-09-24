@@ -401,6 +401,7 @@ impl Store {
             phase: "Inspecting processes".into(),
             ..Snapshot::default()
         };
+        let disk_before = snapshot.metrics.disk_available_bytes;
         if state.snapshot.running {
             state.processes.clear();
             state.worktrees.clear();
@@ -440,25 +441,13 @@ impl Store {
                 return Ok(snapshot);
             }
         };
-        match processes::harvest(
+        inspect_processes(
             &process_table,
             &observation_config,
             &mut state.processes,
-            apply && config.harvest_processes,
-        ) {
-            Ok((items, count)) => {
-                snapshot.processes = items;
-                snapshot.harvested_processes = count;
-            }
-            Err(e) => {
-                state.processes.clear();
-                snapshot.errors.push(format!("Process harvester: {e}"));
-            }
-        }
-        for item in snapshot.processes.clone() {
-            snapshot.record("process", format!("{} — {}", item.name, item.detail));
-        }
-        snapshot.record("scan", format!("Inspected {} processes; {} candidate groups; stopped {} processes. Codex and normal services are protected.", process_table.len(), snapshot.processes.len(), snapshot.harvested_processes));
+            &mut snapshot,
+            apply,
+        );
         // Caches are cheap to inspect; do not put them behind hundreds of Git checks.
         snapshot.phase = "Inspecting disposable caches".into();
         self.checkpoint(&mut state, &snapshot)?;
@@ -501,12 +490,48 @@ impl Store {
             "Checking worktree age, open files, agent activity, Git state, and merge status",
         );
         self.checkpoint(&mut state, &snapshot)?;
-        match worktrees::clean(
-            &observation_config,
-            &process_table,
-            &mut state.worktrees,
-            apply && config.clean_worktrees,
-        ) {
+        // Keep a single maintenance owner, but do not let hundreds of Git checks
+        // postpone the next process observation for tens of minutes. The disk
+        // scanner owns only its worktree observations; this thread owns state
+        // publication and every process check. Both finish before releasing the lock.
+        let mut worktree_observations = state.worktrees.clone();
+        let result = during_worktree_scan(
+            Duration::from_secs(config.interval_seconds),
+            || {
+                worktrees::clean(
+                    &observation_config,
+                    &process_table,
+                    &mut worktree_observations,
+                    apply && config.clean_worktrees,
+                )
+            },
+            || {
+                snapshot.record(
+                    "scan",
+                    "Checking processes while the worktree scan continues",
+                );
+                match processes::inventory() {
+                    Ok(table) => inspect_processes(
+                        &table,
+                        &observation_config,
+                        &mut state.processes,
+                        &mut snapshot,
+                        apply,
+                    ),
+                    Err(error) => {
+                        state.processes.clear();
+                        snapshot.processes.clear();
+                        let message = format!("Process inventory: {error}");
+                        snapshot.errors.push(message.clone());
+                        snapshot.record("error", message);
+                    }
+                }
+                snapshot.metrics = system::metrics();
+                self.checkpoint(&mut state, &snapshot)
+            },
+        )?;
+        state.worktrees = worktree_observations;
+        match result {
             Ok((items, count)) => {
                 snapshot.worktrees = items;
                 snapshot.removed_worktrees = count;
@@ -521,15 +546,10 @@ impl Store {
         }
         if apply {
             let after = system::disk_available_bytes();
-            snapshot.disk_available_change_bytes = snapshot
-                .metrics
-                .disk_available_bytes
-                .zip(after)
-                .map(|(before, after)| {
-                    (i128::from(after) - i128::from(before))
-                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
-                        as i64
-                });
+            snapshot.disk_available_change_bytes = disk_before.zip(after).map(|(before, after)| {
+                (i128::from(after) - i128::from(before))
+                    .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+            });
             snapshot.metrics.disk_available_bytes = after;
             if let Some(change) = snapshot.disk_available_change_bytes {
                 snapshot.record("disk", format!("Net available disk-space change: {change:+} bytes (includes concurrent writes and APFS shared blocks)"));
@@ -554,6 +574,59 @@ impl Store {
         snapshot.refresh_process_inventory();
         Ok(snapshot)
     }
+}
+
+fn inspect_processes(
+    table: &processes::Table,
+    config: &Config,
+    observations: &mut BTreeMap<String, Observation>,
+    snapshot: &mut Snapshot,
+    apply: bool,
+) {
+    match processes::harvest(
+        table,
+        config,
+        observations,
+        apply && config.harvest_processes,
+    ) {
+        Ok((items, count)) => {
+            snapshot.processes = items;
+            snapshot.harvested_processes += count;
+            for item in snapshot.processes.clone() {
+                snapshot.record("process", format!("{} — {}", item.name, item.detail));
+            }
+            snapshot.record("scan", format!("Inspected {} processes; {} candidate groups; stopped {count} processes. Codex and normal services are protected.", table.len(), snapshot.processes.len()));
+        }
+        Err(error) => {
+            observations.clear();
+            snapshot.processes.clear();
+            let message = format!("Process harvester: {error}");
+            snapshot.errors.push(message.clone());
+            snapshot.record("error", message);
+        }
+    }
+}
+
+fn during_worktree_scan<T: Send>(
+    interval: Duration,
+    scan: impl FnOnce() -> T + Send,
+    mut check_processes: impl FnMut() -> io::Result<()>,
+) -> io::Result<T> {
+    std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        scope.spawn(move || {
+            let _ = send.send(scan());
+        });
+        loop {
+            match receive.recv_timeout(interval) {
+                Ok(result) => return Ok(result),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => check_processes()?,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other("Worktree scan interrupted"));
+                }
+            }
+        }
+    })
 }
 
 /// Bound runtime and output; no subprocess left behind on timeout or read failure.
@@ -670,6 +743,63 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: AtomicU64 = AtomicU64::new(0);
+    #[test]
+    fn process_checks_continue_until_slow_worktree_scan_finishes() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut checks = 0;
+        let result = during_worktree_scan(
+            Duration::from_millis(10),
+            move || {
+                for _ in 0..3 {
+                    receive.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                "disk scan complete"
+            },
+            || {
+                checks += 1;
+                let _ = send.send(());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(checks >= 3);
+        assert_eq!(result, "disk scan complete");
+    }
+
+    #[test]
+    fn quick_worktree_scans_do_not_trigger_extra_process_checks() {
+        assert_eq!(
+            during_worktree_scan(
+                Duration::from_secs(1),
+                || 42,
+                || { panic!("process interval has not elapsed") }
+            )
+            .unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn process_checkpoint_failure_is_reported_and_scan_is_joined() {
+        let finished = std::sync::atomic::AtomicBool::new(false);
+        let completed = &finished;
+        let (send, receive) = std::sync::mpsc::channel();
+        let error = during_worktree_scan(
+            Duration::from_millis(5),
+            move || {
+                receive.recv_timeout(Duration::from_secs(5)).unwrap();
+                completed.store(true, Ordering::SeqCst);
+            },
+            || {
+                send.send(()).unwrap();
+                Err(io::Error::other("checkpoint failed"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "checkpoint failed");
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn settings_lock_and_corrupt_state_fail_closed() {
         let root = std::env::temp_dir().join(format!(

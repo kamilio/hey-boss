@@ -136,6 +136,14 @@ fn discover(home: &Path, temp: Option<&Path>) -> io::Result<Vec<Candidate>> {
         for entry in fs::read_dir(temp)?.take(20000) {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            // Miniflare uses a random 16-byte hex suffix for its disposable OS
+            // temp state. Never discover project .wrangler state or named folders.
+            if name.strip_prefix("miniflare-").is_some_and(|suffix| {
+                suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+            }) && entry.file_type()?.is_dir()
+            {
+                add(&mut candidates, entry.path(), 3600);
+            }
             if ["hb-health-", "hey-boss-cache-test-"]
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
@@ -329,7 +337,7 @@ pub(super) fn clean(
             .ok()
             .and_then(|p| PathBuf::from(p.trim()).canonicalize().ok());
     #[cfg(not(target_os = "macos"))]
-    let temp: Option<PathBuf> = None;
+    let temp = std::env::temp_dir().canonicalize().ok();
     let candidates = discover(&home, temp.as_deref())?;
     if candidates.is_empty() {
         observations.clear();
@@ -372,6 +380,73 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn abandoned_miniflare_temp_data_is_cleaned_but_live_and_project_data_survive() {
+        let root = fixture();
+        let temp = root.join("T");
+        let abandoned = temp.join("miniflare-41cacae4eaacdedba85c60730da67a4d");
+        let live = temp.join("miniflare-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let unrelated = temp.join("miniflare-my-project");
+        for path in [&abandoned, &live, &unrelated] {
+            fs::create_dir_all(path.join("do")).unwrap();
+            fs::write(path.join("do/data.sqlite"), "fixture").unwrap();
+        }
+        let persistent = root
+            .join("Workspace/project/.wrangler/state/miniflare-41cacae4eaacdedba85c60730da67a4d");
+        fs::create_dir_all(&persistent).unwrap();
+        let candidates = discover(&root, Some(&temp)).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|c| c.min_age == 3600));
+        let at = super::super::now();
+        let mut observations = BTreeMap::new();
+        let active = vec![live.join("do/data.sqlite")];
+        assert_eq!(
+            run(
+                &candidates,
+                &mut observations,
+                &active,
+                at,
+                &config(),
+                true,
+                || Ok(active.clone())
+            )
+            .unwrap()
+            .1,
+            0
+        );
+        assert_eq!(
+            run(
+                &candidates,
+                &mut observations,
+                &active,
+                at + 3601,
+                &config(),
+                true,
+                || Ok(active.clone())
+            )
+            .unwrap()
+            .1,
+            0
+        );
+        assert_eq!(
+            run(
+                &candidates,
+                &mut observations,
+                &active,
+                at + 3662,
+                &config(),
+                true,
+                || Ok(active.clone())
+            )
+            .unwrap()
+            .1,
+            1
+        );
+        assert!(!abandoned.exists());
+        assert!(live.exists() && unrelated.exists() && persistent.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn new_link_to_shared_chrome_file_does_not_restart_quiet_observation() {
