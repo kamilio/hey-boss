@@ -60,13 +60,14 @@ try {
   }
   const beforeRefresh = await capture('wide-before-refresh');
   snapshot.workers.reverse();
+  snapshot.workers[0].config.directory += '/refreshed';
   await writeFile(statePath, JSON.stringify(snapshot));
   await session.type('r');
-  await wait(`${names.at(-1)} agent`);
+  await wait('/refreshed');
   assert.equal(await capture('wide-refreshed'), beforeRefresh);
   completed++;
   await session.resize(48, 16);
-  await wait(`[${names.at(-1)}]`);
+  await wait('‹'); // This cue is absent from the previous wide frame.
   const narrow = await capture('narrow-last');
   assert.ok(narrow.startsWith('‹ '), narrow);
   assert.ok(narrow.includes('Omega app'), narrow);
@@ -82,7 +83,7 @@ try {
   assert.equal(await capture('narrow-backward'), narrow);
   completed++;
   await session.resize(80, 24);
-  await wait(`${names.at(-1)} agent`);
+  await wait(names[0]); // Alpha is absent from the previous narrow frame.
   const medium = await capture('medium');
   assert.ok(names.every(name => medium.includes(name)), medium);
   assert.ok(medium.indexOf('Alpha') < medium.indexOf('Zeta'), medium);
