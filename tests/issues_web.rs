@@ -179,6 +179,59 @@ impl Drop for Web {
 }
 
 #[test]
+fn exact_local_hostname_supports_same_origin_writes_on_custom_ports() {
+    let web = Web::start();
+    let port = web.authority.rsplit(':').next().unwrap();
+    let host = format!("hey-boss.test:{port}");
+    let origin = format!("http://{host}");
+    let boot = web.http("GET", "/api/bootstrap", &[("Host", &host)], b"");
+    assert_eq!(boot.status, 200);
+    assert_eq!(boot.json()["csrf"], web.token);
+    let body = json!({"project":web.project,"operation":{"action":"create","title":"From local hostname","body":"Shared state","labels":[]}}).to_string();
+    let headers = [
+        ("Host", host.as_str()),
+        ("Origin", origin.as_str()),
+        ("Sec-Fetch-Site", "same-origin"),
+        ("Content-Type", "application/json"),
+        ("X-Hey-Boss-CSRF", web.token.as_str()),
+    ];
+    assert_eq!(
+        web.http("POST", "/api/action", &headers, body.as_bytes())
+            .status,
+        200
+    );
+    assert_eq!(
+        web.ok(json!({"action":"view","number":1}))["issue"]["body"],
+        "Shared state"
+    );
+    for (name, value) in [
+        ("Host", "hey-boss.test"),
+        ("Host", "hey-boss.test:80"),
+        ("Host", "hey-boss.test.evil:80"),
+        ("Origin", "http://hey-boss.test"),
+        ("Origin", "http://localhost:80"),
+        ("Origin", "null"),
+        ("Origin", &format!("http://{}", web.authority)),
+        ("Sec-Fetch-Site", "cross-site"),
+        ("X-Hey-Boss-CSRF", "wrong"),
+    ] {
+        let mut invalid = headers;
+        invalid.iter_mut().find(|h| h.0 == name).unwrap().1 = value;
+        assert_eq!(
+            web.http("POST", "/api/action", &invalid, body.as_bytes())
+                .status,
+            403,
+            "{name}: {value}"
+        );
+    }
+    assert_eq!(
+        web.http("POST", "/api/action", &headers[..4], body.as_bytes())
+            .status,
+        403
+    );
+}
+
+#[test]
 fn native_web_view_uses_boss_machine_identity_in_allocation_diagnostics() {
     let web = Web::start();
     let created =
