@@ -10,6 +10,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::Value;
+#[path = "capacity.rs"]
+mod capacity;
 
 // Match the shared web app's dark palette, with explicit contrast on any terminal.
 const BACKGROUND: Color = Color::Rgb(17, 21, 29);
@@ -526,6 +528,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         header.push(Line::default());
     }
     if app.project_tabs() {
+        header[1] = Line::from(capacity::summary(&app.project_workers()));
         header[0] = tabs::render(
             app.tabs()
                 .iter()
