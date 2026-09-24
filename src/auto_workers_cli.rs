@@ -11,7 +11,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    about = "Run this machine's saved workers and open project tabs. Repeated launches reuse the same workers."
+    about = "Start or resume this machine's saved workers and open project tabs. Repeated launches reuse the same workers; stopped and removed workers stay retired."
 )]
 pub struct Options {
     /// Print one JSON snapshot instead of opening the dashboard.
