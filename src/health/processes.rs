@@ -992,8 +992,53 @@ int main(int argc, char **argv) {
             harvest(&table, &config, &mut observations, true).unwrap().1,
             0
         );
-        let (items, count) = harvest(&table, &config, &mut observations, true).unwrap();
-        assert_eq!(count, 1, "{items:?}");
+        // Inspection-only passes must not signal even after an orphan is ready.
+        let (items, count) = harvest(&table, &config, &mut observations, false).unwrap();
+        assert_eq!(count, 0, "{items:?}");
+        assert_eq!(
+            identity(orphan.process.pid).as_deref(),
+            Some(orphan.process.identity.as_str())
+        );
+        observations.clear();
+        let mut snapshot = super::super::Snapshot::default();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        super::super::during_worktree_scan(
+            Duration::from_millis(10),
+            move || {
+                receive.recv_timeout(Duration::from_secs(60)).unwrap();
+            },
+            || {
+                let table = inventory()?;
+                // Only our controlled fixtures: never harvest unrelated host processes.
+                let table = table
+                    .into_iter()
+                    .filter(|(pid, _)| {
+                        [orphan.process.pid, connected.process.pid, owned.process.pid].contains(pid)
+                    })
+                    .collect();
+                super::super::inspect_processes(
+                    &table,
+                    &config,
+                    &mut observations,
+                    &mut snapshot,
+                    true,
+                );
+                if snapshot.harvested_processes > 0 {
+                    let _ = send.try_send(());
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.harvested_processes, 1, "{:?}", snapshot.processes);
+        assert!(
+            snapshot
+                .activity
+                .iter()
+                .filter(|event| event.category == "scan")
+                .count()
+                >= 2
+        );
         assert!(identity(orphan.process.pid).is_none());
         assert_eq!(
             identity(connected.process.pid).as_deref(),

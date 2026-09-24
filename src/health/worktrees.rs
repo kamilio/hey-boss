@@ -196,7 +196,9 @@ pub(crate) fn open_paths() -> io::Result<Vec<PathBuf>> {
             "-F",
             "pn",
         ]),
-        Duration::from_secs(20),
+        // The same inventory protects cache deletion. Busy machines with many
+        // test descriptors need the process inventory's 90-second allowance.
+        Duration::from_secs(90),
     )?;
     if !o.status.success() || !o.stderr.is_empty() {
         return Err(io::Error::other(
