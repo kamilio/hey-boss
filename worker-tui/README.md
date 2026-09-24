@@ -50,6 +50,19 @@ an inventory refresh; an owning dashboard stays pinned to its worker.
 Session durations and claim deadlines update once per second. Requests time out
 after ten seconds. Output retention is bounded.
 
+`hey-boss auto-workers` gives dedicated projects their own tabs, followed by one
+**Shared** tab for all workers serving multiple projects (or all projects). Its
+label shows the worker and unique-project counts. Shared agents and Chiefs stay
+together, with project names on their rows and completed attempts under History.
+Tab / Shift+Tab cycles through tabs; w lists only the selected tab's workers.
+Pause and stop target the selected agent's worker; graceful removal targets the
+worker selected in that list. Refreshes preserve the selected tab and session.
+
+Tab order stays fixed when selecting a project. On narrow terminals the row shows
+a contiguous portion of that order, with ‹ / › indicating hidden tabs. The selected
+tab stays visible; long labels shorten at a complete Unicode character with an
+ellipsis. Selection reserves the same space as inactive tabs, so labels do not shift.
+
 | Key | Action |
 | --- | --- |
 | ↑/↓ or j/k | Select session |

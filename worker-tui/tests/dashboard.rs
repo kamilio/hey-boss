@@ -1,4 +1,4 @@
-use hey_boss_worker_tui::{Dashboard, ui};
+use hey_boss_worker_tui::{Dashboard, DashboardTab, ui};
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 
@@ -480,17 +480,97 @@ fn project_snapshot() -> serde_json::Value {
 fn project_tabs_collect_every_worker_and_wrap_in_both_directions() {
     let mut app = Dashboard::default();
     app.apply(project_snapshot());
-    assert_eq!(app.project_ids(), ["named:Alpha", "named:Beta"]);
-    assert_eq!(app.project_id.as_deref(), Some("named:Alpha"));
-    assert_eq!(app.runs().len(), 2);
+    assert_eq!(app.tabs().len(), 2);
+    assert_eq!(
+        app.selected_tab,
+        Some(DashboardTab::Project("named:Alpha".into()))
+    );
+    assert_eq!(app.runs().len(), 1);
+    assert_eq!(app.runs()[0]["id"], "a2");
     app.switch_project(-1);
-    assert_eq!(app.project_id.as_deref(), Some("named:Beta"));
-    assert_eq!(app.runs()[0]["id"], "b");
-    app.switch_project(1);
-    assert_eq!(app.project_id.as_deref(), Some("named:Alpha"));
+    assert_eq!(app.runs().len(), 2);
+    assert_eq!(app.project_workers().len(), 1);
     app.navigate(1);
     app.confirm(false);
+    assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "one");
+    app.switch_project(1);
+    assert_eq!(
+        app.selected_tab,
+        Some(DashboardTab::Project("named:Alpha".into()))
+    );
+    app.confirm(false);
     assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "two");
+}
+
+#[test]
+fn shared_pool_has_one_tab_for_five_projects_and_stable_worker_controls() {
+    let mut value = project_snapshot();
+    let projects = json!(["named:Alpha", "named:Beta", "named:C", "named:D", "named:E"]);
+    value["workers"][0]["config"]["projects"] = projects.clone();
+    let mut second = value["workers"][0].clone();
+    second["id"] = json!("shared-two");
+    second["config"]["projects"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    second["runs"] = json!([]);
+    second["chiefs"] =
+        json!([{ "id":"chief", "kind":"chief", "project_id":"named:E", "finished_at":null }]);
+    value["workers"].as_array_mut().unwrap().push(second);
+    let mut app = Dashboard::default();
+    app.apply(value.clone());
+    assert_eq!(
+        app.tabs().len(),
+        2,
+        "Dedicated project and a single shared pool"
+    );
+    app.switch_project(1);
+    assert_eq!(
+        app.tab_label(app.selected_tab.as_ref().unwrap()),
+        "Shared · 2 workers · 5 projects"
+    );
+    assert_eq!(app.project_workers().len(), 2);
+    assert_eq!(app.runs().len(), 3);
+    app.navigate(2);
+    app.confirm(true);
+    assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "shared-two");
+    let selected = app.selected_tab.clone();
+    value["workers"].as_array_mut().unwrap().reverse();
+    app.apply(value.clone());
+    assert_eq!(app.selected_tab, selected);
+    assert_eq!(app.run_id.as_deref(), Some("chief"));
+    app.history = true;
+    value["workers"][0]["chiefs"][0]["finished_at"] = json!(42);
+    app.apply(value);
+    assert_eq!(app.runs().len(), 1);
+    assert_eq!(app.run_id.as_deref(), Some("chief"));
+    app.navigate_worker(1);
+    app.confirm_remove();
+    assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "one");
+}
+
+#[test]
+fn all_project_workers_and_different_pools_share_one_idle_tab() {
+    let mut app = Dashboard::default();
+    app.apply(json!({"project_tabs":true,"workers":[
+        {"id":"all","config":{"projects":[]},"runs":[]},
+        {"id":"ab","config":{"projects":["named:A","named:B","named:A"]},"runs":[]},
+        {"id":"ac","config":{"projects":["named:A","named:C"]},"runs":[]}
+    ]}));
+    assert_eq!(app.tabs().len(), 1);
+    assert_eq!(app.project_workers().len(), 3);
+    assert_eq!(
+        app.tab_label(&DashboardTab::Shared),
+        "Shared · 3 workers · all projects"
+    );
+    assert_eq!(app.worker_id.as_deref(), Some("all"));
+    app.switch_project(1);
+    assert_eq!(app.worker_id.as_deref(), Some("all"));
+    app.navigate_worker(1);
+    app.confirm_remove();
+    assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "ab");
+    app.switch_project(1);
+    assert_eq!(app.selected_tab, Some(DashboardTab::Shared));
 }
 
 #[test]
@@ -499,12 +579,16 @@ fn project_selection_survives_refresh_and_removed_projects_fall_back() {
     let mut value = project_snapshot();
     app.apply(value.clone());
     app.switch_project(1);
+    let selected = app.selected_tab.clone();
     value["workers"].as_array_mut().unwrap().reverse();
     app.apply(value.clone());
-    assert_eq!(app.project_id.as_deref(), Some("named:Beta"));
+    assert_eq!(app.selected_tab, selected);
     value["workers"].as_array_mut().unwrap().pop();
     app.apply(value);
-    assert_eq!(app.project_id.as_deref(), Some("named:Alpha"));
+    assert_eq!(
+        app.selected_tab,
+        Some(DashboardTab::Project("named:Alpha".into()))
+    );
     assert_eq!(app.runs().len(), 1);
 }
 
@@ -522,9 +606,9 @@ fn project_tab_header_is_visible_at_small_terminal_sizes() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(screen.contains("[Beta]"), "{screen}");
+    assert!(screen.contains("[Shared"), "{screen}");
     assert!(screen.contains("Shift+Tab"), "{screen}");
-    assert!(!screen.contains("Alpha work"), "{screen}");
+    assert!(!screen.contains("Second Alpha"), "{screen}");
 }
 
 #[test]

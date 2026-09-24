@@ -1,5 +1,7 @@
 //! Pure responsive rendering; usable with any Ratatui backend.
-use super::{Dashboard, project_name, text};
+use super::{Dashboard, DashboardTab, project_name, text};
+#[path = "tabs.rs"]
+mod tabs;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -295,7 +297,14 @@ fn worker_manager(frame: &mut Frame, app: &Dashboard) {
         height,
     );
     frame.render_widget(Clear, area);
-    let border = block("Project workers", true);
+    let border = block(
+        if app.selected_tab == Some(DashboardTab::Shared) {
+            "Shared workers"
+        } else {
+            "Project workers"
+        },
+        true,
+    );
     let inner = border.inner(area);
     frame.render_widget(border, area);
     let [list, footer] = Layout::vertical([Constraint::Min(2), Constraint::Length(2)]).areas(inner);
@@ -303,12 +312,12 @@ fn worker_manager(frame: &mut Frame, app: &Dashboard) {
     let items: Vec<_> = workers
         .iter()
         .map(|w| {
-            let directory = app
-                .project_id
-                .as_deref()
-                .and_then(|id| w["config"]["directories"].get(id))
-                .map(text)
-                .unwrap_or_else(|| checkout(w, &app.snapshot));
+            let directory = match app.selected_tab.as_ref() {
+                Some(DashboardTab::Project(id)) => w["config"]["directories"].get(id),
+                _ => None,
+            }
+            .map(text)
+            .unwrap_or_else(|| checkout(w, &app.snapshot));
             ListItem::new(vec![
                 Line::from(format!(
                     "{} · {} slots · {}",
@@ -517,21 +526,23 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         header.push(Line::default());
     }
     if app.project_tabs() {
-        let ids = app.project_ids();
-        let selected = app.project_id.as_deref().unwrap_or("");
-        // Keep the selected tab visible even on a narrow terminal.
-        let mut tabs = vec![Span::styled(
-            format!(" [{}]", project_name(selected, &app.snapshot)),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )];
-        for id in ids.iter().filter(|id| id.as_str() != selected) {
-            tabs.push(Span::raw(format!("  {}", project_name(id, &app.snapshot))));
+        header[0] = tabs::render(
+            app.tabs()
+                .iter()
+                .map(|tab| (app.tab_label(tab), Some(tab) == app.selected_tab.as_ref()))
+                .collect(),
+            size.width,
+        );
+        if let Some(w) = worker {
+            header[2] = Line::from(Span::styled(
+                format!(
+                    " {} · {}",
+                    text(&w["config"]["name"]),
+                    checkout(w, &app.snapshot)
+                ),
+                Style::default().fg(MUTED),
+            ));
         }
-        header[0] = if ids.is_empty() {
-            Line::from(" No configured projects")
-        } else {
-            Line::from(tabs)
-        };
     }
     let connection = if app.error.is_some() {
         "unknown"
@@ -592,7 +603,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             Style::default().fg(if app.history { ACCENT } else { MUTED }),
         ),
         Span::raw(if app.project_tabs() {
-            " · Tab/Shift+Tab projects"
+            " · Tab/Shift+Tab tabs"
         } else {
             " · h switch"
         }),
@@ -605,8 +616,17 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         .iter()
         .map(|r| {
             let status = run_state(r);
+            let project = if app.selected_tab == Some(DashboardTab::Shared) {
+                format!(
+                    "{} · ",
+                    project_name(r["project_id"].as_str().unwrap_or_default(), &app.snapshot)
+                )
+            } else {
+                String::new()
+            };
             if compact_sessions {
                 return ListItem::new(Line::from(vec![
+                    Span::styled(project, Style::default().fg(MUTED)),
                     Span::raw(if r["kind"] == "chief" {
                         "Chief ".into()
                     } else {
@@ -747,7 +767,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         };
         let message = if app.project_tabs() {
             format!(
-                "Tab / Shift+Tab  Next / previous project\nw          Manage workers; d removes gracefully\na          Add a worker\n{message}"
+                "Tab / Shift+Tab  Next / previous tab\nw          Manage workers; d removes gracefully\na          Add a worker\n{message}"
             )
         } else {
             message

@@ -4,7 +4,7 @@
   "scripts": {
     "test:terminal": "node tests/terminal-smoke.mjs",
     "test:activity": "node tests/activity-terminal.mjs",
-    "test:projects": "node tests/projects-terminal.mjs"
+    "test:projects": "node tests/projects-terminal.mjs && node tests/shared-terminal.mjs"
   },
   "devDependencies": {
     "terminal-pilot": "0.0.62",
