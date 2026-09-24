@@ -787,7 +787,7 @@ async fn pr_status(
     } else if let Some(repository) = &query.repository {
         crate::client::validate_repository(repository)?;
     }
-    let mut errors = if matches!(freshness, Freshness::CachedOnly) {
+    let errors = if matches!(freshness, Freshness::CachedOnly) {
         if api
             .0
             .client
@@ -835,10 +835,7 @@ async fn pr_status(
     if let Some(state) = discovery_state
         && let Some(error) = &state.lock().await.discovery_last_error
     {
-        let error = format!("discovery: {error}");
-        if !errors.contains(&error) {
-            errors.push(error);
-        }
+        page.record_discovery_error(error);
     }
     page.complete &= errors.is_empty()
         && page

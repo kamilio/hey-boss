@@ -97,6 +97,14 @@ PR list/change commands can emit valid JSON and exit 1 when the envelope or
 returned rows contain source errors. Parse stdout even on that exit; preserve
 the cursor, replacements, hasMore and explicit errors atomically. Exit 0 from
 a fast read does not prove complete=true: details may still be hydrating.
+`coverage` names the repository filter and reports `returnedRows` and
+`returnedRowsComplete` for this page's stored PR evidence, before projection.
+`accountDiscovery` separately reports last-known account scan completeness
+(null means unknown), errors and poll/success times. An unrelated organization's
+restriction can leave returned-row coverage complete while discovery and the
+aggregate envelope remain incomplete (exit 1). This does not prove the selected
+repository roster is complete; an empty page is not proof of no PRs. Preserve
+target row source errors and validate specific PRs with bounded reads as needed.
 Transport/validation failures can instead have no envelope; never advance a
 cursor without a successfully parsed response. A complete individual PR read
 also publishes a replacement for an already tracked PR, clearing its recovered

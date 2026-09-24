@@ -93,6 +93,19 @@ export interface PrStatusPage<Row = PrStatus> {
   hasMore: boolean
   complete: boolean
   errors: string[]
+  /** Coverage of returned rows before projection, not proof of a complete repository roster. */
+  coverage: {
+    repository: string | null
+    returnedRows: number
+    returnedRowsComplete: boolean
+  } | null
+  /** Last-known account scan health; independent of selected PR source evidence. */
+  accountDiscovery: {
+    complete: boolean | null
+    lastPollAtMs: number | null
+    lastSuccessAtMs: number | null
+    errors: string[]
+  }
 }
 export interface SourceError { source: string; message: string }
 export interface ResourceValidation {

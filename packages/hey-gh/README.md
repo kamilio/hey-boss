@@ -228,6 +228,38 @@ hydration does not clear an independent discovery failure.
 Incremental and cached feed envelopes expose a known discovery failure in
 `errors` with `complete=false`, including on empty pages, without changing the
 observation cursor or making additional GitHub requests.
+
+PR feed envelopes separate selected PR evidence from account-wide discovery:
+`coverage.repository` identifies the `-R` filter (null for the whole account),
+`coverage.returnedRows` counts the rows on this page, and
+`coverage.returnedRowsComplete` reports whether all those rows have complete
+stored evidence. This covers bootstrap rows or incremental replacements only,
+including fields omitted by `--json`. An empty page has zero returned rows;
+it does not prove the repository has no PRs, or that a saved mirror is complete.
+`accountDiscovery` reports `complete`, `errors`, `lastPollAtMs`, and
+`lastSuccessAtMs` separately. Its `complete` is null when no discovery result
+is known, false after a known failure, and true after a successful scan.
+These are last-known results, not freshness or merge-readiness guarantees.
+
+For example, an accessible selected repository can report
+`coverage.returnedRowsComplete=true` and `accountDiscovery.complete=false`
+when another organization's IP allow list prevents account discovery.
+The returned PR facts remain usable, with their own `sourceErrors` and validation
+times; discovery cannot establish whether other selected PRs are missing.
+No error-message parsing or network-restriction bypass is used to infer access.
+Actual missing/failed target sources still make returned-row coverage incomplete.
+
+For compatibility, aggregate `complete`, `errors`, and CLI exits are unchanged:
+a known account-discovery failure still produces `complete=false` and exit 1,
+even with complete selected rows. Parse that JSON and retain its cursor and data;
+inspect the separate health fields to determine which evidence is incomplete.
+Cached-only and cursor health reads make no extra GitHub requests. A successful
+bounded `pr view N -R OWNER/REPO --refresh --timeout 30` can validate that PR
+without repairing account discovery or proving a complete repository roster.
+Recovery requires a successful account scan and does not itself advance cursors.
+Older daemons omit these new fields; upgraded SDKs represent absent coverage
+and discovery completeness as null, never as successful evidence.
+
 Discovery health is durable and credential-scoped, including deadlines. Rust
 feed pages and HTTP envelopes expose the same known failure after restart or
 watch removal. Reusing a last-good collection does not clear that failure; only
