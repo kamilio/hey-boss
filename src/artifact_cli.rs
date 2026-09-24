@@ -115,6 +115,12 @@ enum Action {
         #[arg(long)]
         if_version: i64,
     },
+    /// Permanently delete a document, its comments, links and attached files.
+    Delete {
+        id: String,
+        #[arg(long)]
+        if_version: i64,
+    },
     Comment {
         id: String,
         #[arg(long)]
@@ -185,6 +191,10 @@ pub fn run(options: &Options) -> Result<()> {
                 if_version: *if_version,
             }
         }
+        Action::Delete { id, if_version } => Operation::Delete {
+            id: id.clone(),
+            if_version: *if_version,
+        },
         Action::Comment {
             id,
             body,
@@ -277,6 +287,8 @@ pub fn run(options: &Options) -> Result<()> {
         }
     } else if options.json {
         println!("{}", serde_json::to_string(&value)?);
+    } else if let Some(id) = value["deleted"].as_str() {
+        println!("Permanently deleted {id}");
     } else if let Some(doc) = value.get("artifact") {
         println!(
             "{} · {} · revision {}{}\n\n{}",

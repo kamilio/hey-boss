@@ -74,7 +74,20 @@ fn cached_response(
             "Request ID was already used for a different operation",
         ));
     }
-    Ok(Some(serde_json::from_str(&response)?))
+    let response: Value = serde_json::from_str(&response)?;
+    // Retain request identity so an old create cannot recreate a deleted
+    // document, but never replay a saved document after permanent deletion.
+    if matches!(request.operation, Operation::Artifact { .. })
+        && let Some(id) = response["artifact"]["id"].as_str()
+        && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1 AND id=?2)",
+            params![project.id, id],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(Error::new("not_found", "Artifact was permanently deleted"));
+    }
+    Ok(Some(response))
 }
 
 // Only repeat operations with no externally visible effects: opening a store,
@@ -870,6 +883,21 @@ impl Store {
     }
 
     fn finish_replay(&self, request: &Request, response: Value) -> Result<Value> {
+        if matches!(
+            &request.operation,
+            Operation::Artifact {
+                operation: crate::artifacts::Operation::Delete { .. }
+            }
+        ) {
+            for id in response["removed_files"].as_array().into_iter().flatten() {
+                crate::attachments::delete_file(
+                    &self.attachment_root.join(
+                        id.as_str()
+                            .ok_or_else(|| Error::invalid("Invalid deleted attachment receipt"))?,
+                    ),
+                )?;
+            }
+        }
         if let Operation::Attachment {
             operation: crate::attachments::Operation::Remove { id },
         } = &request.operation
@@ -1742,6 +1770,14 @@ impl Store {
         attachment_files.new = None;
         if let Some(path) = attachment_files.removed.take() {
             crate::attachments::delete_file(&path)?;
+        }
+        if matches!(
+            &r.operation,
+            Operation::Artifact {
+                operation: crate::artifacts::Operation::Delete { .. }
+            }
+        ) {
+            return self.finish_replay(r, result);
         }
         if matches!(&r.operation, Operation::ControlWorker { command, .. } if command == "stop_worker" || command == "stop")
         {
