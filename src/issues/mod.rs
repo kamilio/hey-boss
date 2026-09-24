@@ -13,7 +13,7 @@ mod store;
 pub mod web;
 pub mod worker;
 mod worker_approvals;
-pub(crate) mod worker_infrastructure;
+mod worker_infrastructure;
 mod worker_results;
 
 use serde::{Deserialize, Serialize};
