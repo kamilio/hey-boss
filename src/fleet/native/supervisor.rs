@@ -25,6 +25,7 @@ struct State {
     machines: BTreeMap<String, Value>,
     local: Vec<Value>,
     local_updated: f64,
+    chief_ownership: Vec<crate::chief_ownership::Assignment>,
     events: VecDeque<Value>,
     sequence: u64,
     epoch: String,
@@ -56,6 +57,7 @@ impl Supervisor {
                 m["deployment"] = json!("outdated");
             }
         }
+        let chief_ownership = crate::chief_ownership::read(&db)?;
         let local = ctx.workers()?;
         if !ctx.state.join("fleet-main.json").exists() {
             ctx.atomic_json(
@@ -72,6 +74,7 @@ impl Supervisor {
                 machines,
                 local,
                 local_updated: now(),
+                chief_ownership,
                 events: VecDeque::new(),
                 sequence: 0,
                 epoch: id()?,
@@ -663,7 +666,7 @@ impl Supervisor {
             &self.configured(host, &fallback)?,
         )?;
         let mut revision = control::revision(&self.ctx.node, &workers);
-        self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"workers":hello["workers"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
+        self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
@@ -790,7 +793,8 @@ impl Supervisor {
                     )?;
                     // Our own encoding/writing time is not companion silence.
                     last_message = Instant::now();
-                    self.update(host,json!({"workers":message["workers"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now()}))?;
+                    self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now()}))?;
+                    self.reconcile_chief_ownership()?;
                     let active = message["workers"]
                         .as_array()
                         .into_iter()
@@ -1148,15 +1152,37 @@ impl Supervisor {
         }
     }
     fn observe_local(&self) -> Result<()> {
+        // Read acknowledgment before worker state: a revoked worker cannot
+        // start between the status observation and this acknowledgment.
+        let chief_ownership = crate::chief_ownership::read(&self.ctx.db()?)?;
         let observed = self.ctx.workers()?;
         {
             let mut state = self.state.lock().unwrap();
             state.local = observed;
+            state.chief_ownership = chief_ownership;
             // Advance only after a successful fresh collection, never for a
             // timer tick or a failed observation.
             state.local_updated = now();
         }
+        self.reconcile_chief_ownership()?;
         self.event("local", "heartbeat", "Worker state refreshed");
+        Ok(())
+    }
+    fn reconcile_chief_ownership(&self) -> Result<()> {
+        let machines = {
+            let state = self.state.lock().unwrap();
+            let mut machines = state.machines.values().cloned().collect::<Vec<_>>();
+            machines.push(json!({"node":self.ctx.node,"state":"connected","heartbeat":state.local_updated,"workers":state.local,"chief_ownership":state.chief_ownership}));
+            for m in &mut machines {
+                if now() - m["heartbeat"].as_f64().unwrap_or(0.0) > 15.0 {
+                    m["state"] = json!("disconnected");
+                }
+            }
+            machines
+        };
+        let db = self.ctx.db()?;
+        crate::chief_ownership::reconcile(&db, &machines)?;
+        crate::chief_ownership::stop_unassigned(&db)?;
         Ok(())
     }
     fn observer(self: Arc<Self>) {
@@ -1419,6 +1445,7 @@ mod tests {
                 machines: BTreeMap::new(),
                 local: vec![],
                 local_updated: 0.0,
+                chief_ownership: vec![],
                 events: VecDeque::new(),
                 sequence: 0,
                 epoch: "test".into(),

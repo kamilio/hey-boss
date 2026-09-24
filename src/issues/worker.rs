@@ -550,7 +550,7 @@ pub fn serve() -> Result<()> {
 fn alive(pid: u32, start: &str) -> bool {
     crate::agents::process_identity(pid).as_deref() == Some(start)
 }
-pub(super) fn stop_group(pid: u32, start: &str) -> Result<()> {
+pub(crate) fn stop_group(pid: u32, start: &str) -> Result<()> {
     if !alive(pid, start) {
         return Ok(());
     }

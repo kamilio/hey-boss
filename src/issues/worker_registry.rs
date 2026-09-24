@@ -220,11 +220,21 @@ impl Store {
             };
             migrate_runtime(&tx)?;
             let mut workers = worker_overview(&tx)?;
+            let chief_projects = tx.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL")?.query_map([], |r| Ok(Project {id:r.get(0)?,name:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             // Queue counts depend on these sets, not the worker ID or capacity.
             // Cache only within this transaction so each poll sees fresh data.
             let mut eligible_counts = HashMap::new();
             for worker in &mut workers {
                 let config: Settings = serde_json::from_value(worker["config"].clone())?;
+                let mut chief_scope = Vec::new();
+                for project in &chief_projects {
+                    if (config.projects.is_empty() || config.projects.contains(&project.id))
+                        && std::path::Path::new(&checkout(&tx, &config, project)?).is_dir()
+                    {
+                        chief_scope.push(project.id.clone());
+                    }
+                }
+                worker["chief_projects"] = json!(chief_scope);
                 let mut projects = config.projects.clone();
                 let mut tags = config.tags.clone();
                 projects.sort_unstable();
@@ -293,6 +303,9 @@ impl Store {
         for (worker_id, text) in settings {
             let config: Settings = serde_json::from_str(&text)?;
             for project in &projects {
+                if !crate::chief_ownership::allowed(&self.db, &project.id, &worker_id)? {
+                    continue;
+                }
                 if !config.projects.is_empty() && !config.projects.contains(&project.id) {
                     continue;
                 }

@@ -354,8 +354,12 @@ failures retain the conversation and retry on the next hourly pass.
 
 `hey-boss issue settings set --chief --chief-prompt 'Review issues and PRs, then stop.'`
 sets the project prompt. Use `--no-chief` to disable it; an active pass is stopped.
-Workers on the same machine share one Chief reservation per project. Separate
-authoritative issue stores keep their own Chief configuration and conversation.
+The fleet supervisor selects one worker for each project's Chief across all
+machines. It retains that assignment across reconnects. Before moving ownership,
+it revokes the old assignment and waits for that machine to acknowledge it and
+report that its Chief has stopped. A disconnected machine keeps ownership until
+it reconnects; another Chief is not started while the old one may still be running.
+Standalone workers sharing a database share one Chief reservation per project.
 Stopping a worker stops its owned Chief too. Chief startup failures and thread
 crashes are recorded through the supervising worker, which retains results until
 they are saved. Worker reloads recover abandoned passes without losing the saved

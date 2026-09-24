@@ -902,6 +902,7 @@ fn identities(db: &Connection) -> Result<BTreeMap<(String, i64), (String, i64)>>
     Ok(ids)
 }
 fn allocation_payload(db: &Connection, node: &str, mut payload: Value) -> Result<Value> {
+    payload["chief_ownership"] = serde_json::to_value(crate::chief_ownership::read(db)?)?;
     payload["allocations"] = Value::Array(rows(db, "SELECT * FROM fleet_allocations", &[])?);
     payload["allocation_deadlines"] =
         Value::Array(rows(db, "SELECT * FROM fleet_allocation_deadlines", &[])?);
@@ -1262,6 +1263,14 @@ pub(super) fn apply_pull(
         None
     };
     db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
+    if let Some(assignments) = payload.get("chief_ownership") {
+        crate::chief_ownership::apply(
+            db,
+            &serde_json::from_value::<Vec<crate::chief_ownership::Assignment>>(
+                assignments.clone(),
+            )?,
+        )?;
+    }
     let mut acknowledged = BTreeMap::new();
     for receipt in receipts {
         if receipt.get("canonical_subtask").is_some() {
@@ -2978,6 +2987,46 @@ mod tests {
         assert_eq!(
             rows(&agent.db, "SELECT status FROM issue_pull_requests", &[]).unwrap()[0]["status"],
             "merged"
+        );
+    }
+
+    #[test]
+    fn chief_assignment_and_revocation_travel_without_issue_changes() {
+        let main = Fixture::new();
+        main.capture();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        let assignment = crate::chief_ownership::Assignment {
+            project_id: "named:Native fleet".into(),
+            node: "agent".into(),
+            worker_id: "chosen".into(),
+            generation: 1,
+            revoking: false,
+        };
+        crate::chief_ownership::apply(&main.db, std::slice::from_ref(&assignment)).unwrap();
+        let initial = snapshot(&main.db, "agent").unwrap();
+        apply_pull(&agent.db, "agent", &initial, &[]).unwrap();
+        assert!(
+            crate::chief_ownership::allowed(&agent.db, "named:Native fleet", "chosen").unwrap()
+        );
+        assert!(
+            !crate::chief_ownership::allowed(&agent.db, "named:Native fleet", "other").unwrap()
+        );
+        let revoked = crate::chief_ownership::Assignment {
+            generation: 2,
+            revoking: true,
+            ..assignment
+        };
+        crate::chief_ownership::apply(&main.db, &[revoked]).unwrap();
+        let next = incremental(&main.db, "agent", initial["cursor"].as_i64().unwrap()).unwrap();
+        assert!(next["changes"].as_array().unwrap().is_empty());
+        apply_pull(&agent.db, "agent", &next, &[]).unwrap();
+        assert!(
+            !crate::chief_ownership::allowed(&agent.db, "named:Native fleet", "chosen").unwrap()
+        );
+        apply_pull(&agent.db, "agent", &initial, &[]).unwrap();
+        assert!(
+            !crate::chief_ownership::allowed(&agent.db, "named:Native fleet", "chosen").unwrap()
         );
     }
 
