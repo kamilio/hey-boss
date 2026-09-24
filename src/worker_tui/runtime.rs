@@ -31,6 +31,7 @@ pub struct Options {
     pub history: bool,
     /// Quitting an embedded dashboard stops its owning worker's sessions.
     pub owned_worker: bool,
+    pub project_tabs: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +103,7 @@ pub fn run(
         }
     });
     let mut app = Dashboard {
+        snapshot: serde_json::json!({"project_tabs":options.project_tabs}),
         worker_id: options.id,
         history: options.history,
         owned_worker: options.owned_worker,
@@ -147,6 +149,10 @@ fn event_loop(
             app.pending = false;
             match result {
                 Ok(value) => match request {
+                    Request::RefreshProjects => {
+                        app.apply(value);
+                        next_refresh = Instant::now() + Duration::from_secs(2);
+                    }
                     Request::Refresh(id) => {
                         if id == app.worker_id || id.is_none() {
                             app.apply(value);
@@ -158,8 +164,18 @@ fn event_loop(
                     Request::Control { .. } => {
                         next_refresh = Instant::now();
                     }
+                    Request::AddWorker { .. } => {
+                        app.add_worker = None;
+                        next_refresh = Instant::now();
+                    }
+                    Request::RemoveWorker(_) => {
+                        next_refresh = Instant::now();
+                    }
                 },
                 Err(error) => {
+                    if let Some(form) = app.add_worker.as_mut() {
+                        form.error = Some(error.clone());
+                    }
                     app.error = Some(error);
                     // Recover the inventory if the selected worker disappeared.
                     // Keep the last good snapshot visible during ordinary outages.
@@ -170,14 +186,18 @@ fn event_loop(
             }
             dirty = true;
         }
-        if !app.pending && Instant::now() >= next_refresh {
+        if !app.pending && app.add_worker.is_none() && Instant::now() >= next_refresh {
             let id = if recover_inventory {
                 recover_inventory = false;
                 None
             } else {
                 app.worker_id.clone()
             };
-            requests.send(Request::Refresh(id))?;
+            requests.send(if app.project_tabs() {
+                Request::RefreshProjects
+            } else {
+                Request::Refresh(id)
+            })?;
             app.pending = true;
             dirty = true;
         }
@@ -207,6 +227,40 @@ fn event_loop(
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(Exit::Quit);
         }
+        if let Some(form) = app.add_worker.as_mut() {
+            dirty = true;
+            match key.code {
+                KeyCode::Esc if !app.pending => app.add_worker = None,
+                KeyCode::Tab => form.selected = (form.selected + 1) % form.fields.len(),
+                KeyCode::BackTab => {
+                    form.selected = (form.selected + form.fields.len() - 1) % form.fields.len()
+                }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    form.fields.push(String::new());
+                    form.selected = form.fields.len() - 1;
+                }
+                KeyCode::Enter if !app.pending => match form.request() {
+                    Ok(request) => {
+                        requests.send(request)?;
+                        app.pending = true;
+                    }
+                    Err(error) => form.error = Some(error),
+                },
+                KeyCode::Backspace if !app.pending => {
+                    form.fields[form.selected].pop();
+                }
+                KeyCode::Char(c)
+                    if !app.pending
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    form.fields[form.selected].push(c);
+                }
+                _ => {}
+            }
+            continue;
+        }
         if key.code == KeyCode::Char('q') {
             return Ok(Exit::Quit);
         }
@@ -220,9 +274,13 @@ fn event_loop(
                 KeyCode::Esc => app.confirmation = None,
                 KeyCode::Enter if !app.pending => {
                     let c = app.confirmation.take().unwrap();
-                    requests.send(Request::Control {
-                        worker_id: c.worker_id,
-                        stop: c.stop,
+                    requests.send(if c.graceful {
+                        Request::RemoveWorker(c.worker_id)
+                    } else {
+                        Request::Control {
+                            worker_id: c.worker_id,
+                            stop: c.stop,
+                        }
                     })?;
                     app.pending = true;
                 }
@@ -238,7 +296,35 @@ fn event_loop(
             }
             continue;
         }
+        if app.manage_workers {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('w') => app.manage_workers = false,
+                KeyCode::Up | KeyCode::Char('k') => app.navigate_worker(-1),
+                KeyCode::Down | KeyCode::Char('j') => app.navigate_worker(1),
+                KeyCode::Char('a') if !app.pending => {
+                    app.add_worker = Some(super::AddWorker::default())
+                }
+                KeyCode::Char('d') => app.confirm_remove(),
+                _ => {}
+            }
+            continue;
+        }
         match key.code {
+            KeyCode::Char('w') if app.project_tabs() => {
+                app.manage_workers = true;
+                app.navigate_worker(0);
+            }
+            KeyCode::Char('a') if app.project_tabs() && !app.pending => {
+                app.add_worker = Some(super::AddWorker::default())
+            }
+            KeyCode::Tab if app.project_tabs() => {
+                app.switch_project(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    -1
+                } else {
+                    1
+                })
+            }
+            KeyCode::BackTab if app.project_tabs() => app.switch_project(-1),
             KeyCode::Char('q') => return Ok(Exit::Quit),
             KeyCode::Up | KeyCode::Char('k') => app.navigate(-1),
             KeyCode::Down | KeyCode::Char('j') => app.navigate(1),

@@ -23,7 +23,18 @@ pub struct Client {
 #[derive(Clone, Debug)]
 pub enum Request {
     Refresh(Option<String>),
-    Control { worker_id: String, stop: bool },
+    RefreshProjects,
+    AddWorker {
+        id: String,
+        name: String,
+        concurrency: u32,
+        directories: Vec<String>,
+    },
+    RemoveWorker(String),
+    Control {
+        worker_id: String,
+        stop: bool,
+    },
 }
 
 impl Client {
@@ -32,7 +43,17 @@ impl Client {
             return Err("Cancelled".into());
         }
         let mut command = Command::new(&self.binary);
-        command.args(["worker", "--json"]);
+        command.args([
+            if matches!(
+                request,
+                Request::RefreshProjects | Request::AddWorker { .. } | Request::RemoveWorker(_)
+            ) {
+                "auto-workers"
+            } else {
+                "worker"
+            },
+            "--json",
+        ]);
         if let Some(host) = &self.host {
             command.args(["--host", host]);
         }
@@ -40,6 +61,30 @@ impl Client {
             command.arg("--directory").arg(directory);
         }
         match request {
+            Request::AddWorker {
+                id,
+                name,
+                concurrency,
+                directories,
+            } => {
+                command.args([
+                    "add",
+                    "--name",
+                    name,
+                    "--concurrency",
+                    &concurrency.to_string(),
+                ]);
+                for directory in directories {
+                    command.args(["--directory", directory]);
+                }
+                command.args(["--id", id]);
+            }
+            Request::RemoveWorker(id) => {
+                command.args(["remove", id]);
+            }
+            Request::RefreshProjects => {
+                command.arg("status");
+            }
             Request::Refresh(id) => {
                 if let Some(id) = id {
                     command.args(["--id", id]);
@@ -135,6 +180,11 @@ impl Client {
             && (!value["workers"].is_array() || !value["runs"].is_array())
         {
             return Err("Worker status is missing workers/runs; upgrade hey-boss".into());
+        }
+        if matches!(request, Request::RefreshProjects)
+            && (value["project_tabs"] != true || !value["workers"].is_array())
+        {
+            return Err("Worker status is missing project tabs; upgrade hey-boss".into());
         }
         Ok(value)
     }

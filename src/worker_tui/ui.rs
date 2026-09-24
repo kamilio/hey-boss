@@ -30,7 +30,9 @@ fn block(title: impl Into<String>, focused: bool) -> Block<'static> {
 }
 
 fn state(w: &Value) -> &'static str {
-    if w["upgrading"] == true {
+    if w["intent"] == "drain" {
+        "Removing after completion"
+    } else if w["upgrading"] == true {
         "Emergency update drain"
     } else if w["pid"].is_null() {
         if w["config"]["enabled"] == true {
@@ -282,6 +284,125 @@ fn overlay(frame: &mut Frame, title: &str, message: &str) {
     );
 }
 
+fn worker_manager(frame: &mut Frame, app: &Dashboard) {
+    let size = frame.area();
+    let width = size.width.saturating_sub(4).min(96);
+    let height = size.height.saturating_sub(2).min(20);
+    let area = Rect::new(
+        (size.width - width) / 2,
+        (size.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let border = block("Project workers", true);
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    let [list, footer] = Layout::vertical([Constraint::Min(2), Constraint::Length(2)]).areas(inner);
+    let workers = app.project_workers();
+    let items: Vec<_> = workers
+        .iter()
+        .map(|w| {
+            let directory = app
+                .project_id
+                .as_deref()
+                .and_then(|id| w["config"]["directories"].get(id))
+                .map(text)
+                .unwrap_or_else(|| checkout(w, &app.snapshot));
+            ListItem::new(vec![
+                Line::from(format!(
+                    "{} · {} slots · {}",
+                    text(&w["config"]["name"]),
+                    w["config"]["concurrency"],
+                    state(w)
+                )),
+                Line::from(format!("  {directory}")),
+            ])
+        })
+        .collect();
+    let selected = workers
+        .iter()
+        .position(|w| w["id"].as_str() == app.managed_worker_id.as_deref());
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("› ")
+            .highlight_style(Style::default().bg(SELECTED)),
+        list,
+        &mut ListState::default().with_selected(selected),
+    );
+    frame.render_widget(
+        Paragraph::new("↑↓ select · a add · d remove gracefully\nEsc back"),
+        footer,
+    );
+}
+
+fn add_worker_form(frame: &mut Frame, form: &super::AddWorker) {
+    let size = frame.area();
+    let width = size.width.saturating_sub(4).min(96);
+    let height = size.height.saturating_sub(2).min(20);
+    let area = Rect::new(
+        (size.width - width) / 2,
+        (size.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let border = block("Add worker", true);
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    let [description, fields, error, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(2),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new("Slots are shared across these checkouts."),
+        description,
+    );
+    let items: Vec<_> = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, value)| {
+            let label = match i {
+                0 => "Name".to_owned(),
+                1 => "Slots".to_owned(),
+                _ => format!("Checkout {}", i - 1),
+            };
+            let value = text(&Value::String(value.clone()));
+            let limit = fields.width.saturating_sub(label.len() as u16 + 6) as usize;
+            let count = value.chars().count();
+            let value = if count > limit {
+                format!("…{}", value.chars().skip(count - limit).collect::<String>())
+            } else {
+                value
+            };
+            ListItem::new(format!("{label}: {value}"))
+        })
+        .collect();
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("› ")
+            .highlight_style(Style::default().bg(SELECTED)),
+        fields,
+        &mut ListState::default().with_selected(Some(form.selected)),
+    );
+    if let Some(message) = &form.error {
+        frame.render_widget(
+            Paragraph::new(text(&Value::String(message.clone())))
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(color("error"))),
+            error,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Tab field · Ctrl+N another checkout\nEnter add · Esc cancel"),
+        footer,
+    );
+}
+
 fn page_layout(size: Rect) -> [Rect; 3] {
     Layout::vertical([
         Constraint::Length(5),
@@ -395,6 +516,23 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         header.push(Line::default());
         header.push(Line::default());
     }
+    if app.project_tabs() {
+        let ids = app.project_ids();
+        let selected = app.project_id.as_deref().unwrap_or("");
+        // Keep the selected tab visible even on a narrow terminal.
+        let mut tabs = vec![Span::styled(
+            format!(" [{}]", project_name(selected, &app.snapshot)),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )];
+        for id in ids.iter().filter(|id| id.as_str() != selected) {
+            tabs.push(Span::raw(format!("  {}", project_name(id, &app.snapshot))));
+        }
+        header[0] = if ids.is_empty() {
+            Line::from(" No configured projects")
+        } else {
+            Line::from(tabs)
+        };
+    }
     let connection = if app.error.is_some() {
         "unknown"
     } else {
@@ -453,7 +591,11 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             },
             Style::default().fg(if app.history { ACCENT } else { MUTED }),
         ),
-        Span::raw(" · h switch"),
+        Span::raw(if app.project_tabs() {
+            " · Tab/Shift+Tab projects"
+        } else {
+            " · h switch"
+        }),
     ]));
     frame.render_widget(Paragraph::new(header), rows[0]);
     let right = body_layout(rows[1]);
@@ -573,7 +715,9 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                     MUTED
                 }),
             )),
-            Line::from(if size.width >= 90 {
+            Line::from(if app.project_tabs() {
+                " ↑↓ session  w workers  a add  h history  ? help"
+            } else if size.width >= 90 {
                 " ↑↓/jk session  h active/history  r refresh  p pause  s stop  ? help  q quit"
             } else {
                 " ↑↓ session  h history  ? help  q quit"
@@ -601,12 +745,27 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 }
             )
         };
+        let message = if app.project_tabs() {
+            format!(
+                "Tab / Shift+Tab  Next / previous project\nw          Manage workers; d removes gracefully\na          Add a worker\n{message}"
+            )
+        } else {
+            message
+        };
         overlay(frame, "Keyboard", &message);
+    }
+    if app.manage_workers {
+        worker_manager(frame, app);
+    }
+    if let Some(form) = &app.add_worker {
+        add_worker_form(frame, form);
     }
     if let Some(c) = &app.confirmation {
         overlay(
             frame,
-            if c.stop {
+            if c.graceful {
+                "Remove worker?"
+            } else if c.stop {
                 "Stop worker?"
             } else {
                 "Pause worker?"
@@ -615,7 +774,9 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 "{}\n{}\n\n{}\n\nEnter: confirm    Esc: cancel",
                 c.name,
                 c.worker_id,
-                if c.stop {
+                if c.graceful {
+                    "Stops new pickup now. Current agents and Chief finish before this worker is removed."
+                } else if c.stop {
                     "Stops this worker and its active Codex sessions."
                 } else {
                     "Stops pickup. Existing Codex sessions finish normally."

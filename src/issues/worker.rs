@@ -1963,6 +1963,7 @@ pub fn serve_instance_with_history(
                 id: Some(id.clone()),
                 history: history_limit > 0,
                 owned_worker: true,
+                project_tabs: false,
             },
             worker.stop.clone(),
         )
