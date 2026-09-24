@@ -1,6 +1,65 @@
 "use strict";
 // Shared, dependency-free browser components. Page clients own data and mutations.
 const HeyBossUI = (() => {
+  // .test over HTTP is not a secure context. getRandomValues remains available;
+  // randomUUID and SubtleCrypto do not. Keep retry IDs cryptographically random.
+  function requestId() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+  }
+  async function sha256(bytes) {
+    if (crypto.subtle) {
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    }
+    // FIPS 180-4 SHA-256 for stable mutation keys, including pending retries.
+    // This fallback is not used for authentication or transport encryption.
+    const constants = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+    ];
+    const padded = new Uint8Array(Math.ceil((bytes.length + 9) / 64) * 64);
+    padded.set(bytes);
+    padded[bytes.length] = 128;
+    const view = new DataView(padded.buffer);
+    view.setUint32(padded.length - 8, Math.floor(bytes.length / 0x20000000));
+    view.setUint32(padded.length - 4, (bytes.length * 8) >>> 0);
+    const hash = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+    const words = new Uint32Array(64);
+    const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+    for (let offset = 0; offset < padded.length; offset += 64) {
+      for (let i = 0; i < 16; i++) words[i] = view.getUint32(offset + i * 4);
+      for (let i = 16; i < 64; i++) {
+        const x = words[i-15], y = words[i-2];
+        const s0 = rotate(x,7) ^ rotate(x,18) ^ (x >>> 3);
+        const s1 = rotate(y,17) ^ rotate(y,19) ^ (y >>> 10);
+        words[i] = words[i-16] + s0 + words[i-7] + s1;
+      }
+      let [a,b,c,d,e,f,g,h] = hash;
+      for (let i = 0; i < 64; i++) {
+        const s1 = rotate(e,6) ^ rotate(e,11) ^ rotate(e,25);
+        const choice = (e & f) ^ (~e & g);
+        const t1 = (h + s1 + choice + constants[i] + words[i]) >>> 0;
+        const s0 = rotate(a,2) ^ rotate(a,13) ^ rotate(a,22);
+        const majority = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (s0 + majority) >>> 0;
+        h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+      }
+      const block = [a,b,c,d,e,f,g,h];
+      for (let i = 0; i < 8; i++) hash[i] += block[i];
+    }
+    return [...hash].map(word => word.toString(16).padStart(8, "0")).join("");
+  }
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
@@ -200,5 +259,5 @@ function date(at) {
     }
 
   }
-  return {icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  return {requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();

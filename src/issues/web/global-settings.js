@@ -152,7 +152,7 @@ function initGlobalSettings() {
       };
       const key = JSON.stringify([globalSettingsHost, operation]);
       if (globalSettingsPending?.key !== key)
-        globalSettingsPending = { key, id: crypto.randomUUID() };
+        globalSettingsPending = { key, id: HeyBossUI.requestId() };
       const value = await api(
         operation,
         model.project.id,

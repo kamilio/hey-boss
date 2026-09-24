@@ -246,7 +246,7 @@ const HeyBossQuickIssue = (() => {
       try { parsed = parse(input.value, projects, current); } catch (e) { fail(e.message); input.focus(); return; }
       const operation = {action:"create", title:parsed.title, body:"", labels:taskLabels([],kind.value), at_top:!bottom.checked};
       const key = JSON.stringify([host, parsed.project.id, operation]);
-      if (pending?.key !== key) pending = {key, id:crypto.randomUUID()};
+      if (pending?.key !== key) pending = {key, id:HeyBossUI.requestId()};
       hidePicker();
       saving = true; input.disabled = true; bottom.disabled = true; kind.disabled = true; submit.disabled = true; error.hidden = true; context.textContent = "Creating…";
       try {

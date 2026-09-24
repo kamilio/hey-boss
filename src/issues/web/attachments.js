@@ -59,7 +59,7 @@ const HeyBossAttachments = (() => {
             const data = await new Promise((resolve,reject) => {
               const reader = new FileReader();reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",")+1));reader.onerror = () => reject(Error(`Could not read ${file.name}. Choose it again.`));reader.readAsDataURL(file);
             });
-            pending = {operation:{command:"upload",target:context.target,name:file.name,data},id:crypto.randomUUID()};
+            pending = {operation:{command:"upload",target:context.target,name:file.name,data},id:HeyBossUI.requestId()};
           }
           status(`Uploading ${pending.operation.name}…`);
           const value = await api(context,pending.operation,pending.id);
@@ -106,7 +106,7 @@ const HeyBossAttachments = (() => {
       if (event.target.closest("[data-cancel-remove]")) {render();choose?.focus();}
       const confirm = event.target.closest("[data-confirm-remove]");
       if (confirm && !busy) {
-        const id = confirm.dataset.confirmRemove,requestID = confirm.dataset.requestId ||= crypto.randomUUID();
+        const id = confirm.dataset.confirmRemove,requestID = confirm.dataset.requestId ||= HeyBossUI.requestId();
         lock(true);status("Removing file…");
         try {await api(context,{command:"remove",id},requestID);entries=entries.filter(f=>f.id!==id);render();status("File removed.");}
         catch(e) {status("");error(e.message);}finally{lock(false);choose?.focus();}
