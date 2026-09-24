@@ -485,6 +485,13 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             .unwrap_or("")
             .contains("query MyOpenPullRequests")
         {
+            if mode == "account-unrelated-org-denied" {
+                return reply(
+                    200,
+                    json!({"data":{"viewer":null},"errors":[{"type":"FORBIDDEN","message":"Although you appear to have the correct authorization credentials, the unrelated-org organization has an IP allow list enabled, and your IP address is not permitted to access this resource."}]}),
+                    &[],
+                );
+            }
             if mode == "account-discovery-errors" {
                 return reply(
                     200,
@@ -3223,6 +3230,238 @@ async fn rest_discovery_permission_cooldown_prevents_a_denied_prefix_from_starvi
             .count(),
         5
     );
+}
+
+#[tokio::test]
+async fn issue144_repository_coverage_survives_unrelated_discovery_denial() {
+    let h = Harness::new().await;
+    h.mode("account");
+    h.phase(2);
+    let c = h.client();
+    assert!(
+        c.refresh_pr_status(Freshness::Revalidate, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let before = c
+        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(before.complete);
+    h.mode("account-unrelated-org-denied");
+    assert!(
+        c.all_my_open_pull_requests(Freshness::Revalidate)
+            .await
+            .is_err()
+    );
+    drop(c);
+    // The distinction must survive a restart, without a live account watch.
+    let c = h.client();
+    let calls = h.calls().len();
+    let page = c
+        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    let value = serde_json::to_value(&page).unwrap();
+    assert_eq!(
+        value["coverage"],
+        json!({"repository":"acme/demo","returnedRows":1,"returnedRowsComplete":true})
+    );
+    assert_eq!(value["accountDiscovery"]["complete"], false);
+    assert!(value["accountDiscovery"]["lastSuccessAtMs"].is_number());
+    assert!(
+        value["accountDiscovery"]["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("unrelated-org")
+    );
+    assert!(
+        !page.complete,
+        "unknown roster coverage must remain inconclusive"
+    );
+    assert_eq!(page.pull_requests, before.pull_requests);
+    assert_eq!(page.cursor, before.cursor);
+    assert_eq!(h.calls().len(), calls, "coverage reads must not use GitHub");
+
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let router = api.router();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    for cursor in [None, Some(before.cursor.as_str())] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"));
+        command.kill_on_drop(true);
+        command.args([
+            "pr",
+            "-R",
+            "acme/demo",
+            "--cached-only",
+            "--json",
+            "number",
+            "--server",
+            &base,
+        ]);
+        if let Some(cursor) = cursor {
+            command.args(["--cursor", cursor]);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "keep aggregate error exit semantics"
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["coverage"]["returnedRowsComplete"], true);
+        assert_eq!(
+            value["coverage"]["returnedRows"],
+            if cursor.is_some() { 0 } else { 1 }
+        );
+        assert_eq!(value["accountDiscovery"]["complete"], false);
+        assert_eq!(value["cursor"], before.cursor);
+        assert_eq!(value["hasMore"], false);
+        assert_eq!(value["complete"], false);
+        assert!(!value["errors"].as_array().unwrap().is_empty());
+    }
+    let limited = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
+            .kill_on_drop(true)
+            .args([
+                "pr",
+                "list",
+                "--limit",
+                "1",
+                "--cached-only",
+                "--json",
+                "number",
+                "--server",
+                &base,
+            ])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(limited.status.code(), Some(1));
+    let limited: Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(
+        limited["coverage"],
+        json!({"repository":null,"returnedRows":1,"returnedRowsComplete":true})
+    );
+    assert_eq!(limited["totalCount"], 2);
+    assert_eq!(limited["truncated"], true);
+    assert_eq!(
+        h.calls().len(),
+        calls,
+        "cached CLI reads must make zero GitHub requests"
+    );
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
+            .kill_on_drop(true)
+            .args([
+                "pr",
+                "view",
+                "7",
+                "-R",
+                "acme/demo",
+                "--refresh",
+                "--timeout",
+                "5",
+                "--server",
+                &base,
+            ])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let targeted: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(targeted["complete"], true);
+    assert!(h.calls()[calls..].iter().all(|call| {
+        !call.path.contains("/repos/acme/other/")
+            && !call.body["query"]
+                .as_str()
+                .unwrap_or("")
+                .contains("MyOpenPullRequests")
+    }));
+    let after = c
+        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap()["accountDiscovery"]["complete"],
+        false,
+        "a targeted success cannot repair account discovery"
+    );
+
+    h.mode("account");
+    c.all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    let recovered = c
+        .pr_status_page(Some("acme/demo"), Some(&page.cursor), 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    let recovered = serde_json::to_value(recovered).unwrap();
+    assert_eq!(
+        recovered["cursor"], after.cursor,
+        "health-only recovery must not advance the cursor"
+    );
+    assert_eq!(recovered["accountDiscovery"]["complete"], true);
+    assert_eq!(recovered["accountDiscovery"]["errors"], json!([]));
+    api.stop().await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn issue144_coverage_preserves_missing_target_sources_and_unknown_discovery() {
+    let h = Harness::new().await;
+    let c = h.client();
+    let empty = c
+        .pr_status_page(Some("acme/missing"), None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    let empty = serde_json::to_value(empty).unwrap();
+    assert!(empty["accountDiscovery"]["complete"].is_null());
+    assert_eq!(
+        empty["coverage"]["returnedRows"], 0,
+        "an empty selection is not proof of an empty repository"
+    );
+    h.mode("account");
+    c.refresh_pr_status(Freshness::Revalidate, false)
+        .await
+        .unwrap();
+    h.mode("account-ci-permission-fails");
+    c.refresh_pr_status(Freshness::Revalidate, true)
+        .await
+        .unwrap();
+    h.mode("account-unrelated-org-denied");
+    assert!(
+        c.all_my_open_pull_requests(Freshness::Revalidate)
+            .await
+            .is_err()
+    );
+    let page = c
+        .pr_status_page(Some("acme/demo"), None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    let value = serde_json::to_value(page).unwrap();
+    assert_eq!(value["coverage"]["returnedRowsComplete"], false);
+    assert_eq!(value["accountDiscovery"]["complete"], false);
+    assert!(value["pullRequests"][0]["sourceErrors"]["ci"].is_string());
+    assert_eq!(value["complete"], false);
 }
 
 #[tokio::test]
@@ -7013,8 +7252,18 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
         }));
     }
     until(|| c.status().outstanding_requests == 61).await;
+    // Queue the metadata read explicitly before starting the account loops.
+    // Otherwise their own coalesced reads can satisfy the gate below before
+    // the foreground HTTP handler has promoted its request.
+    let metadata_client = c.clone();
+    let metadata = tokio::spawn(async move {
+        metadata_client
+            .get("repos/acme/demo/pulls/7", Freshness::Revalidate)
+            .await
+    });
+    until(|| c.status().outstanding_requests == 62).await;
+    let coalesced = c.status().coalesced_requests;
     let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
-    api.watch_account(10).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!(
         "http://{}/v1/prs/acme/demo/7?refresh=true",
@@ -7034,8 +7283,9 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
             .await
             .unwrap()
     });
-    // The foreground read joins metadata work queued by the account watch.
-    until(|| c.status().coalesced_requests > 0).await;
+    // Only the foreground handler can join the queued metadata at this point.
+    until(|| c.status().coalesced_requests > coalesced).await;
+    api.watch_account(10).await.unwrap();
     h.mock.release.notify_waiters();
     assert!(gate.await.unwrap().is_ok());
     // Dispatch order below proves priority without a machine-speed assertion.
@@ -7050,6 +7300,7 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
         "/repos/acme/demo/pulls/7",
         "foreground work must progress ahead of the bulk queue"
     );
+    assert!(metadata.await.unwrap().is_ok());
     for job in queued {
         assert!(job.await.unwrap().is_ok());
     }

@@ -70,6 +70,62 @@ pub struct PrStatusPage {
     pub has_more: bool,
     pub complete: bool,
     pub errors: Vec<String>,
+    /// Coverage of this page's rows, not proof of a complete repository roster.
+    /// None when reading an envelope from an older daemon.
+    #[serde(default)]
+    pub coverage: Option<PrStatusCoverage>,
+    #[serde(default)]
+    pub account_discovery: AccountDiscoveryHealth,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrStatusCoverage {
+    pub repository: Option<String>,
+    pub returned_rows: usize,
+    /// Includes source evidence omitted by a row projection.
+    pub returned_rows_complete: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDiscoveryHealth {
+    /// Last-known scan result, not freshness; None means no known result.
+    pub complete: Option<bool>,
+    pub last_poll_at_ms: Option<u64>,
+    pub last_success_at_ms: Option<u64>,
+    pub errors: Vec<String>,
+}
+
+impl PrStatusPage {
+    pub(crate) fn update_coverage(&mut self, repository: Option<&str>) {
+        let mut rows = self
+            .pull_requests
+            .iter()
+            .chain(self.changes.iter().map(|change| &change.pull_request));
+        self.coverage = Some(PrStatusCoverage {
+            repository: repository.map(str::to_owned),
+            returned_rows: self.pull_requests.len() + self.changes.len(),
+            returned_rows_complete: rows.all(|row| row["complete"] == true),
+        });
+    }
+
+    pub(crate) fn record_discovery_error(&mut self, error: &str) {
+        self.complete = false;
+        self.account_discovery.complete = Some(false);
+        if !self
+            .account_discovery
+            .errors
+            .iter()
+            .any(|known| known == error)
+        {
+            self.account_discovery.errors.push(error.to_owned());
+        }
+        let error = format!("discovery: {error}");
+        if !self.errors.contains(&error) {
+            self.errors.push(error);
+        }
+    }
 }
 
 /// Work completed by the latest account hydration cycle. This is progress,
@@ -1376,14 +1432,19 @@ impl Client {
                 position = page.next_cursor;
                 if !changes.is_empty() || page.has_more || tokio::time::Instant::now() >= deadline {
                     return self
-                        .with_discovery_health(PrStatusPage {
-                            pull_requests: vec![],
-                            changes,
-                            cursor: wrap(&position),
-                            has_more: page.has_more,
-                            complete: true,
-                            errors: vec![],
-                        })
+                        .with_discovery_health(
+                            repository,
+                            PrStatusPage {
+                                pull_requests: vec![],
+                                changes,
+                                cursor: wrap(&position),
+                                has_more: page.has_more,
+                                complete: true,
+                                errors: vec![],
+                                coverage: None,
+                                account_discovery: AccountDiscoveryHealth::default(),
+                            },
+                        )
                         .await;
                 }
             }
@@ -1401,27 +1462,39 @@ impl Client {
             .map(|s| s.data["pullRequest"].clone())
             .collect();
         let complete = pulls.iter().all(|p| p["complete"] == true);
-        self.with_discovery_health(PrStatusPage {
-            pull_requests: pulls,
-            changes: vec![],
-            cursor: wrap(&page.cursor),
-            has_more: false,
-            complete,
-            errors: vec![],
-        })
+        self.with_discovery_health(
+            repository,
+            PrStatusPage {
+                pull_requests: pulls,
+                changes: vec![],
+                cursor: wrap(&page.cursor),
+                has_more: false,
+                complete,
+                errors: vec![],
+                coverage: None,
+                account_discovery: AccountDiscoveryHealth::default(),
+            },
+        )
         .await
     }
 
-    async fn with_discovery_health(&self, mut page: PrStatusPage) -> Result<PrStatusPage> {
+    async fn with_discovery_health(
+        &self,
+        repository: Option<&str>,
+        mut page: PrStatusPage,
+    ) -> Result<PrStatusPage> {
+        page.update_coverage(repository);
         page.complete &= page
             .changes
             .iter()
             .all(|change| change.pull_request["complete"] == true);
-        if let Some(health) = self.discovery_health().await?
-            && let Some(error) = health.last_error
-        {
-            page.complete = false;
-            page.errors.push(format!("discovery: {error}"));
+        if let Some(health) = self.discovery_health().await? {
+            page.account_discovery.last_poll_at_ms = health.last_poll_at_ms;
+            page.account_discovery.last_success_at_ms = health.last_success_at_ms;
+            page.account_discovery.complete = health.last_success_at_ms.map(|_| true);
+            if let Some(error) = health.last_error {
+                page.record_discovery_error(&error);
+            }
         }
         Ok(page)
     }
@@ -1549,6 +1622,18 @@ fn activity(old: &Value, new: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod incremental_tests {
     use super::*;
+
+    #[test]
+    fn older_envelopes_do_not_invent_coverage_or_discovery_success() {
+        let page: PrStatusPage = serde_json::from_value(json!({
+            "pullRequests":[], "changes":[], "cursor":"old", "hasMore":false,
+            "complete":true, "errors":[],
+        }))
+        .unwrap();
+        assert!(page.coverage.is_none());
+        assert!(page.account_discovery.complete.is_none());
+        assert!(page.account_discovery.last_success_at_ms.is_none());
+    }
 
     #[tokio::test]
     async fn filtered_cursor_pages_return_empty_has_more_and_long_poll_resumes_after_source_events()

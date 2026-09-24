@@ -619,6 +619,13 @@ async fn run_pr(
     let truncated = initial_limit.is_some_and(|l| total > l);
     if let Some(limit) = initial_limit {
         page.pull_requests.truncate(limit);
+        // Coverage describes displayed rows, while aggregate health continues
+        // to include failures beyond a display limit, as before.
+        if let Some(coverage) = &mut page.coverage {
+            coverage.returned_rows = page.pull_requests.len();
+            coverage.returned_rows_complete =
+                page.pull_requests.iter().all(|row| row["complete"] == true);
+        }
     }
     if let Some(fields) = fields {
         for row in page

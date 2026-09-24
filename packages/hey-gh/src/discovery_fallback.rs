@@ -190,7 +190,7 @@ impl Client {
                         }
                     }
                     for field in ["created_at", "updated_at"] {
-                        if !pr[field].as_str().is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()) {
+                        if pr[field].as_str().is_none_or(|s| chrono::DateTime::parse_from_rfc3339(s).is_err()) {
                             return Err(Error::Invalid("REST discovery PR timestamp invalid".into()));
                         }
                     }
