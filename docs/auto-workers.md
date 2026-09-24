@@ -20,13 +20,13 @@ hey-boss auto-workers add --name 'Tools' --concurrency 2 \
   -C /work/hey-proxy -C /work/hey-gh -C /work/ashby-mcp
 ```
 
-A second worker may use a different set of those checkouts. It has its own slots, filters, and history. Project tabs are views across workers; they do not combine worker configurations or multiply a shared pool's capacity.
+A second worker may use a different set of those checkouts. It has its own slots, filters, and history. All multi-project workers appear together in one **Shared** tab after the dedicated project tabs. Its label shows the worker and unique-project counts, such as **Shared · 2 workers · 5 projects**. Workers covering all projects also appear here. Each agent row identifies its project; Chiefs and completed attempts remain available in the same tab. Tabs do not combine worker configurations or multiply a shared pool's capacity.
 
 ## Live controls
 
-- **Tab / Shift+Tab:** next / previous project.
-- **↑ / ↓:** select an agent across this project's workers.
-- **w:** list this project's workers, including idle workers, their checkouts and slot counts.
+- **Tab / Shift+Tab:** next / previous tab.
+- **↑ / ↓:** select an agent across the selected tab's workers.
+- **w:** list the selected tab's workers, including idle workers, their checkouts and slot counts.
 - **a:** add a worker. Enter its name, slot count and checkout. Tab changes fields; Ctrl+N adds another checkout; Enter saves and starts it.
 - **d** in the worker list: remove the selected worker after confirmation. It stops picking up new issues immediately, waits for its current agents and Chief, then exits. It stays marked for removal in saved configuration so reconnecting cannot resurrect it.
 - **h:** switch active work and attempt history.

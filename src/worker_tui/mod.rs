@@ -6,6 +6,32 @@ mod terminal_name;
 pub mod ui;
 
 use serde_json::Value;
+use std::collections::BTreeSet;
+
+/// Dedicated projects precede the lower-priority pool of shared workers.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DashboardTab {
+    Project(String),
+    Shared,
+}
+
+fn worker_projects(worker: &Value) -> BTreeSet<&str> {
+    worker["config"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+fn worker_tab(worker: &Value) -> DashboardTab {
+    let projects = worker_projects(worker);
+    if projects.len() == 1 {
+        DashboardTab::Project(projects.first().unwrap().to_string())
+    } else {
+        DashboardTab::Shared
+    }
+}
 
 /// Strip terminal controls, including ANSI and bidi overrides, from queue text.
 pub fn text(value: &Value) -> String {
@@ -39,7 +65,7 @@ pub struct Dashboard {
     pub snapshot: Value,
     pub owned_worker: bool,
     pub worker_id: Option<String>,
-    pub project_id: Option<String>,
+    pub selected_tab: Option<DashboardTab>,
     pub manage_workers: bool,
     pub managed_worker_id: Option<String>,
     pub add_worker: Option<AddWorker>,
@@ -113,44 +139,55 @@ impl Dashboard {
         self.snapshot["project_tabs"] == true
     }
 
-    pub fn project_ids(&self) -> Vec<String> {
-        let mut ids = std::collections::BTreeSet::new();
-        for worker in self.workers() {
-            for project in worker["config"]["projects"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                if let Some(id) = project.as_str() {
-                    ids.insert(id.to_owned());
-                }
-            }
-            for run in ["runs", "chiefs"]
-                .iter()
-                .flat_map(|key| worker[*key].as_array().into_iter().flatten())
-            {
-                if let Some(id) = run["project_id"].as_str() {
-                    ids.insert(id.to_owned());
-                }
+    pub fn tabs(&self) -> Vec<DashboardTab> {
+        self.workers()
+            .into_iter()
+            .map(worker_tab)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn tab_label(&self, tab: &DashboardTab) -> String {
+        match tab {
+            DashboardTab::Project(id) => project_name(id, &self.snapshot),
+            DashboardTab::Shared => {
+                let workers: Vec<_> = self
+                    .workers()
+                    .into_iter()
+                    .filter(|w| worker_tab(w) == DashboardTab::Shared)
+                    .collect();
+                let projects: BTreeSet<_> =
+                    workers.iter().flat_map(|w| worker_projects(w)).collect();
+                let scope = if workers.iter().any(|w| worker_projects(w).is_empty()) {
+                    "all projects".to_owned()
+                } else {
+                    format!("{} projects", projects.len())
+                };
+                format!(
+                    "Shared · {} worker{} · {scope}",
+                    workers.len(),
+                    if workers.len() == 1 { "" } else { "s" }
+                )
             }
         }
-        ids.into_iter().collect()
     }
 
     pub fn switch_project(&mut self, delta: isize) {
-        let ids = self.project_ids();
+        let ids = self.tabs();
         if ids.is_empty() {
             return;
         }
         let at = ids
             .iter()
-            .position(|id| Some(id) == self.project_id.as_ref())
+            .position(|id| Some(id) == self.selected_tab.as_ref())
             .unwrap_or(0);
-        self.project_id =
+        self.selected_tab =
             Some(ids[(at as isize + delta).rem_euclid(ids.len() as isize) as usize].clone());
         self.run_id = None;
         self.detail_scroll = 0;
         self.normalize_run();
+        self.navigate_worker(0);
     }
 
     pub fn workers(&self) -> Vec<&Value> {
@@ -163,14 +200,7 @@ impl Dashboard {
     pub fn project_workers(&self) -> Vec<&Value> {
         self.workers()
             .into_iter()
-            .filter(|w| {
-                w["config"]["projects"].as_array().is_some_and(|projects| {
-                    projects.is_empty()
-                        || projects
-                            .iter()
-                            .any(|p| p.as_str() == self.project_id.as_deref())
-                })
-            })
+            .filter(|w| Some(&worker_tab(w)) == self.selected_tab.as_ref())
             .collect()
     }
 
@@ -213,14 +243,13 @@ impl Dashboard {
     pub fn runs(&self) -> Vec<&Value> {
         if self.project_tabs() {
             return self
-                .workers()
+                .project_workers()
                 .into_iter()
                 .flat_map(|worker| {
                     ["runs", "chiefs"]
                         .into_iter()
                         .flat_map(move |key| worker[key].as_array().into_iter().flatten())
                 })
-                .filter(|run| run["project_id"].as_str() == self.project_id.as_deref())
                 .filter(|run| {
                     (run["finished_at"].is_null() || run["retry_at"].is_i64()) != self.history
                 })
@@ -241,9 +270,12 @@ impl Dashboard {
     pub fn apply(&mut self, snapshot: Value) {
         self.snapshot = snapshot;
         if self.project_tabs() {
-            let projects = self.project_ids();
-            if !projects.iter().any(|p| Some(p) == self.project_id.as_ref()) {
-                self.project_id = projects.into_iter().next();
+            let tabs = self.tabs();
+            if !tabs
+                .iter()
+                .any(|tab| Some(tab) == self.selected_tab.as_ref())
+            {
+                self.selected_tab = tabs.into_iter().next();
             }
         }
         let workers = self.workers();
@@ -282,7 +314,7 @@ impl Dashboard {
             return;
         }
         self.worker_id = self
-            .workers()
+            .project_workers()
             .into_iter()
             .find(|w| {
                 ["runs", "chiefs"]
@@ -290,15 +322,7 @@ impl Dashboard {
                     .flat_map(|key| w[*key].as_array().into_iter().flatten())
                     .any(|r| r["id"].as_str() == self.run_id.as_deref())
             })
-            .or_else(|| {
-                self.workers().into_iter().find(|w| {
-                    w["config"]["projects"].as_array().is_some_and(|projects| {
-                        projects
-                            .iter()
-                            .any(|p| p.as_str() == self.project_id.as_deref())
-                    })
-                })
-            })
+            .or_else(|| self.project_workers().into_iter().next())
             .and_then(|w| w["id"].as_str())
             .map(str::to_owned);
     }
