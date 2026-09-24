@@ -514,6 +514,11 @@ impl Store {
         let mut state = state;
         let mut summary: String = summary.chars().take(16_000).collect();
         let approval_hold = summary.starts_with("Codex needs input or approval:");
+        // A captured outage earlier in the turn must not relabel a later
+        // permission request or promise an automatic retry for that request.
+        if approval_hold {
+            state = "blocked";
+        }
         if state == "completed"
             && !own_closed
             && ((!own && !handed_off)

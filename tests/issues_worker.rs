@@ -1480,6 +1480,76 @@ fn infrastructure_outages_retry_automatically_and_resume_after_recovery() {
 }
 
 #[test]
+fn outage_backoff_and_continuation_survive_restarts_beyond_five_attempts() {
+    let f = Fixture::new("outage-restart-backoff");
+    f.setup(&[]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    let mut session = Value::Null;
+    let mut previous = Value::Null;
+    let mut previous_deadline = 0;
+    // Alternate the two captured outage causes. Restart the scheduler between
+    // attempts so neither the deadline nor continuation can live only in memory.
+    for count in 1..=6 {
+        let mode = if count % 2 == 0 {
+            "proxy-outage-rpc"
+        } else {
+            "database-outage-tool"
+        };
+        fs::write(f.root.join("mode.txt"), mode).unwrap();
+        let mut worker = f.worker();
+        if count > 1 {
+            let waiting = f.wait(|s| {
+                s["workers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|w| w["pid"] == worker.0.id())
+            });
+            // Each standalone scheduler has its own visible history. Inspect
+            // the authoritative old run, not the new worker's empty run list.
+            let deadline: i64 = db
+                .query_row(
+                    "SELECT retry_at FROM worker_runs WHERE id=?1",
+                    [previous.as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(deadline, previous_deadline);
+            assert_eq!(waiting["active"], 0);
+            assert_eq!(waiting["eligible"], 0);
+            // Advance only the synthetic deadline after verifying it survived.
+            db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
+        }
+        let result =
+            f.wait(|s| s["runs"][0]["id"] != previous && s["runs"][0]["finished_at"].is_number());
+        let run = &result["runs"][0];
+        assert_eq!(run["state"], "infrastructure_blocked");
+        assert_eq!(run["retry_count"], count);
+        let delay = run["retry_at"].as_i64().unwrap() - run["finished_at"].as_i64().unwrap();
+        assert_eq!(delay, (30_000_i64 << (count - 1)).min(300_000));
+        if count == 1 {
+            session = run["session_id"].clone();
+            assert!(session.is_string());
+        }
+        assert_eq!(run["session_id"], session);
+        assert_eq!(result["active"], 0);
+        let issue = f.cli(&["view", "1"]);
+        assert_eq!(issue["issue"]["state"], "open");
+        assert!(issue["issue"]["assignee"].is_null());
+        previous = run["id"].clone();
+        previous_deadline = run["retry_at"].as_i64().unwrap();
+        worker.stop();
+    }
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
+    let mut worker = f.worker();
+    let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
+    assert_eq!(recovered["runs"][0]["session_id"], session);
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    worker.stop();
+}
+
+#[test]
 fn manual_reopen_during_database_and_proxy_outages_preserves_session() {
     for mode in ["database-outage-tool", "proxy-outage-rpc"] {
         let f = Fixture::new(&format!("manual-reopen-{mode}"));
@@ -1512,6 +1582,32 @@ fn manual_reopen_during_database_and_proxy_outages_preserves_session() {
         let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
         assert_eq!(recovered["runs"][0]["session_id"], session);
         assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+        worker.stop();
+    }
+}
+
+#[test]
+fn approval_request_after_an_outage_still_requires_human_action() {
+    for mode in ["database-outage-approval", "proxy-outage-approval"] {
+        let f = Fixture::new(if mode.starts_with("database") {
+            "db-approval"
+        } else {
+            "proxy-approval"
+        });
+        fs::write(f.root.join("mode.txt"), mode).unwrap();
+        f.setup(&[]);
+        let mut worker = f.worker();
+        let result = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        let run = &result["runs"][0];
+        assert_eq!(run["state"], "blocked", "{mode}: {result}");
+        assert!(run["retry_at"].is_null());
+        assert!(
+            run["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("Codex needs input or approval:")
+        );
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "blocked");
         worker.stop();
     }
 }
@@ -2143,11 +2239,23 @@ fn worker_refreshes_order_before_each_reservation_and_preserves_tag_filters() {
     f.cli(&["move", "4", "--before", "3"]);
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
     f.control("stop", run);
-    let result = f.wait(|s| {
-        s["runs"]
-            .as_array()
-            .is_some_and(|r| r.len() == 4 && r.iter().all(|r| r["finished_at"].is_number()))
-    });
+    // Each sequential agent gets the normal completion deadline. A single
+    // deadline for all three launches can expire despite steady queue progress.
+    for number in [1, 3, 2] {
+        f.wait(|s| {
+            s["runs"].as_array().is_some_and(|runs| {
+                runs.iter()
+                    .any(|r| r["number"] == number && r["state"] == "completed")
+            })
+        });
+    }
+    let result = f.cli(&["worker", "status"]);
+    let runs = result["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 4, "{result}");
+    assert!(
+        runs.iter().all(|r| r["finished_at"].is_number()),
+        "{result}"
+    );
     let turns: Vec<_> = f
         .transcript()
         .into_iter()
