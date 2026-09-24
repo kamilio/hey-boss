@@ -9,7 +9,13 @@ only the reference. Removed map topics remain identified in document backlinks.
 
 The library keeps search and recent documents together. Open a document for a
 focused reading view; **Edit** opens its draft, and the **More actions** menu
-contains Export Markdown and Archive/Restore. **Comments** shows or hides the
+contains Export Markdown, Archive/Restore, and Delete permanently. Library rows
+also offer quick Archive/Restore and Delete actions, including on touch screens.
+Select **Archived** to browse archived documents and restore them.
+Permanent deletion asks for confirmation and removes the document, its comments,
+attached files, and issue/mindmap references. Referring issues and map topics stay
+intact. Deletion cannot be undone; Archive keeps a document for later.
+**Comments** shows or hides the
 conversation beside the document, or below it on smaller screens. Reply composers
 open only when needed. Unused reference and discussion sections stay out of view.
 Attachment pickers search available documents and disable Attach when nothing
@@ -61,11 +67,15 @@ hey-boss artifact archive a-ID --if-version 2
 hey-boss artifact list --archived
 hey-boss artifact restore a-ID --if-version 3
 hey-boss artifact unlink a-ID --issue 12
+hey-boss artifact delete a-ID --if-version 4
 ```
 
 `--project`, `--host`, `--agent`, `--request-id` and `--json` follow issue CLI
 conventions. Mutation retries must retain the identical request ID and payload.
-Edits and archive/restore require a current `--if-version`. List pages contain
+Edits, archive/restore, and permanent deletion require a current `--if-version`.
+The CLI's `delete` command is explicit and does not prompt; check the ID and
+revision before running it. Interrupted web actions retain their request identity
+for retry. List pages contain
 50 documents, ordered by recent activity; use `--offset` for additional pages.
 Documents have a 1 MiB Markdown limit, comments a 1 MiB limit, and selection
 anchors an 8 KiB limit. Each document supports 1,000 comments within an aggregate
