@@ -998,7 +998,7 @@ fn web_reordering_shares_cli_order_and_rejects_stale_changes() {
 }
 
 #[test]
-fn ui_creation_uses_selected_end_atomically_and_cli_creation_still_appends() {
+fn ui_creation_uses_selected_end_atomically_and_cli_creation_defaults_to_front() {
     let web = Web::start();
     web.ok(json!({"action":"create","title":"First","body":"","labels":[],"at_top":true}));
     let cli_create = |title: &str| {
@@ -1057,7 +1057,7 @@ fn ui_creation_uses_selected_end_atomically_and_cli_creation_still_appends() {
             .iter()
             .map(|i| i["number"].as_i64().unwrap())
             .collect::<Vec<_>>(),
-        vec![4, 3, 2, 1, 5, 6]
+        vec![5, 4, 3, 2, 1, 6]
     );
     assert_eq!(
         result["order_version"].as_i64().unwrap(),

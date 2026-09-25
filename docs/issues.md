@@ -724,7 +724,7 @@ to another keeps the other hidden issues in their relative order. New issues
 created in the UI go to the top by default; check **Add to bottom** in the editor
 or Quick Add to append instead. Press **⌘⇧B / Ctrl+Shift+B** while composing to
 toggle placement. Unsent drafts retain the choice; the next issue defaults to top.
-CLI-created issues append to the end. Creating
+CLI-created issues also go to the front; `--at-bottom` appends instead. Creating
 in the UI keeps you on the list and highlights the new row for four seconds.
 Matching filters remain; filters that exclude the new issue reset to reveal it. Closing,
 deleting, reopening, and restoring retain position.
