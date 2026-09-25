@@ -65,7 +65,7 @@ Version guards, actor identity and request IDs are checked by the supervisor.
 If a connection drops during a write, retry with the same `--request-id`; an
 unacknowledged write may already have completed. Requests are not queued for
 offline replay. Fleet responses are limited to 16 MiB; narrow large map reads
-with `--bodies omit`, `view NODE`, or `links NODE`.
+with `--bodies none`, `view NODE`, or `links NODE`.
 
 ## References and links
 
