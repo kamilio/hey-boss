@@ -86,12 +86,33 @@ pub(in crate::fleet) fn resource(
     })
 }
 
+pub(in crate::fleet) fn numbers(
+    database: &Path,
+    project: &crate::issues::Project,
+    next: i64,
+) -> crate::issues::Result<Value> {
+    if std::env::var_os("HEY_BOSS_ISSUE_DB").is_some()
+        && std::env::var_os("HEY_BOSS_FLEET_STATE").is_none()
+    {
+        return Err(unavailable(
+            "a private issue database needs its own HEY_BOSS_FLEET_STATE",
+        ));
+    }
+    let socket = crate::fleet::socket_path()?;
+    call(
+        socket.parent().unwrap(),
+        database,
+        json!({"kind":"issue_numbers","project":project,"next":next}),
+    )
+}
+
 pub(super) fn failure(error: Error) -> Value {
     json!({"ok":false,"error":error})
 }
 
 pub(super) struct Relay {
     supported: Arc<AtomicBool>,
+    numbers_supported: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     replies: mpsc::SyncSender<Value>,
     thread: Option<thread::JoinHandle<()>>,
@@ -115,9 +136,11 @@ impl Relay {
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let supported = Arc::new(AtomicBool::new(false));
+        let numbers_supported = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
         let (replies, incoming) = mpsc::sync_channel::<Value>(2);
         let ready = supported.clone();
+        let numbers_ready = numbers_supported.clone();
         let stop = stopped.clone();
         let database = ctx.path.canonicalize()?;
         let thread = thread::spawn(move || {
@@ -154,9 +177,17 @@ impl Relay {
                     }
                     if !matches!(
                         request["request"]["kind"].as_str(),
-                        Some("resource" | "status" | "overview")
+                        Some("resource" | "status" | "overview" | "issue_numbers")
                     ) {
                         return Err(Error::invalid("Unsupported authority request").into());
+                    }
+                    if request["request"]["kind"] == "issue_numbers"
+                        && !numbers_ready.load(Ordering::Acquire)
+                    {
+                        return Err(unavailable(
+                            "supervisor needs an upgrade for on-demand issue numbers",
+                        )
+                        .into());
                     }
                     serial += 1;
                     let id = format!("{}-{serial}", std::process::id());
@@ -192,6 +223,7 @@ impl Relay {
         });
         Ok(Self {
             supported,
+            numbers_supported,
             stopped,
             replies,
             thread: Some(thread),
@@ -200,6 +232,10 @@ impl Relay {
         })
     }
     pub fn configure(&self, message: &Value) {
+        self.numbers_supported.store(
+            message["capabilities"]["issue_numbers"] == true,
+            Ordering::Release,
+        );
         self.supported.store(
             message["capabilities"]["authority_rpc"] == true,
             Ordering::Release,
@@ -264,6 +300,9 @@ mod tests {
         assert_eq!(error.code, "fleet_unavailable");
         assert!(error.message.contains("has not advertised"));
         relay.configure(&json!({"capabilities":{"authority_rpc":true}}));
+        let error = call(&ctx.state, &ctx.path, json!({"kind":"issue_numbers"})).unwrap_err();
+        assert_eq!(error.code, "fleet_unavailable");
+        assert!(error.message.contains("needs an upgrade"));
         let error = call(
             &ctx.state,
             &root.join("unrelated.db"),
