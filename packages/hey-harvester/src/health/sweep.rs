@@ -1,7 +1,13 @@
 //! Resumable, bounded file expiration. New files never shelter old siblings.
 use super::{Config, Item, databases, now};
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::MetadataExt;
+use std::os::{
+    fd::AsRawFd,
+    unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt},
+    },
+};
 use std::{
     collections::{BTreeSet, VecDeque},
     fs, io,
@@ -22,39 +28,110 @@ pub struct Progress {
 #[derive(Serialize, Deserialize)]
 struct Frame {
     path: PathBuf,
-    after: Option<PathBuf>,
-    #[serde(skip)]
-    batch: VecDeque<PathBuf>,
+    #[serde(default)]
+    offset: i64,
+    #[serde(default)]
+    identity: Option<(u64, u64)>,
+    #[serde(default)]
+    batch: VecDeque<Vec<u8>>,
 }
 impl Frame {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
-            after: None,
+            offset: 0,
+            identity: None,
             batch: VecDeque::new(),
         }
     }
     fn next(&mut self) -> io::Result<Option<PathBuf>> {
         if self.batch.is_empty() {
-            // Bound persisted memory even for flat directories with millions of files.
-            let mut first = BTreeSet::new();
-            for entry in fs::read_dir(&self.path)? {
-                let p = entry?.path();
-                if self.after.as_ref().is_some_and(|last| p <= *last) {
-                    continue;
-                }
-                first.insert(p);
-                if first.len() > 1024 {
-                    first.pop_last();
-                }
+            self.refill()?;
+        }
+        Ok(self
+            .batch
+            .pop_front()
+            .map(|name| self.path.join(std::ffi::OsStr::from_bytes(&name))))
+    }
+    fn refill(&mut self) -> io::Result<()> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.path)?;
+        let meta = file.metadata()?;
+        let identity = (meta.dev(), meta.ino());
+        if self.identity != Some(identity) {
+            self.offset = 0;
+            self.identity = Some(identity);
+        }
+        let fd = file.as_raw_fd();
+        if unsafe { libc::lseek(fd, self.offset, libc::SEEK_SET) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // Persist the kernel chunk offset AND unconsumed names. telldir cookies
+        // belong to a DIR stream; macOS d_seekoff is often zero. Neither can
+        // safely resume a reopened stream. One bounded read avoids rescanning
+        // a huge flat directory for each batch or scheduling interval.
+        let mut bytes = [0u8; 8192];
+        #[cfg(target_os = "macos")]
+        let count = {
+            unsafe extern "C" {
+                fn __getdirentries64(
+                    fd: libc::c_int,
+                    buf: *mut libc::c_void,
+                    size: libc::size_t,
+                    base: *mut libc::off_t,
+                ) -> libc::ssize_t;
             }
-            self.batch.extend(first);
+            let mut base = 0;
+            unsafe { __getdirentries64(fd, bytes.as_mut_ptr().cast(), bytes.len(), &mut base) }
+        };
+        #[cfg(target_os = "linux")]
+        let count =
+            unsafe { libc::syscall(libc::SYS_getdents64, fd, bytes.as_mut_ptr(), bytes.len()) }
+                as isize;
+        if count < 0 {
+            return Err(io::Error::last_os_error());
         }
-        let p = self.batch.pop_front();
-        if let Some(p) = &p {
-            self.after = Some(p.clone());
+        let offset = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };
+        if offset == -1 {
+            return Err(io::Error::last_os_error());
         }
-        Ok(p)
+        if count > 0 && offset == self.offset {
+            return Err(io::Error::other("Directory cursor did not advance"));
+        }
+        #[cfg(target_os = "macos")]
+        let name_start = 21;
+        #[cfg(target_os = "linux")]
+        let name_start = 19;
+        let mut pos = 0;
+        let mut batch = VecDeque::new();
+        while pos < count as usize {
+            let remaining = &bytes[pos..count as usize];
+            if remaining.len() <= name_start {
+                return Err(io::Error::other("Truncated directory entry"));
+            }
+            let length = u16::from_ne_bytes([remaining[16], remaining[17]]) as usize;
+            if length <= name_start || length > remaining.len() {
+                return Err(io::Error::other("Invalid directory entry length"));
+            }
+            let name = &remaining[name_start..length];
+            let end = name
+                .iter()
+                .position(|b| *b == 0)
+                .ok_or_else(|| io::Error::other("Unterminated directory entry"))?;
+            let name = &name[..end];
+            if !name.is_empty() && name != b"." && name != b".." {
+                if name.contains(&b'/') {
+                    return Err(io::Error::other("Invalid directory entry name"));
+                }
+                batch.push_back(name.to_vec());
+            }
+            pos += length;
+        }
+        self.offset = offset;
+        self.batch = batch;
+        Ok(())
     }
 }
 fn add(roots: &mut BTreeSet<PathBuf>, path: PathBuf) {
@@ -336,6 +413,31 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flat_directory_resumes_without_retained_entries_starving_later_files() {
+        let root = std::env::temp_dir().join(format!("harvester-flat-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let expected: BTreeSet<_> = (0..4096)
+            .map(|n| {
+                let path = root.join(format!("entry-{n:05}"));
+                fs::write(&path, b"retained").unwrap();
+                path
+            })
+            .collect();
+        let mut frame = Frame::new(root.clone());
+        let mut seen = BTreeSet::new();
+        while let Some(path) = frame.next().unwrap() {
+            assert!(seen.insert(path));
+            // A step must only read a bounded kernel chunk, never sort the directory.
+            assert!(frame.batch.len() < 512);
+            if seen.len() % 113 == 0 {
+                frame = serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+            }
+        }
+        assert_eq!(seen, expected);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn expires_old_siblings_resumes_and_preserves_live_sqlite_and_symlink_targets() {
         let root = std::env::temp_dir().join(format!("harvester-sweep-{}", std::process::id()));
