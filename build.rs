@@ -21,6 +21,7 @@ fn main() {
         "src",
         "skills/hey-boss",
         "packages/hey-gh",
+        "packages/hey-harvester",
         "tools/upgrade_hey_boss.py",
         "tools/drain_github_issues.py",
         "hey_boss_daemon.swift",

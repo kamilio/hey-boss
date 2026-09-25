@@ -77,7 +77,7 @@ fn normalize_origin(origin: &str) -> Option<String> {
     }
     Some(format!("{host}/{path}"))
 }
-pub(crate) fn git_info(cwd: &str) -> Option<GitInfo> {
+pub fn git_info(cwd: &str) -> Option<GitInfo> {
     let locations = git_output(
         cwd,
         &[
@@ -716,7 +716,7 @@ fn process_started(pid: u32) -> Option<u64> {
     Some(now().saturating_sub(elapsed))
 }
 #[cfg(target_os = "macos")]
-pub(crate) fn process_identity(pid: u32) -> Option<String> {
+pub fn process_identity(pid: u32) -> Option<String> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
     if unsafe {
@@ -738,7 +738,7 @@ pub(crate) fn process_identity(pid: u32) -> Option<String> {
     ))
 }
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn process_identity(pid: u32) -> Option<String> {
+pub fn process_identity(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
@@ -904,7 +904,7 @@ impl SessionFiles {
         Ok(titles)
     }
     fn thread(&self, id: &str) -> Option<SessionRecord> {
-        let rollout = crate::agent_conversations::rollout(&self.root, id)?;
+        let rollout = rollout(&self.root, id)?;
         Some(SessionRecord {
             title: self.titles.get(id).cloned(),
             rollout: Some(rollout),
@@ -1143,6 +1143,45 @@ pub fn scan() -> Snapshot {
     });
     snapshot
 }
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+static PATHS: OnceLock<Mutex<HashMap<(PathBuf, String), PathBuf>>> = OnceLock::new();
+fn find(root: &Path, suffix: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let kind = entry.file_type().ok()?;
+        if kind.is_dir() {
+            if let Some(path) = find(&entry.path(), suffix) {
+                return Some(path);
+            }
+        } else if kind.is_file() && entry.file_name().to_string_lossy().ends_with(suffix) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+pub fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
+    let key = (home.to_owned(), session.to_owned());
+    if let Some(path) = PATHS
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .get(&key)
+        .filter(|p| p.exists())
+        .cloned()
+    {
+        return Some(path);
+    }
+    let suffix = format!("-{session}.jsonl");
+    let path = find(&home.join("sessions"), &suffix)
+        .or_else(|| find(&home.join("archived_sessions"), &suffix))?;
+    let mut paths = PATHS.get_or_init(Default::default).lock().ok()?;
+    if paths.len() >= 256 {
+        paths.clear();
+    }
+    paths.insert(key, path.clone());
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,15 +11,16 @@ description = "Native macOS notifications, Markdown updates, and agent questions
 readme = "README.md"
 keywords = ["macos", "notifications", "cli", "agents"]
 categories = ["command-line-utilities"]
-include = ["packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**"]
+include = ["packages/hey-harvester/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**"]
 
 [workspace]
 exclude = ["worker-tui"]
-members = ["packages/hey-gh", "packages/hey-gh/bindings/node"]
-default-members = [".", "packages/hey-gh"]
+members = ["packages/hey-harvester", "packages/hey-gh", "packages/hey-gh/bindings/node"]
+default-members = ["packages/hey-harvester", ".", "packages/hey-gh"]
 resolver = "3"
 
 [dependencies]
+hey-harvester = { version = "0.1.0", path = "packages/hey-harvester" }
 hey-gh = { version = "0.1.0", path = "packages/hey-gh" }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 crossterm = "0.28"
