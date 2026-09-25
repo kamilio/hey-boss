@@ -32,7 +32,7 @@ async page => {
       await page.waitForFunction(() => !!projectSettingsOriginal && !document.querySelector('#project-subtask-scheduling').disabled);
     };
     await view(4);
-    check(await page.getByRole('heading',{name:'Manual hold',exact:true}).isVisible(),'Manual hold is distinguished from dependencies');
+    check(await page.getByRole('heading',{name:'On hold',exact:true}).isVisible(),'Manual hold is distinguished from dependencies');
     check(await page.locator('.issue-blockers').innerText().then(t=>t.includes('#2') && t.includes('#3')),'Sequential mode shows effective earlier siblings');
     await page.locator('.blocked-notice [data-action="clear_manual_hold"]').click();
     await page.getByRole('heading',{name:'Waiting for dependencies',exact:true}).waitFor();

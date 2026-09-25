@@ -103,6 +103,14 @@
             </button>
           </div>
         </div>
+        <div id="blocked-filter-control" class="blocked-filter-control" hidden>
+          <label for="blocked-filter">Blocked reason</label>
+          <select id="blocked-filter" aria-label="Filter by blocked reason">
+            <option value="">All blocked issues</option>
+            <option value="hold">On hold</option>
+            <option value="dependencies">Waiting for dependencies</option>
+          </select>
+        </div>
         <div class="issue-panel glass">
           <div class="list-heading">
             <div class="state-tabs" role="tablist" aria-label="Issue state">

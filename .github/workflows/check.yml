@@ -12,6 +12,7 @@ jobs:
       - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py tools/test_mobile_issues.py
       - run: python3 tools/test_issue_planning.py
       - run: node tools/test_quick_issue.js && node --check src/issues/web/quick-issue.js
+      - run: node tools/test_issue_blocked_types.cjs
       - run: node tools/test_issue_transfer_controls.cjs
       - run: node tools/test_local_http_crypto.cjs
       - run: node tools/test_metadata_mutation.cjs
