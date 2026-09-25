@@ -1226,6 +1226,25 @@ impl Store {
         Ok(project)
     }
 
+    /// Explicit online metadata path. Never falls back to replica mutation.
+    pub fn execute_supervisor(&mut self, r: &Request) -> Result<Value> {
+        validate(r)?;
+        super::authority::validate(r)?;
+        let companion: bool = self.db.query_row(
+            "SELECT role='agent' FROM fleet_meta WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if companion {
+            // Do not hold a transaction or resolve projects against stale data.
+            let path = self.db.path().ok_or_else(|| {
+                Error::invalid("Supervisor routing requires a persistent issue database")
+            })?;
+            return crate::fleet::authoritative_metadata(r, Path::new(path));
+        }
+        self.execute(r)
+    }
+
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
         if matches!(
             r.operation,

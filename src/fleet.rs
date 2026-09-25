@@ -159,6 +159,13 @@ pub(crate) fn issue_numbers(
     native::numbers(database, project, next)
 }
 
+pub(crate) fn authoritative_metadata(
+    request: &crate::issues::Request,
+    database: &std::path::Path,
+) -> crate::issues::Result<Value> {
+    native::metadata(request, database)
+}
+
 pub fn subscribe() -> crate::issues::Result<UnixStream> {
     let mut stream = UnixStream::connect(socket_path()?)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(20)))?;

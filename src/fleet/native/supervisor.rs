@@ -670,7 +670,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
-            json!({"kind":"configure","capabilities":{"authority_rpc":true,"issue_numbers":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","capabilities":authority::capabilities(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
@@ -836,7 +836,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut input,
-                            json!({"kind":"configure","capabilities":{"authority_rpc":true,"issue_numbers":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","capabilities":authority::capabilities(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1238,6 +1238,11 @@ impl Supervisor {
 
     fn authoritative(&self, value: &Value) -> crate::issues::Result<Value> {
         match value["kind"].as_str() {
+            Some("issue_metadata") => {
+                let request: crate::issues::Request =
+                    serde_json::from_value(value["request"].clone())?;
+                crate::issues::Store::open(&self.ctx.path)?.execute_supervisor(&request)
+            }
             Some("resource") => {
                 let request: crate::issues::Request =
                     serde_json::from_value(value["request"].clone())?;
@@ -1534,6 +1539,112 @@ mod tests {
             app.authoritative(&json!({"kind":"status"})).unwrap()["ok"],
             true
         );
+    }
+
+    #[test]
+    fn authority_metadata_preserves_ownership_guards_and_receipts() {
+        let (_directory, app) = test_supervisor();
+        let actor = json!({"id":"codex:chief","kind":"codex","session_id":"chief","machine":"peer","host":"peer","pid":null,"process_start":null,"cwd":"/tmp","source":"test"});
+        let request = |mut operation: Value, key: Option<&str>| -> crate::issues::Request {
+            if operation["action"] == "edit" {
+                let fields = operation.as_object_mut().unwrap();
+                fields.entry("add_labels").or_insert_with(|| json!([]));
+                fields.entry("remove_labels").or_insert_with(|| json!([]));
+            }
+            serde_json::from_value(json!({"version":1,"project":{"id":"named:Test","name":"Test"},"actor":actor,"operation":operation,"request_id":key})).unwrap()
+        };
+        let mut store = crate::issues::Store::open(&app.ctx.path).unwrap();
+        for title in ["Closed cleanup", "Live assignment"] {
+            store
+                .execute(&request(
+                    json!({"action":"create","title":title,"body":"","labels":["rework needed"]}),
+                    None,
+                ))
+                .unwrap();
+        }
+        store
+            .execute(&request(
+                json!({"action":"close","number":1,"force":false}),
+                None,
+            ))
+            .unwrap();
+        let mut claim = request(json!({"action":"claim","number":2,"force":false}), None);
+        claim.actor.as_mut().unwrap().id = "codex:worker".into();
+        claim.actor.as_mut().unwrap().session_id = Some("worker".into());
+        store.execute(&claim).unwrap();
+        app.ctx
+            .db()
+            .unwrap()
+            .execute_batch("INSERT INTO fleet_allocations VALUES('named:Test',2,'worker-machine');")
+            .unwrap();
+        let ownership = || {
+            app.ctx
+                .db()
+                .unwrap()
+                .prepare("SELECT number,state,assignee FROM issues ORDER BY number")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let before = ownership();
+        let route = |operation: Value, key: Option<&str>| {
+            app.authoritative(&json!({"kind":"issue_metadata","request":request(operation, key)}))
+        };
+        for number in [1, 2] {
+            let edit = json!({"action":"edit","number":number,"if_version":2,"add_labels":["reviewed"],"remove_labels":["rework needed"]});
+            let key = format!("edit-{number}");
+            let saved = route(edit.clone(), Some(key.as_str())).unwrap();
+            assert_eq!(saved["issue"]["labels"], json!(["reviewed"]));
+            assert_eq!(route(edit.clone(), Some(key.as_str())).unwrap(), saved);
+            assert_eq!(route(edit, Some("stale")).unwrap_err().code, "conflict");
+        }
+        assert_eq!(ownership(), before);
+        assert_eq!(
+            app.ctx
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT node FROM fleet_allocations WHERE issue_number=2",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "worker-machine"
+        );
+        let batch = json!({"action":"batch","edits":[{"number":1,"if_version":3,"expected_assignee":null,"add_labels":["batch"]},{"number":2,"if_version":3,"expected_assignee":"wrong","add_labels":["batch"]}]});
+        assert_eq!(
+            route(batch, Some("batch-stale")).unwrap()["accepted"],
+            false
+        );
+        for operation in [
+            json!({"action":"claim","number":1,"force":true}),
+            json!({"action":"reopen","number":1,"if_version":3}),
+            json!({"action":"edit","number":2,"draft":true,"if_version":3}),
+            json!({"action":"edit","number":2,"add_labels":["unguarded"]}),
+            json!({"action":"batch","edits":[{"number":2,"if_version":3,"expected_assignee":"codex:worker","assignment":"unassign"}]}),
+        ] {
+            assert_eq!(
+                route(operation, Some("unsupported")).unwrap_err().code,
+                "invalid_input"
+            );
+        }
+        let edit = json!({"action":"edit","number":2,"if_version":3,"add_labels":["yolo"]});
+        assert_eq!(route(edit, Some("unsafe")).unwrap_err().code, "forbidden");
+        let edit = json!({"action":"edit","number":2,"if_version":3,"body":"Correct guidance"});
+        assert_eq!(route(edit.clone(), None).unwrap_err().code, "invalid_input");
+        assert_eq!(
+            route(edit, Some("body")).unwrap()["issue"]["body"],
+            "Correct guidance"
+        );
+        assert_eq!(ownership(), before);
     }
 
     fn large_report_supervisor() -> (TestDirectory, Supervisor) {

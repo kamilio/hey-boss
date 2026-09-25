@@ -62,6 +62,18 @@ pub(in crate::fleet) fn resource(
     request: &Request,
     database: &Path,
 ) -> crate::issues::Result<Value> {
+    routed(request, database, "resource")
+}
+
+pub(in crate::fleet) fn metadata(
+    request: &Request,
+    database: &Path,
+) -> crate::issues::Result<Value> {
+    crate::issues::authority::validate(request)?;
+    routed(request, database, "issue_metadata")
+}
+
+fn routed(request: &Request, database: &Path, kind: &str) -> crate::issues::Result<Value> {
     // Workers inherit HEY_BOSS_ISSUE_DB for the installed store. The relay
     // verifies its canonical database identity before forwarding any request;
     // a genuinely different private store still cannot use the live fleet.
@@ -69,7 +81,7 @@ pub(in crate::fleet) fn resource(
     call(
         socket.parent().unwrap(),
         database,
-        json!({"kind":"resource","request":request}),
+        json!({"kind":kind,"request":request}),
     )
     .map_err(|mut error| {
         if request.operation.writes() && error.code == "fleet_unavailable" {
@@ -98,9 +110,14 @@ pub(super) fn failure(error: Error) -> Value {
     json!({"ok":false,"error":error})
 }
 
+pub(super) fn capabilities() -> Value {
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true})
+}
+
 pub(super) struct Relay {
     supported: Arc<AtomicBool>,
     numbers_supported: Arc<AtomicBool>,
+    metadata_supported: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     replies: mpsc::SyncSender<Value>,
     thread: Option<thread::JoinHandle<()>>,
@@ -125,10 +142,12 @@ impl Relay {
         listener.set_nonblocking(true)?;
         let supported = Arc::new(AtomicBool::new(false));
         let numbers_supported = Arc::new(AtomicBool::new(false));
+        let metadata_supported = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
         let (replies, incoming) = mpsc::sync_channel::<Value>(2);
         let ready = supported.clone();
         let numbers_ready = numbers_supported.clone();
+        let metadata_ready = metadata_supported.clone();
         let stop = stopped.clone();
         let database = ctx.path.canonicalize()?;
         let thread = thread::spawn(move || {
@@ -165,7 +184,9 @@ impl Relay {
                     }
                     if !matches!(
                         request["request"]["kind"].as_str(),
-                        Some("resource" | "status" | "overview" | "issue_numbers")
+                        Some(
+                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata"
+                        )
                     ) {
                         return Err(Error::invalid("Unsupported authority request").into());
                     }
@@ -176,6 +197,17 @@ impl Relay {
                             "supervisor needs an upgrade for on-demand issue numbers",
                         )
                         .into());
+                    }
+                    if request["request"]["kind"] == "issue_metadata" {
+                        if !metadata_ready.load(Ordering::Acquire) {
+                            return Err(unavailable(
+                                "supervisor needs an upgrade for guarded issue metadata",
+                            )
+                            .into());
+                        }
+                        let metadata: Request =
+                            serde_json::from_value(request["request"]["request"].clone())?;
+                        crate::issues::authority::validate(&metadata)?;
                     }
                     serial += 1;
                     let id = format!("{}-{serial}", std::process::id());
@@ -212,6 +244,7 @@ impl Relay {
         Ok(Self {
             supported,
             numbers_supported,
+            metadata_supported,
             stopped,
             replies,
             thread: Some(thread),
@@ -220,6 +253,10 @@ impl Relay {
         })
     }
     pub fn configure(&self, message: &Value) {
+        self.metadata_supported.store(
+            message["capabilities"]["issue_metadata"] == true,
+            Ordering::Release,
+        );
         self.numbers_supported.store(
             message["capabilities"]["issue_numbers"] == true,
             Ordering::Release,
@@ -293,6 +330,9 @@ mod tests {
         assert!(error.message.contains("has not advertised"));
         relay.configure(&json!({"capabilities":{"authority_rpc":true}}));
         let error = call(&ctx.state, &ctx.path, json!({"kind":"issue_numbers"})).unwrap_err();
+        assert_eq!(error.code, "fleet_unavailable");
+        assert!(error.message.contains("needs an upgrade"));
+        let error = call(&ctx.state, &ctx.path, json!({"kind":"issue_metadata"})).unwrap_err();
         assert_eq!(error.code, "fleet_unavailable");
         assert!(error.message.contains("needs an upgrade"));
         let error = call(

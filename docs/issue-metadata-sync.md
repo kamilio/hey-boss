@@ -27,6 +27,7 @@ can change canonical state. Later ownership or same-field conflicts still retain
 the attempted journal payload in fleet conflicts. Never obtain an allocation by
 forcing a claim or releasing someone else's reservation just to edit metadata.
 For unallocated companion edits, use the authoritative supervisor connection via
+[`--supervisor`](chief-metadata-routing.md) for guarded metadata changes, or
 `--host` when available; otherwise the operation fails explicitly and must be
 retried deliberately once a valid route is available. DNS configuration is outside
 this repair.

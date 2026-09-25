@@ -471,6 +471,161 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
             .unwrap(),
         0
     );
+    // Chief metadata uses the same authenticated stream, without a work claim.
+    let main_db = rusqlite::Connection::open(main.root.join("issues.db")).unwrap();
+    // Both fixture processes share a physical machine UUID. Give captured
+    // authority history a distinct origin, as it has on a real second device.
+    main_db
+        .execute(
+            "UPDATE fleet_meta SET node='authority-fixture-main' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    let issue = |fixture: &Fixture, args: &[&str], code| {
+        let mut all = vec![
+            "issue",
+            "--project",
+            "Authority",
+            "--agent",
+            "codex:chief",
+            "--json",
+        ];
+        all.extend_from_slice(args);
+        let output = fixture.command(&all).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    issue(
+        &main,
+        &[
+            "create",
+            "--title",
+            "Closed cleanup",
+            "--label",
+            "rework needed",
+        ],
+        0,
+    );
+    issue(&main, &["close", "1"], 0);
+    issue(&main, &["create", "--title", "Live worker"], 0);
+    main.cli(&[
+        "issue",
+        "--project",
+        "Authority",
+        "--agent",
+        "codex:worker",
+        "--json",
+        "claim",
+        "2",
+    ]);
+    main_db
+        .execute(
+            "INSERT INTO fleet_allocations VALUES('named:Authority',2,'another-machine') ON CONFLICT(project_id,issue_number) DO UPDATE SET node=excluded.node",
+            [],
+        )
+        .unwrap();
+    for number in ["1", "2"] {
+        let before = issue(&peer, &["--supervisor", "view", number], 0);
+        assert_eq!(before["store"]["host"], "supervisor");
+        let version = before["issue"]["version"].to_string();
+        let key = format!("metadata-{number}");
+        let args = [
+            "--supervisor",
+            "edit",
+            number,
+            "--if-version",
+            &version,
+            "--label",
+            "reviewed",
+            "--remove-label",
+            "rework needed",
+            "--request-id",
+            &key,
+        ];
+        let saved = issue(&peer, &args, 0);
+        assert_eq!(saved, issue(&peer, &args, 0));
+        assert_eq!(saved["issue"]["assignee"], before["issue"]["assignee"]);
+        assert_eq!(saved["issue"]["state"], before["issue"]["state"]);
+        assert_eq!(saved["issue"]["labels"], serde_json::json!(["reviewed"]));
+        assert_eq!(issue(&main, &["view", number], 0)["issue"], saved["issue"]);
+        let stale = issue(
+            &peer,
+            &[
+                "--supervisor",
+                "edit",
+                number,
+                "--if-version",
+                &version,
+                "--label",
+                "stale",
+                "--request-id",
+                "stale",
+            ],
+            4,
+        );
+        assert_eq!(stale["error"]["code"], "conflict");
+    }
+    assert_eq!(
+        main_db
+            .query_row(
+                "SELECT actor FROM requests WHERE request_id='metadata-2'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "codex:chief"
+    );
+    assert_eq!(
+        main_db
+            .query_row(
+                "SELECT node FROM fleet_allocations WHERE issue_number=2",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "another-machine"
+    );
+    assert_eq!(
+        peer_db
+            .query_row(
+                "SELECT count(*) FROM requests WHERE request_id LIKE 'metadata-%'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    for args in [
+        vec!["--supervisor", "claim", "2", "--force"],
+        vec!["--supervisor", "reopen", "1", "--if-version", "3"],
+        vec![
+            "--supervisor",
+            "edit",
+            "2",
+            "--label",
+            "unguarded",
+            "--request-id",
+            "unsupported",
+        ],
+        vec![
+            "--supervisor",
+            "edit",
+            "2",
+            "--draft",
+            "--if-version",
+            "3",
+            "--request-id",
+            "unsupported",
+        ],
+    ] {
+        assert_eq!(issue(&peer, &args, 2)["error"]["code"], "invalid_input");
+    }
     supervisor.terminate();
     assert_eq!(supervisor.0.try_wait().unwrap().unwrap().code(), Some(0));
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -481,6 +636,32 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         );
         thread::sleep(Duration::from_millis(50));
     }
+    let disconnected = issue(
+        &peer,
+        &[
+            "--supervisor",
+            "edit",
+            "2",
+            "--if-version",
+            "3",
+            "--label",
+            "offline",
+            "--request-id",
+            "offline-metadata",
+        ],
+        1,
+    );
+    assert_eq!(disconnected["error"]["code"], "fleet_unavailable");
+    assert!(
+        disconnected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("same --request-id")
+    );
+    assert_eq!(
+        issue(&main, &["view", "2"], 0)["issue"]["labels"],
+        serde_json::json!(["reviewed"])
+    );
     let offline = peer
         .command(&["mm", "--project", "Authority", "--json", "show"])
         .output()

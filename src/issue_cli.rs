@@ -18,6 +18,9 @@ pub struct Options {
     /// Authoritative SSH host (also HEY_BOSS_ISSUE_HOST); never falls back locally.
     #[arg(long, global = true)]
     host: Option<String>,
+    /// Use the connected supervisor for guarded metadata (no SSH or work claim).
+    #[arg(long, global = true, conflicts_with = "host")]
+    supervisor: bool,
     /// Print structured results and operational errors.
     #[arg(long, global = true)]
     pub json: bool,
@@ -69,6 +72,7 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
         project: None,
         agent: Some("human:boss".into()),
         host: options.host.clone(),
+        supervisor: false,
         json: options.json,
         request_id: options.request_id.clone(),
         action: Action::GlobalSettings { operation },
@@ -934,6 +938,27 @@ impl Options {
 }
 
 pub fn run(options: &Options) -> Result<()> {
+    if options.supervisor {
+        if std::env::var_os("HEY_BOSS_ISSUE_HOST").is_some_and(|v| !v.is_empty()) {
+            return Err(Error::invalid(
+                "--supervisor conflicts with HEY_BOSS_ISSUE_HOST; choose one authority route",
+            ));
+        }
+        if !matches!(
+            options.action,
+            Action::View { .. }
+                | Action::Allocation { .. }
+                | Action::Batch { .. }
+                | Action::Edit {
+                    interactive: false,
+                    ..
+                }
+        ) {
+            return Err(Error::invalid(
+                "--supervisor supports view, allocation, guarded metadata edits and label-only batches; this command is not supported",
+            ));
+        }
+    }
     if let Action::Migrate { installation } = &options.action {
         let path = issues::database_path_for_installation(&installation.canonicalize()?)?;
         Store::migrate(&path)?;
@@ -1085,7 +1110,14 @@ pub fn run(options: &Options) -> Result<()> {
                 }
                 error
             })?,
-            None => Store::open(&issues::database_path()?)?.execute(&request)?,
+            None => {
+                let mut store = Store::open(&issues::database_path()?)?;
+                if options.supervisor {
+                    store.execute_supervisor(&request)?
+                } else {
+                    store.execute(&request)?
+                }
+            }
         };
         if interactive {
             let file = match &options.action {
@@ -1117,7 +1149,9 @@ pub fn run(options: &Options) -> Result<()> {
         {
             scope_allocation(info, host);
         }
-        value["store"] = if let Some(host) = host {
+        value["store"] = if options.supervisor {
+            json!({"host":"supervisor"})
+        } else if let Some(host) = host {
             json!({"host":host})
         } else {
             json!({"host":"local","database":issues::database_path()?})
