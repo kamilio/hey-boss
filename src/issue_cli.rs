@@ -1282,15 +1282,24 @@ pub(crate) fn print_text(value: &Value) {
         );
         return;
     }
-    if value.get("prs_enabled").is_some() {
-        println!(
-            "Worktrees enabled: {}\nPRs enabled: {}\nChief enabled: {}\nChief prompt: {}\nShared prompt: {}",
-            value["worktree_enabled"],
-            value["prs_enabled"],
-            value["chief_enabled"],
-            markdown(&value["chief_prompt"]),
-            markdown(&value["prompt"])
-        );
+    for (key, label) in [
+        // Project permission does not imply that a worker selected a worktree.
+        ("worktree_enabled", "Worktrees allowed"),
+        ("prs_enabled", "PRs enabled"),
+        ("chief_enabled", "Chief enabled"),
+    ] {
+        if value[key] == true {
+            println!("{label}: true");
+        }
+    }
+    for (key, label) in [
+        ("chief_prompt", "Chief prompt"),
+        ("prompt", "Shared prompt"),
+    ] {
+        let prompt = markdown(&value[key]);
+        if !prompt.trim().is_empty() {
+            println!("{label}: {prompt}");
+        }
     }
     if let Some(mode) = value.get("subtask_scheduling") {
         println!("Subtask scheduling: {}", line(mode));
