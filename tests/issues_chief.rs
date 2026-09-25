@@ -96,10 +96,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     f.cli(&["settings", "set", "--no-chief"]);
     let start = |enable: bool| {
         let mut command = f.command();
+        command.args(["worker", "run"]);
         if enable {
-            command.arg("worker").arg("--chief");
-        } else {
-            command.arg("worker");
+            command.arg("--chief");
         }
         Worker(
             command
