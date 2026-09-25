@@ -254,9 +254,12 @@ enum Action {
     },
     /// Create an open, unassigned issue. The body defaults to empty.
     Create {
-        /// Place the new issue at the front of the project queue.
-        #[arg(long)]
+        /// Place the new issue at the front of the project queue (the default).
+        #[arg(long, conflicts_with = "at_bottom")]
         at_top: bool,
+        /// Append the new issue to the project queue.
+        #[arg(long)]
+        at_bottom: bool,
         #[arg(long)]
         draft: bool,
         #[arg(long)]
@@ -761,7 +764,8 @@ impl Options {
                 offset: *offset,
             },
             Action::Create {
-                at_top,
+                at_top: _,
+                at_bottom,
                 title,
                 body,
                 labels,
@@ -784,7 +788,7 @@ impl Options {
                     title,
                     body,
                     labels: labels.clone(),
-                    at_top: *at_top,
+                    at_top: !*at_bottom,
                 }
             }
             Action::Edit {

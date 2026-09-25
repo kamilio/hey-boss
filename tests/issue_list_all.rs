@@ -28,7 +28,14 @@ fn list_all_preserves_filters_and_queue_order_without_truncating() {
         serde_json::from_slice(&output.stdout).unwrap()
     };
     for _ in 0..105 {
-        ok(&["create", "--title", "Matching issue", "--label", "ready"]);
+        ok(&[
+            "create",
+            "--at-bottom",
+            "--title",
+            "Matching issue",
+            "--label",
+            "ready",
+        ]);
     }
     ok(&["create", "--title", "Other issue"]);
     ok(&["claim", "1"]);

@@ -10,6 +10,59 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn default_creation_stays_on_the_first_page_of_a_long_cli_queue() {
+    let f = Fixture::new();
+    f.create();
+    f.sql().execute_batch(
+        "WITH RECURSIVE numbers(n) AS (SELECT 2 UNION ALL SELECT n+1 FROM numbers WHERE n<60)
+         INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+         SELECT project_id,n,'Queued work','','open',created_by,created_at,updated_at,1,'[]',n
+         FROM issues CROSS JOIN numbers WHERE number=1;
+         UPDATE projects SET next_number=61;",
+    ).unwrap();
+    let created = f.run("session-a", &["create", "--title", "Visible immediately"]);
+    assert_eq!(created["issue"]["number"], 61);
+    let first = f.run("session-a", &["list"]);
+    assert_eq!(first["issues"].as_array().unwrap().len(), 50);
+    assert_eq!(first["issues"][0]["number"], 61);
+    assert_eq!(first["issues"][1]["number"], 1);
+    let second = f.run("session-a", &["list", "--offset", "50"]);
+    assert_eq!(second["issues"].as_array().unwrap().len(), 11);
+    assert_eq!(second["issues"][0]["number"], 50);
+}
+
+#[test]
+fn creation_defaults_to_front_with_explicit_bottom_and_stable_existing_ranks() {
+    let f = Fixture::new();
+    f.create();
+    let before: i64 = f
+        .sql()
+        .query_row("SELECT sort_order FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    f.run("session-a", &["create", "--title", "Newest"]);
+    f.run("session-a", &["create", "--title", "Later", "--at-bottom"]);
+    let list = f.run("session-a", &["list"]);
+    assert_eq!(
+        list["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["number"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2, 1, 3]
+    );
+    assert_eq!(
+        f.sql()
+            .query_row("SELECT sort_order FROM issues WHERE number=1", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
 fn even_a_boss_cli_identity_cannot_enable_yolo() {
     let f = Fixture::new();
     f.create();
@@ -55,7 +108,10 @@ fn native_quick_issue_creates_atomically_at_top_and_retries_once() {
         f.run("human:boss", &args)["issue"]["number"],
         created["issue"]["number"]
     );
-    f.run("human:boss", &["create", "--title", "Bottom"]);
+    f.run(
+        "human:boss",
+        &["create", "--title", "Bottom", "--at-bottom"],
+    );
     let list = f.run("human:boss", &["list"]);
     assert_eq!(list["issues"][0]["number"], created["issue"]["number"]);
     assert_eq!(list["issues"][1]["number"], first);
@@ -124,6 +180,7 @@ impl Fixture {
             "session-a",
             &[
                 "create",
+                "--at-bottom",
                 "--title",
                 "Reconnect",
                 "--body",
@@ -1140,7 +1197,7 @@ fn project_identity_groups_worktrees_and_normalizes_origins() {
         ],
     );
     success(
-        f.cmd("session-a", &["create", "--title", "other"])
+        f.cmd("session-a", &["create", "--at-bottom", "--title", "other"])
             .current_dir(&second)
             .output()
             .unwrap(),
@@ -1209,7 +1266,10 @@ fn same_named_directories_share_a_destination_and_explicit_names_are_isolated() 
 fn filtering_pagination_and_field_validation() {
     let f = Fixture::new();
     for title in ["first bug", "second bug", "third"] {
-        f.run("a", &["create", "--title", title, "--label", "bug"]);
+        f.run(
+            "a",
+            &["create", "--at-bottom", "--title", title, "--label", "bug"],
+        );
     }
     let first = f.run(
         "a",
@@ -1775,12 +1835,19 @@ fn project_overview_counts_open_claimed_closed_deleted_and_prints_columns() {
 }
 
 #[test]
-fn issue_order_is_shared_durable_paginated_filtered_and_new_issues_append() {
+fn issue_order_is_shared_durable_paginated_filtered_and_explicit_bottom_appends() {
     let f = Fixture::new();
     for title in ["One", "Two", "Three"] {
         f.run(
             "session-a",
-            &["create", "--title", title, "--label", "ready"],
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                title,
+                "--label",
+                "ready",
+            ],
         );
     }
     let order = |args: &[&str]| {
@@ -1804,7 +1871,7 @@ fn issue_order_is_shared_durable_paginated_filtered_and_new_issues_append() {
     assert_eq!(order(&["list"]), vec![3, 1, 2]);
     assert_eq!(order(&["list", "--limit", "2"]), vec![3, 1]);
     assert_eq!(order(&["list", "--limit", "2", "--offset", "2"]), vec![2]);
-    f.run("session-a", &["create", "--title", "Four"]);
+    f.run("session-a", &["create", "--at-bottom", "--title", "Four"]);
     assert_eq!(order(&["list"]), vec![3, 1, 2, 4]);
     assert_eq!(order(&["list", "--label", "ready"]), vec![3, 1, 2]);
     f.run("session-a", &["move", "3", "--after", "2"]);
@@ -1830,6 +1897,7 @@ fn issue_order_is_shared_durable_paginated_filtered_and_new_issues_append() {
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .env("GIT_CEILING_DIRECTORIES", &f.root)
         .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
         .args(["issue", "list"])
         .output()
         .unwrap();
@@ -1861,7 +1929,14 @@ fn concurrent_reorders_reject_stale_lists_without_losing_issue_content() {
     for title in ["One", "Two", "Three"] {
         f.run(
             "session-a",
-            &["create", "--title", title, "--body", "# Preserve me"],
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                title,
+                "--body",
+                "# Preserve me",
+            ],
         );
     }
     let v = f.run("session-a", &["list"])["order_version"]
@@ -1941,7 +2016,12 @@ fn repeated_issue_moves_match_user_order_and_preserve_unique_positions() {
     for number in &expected {
         f.run(
             "session-a",
-            &["create", "--title", &format!("Issue {number}")],
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                &format!("Issue {number}"),
+            ],
         );
     }
     for step in 0..90 {
@@ -2049,6 +2129,7 @@ fn boss_assignment_rename_filter_and_ownership_preserve_issue_data() {
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .env("GIT_CEILING_DIRECTORIES", &f.root)
         .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
         .args([
             "issue",
             "list",
