@@ -416,6 +416,10 @@ mod tests {
                 .to_string()
                 .contains("build verification")
         );
+        assert_eq!(
+            fs::read_to_string(bin.with_file_name("hey-harvester")).unwrap(),
+            "#!/bin/sh\necho old-hey-harvester\n"
+        );
         assert_eq!(fs::read(&bin).unwrap(), original);
         assert_eq!(
             fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
