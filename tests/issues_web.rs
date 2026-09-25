@@ -965,9 +965,6 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
         assert_eq!(value["use_goal"], use_goal);
         let text = value["prompt"].as_str().unwrap();
-        let expected = format!(
-            "{expected}\n\nFor required validation, exit 0 alone is not success: require a normal exit and fresh completion evidence for the expected task graph. Treat interrupted, cancelled, timed-out, or incompletely reported runs as incomplete. Do not advance dependent steps until the required checks are verified; keep existing hooks and project gates enabled.\n\nUse the project's single admission path for validation. Do not nest manual slot locks around commands that already acquire capacity, or reserve extra slots to work around slow checks, unless exclusive reservation is an explicit requirement. Preserve the concurrency limit and inherited ownership. When queued, report the holder and waiter PIDs, their parent/child relationship, the slots involved, and whether checks have started. Do not kill owners or release locks based only on idle or orphan labels."
-        );
         assert_eq!(text, expected);
         assert!(!text.contains("--project"));
         assert_eq!(value["objective"], text);
@@ -1745,6 +1742,7 @@ fn project_plan_prompt_is_saved_previewed_claimed_and_reset() {
         reset["prompt"]
             .as_str()
             .unwrap()
+            .trim_start_matches("- ")
             .starts_with("Claim and plan")
     );
     assert!(

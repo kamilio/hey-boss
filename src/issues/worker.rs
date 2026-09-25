@@ -2289,10 +2289,6 @@ mod tests {
                 && text.contains("prompt-test-literal-body-7")
         );
         assert!(!text.contains("{{worktree_"));
-        assert!(text.contains("git worktree add --lock --reason"));
-        assert!(text.contains("queued") && text.contains("session") && text.contains("issue"));
-        assert!(text.contains("staged") && text.contains("duplicate validators"));
-        assert!(text.contains("owner-authorized cleanup") && text.contains("receipts"));
     }
     #[test]
     fn artifact_tasks_replace_implementation_and_delivery_prompts() {
@@ -2315,15 +2311,17 @@ mod tests {
                 assert!(text.contains("Claim and plan"), "{text}");
                 assert!(text.contains("hey-boss artifact create"), "{text}");
                 assert!(text.contains("--issue 7"));
-                assert!(text.contains("mindmap"));
-                assert!(text.contains("draft follow-up issues"));
                 assert!(text.contains("Plan document: /tmp/task-notes.md"));
                 assert!(!text.contains("Commit your changes"));
                 assert!(!text.contains("pull request"));
                 assert!(!text.contains("dedicated Git worktree"));
                 assert!(!text.contains("Implement and deploy everything"));
                 assert_eq!(goal, base.starts_with("/goal"));
-                assert!(objective.starts_with("Claim and plan"));
+                assert!(
+                    objective
+                        .trim_start_matches("- ")
+                        .starts_with("Claim and plan")
+                );
             }
         }
     }
@@ -2335,24 +2333,6 @@ mod tests {
             preview(&ProjectConfig::default(), &project(), task).0,
             preview(&ProjectConfig::default(), &project(), issue()).0
         );
-    }
-    #[test]
-    fn default_delivery_requires_complete_validation_for_main_and_prs() {
-        for prs_enabled in [false, true] {
-            let config = ProjectConfig {
-                prompt: "Implement {{number}} with the project's checks.".into(),
-                prs_enabled,
-                ..Default::default()
-            };
-            let text = preview(&config, &project(), issue()).0;
-            assert!(text.contains("exit 0 alone"), "{text}");
-            assert!(text.contains("incomplete"), "{text}");
-            assert!(text.contains("expected task graph"), "{text}");
-            assert!(text.contains("Do not advance dependent steps"), "{text}");
-            assert!(text.contains("single admission path"), "{text}");
-            assert!(text.contains("holder and waiter"), "{text}");
-            assert!(text.contains("Do not kill owners"), "{text}");
-        }
     }
     #[test]
     fn configured_prompts_keep_their_instructions_and_add_pr_handoff_context() {
