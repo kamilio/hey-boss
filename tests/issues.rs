@@ -3317,8 +3317,16 @@ fn dependency_migration_normalizes_legacy_parents_and_preserves_manual_blocks() 
     f.sql()
         .execute_batch(
             "UPDATE issues SET state='open',assignee='session-a' WHERE number=1;
-        DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
+        DROP INDEX issue_list_summary; DROP VIEW issue_pickup_ready; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
         )
+        .unwrap();
+    // A pre-blocker database used the earlier readiness view as well.
+    let legacy_view = include_str!("../src/issues/subtasks.sql")
+        .split_once("CREATE VIEW")
+        .unwrap()
+        .1;
+    f.sql()
+        .execute_batch(&format!("CREATE VIEW{legacy_view}"))
         .unwrap();
     let parent = f.run("reader", &["view", "1"]);
     assert_eq!(parent["issue"]["state"], "blocked");
