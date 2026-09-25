@@ -62,6 +62,8 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
 struct Graph {
     issues: BTreeMap<i64, Value>,
     children: BTreeMap<i64, Vec<i64>>,
+    parents: BTreeMap<i64, i64>,
+    previous: BTreeMap<i64, Vec<i64>>,
     links: BTreeMap<i64, Vec<i64>>,
 }
 impl Graph {
@@ -69,22 +71,57 @@ impl Graph {
         let mut graph = Self {
             issues: BTreeMap::new(),
             children: BTreeMap::new(),
+            parents: BTreeMap::new(),
+            previous: BTreeMap::new(),
             links: BTreeMap::new(),
         };
-        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
-        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?}), r.get::<_,String>(5)?)))? {
+        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL) FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
+        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?}), r.get::<_,String>(5)?)))? {
             let (n, issue, links) = row?;
             graph.links.insert(n, serde_json::from_str(&links)?);
             graph.issues.insert(n, issue);
         }
-        let mut stmt = db.prepare("SELECT parent_number,child_number FROM issue_subtasks WHERE project_id=?1 ORDER BY child_number")?;
+        let mut stmt = db.prepare("SELECT r.parent_number,r.child_number FROM issue_subtasks r JOIN issues i ON i.project_id=r.project_id AND i.number=r.child_number WHERE r.project_id=?1 ORDER BY i.sort_order,i.number")?;
         for row in stmt.query_map([project], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })? {
             let (parent, child) = row?;
+            graph.parents.insert(child, parent);
             graph.children.entry(parent).or_default().push(child);
         }
+        for (&parent, children) in &graph.children {
+            if !graph.issues[&parent]["deleted_at"].is_null() {
+                continue;
+            }
+            let mut previous = Vec::new();
+            for &child in children {
+                if graph.issues[&child]["deleted_at"].is_null() {
+                    graph.previous.insert(child, previous.clone());
+                    previous.push(child);
+                }
+            }
+        }
         Ok(graph)
+    }
+    // Include preceding branches at every level, so a nested leaf cannot
+    // overtake its parent's previous sibling. Deleted ancestors detach work.
+    fn sequence_roots(&self, mut n: i64) -> Vec<i64> {
+        let mut roots = Vec::new();
+        loop {
+            if self
+                .issues
+                .get(&n)
+                .is_none_or(|i| !i["deleted_at"].is_null())
+            {
+                break;
+            }
+            roots.extend(self.previous.get(&n).into_iter().flatten());
+            let Some(parent) = self.parents.get(&n) else {
+                break;
+            };
+            n = *parent;
+        }
+        roots
     }
     fn unfinished(&self, n: i64) -> bool {
         self.issues
@@ -112,6 +149,13 @@ impl Graph {
         for child in self.descendants(n) {
             if self.unfinished(child) {
                 result.insert(child, "subtask");
+            }
+        }
+        for root in self.sequence_roots(n) {
+            for previous in std::iter::once(root).chain(self.descendants(root)) {
+                if self.unfinished(previous) {
+                    result.insert(previous, "previous_subtask");
+                }
             }
         }
         for &blocker in self.links.get(&n).into_iter().flatten() {
@@ -149,6 +193,7 @@ impl Graph {
         issue.as_object_mut().unwrap().remove("manual_blocked");
         issue.as_object_mut().unwrap().remove("created_by");
         issue.as_object_mut().unwrap().remove("assignee");
+        issue.as_object_mut().unwrap().remove("reserved");
         issue["source"] = json!(source);
         issue
     }
@@ -166,6 +211,7 @@ impl Graph {
                 continue;
             }
             todo.extend(self.children.get(&n).into_iter().flatten());
+            todo.extend(self.sequence_roots(n));
             todo.extend(self.links.get(&n).into_iter().flatten());
         }
         Ok(())
@@ -228,37 +274,37 @@ pub(super) fn reconcile(
     actor: Option<&str>,
     now: i64,
 ) -> Result<()> {
-    reconcile_with_claim_protection(db, project, actor, now, false)
+    reconcile_graph(db, project, actor, now, false)
 }
 
-/// Subtask organization must not transfer ownership, even indirectly through a
-/// closed ancestor. The caller's transaction rolls back the whole mutation.
+/// Subtask organization must preserve all existing parent and ancestor claims.
 pub(super) fn reconcile_subtasks(
     db: &Connection,
     project: &str,
     actor: Option<&str>,
     now: i64,
 ) -> Result<()> {
-    reconcile_with_claim_protection(db, project, actor, now, true)
+    validate_subtask_claims(db, project)?;
+    reconcile(db, project, actor, now)
 }
 
-fn reconcile_with_claim_protection(
+fn reconcile_graph(
     db: &Connection,
     project: &str,
     actor: Option<&str>,
     now: i64,
-    protect_claims: bool,
+    upgrading: bool,
 ) -> Result<()> {
     let graph = Graph::load(db, project)?;
-    if protect_claims {
-        graph.validate_subtask_claims()?;
+    // Reordering or linking may introduce a cycle through a closed issue too.
+    for (&number, links) in &graph.links {
+        for &target in links {
+            graph.validate_edge(number, target)?;
+        }
     }
     for (&number, issue) in &graph.issues {
         if !issue["deleted_at"].is_null() || issue["state"] == "closed" {
             continue;
-        }
-        for &target in graph.links.get(&number).into_iter().flatten() {
-            graph.validate_edge(number, target)?;
         }
         let blockers = graph.active(number);
         let state = if issue["manual_blocked"] == true
@@ -270,6 +316,18 @@ fn reconcile_with_claim_protection(
         };
         if issue["state"] == state {
             continue;
+        }
+        if !issue["assignee"].is_null() || issue["reserved"] == true {
+            // An upgrade lets existing work drain without stealing ownership.
+            // The readiness view already excludes later branches from new pickup.
+            if upgrading {
+                continue;
+            }
+            if state == "blocked" && blockers.values().any(|s| *s == "previous_subtask") {
+                return Err(Error::conflict(format!(
+                    "Cannot change the subtask sequence: issue #{number} is claimed or reserved. Finish or release that work first."
+                )));
+            }
         }
         db.execute("UPDATE issues SET state=?3,assignee=NULL,version=version+1,updated_at=?4 WHERE project_id=?1 AND number=?2", params![project,number,state,now])?;
         super::store::event(
@@ -289,6 +347,14 @@ fn reconcile_with_claim_protection(
     Ok(())
 }
 pub(crate) fn reconcile_all(db: &Connection) -> Result<()> {
+    reconcile_projects(db, false)
+}
+
+pub(super) fn reconcile_sequence_upgrade(db: &Connection) -> Result<()> {
+    reconcile_projects(db, true)
+}
+
+fn reconcile_projects(db: &Connection, upgrading: bool) -> Result<()> {
     let mut stmt = db.prepare("SELECT id FROM projects")?;
     let projects = stmt
         .query_map([], |r| r.get::<_, String>(0))?
@@ -298,7 +364,7 @@ pub(crate) fn reconcile_all(db: &Connection) -> Result<()> {
         .unwrap_or_default()
         .as_millis() as i64;
     for project in projects {
-        reconcile(db, &project, None, now)?;
+        reconcile_graph(db, &project, None, now, upgrading)?;
     }
     Ok(())
 }

@@ -3519,6 +3519,62 @@ mod tests {
     }
 
     #[test]
+    fn fleet_allocates_only_the_first_unfinished_subtask_and_syncs_progress() {
+        let main = Fixture::new();
+        main.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            VALUES('named:Native fleet',2,'First','','open','human:fixture',0,0,1,'[]',2),
+                  ('named:Native fleet',3,'Second','','open','human:fixture',0,0,1,'[]',3);
+            INSERT INTO issue_subtasks VALUES('named:Native fleet',1,2,0,'human:fixture'),('named:Native fleet',1,3,0,'human:fixture');").unwrap();
+        main.capture();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":3,"tags":[],"enabled":true}}),
+        ];
+        allocate(&main.db, "agent", &workers).unwrap();
+        allocate(&main.db, "other", &workers).unwrap();
+        let allocated = rows(
+            &main.db,
+            "SELECT issue_number FROM fleet_allocations ORDER BY issue_number",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(allocated, vec![json!({"issue_number":2})]);
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT state FROM issues WHERE number=3", &[]).unwrap()[0]["state"],
+            "blocked"
+        );
+        main.db
+            .execute("UPDATE issues SET state='closed' WHERE number=2", [])
+            .unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        allocate(&main.db, "agent", &workers).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&main.db, "SELECT a.issue_number FROM fleet_allocations a JOIN issues i ON i.project_id=a.project_id AND i.number=a.issue_number WHERE i.state='open'", &[]).unwrap(),
+            vec![json!({"issue_number":3})]
+        );
+        assert_eq!(
+            rows(&agent.db, "SELECT number FROM issue_pickup_ready", &[]).unwrap(),
+            vec![json!({"number":3})]
+        );
+    }
+
+    #[test]
     fn a_full_allocation_pool_does_not_scan_the_unallocated_queue() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         unsafe extern "C" fn count_steps(context: *mut std::ffi::c_void) -> std::ffi::c_int {

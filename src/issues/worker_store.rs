@@ -228,7 +228,7 @@ pub(super) fn execute(
                     {} ORDER BY i.sort_order,i.created_at,i.project_id,i.number LIMIT 1", super::registry::PICKUP_READY), params![project.id,serde_json::to_string(&config.labels)?], |r|r.get(0)).optional()?
             };
             let issue = if let Some(n) = next {
-                json!(get_issue(db, &project.id, n, false)?)
+                super::subtasks::worker_issue(db, &project.id, n)?
             } else {
                 json!({"number":1,"title":"<issue title>","body":"<issue body>"})
             };

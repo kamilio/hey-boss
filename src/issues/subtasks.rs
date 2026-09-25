@@ -174,6 +174,10 @@ struct Graph {
     open: BTreeMap<i64, i64>,
 }
 impl Graph {
+    fn context_reference(issue: &Value) -> Value {
+        json!({"number":issue["number"],"title":issue["title"],"state":issue["state"],
+            "deleted_at":issue["deleted_at"],"pull_requests":issue["pull_requests"]})
+    }
     fn load(db: &Connection, project: &str) -> Result<Self> {
         let mut graph = Self {
             issues: BTreeMap::new(),
@@ -239,6 +243,25 @@ impl Graph {
             .and_then(|p| self.issues.get(p))
             .cloned()
             .unwrap_or(Value::Null);
+        issue["subtask_context"] = Value::Null;
+        if let Some(parent) = self.parents.get(&number) {
+            let siblings: Vec<_> = self
+                .children
+                .get(parent)
+                .into_iter()
+                .flatten()
+                .filter(|n| self.issues[n]["deleted_at"].is_null())
+                .collect();
+            if let Some(position) = siblings.iter().position(|n| **n == number) {
+                issue["subtask_context"] = json!({
+                    "parent":self.issues.get(parent).map(Self::context_reference),
+                    "position":position+1,
+                    "total":siblings.len(),
+                    "previous":position.checked_sub(1).map(|p| Self::context_reference(&self.issues[siblings[p]])),
+                    "next":siblings.get(position+1).map(|n| Self::context_reference(&self.issues[n])),
+                });
+            }
+        }
         let children = self.children.get(&number).cloned().unwrap_or_default();
         if children.is_empty() {
             issue["subtasks"] = Value::Null;
@@ -264,6 +287,12 @@ impl Graph {
             .filter_map(|n| self.issues.get(n).cloned())
             .collect()
     }
+}
+/// Use the same relationship snapshot for claim responses, previews and jobs.
+pub(super) fn worker_issue(db: &Connection, project: &str, number: i64) -> Result<Value> {
+    let mut issue = json!(get_issue(db, project, number, false)?);
+    Graph::load(db, project)?.attach(&mut issue);
+    Ok(issue)
 }
 /// One graph snapshot enriches an entire page; no relationship query per row.
 pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Result<()> {

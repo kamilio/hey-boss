@@ -1176,6 +1176,38 @@ fn prompt(job: &Job) -> (String, bool, String) {
 }
 fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
     let (mut instructions, goal, objective) = task_prompt(job, config);
+    if let Some(context) = job.issue["subtask_context"].as_object() {
+        let parent = &context["parent"];
+        instructions.push_str(&format!(
+            "\n\nSubtask {} of {} (sequential queue).\nParent: #{} {} [{}]",
+            context["position"],
+            context["total"],
+            parent["number"],
+            parent["title"].as_str().unwrap_or(""),
+            parent["state"].as_str().unwrap_or("")
+        ));
+        for (key, label) in [("previous", "Previous"), ("next", "Next")] {
+            if let Some(sibling) = context[key].as_object() {
+                instructions.push_str(&format!(
+                    "\n{label}: #{} {} [{}]",
+                    sibling["number"],
+                    sibling["title"].as_str().unwrap_or(""),
+                    sibling["state"].as_str().unwrap_or("")
+                ));
+            } else {
+                instructions.push_str(&format!("\n{label}: none"));
+            }
+        }
+        let project = format!("'{}'", job.project.id.replace('\'', "'\\''"));
+        instructions.push_str(&format!(
+            "\nRead the parent requirements: hey-boss issue view {} --project {project}.",
+            parent["number"]
+        ));
+        if let Some(previous) = context["previous"]["number"].as_i64() {
+            instructions.push_str(&format!("\nRead the previous subtask's completion notes and PRs: hey-boss issue view {previous} --project {project}."));
+        }
+        instructions.push_str("\nWork on this subtask's scope. Later subtasks wait until this issue and its descendants are closed. Before closing, record what changed, verification, and any handoff details for the next agent. Completing this subtask does not complete the parent. Re-read the claim response for current sequence context; queue order may have changed since launch.");
+    }
     if job.resume_session.is_some() {
         instructions.push_str("\n\nResume the saved work. If a previous database mutation had an unknown outcome, first read and reconcile the current issue state or reuse its original request ID for deduplication; never blindly replay it. If an infrastructure outage still prevents progress, report the active outage and retain the continuation state. An automatic retry never bypasses permissions or verification.");
     }
