@@ -503,6 +503,13 @@ final class Store {
     let queue = DispatchQueue(label: "hey-boss.store", qos: .userInitiated)
     // Native bulk dismissal must not wait behind periodic sync or block the
     // database queue while the relay is responding.
+    let actionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "hey-boss.notification-actions"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 4
+        return queue
+    }()
     let dismissalQueue = DispatchQueue(label: "hey-boss.dismissal", qos: .userInitiated)
     let database: Database
     var mobile: MobileHub?
@@ -573,8 +580,10 @@ final class Store {
                 else { throw invalid("Only questions or enabled document reviews can be waited on") }
             } else { reply.send(row.response) }
         case "hide":
-            try dismissRecords([row.taskID])
-            reply.send(try database.get(row.taskID).response)
+            dismiss([row.taskID]) { result in
+                do { try result.get(); reply.send(try self.database.get(row.taskID).response) }
+                catch { reply.send(["status":"error", "error":String(describing:error)]) }
+            }
         default:
             guard row.kind == "prompt" || row.kind == "approval" || row.commentsEnabled == true else { throw invalid("Only questions or enabled document reviews can be waited on") }
             if row.status != "pending" { reply.send(row.response) }
@@ -595,33 +604,41 @@ final class Store {
                   Set(ids).count == ids.count, ids.allSatisfy({ !$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && $0.utf8.count <= 256 && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }) else { throw StorageError(description:"Select 1–10000 unique notice IDs") }
             // Validate the complete snapshot before changing any records.
             let pending = try ids.filter { try database.status($0) == "pending" }
-            // Decode only a bounded batch of documents at a time.
-            defer { refreshPendingCount() }
-            for start in stride(from:0,to:pending.count,by:100) {
-                let batch = Array(pending[start..<min(start+100,pending.count)])
-                if let mobile { try mobile.clear(batch.map { try database.get($0) }, apply: applyMobileMany) }
-                else { try dismissRecords(batch) }
+            dismiss(pending) { result in
+                do {
+                    try result.get()
+                    let cleared = try pending.filter { try self.database.status($0) != "pending" }.count
+                    let data = try JSONSerialization.data(withJSONObject:["cleared":cleared,"changed":cleared>0])
+                    reply.send(["task_id":"inbox","status":"ok","result":String(decoding:data,as:UTF8.self)])
+                } catch { reply.send(["status":"error", "error":String(describing:error)]) }
             }
-            let cleared = try pending.filter { try database.status($0) != "pending" }.count
-            let data = try JSONSerialization.data(withJSONObject:["cleared":cleared,"changed":cleared>0])
-            reply.send(["task_id":"inbox","status":"ok","result":String(decoding:data,as:UTF8.self)])
             return
         }
         guard let id = request.task_id, !id.isEmpty, id.utf8.count <= 256 else { throw StorageError(description:"Task ID is required") }
         var row = try database.get(id)
         let before = try JSONEncoder().encode(row)
+        let completed: (Result<Record, Error>) -> Void = { result in
+            do {
+                let updated = try result.get()
+                try self.inboxReply(reply, task:updated, changed:before != JSONEncoder().encode(updated))
+            } catch { reply.send(["status":"error", "error":String(describing:error)]) }
+        }
         switch request.command {
         case "inbox_view": break
         case "inbox_read":
-            if row.status == "pending" && ["alert","update"].contains(row.kind) && row.commentsEnabled != true { try finish(id,nil) }
+            if row.status == "pending" && ["alert","update"].contains(row.kind) && row.commentsEnabled != true { finishAsync(id,nil,completion:completed); return }
         case "inbox_respond":
             guard ["prompt","approval"].contains(row.kind), let answer = request.question, !answer.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, answer.utf8.count <= 65536 else { throw StorageError(description:"A valid answer is required") }
-            if row.status == "pending" { try finish(id,answer) }
-        case "inbox_dismiss": try dismissRecords([id])
+            if row.status == "pending" { finishAsync(id,answer,completion:completed); return }
+        case "inbox_dismiss":
+            dismiss([id]) { result in
+                completed(result.flatMap { _ in Result { try self.database.get(id) } })
+            }
+            return
         case "inbox_comment": _ = try addComment(id,text:request.question ?? "",quote:request.description)
         case "inbox_finish_review":
             guard row.kind == "update", row.commentsEnabled == true else { throw StorageError(description:"This is not a document review") }
-            if row.status == "pending" { try finish(id,nil) }
+            if row.status == "pending" { finishAsync(id,nil,completion:completed); return }
         case "inbox_link":
             try request.issue?.validate()
             if row.issue != request.issue {
@@ -635,7 +652,7 @@ final class Store {
                 self.queue.async {
                     do {
                         guard opened else { throw StorageError(description:"Could not open the destination") }
-                        if row.status == "pending", ["alert","update"].contains(row.kind), row.commentsEnabled != true { try self.finish(id,nil) }
+                        if row.status == "pending", ["alert","update"].contains(row.kind), row.commentsEnabled != true { self.finishAsync(id,nil,completion:completed); return }
                         try self.inboxReply(reply,task:self.database.get(id),changed:opened)
                     } catch { reply.send(["status":"error","error":String(describing:error)]) }
                 }
@@ -676,7 +693,7 @@ final class Store {
     }
     func complete(_ ids: [String]) { dismiss(ids) }
     func complete(_ id: String, _ result: String?) {
-        do { try finish(id, result) } catch { reportFailure(error) }
+        finishAsync(id, result) { if case .failure(let error) = $0 { reportFailure(error) } }
     }
     func finish(_ id: String, _ result: String?) throws {
         defer { refreshPendingCount() }
@@ -691,23 +708,51 @@ final class Store {
         for reply in (waiters.removeValue(forKey: id) ?? []) + (feedbackWaiters.removeValue(forKey: id) ?? []) { reply.send(row.response) }
         remove(id)
     }
-    func dismiss(_ ids: [String]) {
+    // Called on the store queue. Only snapshots and acknowledgement commits use
+    // that queue; a slow relay cannot stall subsequent notification clicks.
+    func finishAsync(_ id: String, _ result: String?, completion: @escaping (Result<Record, Error>) -> Void) {
         do {
-            guard let mobile else { try dismissRecords(ids); return }
+            let row = try database.get(id)
+            guard row.status == "pending" else { completion(.success(row)); return }
+            if row.kind == "approval", result == nil || !row.options.contains(result ?? "") { throw StorageError(description: "Invalid approval answer") }
+            if row.kind == "prompt", result == nil { throw StorageError(description: "Missing prompt answer") }
+            guard let mobile else {
+                try finish(id, result)
+                completion(.success(try database.get(id)))
+                return
+            }
+            actionQueue.addOperation {
+                do {
+                    let task = try mobile.resolve(row, result: result, cancel: false)
+                    guard task["taskID"] as? String == id else { throw StorageError(description: "Mobile acknowledgement belongs to a different notice") }
+                    self.queue.async {
+                        do {
+                            try self.applyMobile(task)
+                            completion(.success(try self.database.get(id)))
+                        } catch { completion(.failure(error)) }
+                    }
+                } catch { self.queue.async { completion(.failure(error)) } }
+            }
+        } catch { completion(.failure(error)) }
+    }
+    func dismiss(_ ids: [String], completion: ((Result<Void, Error>) -> Void)? = nil) {
+        do {
+            guard let mobile else { try dismissRecords(ids); completion?(.success(())); return }
             let snapshot = Array(Set(ids))
             dismissalQueue.async {
                 do {
-                    // Keep large documents bounded in memory; decode only the
-                    // next batch on the database queue, never the whole stack.
                     for start in stride(from: 0, to: snapshot.count, by: 100) {
                         let batch = Array(snapshot[start..<min(start + 100, snapshot.count)])
                         let rows = try self.queue.sync { try batch.map { try self.database.get($0) }.filter { $0.status == "pending" } }
                         try mobile.clear(rows) { tasks in try self.queue.sync { try self.applyMobileMany(tasks) } }
                     }
+                    self.queue.async { completion?(.success(())) }
+                } catch {
+                    reportFailure(error)
+                    self.queue.async { completion?(.failure(error)) }
                 }
-                catch { reportFailure(error) } // Unacknowledged notices remain available for retry.
             }
-        } catch { reportFailure(error) }
+        } catch { reportFailure(error); completion?(.failure(error)) }
     }
     func applyMobile(_ task: [String: Any]) throws {
         try applyMobileMany([task])
@@ -980,7 +1025,7 @@ func markdown(_ source: String, size: CGFloat, color: NSColor) -> NSAttributedSt
                 var runFont = font
                 if let intent = run.inlinePresentationIntent {
                     if intent.contains(.stronglyEmphasized) { runFont = .systemFont(ofSize: font.pointSize, weight: .bold) }
-                    if intent.contains(.emphasized) { runFont = NSFontManager.shared.convert(runFont, toHaveTrait: .italicFontMask) }
+                    if intent.contains(.emphasized) { runFont = NSFont(descriptor: runFont.fontDescriptor.withSymbolicTraits(.italic), size: runFont.pointSize) ?? runFont }
                     if intent.contains(.code) { runFont = .monospacedSystemFont(ofSize: size - 1, weight: .regular) }
                 }
                 var attributes: [NSAttributedString.Key: Any] = [.font: runFont, .foregroundColor: color, .paragraphStyle: paragraph]
@@ -1537,6 +1582,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
     var finishAfterSave = false
     var closeAfterSave = false
     var reviewClosing = false
+    var finishInFlight = false
     var selectionAction: ActionButton?
     var commentsToggle: ActionButton?
     var selectionObserver: Any?
@@ -1576,7 +1622,18 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         text.textContainerInset = NSSize(width: 40, height: 32)
         text.textContainer!.widthTracksTextView = true
         text.textContainer!.containerSize = NSSize(width: text.frame.width - 80, height: .greatestFiniteMagnitude)
-        text.textStorage!.setAttributedString(markdown(row.question, size: 15, color: .textColor))
+        let initialText = String(row.question.prefix(4000))
+        text.textStorage!.setAttributedString(markdown(initialText, size: 15, color: .textColor))
+        if initialText != row.question {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let full = markdown(row.question, size: 15, color: .textColor)
+                onMain { [weak self] in
+                    guard let self, self.browser == nil else { return }
+                    self.text.textStorage?.setAttributedString(full)
+                }
+            }
+        }
+
         text.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         scroll.documentView = text
         fallbackScroll = scroll
@@ -1701,7 +1758,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         sidebar.composer.delegate = self
         sidebar.openComment = { [weak self] id in self?.openSavedComment(id) }
         sidebar.comments = reviewRecord.comments ?? []
-        sidebar.completed = reviewRecord.status != "pending"
+        sidebar.completed = finishInFlight || reviewRecord.status != "pending"
         if commentsToggle == nil {
             let accessory = NSTitlebarAccessoryViewController()
             accessory.layoutAttribute = .right
@@ -1890,6 +1947,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         let draft = sidebar.composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !draft.isEmpty else { sidebar.feedback.stringValue = "Write a comment to save it."; return }
         saveInFlight = true
+        if editorCloseAfterSave { commentEditor?.orderOut(nil) }
         updateEditorState()
         let quote = selectedQuote
         let oldID = editingCommentID
@@ -1906,6 +1964,8 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
             case .failure(let error):
                 self.finishAfterSave = false; self.closeAfterSave = false; self.reviewClosing = false; self.editorCloseAfterSave = false
                 sidebar.feedback.stringValue = "Couldn’t save. Keep this window open to retry."
+                self.sidebarCollapsed = false; self.layoutReview()
+                self.makeKeyAndOrderFront(nil)
                 self.commentEditor?.makeKeyAndOrderFront(nil)
                 sidebar.feedback.toolTip = String(describing: error)
                 sidebar.arrange(); self.updateEditorState(); return
@@ -1923,7 +1983,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         }
     }
     func submitReview() {
-        guard let sidebar = reviewSidebar, !sidebar.completed else { return }
+        guard let sidebar = reviewSidebar, !sidebar.completed, !finishInFlight else { return }
         let draft = sidebar.composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
         if !draft.isEmpty {
             if let id = editingCommentID, reviewRecord.comments?.first(where: { $0.id == id })?.text == draft, !saveInFlight { completeReview() }
@@ -1932,13 +1992,22 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         else { completeReview() }
     }
     func completeReview() {
+        guard !finishInFlight, let sidebar = reviewSidebar else { return }
+        finishInFlight = true
+        sidebar.completed = true
+        sidebar.arrange()
         finishReview(reviewID) { [weak self] result in
             guard let self, let sidebar = self.reviewSidebar else { return }
+            self.finishInFlight = false
             switch result {
             case .success(let row):
                 self.reviewRecord = row; sidebar.completed = true
                 if self.closeAfterSave { self.closeAfterSave = false; self.close() }
-            case .failure(let error): self.closeAfterSave = false; self.reviewClosing = false; sidebar.feedback.stringValue = String(describing: error)
+            case .failure(let error):
+                self.closeAfterSave = false; self.reviewClosing = false; sidebar.completed = false
+                sidebar.feedback.stringValue = String(describing: error)
+                self.sidebarCollapsed = false; self.layoutReview()
+                self.makeKeyAndOrderFront(nil)
             }
             sidebar.arrange()
         }
@@ -1996,7 +2065,8 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         guard reviewRecord.commentsEnabled == true, reviewRecord.status == "pending" else { return true }
         if reviewClosing { return false }
         reviewClosing = true; closeAfterSave = true
-        sidebarCollapsed = false; layoutReview()
+        commentEditor?.orderOut(nil)
+        orderOut(nil)
         submitReview()
         return false
     }
@@ -2040,6 +2110,70 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
     }
 }
 
+func connectNotificationActions(_ store: Store, _ ui: Interface) {
+    store.show = { row in onMain { ui.add(row) } }
+    store.remove = { id in onMain { ui.remove(id) } }
+    store.removeMany = { ids in onMain { ui.remove(ids) } }
+    ui.onComplete = { id, answer in store.queue.async {
+        store.finishAsync(id, answer) { result in onMain {
+            switch result {
+            case .success: ui.remove(id)
+            case .failure(let error): reportFailure(error); ui.retryCompletion([id], message: String(describing: error))
+            }
+        } }
+    } }
+    ui.saveComment = { id, text, quote, commentID, selection, completion in
+        store.queue.async {
+            do { let row = try store.addComment(id, text: text, quote: quote, commentID: commentID, selection: selection); onMain { completion(.success(row)) } }
+            catch { onMain { completion(.failure(error)) } }
+        }
+    }
+    ui.finishReview = { id, completion in
+        _ = ui.stageCompletion([id])
+        store.queue.async { store.finishAsync(id, nil) { result in onMain {
+            switch result {
+            case .success: ui.remove(id)
+            case .failure(let error): ui.retryCompletion([id], message: String(describing: error))
+            }
+            completion(result)
+        } } }
+    }
+    ui.onCompleteMany = { ids in store.queue.async { store.complete(ids) } }
+    ui.onDismissMany = { ids in store.queue.async {
+        store.dismiss(ids) { result in onMain {
+            switch result {
+            case .success: ui.remove(ids)
+            case .failure(let error): ui.retryCompletion(ids, message: String(describing: error))
+            }
+        } }
+    } }
+
+    ui.onPresented = { id, time in store.queue.async { store.presented(id, time) } }
+}
+
+final class NotificationClick: NSObject, NSGestureRecognizerDelegate {
+    let action: () -> Void
+    weak var view: NSView?
+    init(view: NSView, action: @escaping () -> Void) {
+        self.view = view; self.action = action
+        super.init()
+        let click = NSClickGestureRecognizer(target: self, action: #selector(activate))
+        click.delaysPrimaryMouseButtonEvents = false
+        click.delegate = self
+        view.addGestureRecognizer(click)
+    }
+    @objc func activate() { action() }
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        guard let view, let parent = view.superview else { return false }
+        var hit = view.hitTest(parent.convert(event.locationInWindow, from: nil))
+        while let target = hit, target !== view {
+            if target is NSButton || target is Surface { return false }
+            hit = target.superview
+        }
+        return true
+    }
+}
+
 final class Card {
     let row: Record
     let view: Surface
@@ -2053,6 +2187,7 @@ final class Card {
     var projectLabel: DragHeader!
     var info: InfoButton!
     var contentHeight: CGFloat!
+    var contentClick: NotificationClick!
     var grouped: Bool?
     init(_ row: Record, open: @escaping () -> Void, openURL: @escaping (URL) -> Void, complete: @escaping (String, String?) -> Void) {
         self.row = row
@@ -2116,12 +2251,15 @@ final class Card {
         view.content.addSubview(close)
         info = InfoButton(row, frame: NSRect(x: 284, y: height - 36, width: 24, height: 24))
         view.content.addSubview(info)
+        let activate = {
+            if row.kind == "update" || row.linkURL == nil { open() }
+            else if let link = row.linkURL, let url = URL(string: link) { openURL(url) }
+            if row.commentsEnabled != true { complete(row.taskID, nil) }
+        }
+        contentClick = NotificationClick(view: view, action: activate)
+        body.isSelectable = false
         if hasAction {
-            let button = ActionButton(actionTitle, frame: NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: 28), style: .secondary) {
-                if row.kind == "update" { open() }
-                else if let link = row.linkURL, let url = URL(string: link) { openURL(url) }
-                if row.commentsEnabled != true { complete(row.taskID, nil) }
-            }
+            let button = ActionButton(actionTitle, frame: NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: 28), style: .secondary, action: activate)
             button.font = .systemFont(ofSize: 12, weight: .medium)
             button.controlSize = .regular
             button.frame = NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: button.intrinsicContentSize.height)
@@ -2155,6 +2293,7 @@ final class ProjectGroup {
     let toggle: ActionButton
     let clear: ActionButton
     var dividers: [NSBox] = []
+    var contentClick: NotificationClick!
     var badge: IconBadge?
     init(_ project: String, toggle: @escaping () -> Void, clear: @escaping () -> Void) {
         self.project = project
@@ -2178,6 +2317,7 @@ final class ProjectGroup {
         self.clear.toolTip = "Clear all \(project) notifications"
         self.clear.setAccessibilityLabel("Clear all \(project) notifications")
         for child in [count, summary, detail, self.toggle, self.clear] { view.content.addSubview(child) }
+        contentClick = NotificationClick(view: view, action: toggle)
     }
     func update(_ cards: [Card], expanded: Bool) {
         let height: CGFloat = expanded ? 30 + cards.reduce(CGFloat(0)) { $0 + $1.view.frame.height + 1 } : 66
@@ -2259,6 +2399,7 @@ final class Interface {
     let question = panel("Hey Boss question")
     var cards: [Card] = []
     var dismissalAnimations = 0
+    var pendingCompletions: [String: (row: Record, draft: String?)] = [:]
     var groupHeaders: [NSView] = []
     var projectGroups: [String: ProjectGroup] = [:]
     var expandedProjects: Set<String> = []
@@ -2275,8 +2416,10 @@ final class Interface {
     var saveComment: (String, String, String?, String?, DocumentSelection?, @escaping (Result<Record, Error>) -> Void) -> Void = { _, _, _, _, _, completion in completion(.failure(StorageError(description: "Review storage unavailable"))) }
     var finishReview: (String, @escaping (Result<Record, Error>) -> Void) -> Void = { _, completion in completion(.failure(StorageError(description: "Review storage unavailable"))) }
     var previews: [String: Preview] = [:]
-    var openURL: (URL) -> Void = {
-        if !NSWorkspace.shared.open($0) { NSLog("Unable to open link: %@", $0.absoluteString) }
+    var openURL: (URL) -> Void = { url in
+        NSWorkspace.shared.open(url, configuration: .init()) { _, error in
+            if let error { reportFailure(error) }
+        }
     }
     init(present: Bool) {
         self.present = present
@@ -2303,7 +2446,7 @@ final class Interface {
         closeAll.invoke = { [weak self] in
             guard let self else { return }
             let ids = self.cards.map { $0.row.taskID } + self.questions.map(\.taskID) + [self.current?.taskID].compactMap { $0 }
-            if !ids.isEmpty { self.onDismissMany(ids) }
+            if !ids.isEmpty { self.dismissNotifications(ids) }
         }
         stackToolbar.content.addSubview(closeAll)
         hideStack.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide notifications")
@@ -2319,12 +2462,12 @@ final class Interface {
         observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.layout() }
     }
     func add(_ row: Record) {
-        guard !cards.contains(where: { $0.row.taskID == row.taskID }), !questions.contains(where: { $0.taskID == row.taskID }), current?.taskID != row.taskID else { return }
+        guard pendingCompletions[row.taskID] == nil, !cards.contains(where: { $0.row.taskID == row.taskID }), !questions.contains(where: { $0.taskID == row.taskID }), current?.taskID != row.taskID else { return }
         stackHiddenByUser = false
         if row.kind == "alert" || row.kind == "update" {
             let card = Card(row, open: { [weak self] in self?.openPreview(row) }, openURL: openURL) { [weak self] id, answer in
-                if row.commentsEnabled == true { self?.onDismissMany([id]) }
-                else { self?.onComplete(id, answer) }
+                if row.commentsEnabled == true { self?.dismissNotifications([id]) }
+                else { self?.completeNotification(id, answer) }
             }
             // A pending dismissal freezes stack geometry. Keep arrivals hidden
             // until the final layout gives them their correct position.
@@ -2335,7 +2478,7 @@ final class Interface {
             let now = Date().timeIntervalSince1970
             onPresented(row.taskID, now)
             if let interval = notificationTimerInterval(autoclose: row.autoclose, expiry: row.expiresAt, now: now) {
-                card.timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in self?.onComplete(row.taskID, nil) }
+                card.timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in self?.completeNotification(row.taskID, nil) }
             } else if row.autoclose != nil {
                 reportFailure(StorageError(description: "Ignored invalid saved autoclose; the card can be dismissed manually"))
             }
@@ -2385,7 +2528,41 @@ final class Interface {
             }
         })
     }
+    func stageCompletion(_ ids: [String]) -> [String] {
+        let selected = Set(ids)
+        var rows = cards.map(\.row) + questions
+        if let current { rows.append(current) }
+        var staged: [String] = []
+        for row in rows where selected.contains(row.taskID) && pendingCompletions[row.taskID] == nil {
+            let draft = current?.taskID == row.taskID ? field?.stringValue : questionDrafts[row.taskID]
+            pendingCompletions[row.taskID] = (row, draft)
+            staged.append(row.taskID)
+        }
+        removeVisible(staged)
+        return staged
+    }
+    func completeNotification(_ id: String, _ result: String?) {
+        guard !stageCompletion([id]).isEmpty else { return }
+        onComplete(id, result)
+    }
+    func dismissNotifications(_ ids: [String]) {
+        let staged = stageCompletion(ids)
+        if !staged.isEmpty { onDismissMany(staged) }
+    }
+    func retryCompletion(_ ids: [String], message: String) {
+        for id in ids {
+            guard let saved = pendingCompletions.removeValue(forKey: id) else { continue }
+            if let draft = saved.draft { questionDrafts[id] = draft }
+            add(saved.row)
+        }
+        retryAnswer(ids.first ?? "", message: message)
+    }
     func remove(_ ids: [String]) {
+        for id in ids { pendingCompletions.removeValue(forKey: id) }
+        removeVisible(ids)
+    }
+    private func removeVisible(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
         let removedIDs = Set(ids)
         for id in ids { questionDrafts.removeValue(forKey: id) }
         let removedCards = cards.filter { removedIDs.contains($0.row.taskID) }
@@ -2399,7 +2576,7 @@ final class Interface {
             field = nil
             nextQuestion()
         }
-        finishCardRemoval(removedCards)
+        if !removedCards.isEmpty { finishCardRemoval(removedCards) } else if !ids.isEmpty { layout() }
     }
     func remove(_ id: String) { remove([id]) }
     func layout(animated: Bool = false) {
@@ -2463,7 +2640,7 @@ final class Interface {
                     self.layout()
                 }, clear: { [weak self] in
                     guard let self else { return }
-                    self.onDismissMany(self.cards.filter { ($0.row.project ?? "Notifications") == project }.map { $0.row.taskID })
+                    self.dismissNotifications(self.cards.filter { ($0.row.project ?? "Notifications") == project }.map { $0.row.taskID })
                 })
             }
             guard let projectView = projectGroups[group.project] else { continue }
@@ -2600,7 +2777,7 @@ final class Interface {
         guard let current else { return }
         for button in buttons { button.isEnabled = false }
         field?.isEnabled = false
-        onComplete(current.taskID, text)
+        completeNotification(current.taskID, text)
     }
 }
 
@@ -4872,28 +5049,7 @@ struct Daemon {
         store.mobile?.presence = { presence.snapshot }
         store.mobile?.onRouting = { routing in onMain { overview.updateActivity(routing) } }
         store.mobile?.start()
-        store.show = { row in onMain { ui.add(row) } }
-        store.remove = { id in onMain { ui.remove(id) } }
-        store.removeMany = { ids in onMain { ui.remove(ids) } }
-        ui.onComplete = { id, answer in store.queue.async {
-            do { try store.finish(id, answer) }
-            catch { reportFailure(error); onMain { ui.retryAnswer(id, message: String(describing: error)) } }
-        } }
-        ui.saveComment = { id, text, quote, commentID, selection, completion in
-            store.queue.async {
-                do { let row = try store.addComment(id, text: text, quote: quote, commentID: commentID, selection: selection); onMain { completion(.success(row)) } }
-                catch { onMain { completion(.failure(error)) } }
-            }
-        }
-        ui.finishReview = { id, completion in
-            store.queue.async {
-                do { try store.finish(id, nil); let row = try store.database.get(id); onMain { completion(.success(row)) } }
-                catch { onMain { completion(.failure(error)) } }
-            }
-        }
-        ui.onCompleteMany = { ids in store.queue.async { store.complete(ids) } }
-        ui.onDismissMany = { ids in store.queue.async { store.dismiss(ids) } }
-        ui.onPresented = { id, time in store.queue.async { store.presented(id, time) } }
+        connectNotificationActions(store, ui)
         store.pendingChanged = { count in onMain { overview.updateInboxCount(count) } }
         store.queue.async { store.restore() }
         var sockets: UnsafeMutablePointer<Int32>?
