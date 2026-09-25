@@ -145,7 +145,7 @@ devbox harvesters completed 4/4 checks, and the legacy Mac worker completed 4/4.
 This verifies the new entry point but does not establish that every existing
 client and schedule has stopped using the old helper.
 
-Devbox's required installer validation is currently blocked: 31/35 health tests
+At that handoff, devbox's legacy installer validation was blocked: 31/35 health tests
 passed, while four real-process/worktree tests could not inspect a non-dumpable
 process through `/proc`. The worker correctly preserved worktrees when process
 visibility was incomplete. Linux CI runs these tests with privileged inspection;
@@ -157,3 +157,23 @@ the installer, then require the standalone worker's 4/4 ownership probe before
 closing issue 147. Alternatively, finish and verify the harvester migration,
 including legacy callers, so the outdated helper is no longer selected.
 Do not stop the unrelated process or weaken cleanup checks.
+
+## Harvester migration and terminal details — September 25, 2026
+
+The migration alternative above has now been verified. Both Mac launch agents
+and devbox's systemd service invoke `~/.local/bin/hey-harvester run`. The installed
+Hey Boss clients on all three machines prefer harvester over the obsolete helper.
+`tools/harvester_routing_install_checks.mjs` executes each installed client's
+generated remote command inside a disposable HOME with synthetic workers. Its
+three checks cover local-bin precedence, cargo-bin precedence, and failure without
+falling back to the legacy worker. The stale helper fails the negative control.
+No production schedule, maintenance setting, or worktree is mutated by this probe.
+
+Visual testing of the extracted terminal dashboard found another visibility gap:
+long worktree paths clipped the owner and preservation reason. Enter now opens
+the selected entry in a wrapped details pane. Arrow keys and Page Up/Down scroll
+to the final line; Escape returns to the list. Cleanup keys do not dispatch from
+details. A Rust rendering regression covers 120x24, 80x24, 48x20 and scrolling at
+48x14. `tools/harvester_ownership_terminal_checks.mjs` exercises the actual binary
+in a real PTY with synthetic remote status, captures those layouts, cancels a
+removal confirmation, and requires a normal exit with no maintenance mutations.
