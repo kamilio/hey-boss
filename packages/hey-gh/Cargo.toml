@@ -10,7 +10,7 @@ license = "MIT"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-dirs = "6"
+dirs = "7"
 fastrand = "2"
 graphql-parser = "0.4"
 getrandom = "0.4"
