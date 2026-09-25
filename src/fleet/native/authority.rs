@@ -43,6 +43,7 @@ pub(in crate::fleet) fn call(
     let mut stream = UnixStream::connect(state.join(SOCKET)).map_err(unavailable)?;
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let kind = request["kind"].as_str().unwrap_or("").to_owned();
     let envelope = json!({"database":database,"request":request});
     send(&mut stream, envelope).map_err(unavailable)?;
     stream.shutdown(std::net::Shutdown::Write)?;
@@ -50,7 +51,27 @@ pub(in crate::fleet) fn call(
         .map_err(unavailable)?
         .ok_or_else(|| unavailable("connection closed before acknowledgment"))?;
     if result["ok"] == false {
-        return Err(serde_json::from_value(result["error"].clone())?);
+        let mut error: Error = serde_json::from_value(result["error"].clone())?;
+        if matches!(kind.as_str(), "capabilities" | "issue_metadata")
+            && error.code == "invalid_input"
+            && error.message == "Unsupported authority request"
+        {
+            let operation = if kind == "capabilities" {
+                "capability discovery"
+            } else {
+                "guarded issue metadata"
+            };
+            error = Error::new(
+                "fleet_capability_unsupported",
+                format!(
+                    "The running companion or supervisor does not support {operation} through the existing fleet tunnel. Run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities. Nothing was saved; no SSH hostname or work claim is needed"
+                ),
+            );
+            error.details = Some(
+                json!({"route":"supervisor_tunnel","requested_operation":kind,"upgrade_required":true}),
+            );
+        }
+        return Err(error);
     }
     if result["ok"] != true {
         return Err(unavailable("incomplete response"));
@@ -359,6 +380,39 @@ mod tests {
         };
         let store = crate::issues::Store::open(&ctx.path).unwrap();
         (root, ctx, store)
+    }
+
+    #[test]
+    fn legacy_relay_rejection_explains_required_fleet_upgrade() {
+        let (root, ctx, store) = test_context();
+        let listener = UnixListener::bind(ctx.state.join(SOCKET)).unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_frame(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                send(
+                    &mut stream,
+                    failure(Error::invalid("Unsupported authority request")),
+                )
+                .unwrap();
+            }
+        });
+        for kind in ["capabilities", "issue_metadata", "resource"] {
+            let error = call(&ctx.state, &ctx.path, json!({"kind":kind})).unwrap_err();
+            if kind == "resource" {
+                assert_eq!(error.code, "invalid_input");
+                assert_eq!(error.message, "Unsupported authority request");
+            } else {
+                assert_eq!(error.code, "fleet_capability_unsupported");
+                assert!(error.message.contains("hey-boss upgrade"));
+                assert!(error.message.contains("companion"));
+                assert!(error.message.contains("supervisor"));
+                assert_eq!(error.details.unwrap()["route"], "supervisor_tunnel");
+            }
+        }
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
