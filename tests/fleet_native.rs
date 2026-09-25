@@ -568,6 +568,7 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
     let mut worker = Service(
         f.command(&[
             "worker",
+            "run",
             "--project",
             "Worker fixture",
             "--directory",
@@ -668,6 +669,7 @@ fn supervisor_shutdown_preserves_running_worker_and_agent() {
     let mut worker = Service(
         f.command(&[
             "worker",
+            "run",
             "--project",
             "Worker fixture",
             "--directory",
@@ -728,6 +730,7 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
     let mut worker = Service(
         f.command(&[
             "worker",
+            "run",
             "--project",
             "Worker fixture",
             "--directory",
@@ -1069,6 +1072,7 @@ fn companion_shutdown_preserves_existing_worker_and_claimed_agent() {
     let mut worker = Service(
         f.command(&[
             "worker",
+            "run",
             "--project",
             "Worker fixture",
             "--directory",
