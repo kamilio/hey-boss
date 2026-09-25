@@ -216,8 +216,12 @@ fn receive(socket: &Path, request: &serde_json::Value) -> io::Result<Vec<String>
     stream.set_read_timeout(Some(Duration::from_secs(900)))?;
     stream.write_all(&serde_json::to_vec(request).map_err(|_| error("Invalid secret request"))?)?;
     stream.shutdown(std::net::Shutdown::Write)?;
+    read_response(&mut stream)
+}
+
+fn read_response(stream: &mut UnixStream) -> io::Result<Vec<String>> {
     let mut bytes = Vec::new();
-    (&mut stream)
+    stream
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| error("Secret prompt disconnected or timed out; nothing saved"))?;
@@ -347,7 +351,7 @@ mod tests {
         assert!(child.wait().unwrap().success());
     }
     #[test]
-    fn safe_file_and_redacted_response_errors() {
+    fn safe_file_permissions_and_existing_keys() {
         let root = std::env::temp_dir().join(format!("hb-secret-test-{}", SystemNonce::value()));
         fs::create_dir(&root).unwrap();
         let path = root.join(".env");
@@ -360,22 +364,65 @@ mod tests {
         assert!(EnvFile::open(&path, &fields).is_err());
         std::os::unix::fs::symlink(&path, root.join("link")).unwrap();
         assert!(EnvFile::open(&root.join("link"), &fields).is_err());
-        let socket = root.join("mock.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut req = Vec::new();
-            s.read_to_end(&mut req).unwrap();
-            s.write_all(
-                b"{\"status\":\"ok\",\"result\":\"synthetic-secret-that-must-not-appear\"}",
-            )
-            .unwrap();
-        });
-        let err = receive(&socket, &serde_json::json!({}))
-            .unwrap_err()
-            .to_string();
-        assert!(!err.contains("synthetic-secret"));
-        server.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn secret_response_errors_are_redacted() {
+        for (response, expected) in [
+            (
+                r#"{"status":"ok","result":"synthetic-secret-that-must-not-appear"}"#,
+                "Invalid secret response",
+            ),
+            (
+                r#"{"status":"synthetic-secret"}"#,
+                "Secret prompt unavailable; update/reconnect the desktop companion",
+            ),
+            (
+                r#"{"status":"cancelled","result":"synthetic-secret"}"#,
+                "Secret entry cancelled; nothing saved",
+            ),
+            (r#"{"status":"ok"}"#, "Missing secret response"),
+            ("synthetic-secret", "Invalid secret response"),
+        ] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            // Queue this small response and close the peer before reading. The
+            // redaction test needs neither a request reader nor a human deadline.
+            server.write_all(response.as_bytes()).unwrap();
+            drop(server);
+            assert_eq!(
+                read_response(&mut client).unwrap_err().to_string(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn secret_response_round_trip() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        server
+            .write_all(br#"{"status":"ok","result":"[\"synthetic-value\"]"}"#)
+            .unwrap();
+        drop(server);
+        assert_eq!(read_response(&mut client).unwrap(), ["synthetic-value"]);
+    }
+
+    #[test]
+    fn stalled_secret_response_is_redacted() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        server.write_all(b"synthetic-secret").unwrap();
+        assert_eq!(
+            read_response(&mut client).unwrap_err().to_string(),
+            "Secret prompt disconnected or timed out; nothing saved"
+        );
     }
 }
