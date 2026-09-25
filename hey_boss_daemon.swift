@@ -877,7 +877,7 @@ extension Record {
 
 // Read raster dimensions without decoding full-resolution pixels. A tiny compressed
 // file can otherwise expand to hundreds of megabytes on the app's main thread.
-func boundedIconImage(_ data: Data) -> NSImage? {
+func boundedIconImage(_ data: Data, maximumPixelSize: Int = 128) -> NSImage? {
     // Some ImageIO sources recognize PDF but expose no raster properties.
     // Handle vector pages before trying the raster thumbnail path.
     if data.starts(with: Data("%PDF-".utf8)) {
@@ -896,7 +896,7 @@ func boundedIconImage(_ data: Data) -> NSImage? {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 128,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
             kCGImageSourceShouldCacheImmediately: true
         ]
         guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
@@ -988,7 +988,7 @@ func severityLabel(_ row: Record, frame: NSRect) -> PlainTextField {
 
 func markdownLinkURL(_ link: URL) -> URL? {
     if let scheme = link.scheme {
-        return ["https", "http", "file"].contains(scheme.lowercased()) ? link : nil
+        return ["https", "http", "file", "mailto"].contains(scheme.lowercased()) ? link : nil
     }
     // Agent reports commonly link directly to absolute workspace paths.
     // Relative links have no document base to resolve against.
@@ -1382,8 +1382,263 @@ func panel(_ title: String) -> Panel {
     return panel
 }
 
+// Native block model adapted from poe-code's toolcraft-design Markdown renderer.
+// Keep one text storage for the document so selection crosses every block.
+struct NativeMarkdownNode: Decodable {
+    let type: String
+    let lineStart: Int
+    let lineEnd: Int
+    var children: [NativeMarkdownNode]?
+    var value: String?
+    var url: String?
+    var depth: Int?
+    var start: Int?
+    var checked: Bool?
+    var lang: String?
+    var align: [String]?
+    var tokens: [NativeMarkdownToken]?
+}
+struct NativeMarkdownToken: Decodable { let kind: String; let value: String }
+extension NSAttributedString.Key {
+    static let sourceStart = NSAttributedString.Key("HeyBossSourceStart")
+    static let sourceEnd = NSAttributedString.Key("HeyBossSourceEnd")
+    static let nativeCode = NSAttributedString.Key("HeyBossCode")
+    static let nativeTableRow = NSAttributedString.Key("HeyBossTableRow")
+    static let nativeTableCell = NSAttributedString.Key("HeyBossTableCell")
+    static let nativeImageURL = NSAttributedString.Key("HeyBossImageURL")
+    static let nativeImageAlt = NSAttributedString.Key("HeyBossImageAlt")
+    static let nativeAnchor = NSAttributedString.Key("HeyBossAnchor")
+    static let reviewComment = NSAttributedString.Key("HeyBossReviewComment")
+}
+final class NativeMarkdownRenderer {
+    let output = NSMutableAttributedString(string: "")
+    var tableID = 0
+    static let cache = NSCache<NSString, NSData>()
+    static let queue: OperationQueue = {
+        let queue = OperationQueue(); queue.name = "hey-boss.markdown"; queue.maxConcurrentOperationCount = 2
+        queue.qualityOfService = .userInitiated
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return queue
+    }()
+    static func render(_ root: NativeMarkdownNode) -> NSAttributedString {
+        let renderer = NativeMarkdownRenderer()
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 4; paragraph.paragraphSpacing = 12
+        renderer.node(root, [.font:NSFont.systemFont(ofSize:15), .foregroundColor:NSColor.textColor, .paragraphStyle:paragraph])
+        return renderer.output
+    }
+    func append(_ text: String, _ attributes: [NSAttributedString.Key:Any], _ source: NativeMarkdownNode) {
+        var attributes = attributes
+        attributes[.sourceStart] = source.lineStart; attributes[.sourceEnd] = source.lineEnd
+        output.append(NSAttributedString(string:text,attributes:attributes))
+    }
+    func newline(_ attributes: [NSAttributedString.Key:Any], _ source: NativeMarkdownNode) {
+        if output.length > 0 && output.mutableString.character(at:output.length - 1) != 10 { append("\n",attributes,source) }
+    }
+    func children(_ node: NativeMarkdownNode, _ attributes: [NSAttributedString.Key:Any]) {
+        for child in node.children ?? [] { self.node(child,attributes) }
+    }
+    func node(_ node: NativeMarkdownNode, _ inherited: [NSAttributedString.Key:Any]) {
+        var attributes = inherited
+        let paragraph = (inherited[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+        attributes[.paragraphStyle] = paragraph
+        switch node.type {
+        case "frontmatter": return
+        case "root", "container": children(node,attributes)
+        case "heading":
+            newline(attributes,node)
+            let sizes: [CGFloat] = [30,24,20,17,16,15]
+            attributes[.font] = NSFont.systemFont(ofSize:sizes[min(5,max(0,(node.depth ?? 1)-1))],weight:.semibold)
+            paragraph.paragraphSpacingBefore = output.length == 0 ? 0 : 16; paragraph.paragraphSpacing = 10
+            children(node,attributes); newline(attributes,node)
+        case "paragraph": children(node,attributes); newline(attributes,node)
+        case "strong", "emphasis":
+            let font = attributes[.font] as? NSFont ?? .systemFont(ofSize:15)
+            let trait: NSFontDescriptor.SymbolicTraits = node.type == "strong" ? .bold : .italic
+            attributes[.font] = NSFont(descriptor:font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(trait)),size:font.pointSize) ?? font
+            children(node,attributes)
+        case "strikethrough": attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue; children(node,attributes)
+        case "inlineCode":
+            attributes[.font] = NSFont.monospacedSystemFont(ofSize:13,weight:.regular)
+            attributes[.backgroundColor] = NSColor.quaternaryLabelColor
+            append(node.value ?? "",attributes,node)
+        case "link":
+            if let raw = node.url, let url = URL(string:raw) {
+                if raw.hasPrefix("#") { attributes[.link] = url }
+                else if let destination = markdownLinkURL(url) { attributes[.link] = destination }
+            }
+            if attributes[.link] != nil { attributes[.foregroundColor] = NSColor.linkColor; attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+            children(node,attributes)
+        case "list":
+            let depth = Int(paragraph.headIndent / 24)
+            for (index,item) in (node.children ?? []).enumerated() {
+                newline(attributes,item)
+                let listParagraph = paragraph.mutableCopy() as! NSMutableParagraphStyle
+                listParagraph.firstLineHeadIndent = CGFloat(depth) * 24
+                listParagraph.headIndent = CGFloat(depth + 1) * 24
+                listParagraph.tabStops = [NSTextTab(textAlignment:.left,location:listParagraph.headIndent)]
+                listParagraph.paragraphSpacing = 5
+                var itemAttributes = attributes; itemAttributes[.paragraphStyle] = listParagraph
+                func task(_ node: NativeMarkdownNode) -> Bool? {
+                    if node.type == "task" { return node.checked }
+                    if node.type == "list" { return nil }
+                    for child in node.children ?? [] { if let checked = task(child) { return checked } }
+                    return nil
+                }
+                let marker = task(item).map { $0 ? "☑" : "☐" } ?? node.start.map { "\($0 + index)." } ?? "•"
+                append(marker + "\t",itemAttributes,item)
+                children(item,itemAttributes); newline(itemAttributes,item)
+            }
+        case "listItem": children(node,attributes)
+        case "task": break
+        case "blockquote", "alert":
+            newline(attributes,node)
+            paragraph.headIndent += 16; paragraph.firstLineHeadIndent = paragraph.headIndent
+            attributes[.foregroundColor] = NSColor.secondaryLabelColor
+            let block = NSTextBlock(); block.setWidth(3,type:.absoluteValueType,for:.border,edge:.minX)
+            block.setValue(100,type:.percentageValueType,for:.width)
+            block.setBorderColor(node.type == "alert" ? .systemOrange : .separatorColor,for:.minX)
+            block.setWidth(12,type:.absoluteValueType,for:.padding)
+            paragraph.textBlocks += [block]
+            if node.type == "alert" {
+                var heading = attributes; heading[.font] = NSFont.systemFont(ofSize:15,weight:.semibold)
+                append((node.value ?? "Note") + "\n",heading,node)
+            }
+            children(node,attributes); newline(attributes,node)
+        case "code":
+            newline(attributes,node)
+            attributes[.font] = NSFont.monospacedSystemFont(ofSize:13,weight:.regular)
+            attributes[.nativeCode] = true
+            paragraph.lineSpacing = 3; paragraph.paragraphSpacing = 0; paragraph.lineBreakMode = .byCharWrapping
+            let block = NSTextBlock(); block.backgroundColor = .controlBackgroundColor
+            block.setValue(100,type:.percentageValueType,for:.width)
+            block.setWidth(12,type:.absoluteValueType,for:.padding)
+            paragraph.textBlocks += [block]
+            var line = node.lineStart
+            let tokens = node.tokens ?? [NativeMarkdownToken(kind:"plain",value:node.value ?? "")]
+            for token in tokens {
+                var styled = attributes
+                switch token.kind {
+                case "keyword": styled[.foregroundColor] = NSColor.systemPurple
+                case "string": styled[.foregroundColor] = NSColor.systemRed
+                case "number", "constant": styled[.foregroundColor] = NSColor.systemBlue
+                case "type", "key": styled[.foregroundColor] = NSColor.systemIndigo
+                case "comment": styled[.foregroundColor] = NSColor.secondaryLabelColor
+                case "insert": styled[.foregroundColor] = NSColor.systemGreen
+                case "delete": styled[.foregroundColor] = NSColor.systemRed
+                default: break
+                }
+                let parts = token.value.components(separatedBy:"\n")
+                for (index,part) in parts.enumerated() {
+                    let value = part + (index < parts.count - 1 ? "\n" : "")
+                    if !value.isEmpty {
+                        styled[.sourceStart] = line; styled[.sourceEnd] = line
+                        output.append(NSAttributedString(string:value,attributes:styled))
+                    }
+                    if index < parts.count - 1 { line += 1 }
+                }
+            }
+            newline(attributes,node)
+            append("\n",inherited,node)
+        case "table":
+            newline(attributes,node); tableID += 1
+            let table = NSTextTable(); table.numberOfColumns = max(1,node.align?.count ?? 1)
+            table.layoutAlgorithm = .automaticLayoutAlgorithm; table.collapsesBorders = true
+            table.setValue(100,type:.percentageValueType,for:.width)
+            for (rowIndex,row) in (node.children ?? []).enumerated() {
+                for (column,cell) in (row.children ?? []).enumerated() {
+                    let block = NSTextTableBlock(table:table,startingRow:rowIndex,rowSpan:1,startingColumn:column,columnSpan:1)
+                    block.setWidth(7,type:.absoluteValueType,for:.padding); block.setWidth(0.5,type:.absoluteValueType,for:.border)
+                    block.setBorderColor(.separatorColor)
+                    if row.checked == true { block.backgroundColor = .controlBackgroundColor }
+                    let cellParagraph = paragraph.mutableCopy() as! NSMutableParagraphStyle
+                    cellParagraph.paragraphSpacing = 0; cellParagraph.textBlocks = [block]
+                    let alignment = (node.align ?? []).indices.contains(column) ? node.align![column] : "left"
+                    cellParagraph.alignment = alignment == "right" ? .right : alignment == "center" ? .center : .left
+                    var cellAttributes = attributes
+                    cellAttributes[.paragraphStyle] = cellParagraph
+                    cellAttributes[.nativeTableRow] = "\(tableID):\(rowIndex)"; cellAttributes[.nativeTableCell] = column
+                    if row.checked == true { cellAttributes[.font] = NSFont.systemFont(ofSize:14,weight:.semibold) }
+                    else { cellAttributes[.font] = NSFont.systemFont(ofSize:14) }
+                    children(cell,cellAttributes); append("\n",cellAttributes,cell)
+                }
+            }
+            append("\n",inherited,node)
+        case "footnoteReference":
+            attributes[.superscript] = 1; attributes[.font] = NSFont.systemFont(ofSize:11)
+            attributes[.link] = URL(string:"#footnote-" + (node.value ?? ""))
+            append("[" + (node.value ?? "") + "]",attributes,node)
+        case "footnoteDefinition":
+            newline(attributes,node); attributes[.nativeAnchor] = "footnote-" + (node.value ?? "")
+            attributes[.font] = NSFont.systemFont(ofSize:13); attributes[.foregroundColor] = NSColor.secondaryLabelColor
+            append("[" + (node.value ?? "") + "] ",attributes,node); children(node,attributes); newline(attributes,node)
+        case "image":
+            let alt = (node.children ?? []).compactMap(\.value).joined()
+            if let raw = node.url, let url = URL(string:raw), ["https","http"].contains(url.scheme ?? "") {
+                let attachment = NSTextAttachment(); attachment.image = NSImage(systemSymbolName:"photo",accessibilityDescription:alt)
+                attachment.bounds = NSRect(x:0,y:0,width:32,height:32)
+                var imageAttributes = attributes; imageAttributes[.attachment] = attachment
+                imageAttributes[.nativeImageURL] = url; imageAttributes[.nativeImageAlt] = alt
+                append("\u{fffc}",imageAttributes,node)
+            }
+            else if !alt.isEmpty { append(alt,attributes,node) }
+        case "thematicBreak":
+            newline(attributes,node); attributes[.foregroundColor] = NSColor.separatorColor
+            append("────────────────────────\n",attributes,node)
+        default: append(node.value ?? "",attributes,node)
+        }
+    }
+}
+
+final class DocumentLoadingView: NSView {
+    let spinner = NSProgressIndicator()
+    override var isOpaque: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame:frame)
+        autoresizingMask = [.width,.height]
+        spinner.style = .spinning; spinner.controlSize = .small; spinner.isIndeterminate = true
+        let title = NSTextField(labelWithString:"Opening document…")
+        title.font = .systemFont(ofSize:14); title.textColor = .secondaryLabelColor
+        let stack = NSStackView(views:[spinner,title]); stack.orientation = .horizontal; stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false; addSubview(stack)
+        NSLayoutConstraint.activate([stack.centerXAnchor.constraint(equalTo:centerXAnchor),stack.centerYAnchor.constraint(equalTo:centerYAnchor)])
+        spinner.startAnimation(nil)
+    }
+    required init?(coder:NSCoder) { nil }
+    override func draw(_ dirtyRect:NSRect) { NSColor.textBackgroundColor.setFill(); bounds.fill() }
+}
+
 final class DocumentText: NSTextView {
+    var onComment: (String) -> Void = { _ in }
+    var copyPasteboard = NSPasteboard.general
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with:event)
+        guard selectedRange().length == 0, event.clickCount == 1, let storage = textStorage else { return }
+        let index = characterIndexForInsertion(at:convert(event.locationInWindow,from:nil))
+        if index < storage.length, let id = storage.attribute(.reviewComment,at:index,effectiveRange:nil) as? String { onComment(id) }
+    }
+    override func copy(_ sender: Any?) {
+        guard let storage = textStorage else { return }
+        let range = selectedRange()
+        guard range.length > 0, NSMaxRange(range) <= storage.length else { return }
+        let selected = storage.attributedSubstring(from:range)
+        let plain = NSMutableString(string:selected.string)
+        // Native table cells are paragraphs; use TSV on the plain-text clipboard.
+        for index in (0..<selected.length).reversed() where plain.character(at:index) == 10 && index + 1 < selected.length {
+            if let row = selected.attribute(.nativeTableRow,at:index,effectiveRange:nil) as? String,
+               row == selected.attribute(.nativeTableRow,at:index+1,effectiveRange:nil) as? String,
+               selected.attribute(.nativeTableCell,at:index,effectiveRange:nil) as? Int != selected.attribute(.nativeTableCell,at:index+1,effectiveRange:nil) as? Int {
+                plain.replaceCharacters(in:NSRange(location:index,length:1),with:"\t")
+            }
+        }
+        selected.enumerateAttribute(.nativeImageAlt,in:NSRange(location:0,length:selected.length),options:.reverse) { value, range, _ in
+            if let alt = value as? String { plain.replaceCharacters(in:range,with:alt) }
+        }
+        copyPasteboard.clearContents()
+        copyPasteboard.setString(plain as String,forType:.string)
+        if let rtf = try? selected.data(from:NSRange(location:0,length:selected.length),documentAttributes:[.documentType:NSAttributedString.DocumentType.rtf]) { copyPasteboard.setData(rtf,forType:.rtf) }
+        if selected.containsAttachments, let rtfd = try? selected.data(from:NSRange(location:0,length:selected.length),documentAttributes:[.documentType:NSAttributedString.DocumentType.rtfd]) { copyPasteboard.setData(rtfd,forType:.rtfd) }
+    }
 }
 
 final class ReviewSidebar: NSView {
@@ -1561,7 +1816,7 @@ final class FloatingCommentEditor: NSPanel, NSWindowDelegate {
     }
 }
 
-final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate {
+final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate {
     let reviewID: String
     var reviewRecord: Record
     var reviewSidebar: ReviewSidebar?
@@ -1574,7 +1829,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
     var sidebarCollapsed = true
     var selectedQuote: String?
     var selectedSource: DocumentSelection?
-    var queuedSelection: Any?
+    var queuedSelection: NSRange?
     var queuedCommentID: String?
     var editingCommentID: String?
     var autosaveTimer: Timer?
@@ -1587,14 +1842,13 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
     var commentsToggle: ActionButton?
     var selectionObserver: Any?
     var fallbackScroll: NSScrollView?
-    var browser: WKWebView?
-    var renderedDocument: String?
-    var rendererReloaded = false
+    var loadingView: DocumentLoadingView?
+    var readerClosed = false
+    var imageRequests: [URLSessionDataTask] = []
     var readerLoaded = false
     var onClose: () -> Void = {}
     let text = DocumentText()
     let openURL: (URL) -> Void
-    var linkButtons: [ActionButton] = []
     init(_ row: Record, openURL: @escaping (URL) -> Void) {
         self.openURL = openURL
         self.reviewID = row.taskID
@@ -1616,66 +1870,21 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         text.isEditable = false
         text.isSelectable = true
         text.delegate = self
+        text.onComment = { [weak self] id in self?.openSavedComment(id) }
         text.isVerticallyResizable = true
         text.isHorizontallyResizable = false
+        text.layoutManager?.allowsNonContiguousLayout = true
         text.autoresizingMask = [.width]
         text.textContainerInset = NSSize(width: 40, height: 32)
         text.textContainer!.widthTracksTextView = true
         text.textContainer!.containerSize = NSSize(width: text.frame.width - 80, height: .greatestFiniteMagnitude)
-        let initialText = String(row.question.prefix(4000))
-        text.textStorage!.setAttributedString(markdown(initialText, size: 15, color: .textColor))
-        if initialText != row.question {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let full = markdown(row.question, size: 15, color: .textColor)
-                onMain { [weak self] in
-                    guard let self, self.browser == nil else { return }
-                    self.text.textStorage?.setAttributedString(full)
-                }
-            }
-        }
-
         text.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         scroll.documentView = text
         fallbackScroll = scroll
         contentView!.addSubview(scroll)
-        var links: [(URL, String)] = []
-        text.textStorage!.enumerateAttribute(.link, in: NSRange(location: 0, length: text.textStorage!.length)) { value, range, _ in
-            if let url = value as? URL, !links.contains(where: { $0.0 == url }) {
-                links.append((url, (self.text.string as NSString).substring(with: range)))
-            }
-        }
-        if !links.isEmpty {
-            let height = min(CGFloat(links.count) * 48 + 16, 160)
-            let tray = NSScrollView(frame: NSRect(x: 0, y: 0, width: 720, height: height))
-            tray.autoresizingMask = [.width]
-            tray.hasVerticalScroller = true
-            tray.autohidesScrollers = true
-            tray.drawsBackground = true
-            tray.backgroundColor = .windowBackgroundColor
-            let body = NSView(frame: NSRect(x: 0, y: 0, width: tray.contentSize.width, height: CGFloat(links.count) * 48 + 16))
-            body.autoresizingMask = [.width]
-            for (index, link) in links.enumerated() {
-                let button = ActionButton(link.1, frame: NSRect(x: 32, y: body.frame.height - 8 - CGFloat(index + 1) * 48, width: body.frame.width - 64, height: 44), style: .link) { openURL(link.0) }
-                button.autoresizingMask = [.width]
-                button.alignment = .left
-                button.font = .systemFont(ofSize: 14, weight: .medium)
-                button.setAccessibilityLabel("Open \(link.1)")
-                button.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil)
-                button.imagePosition = .imageTrailing
-                button.toolTip = link.0.absoluteString
-                button.cell!.lineBreakMode = .byTruncatingTail
-                body.addSubview(button)
-                linkButtons.append(button)
-            }
-            tray.documentView = body
-            tray.contentView.scroll(to: NSPoint(x: 0, y: max(0, body.frame.height - height)))
-            contentView!.addSubview(tray)
-            let divider = NSBox(frame: NSRect(x: 0, y: height - 2, width: 720, height: 5))
-            divider.boxType = .separator
-            divider.autoresizingMask = [.width]
-            contentView!.addSubview(divider)
-            scroll.frame = NSRect(x: 0, y: height, width: 720, height: 640 - height)
-        }
+        scroll.isHidden = true
+        let loading = DocumentLoadingView(frame:contentView!.bounds)
+        contentView!.addSubview(loading); loadingView = loading
         initialFirstResponder = text
         let accessory = NSTitlebarAccessoryViewController()
         accessory.layoutAttribute = .right
@@ -1690,67 +1899,106 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         center()
         if row.commentsEnabled == true { installReviewSidebar() }
         if let attachment = row.attachment {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            NativeMarkdownRenderer.queue.addOperation { [weak self] in
                 do {
-                    _ = try attachment.validatedImage()
-                    let html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>:root{color-scheme:light dark}body{margin:0;background:Canvas;color:CanvasText;font:14px -apple-system}figure{margin:24px;display:flex;justify-content:center}img{max-width:100%;height:auto;object-fit:contain}</style></head><body><figure><img alt=\"Review image\" src=\"data:" + attachment.mime + ";base64," + attachment.data + "\"></figure></body></html>"
-                    onMain { [weak self] in self?.showRenderedMarkdown(html) }
-                } catch { reportFailure(error) }
+                    let data = try attachment.validatedImage()
+                    guard let image = NSImage(data:data) else { throw StorageError(description:"Invalid review image") }
+                    let picture = NSTextAttachment(); picture.image = image
+                    let document = NSMutableAttributedString(attachment:picture)
+                    document.addAttribute(.nativeImageAlt,value:attachment.name,range:NSRange(location:0,length:document.length))
+                    onMain { [weak self] in self?.showNativeDocument(document) }
+                } catch { onMain { [weak self] in self?.showNativeDocument(NSAttributedString(string:"Unable to open image: \(error)")) } }
             }
         } else { prepareMarkdownReader(row.question) }
     }
     func prepareMarkdownReader(_ source: String) {
-        guard source.utf8.count <= 2 * 1024 * 1024 else { return }
         let executable = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"] ?? "/opt/homebrew/bin/hey-boss"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        NativeMarkdownRenderer.queue.addOperation { [weak self] in
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hey-boss-reader-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
             do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-                let input = directory.appendingPathComponent("document.md")
-                let output = directory.appendingPathComponent("document.html")
-                try Data(source.utf8).write(to: input, options: .atomic)
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = ["render-markdown", input.path, output.path, "--source-map"]
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                try process.run()
-                let deadline = DispatchTime.now().uptimeNanoseconds + 20_000_000_000
-                while process.isRunning && DispatchTime.now().uptimeNanoseconds < deadline { Thread.sleep(forTimeInterval: 0.05) }
-                if process.isRunning {
-                    process.terminate()
-                    let cleanup = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
-                    while process.isRunning && DispatchTime.now().uptimeNanoseconds < cleanup { Thread.sleep(forTimeInterval: 0.05) }
-                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                    throw StorageError(description: "Markdown renderer timed out")
+                let data: Data
+                if let cached = NativeMarkdownRenderer.cache.object(forKey:source as NSString) { data = cached as Data }
+                else {
+                    try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+                    let input = directory.appendingPathComponent("document.md"), output = directory.appendingPathComponent("document.json")
+                    try Data(source.utf8).write(to:input,options:.atomic)
+                    let process = Process(); process.executableURL = URL(fileURLWithPath:executable)
+                    process.arguments = ["render-markdown",input.path,output.path,"--native"]
+                    process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+                    let finished = DispatchSemaphore(value:0)
+                    process.terminationHandler = { _ in finished.signal() }
+                    try process.run()
+                    if finished.wait(timeout:.now()+20) != .success {
+                        process.terminate()
+                        if finished.wait(timeout:.now()+2) != .success { kill(process.processIdentifier,SIGKILL); process.waitUntilExit() }
+                        throw StorageError(description:"Markdown renderer timed out")
+                    }
+                    guard process.terminationStatus == 0 else { throw StorageError(description:"Markdown renderer failed") }
+                    let size = try output.resourceValues(forKeys:[.fileSizeKey]).fileSize ?? Int.max
+                    guard size <= 32 * 1024 * 1024 else { throw StorageError(description:"Rendered document is too large") }
+                    data = try Data(contentsOf:output)
+                    NativeMarkdownRenderer.cache.setObject(data as NSData,forKey:source as NSString,cost:data.count+source.utf8.count)
                 }
-                guard process.terminationStatus == 0 else { throw StorageError(description: "Markdown renderer failed") }
-                let attributes = try FileManager.default.attributesOfItem(atPath: output.path)
-                guard (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 8 * 1024 * 1024 else { throw StorageError(description: "Rendered Markdown is too large") }
-                let html = try String(contentsOf: output, encoding: .utf8)
-                onMain { [weak self] in self?.showRenderedMarkdown(html) }
-            } catch { reportFailure(error) }
+                let document = try JSONDecoder().decode(NativeMarkdownNode.self,from:data)
+                let rendered = NativeMarkdownRenderer.render(document)
+                onMain { [weak self] in self?.showNativeDocument(rendered) }
+            } catch {
+                reportFailure(error)
+                // Remain readable and copyable if the helper is unavailable.
+                let plain = NativeMarkdownNode(type:"code",lineStart:1,lineEnd:source.components(separatedBy:"\n").count,value:source)
+                let rendered = NativeMarkdownRenderer.render(plain)
+                onMain { [weak self] in
+                    self?.subtitle += " · Plain text"
+                    self?.showNativeDocument(rendered)
+                }
+            }
         }
     }
-    func showRenderedMarkdown(_ html: String) {
-        renderedDocument = html
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        let web = WKWebView(frame: contentView!.bounds, configuration: configuration)
-        web.autoresizingMask = [.width, .height]
-        web.navigationDelegate = self
-        web.allowsMagnification = true
-        web.setAccessibilityLabel("Markdown update document")
-        for view in contentView!.subviews { view.isHidden = true }
-        contentView!.addSubview(web)
-        browser = web
-        web.loadHTMLString(html, baseURL: nil)
+    func showNativeDocument(_ document: NSAttributedString) {
+        guard !readerClosed else { return }
+        text.textStorage?.setAttributedString(document)
+        readerLoaded = true
+        loadingView?.removeFromSuperview(); loadingView = nil
+        fallbackScroll?.isHidden = false
+        initialFirstResponder = text
+        if firstResponder === self || firstResponder == nil { makeFirstResponder(text) }
         if reviewRecord.commentsEnabled == true { installReviewSidebar() }
+        highlightComments()
+        loadDocumentImages()
     }
+    func loadDocumentImages() {
+        guard let storage = text.textStorage else { return }
+        storage.enumerateAttribute(.nativeImageURL,in:NSRange(location:0,length:storage.length)) { value, range, _ in
+            guard let url = value as? URL, let attachment = storage.attribute(.attachment,at:range.location,effectiveRange:nil) as? NSTextAttachment else { return }
+            var request = URLRequest(url:url); request.timeoutInterval = 15
+            let task = URLSession.shared.dataTask(with:request) { [weak self, weak attachment] data, _, _ in
+                guard let data, data.count <= 4 * 1024 * 1024,
+                      let image = boundedIconImage(data,maximumPixelSize:1600) else { return }
+                onMain { [weak self, weak attachment] in
+                    guard let self, !self.readerClosed, let attachment else { return }
+                    attachment.image = image
+                    self.resizeDocumentImages()
+                }
+            }
+            imageRequests.append(task); task.resume()
+        }
+        resizeDocumentImages()
+    }
+    func resizeDocumentImages() {
+        guard let storage = text.textStorage else { return }
+        let width = max(80,(fallbackScroll?.contentSize.width ?? 720) - 80)
+        storage.enumerateAttribute(.attachment,in:NSRange(location:0,length:storage.length)) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment, let image = attachment.image, image.size.width > 0 else { return }
+            let scale = min(1,width/image.size.width)
+            attachment.bounds = NSRect(x:0,y:0,width:image.size.width*scale,height:image.size.height*scale)
+            text.layoutManager?.invalidateLayout(forCharacterRange:range,actualCharacterRange:nil)
+            text.layoutManager?.invalidateDisplay(forCharacterRange:range)
+        }
+    }
+    func windowDidResize(_ notification: Notification) { resizeDocumentImages() }
     func installReviewSidebar() {
-        guard browser != nil || fallbackScroll != nil, let contentView else { return }
+        guard fallbackScroll != nil, let contentView else { return }
         minSize = NSSize(width: 720, height: 480)
         let sidebar = reviewSidebar ?? ReviewSidebar(addComment: { [weak self] in self?.submitComment() }, finishReview: { [weak self] in self?.submitReview() })
         reviewSidebar = sidebar
@@ -1778,18 +2026,16 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
             action.imagePosition = .imageLeading
             action.isHidden = true; contentView.addSubview(action); selectionAction = action
             selectionObserver = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
-                guard let self, event.window === self, let browser = self.browser else { return event }
-                let point = browser.convert(event.locationInWindow, from: nil)
-                if browser.bounds.contains(point) {
-                    DispatchQueue.main.async { [weak self] in self?.inspectSelection(at: point) }
-                }
+                guard let self, event.window === self else { return event }
+                let point = self.text.convert(event.locationInWindow, from:nil)
+                if self.text.visibleRect.contains(point) { DispatchQueue.main.async { [weak self] in self?.inspectSelection() } }
                 return event
             }
         }
         layoutReview()
     }
     func layoutReview() {
-        guard let web = (browser as NSView?) ?? fallbackScroll, let sidebar = reviewSidebar, let contentView else { return }
+        guard let web = fallbackScroll, let sidebar = reviewSidebar, let contentView else { return }
         NSLayoutConstraint.deactivate(reviewConstraints)
         web.translatesAutoresizingMaskIntoConstraints = false
         sidebar.translatesAutoresizingMaskIntoConstraints = false
@@ -1804,74 +2050,69 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         sidebar.arrange()
         contentView.layoutSubtreeIfNeeded()
     }
-    func inspectSelection(at point: NSPoint? = nil, beginEditor: Bool = false) {
-        guard let browser, !saveInFlight else { return }
-        let x = point?.x ?? -1
-        let y = point.map { browser.isFlipped ? $0.y : browser.bounds.height - $0.y } ?? -1
-        let script = """
-        (()=>{
-          const hit=document.elementFromPoint(\(Double(x)),\(Double(y))),m=hit?.closest('mark[data-review-id]');
-          if(m){const r=m.getBoundingClientRect();return {commentID:m.dataset.reviewId,x:r.right,y:r.top};}
-          const s=window.getSelection();if(!s.rangeCount||s.isCollapsed)return null;
-          const range=s.getRangeAt(0),rect=range.getBoundingClientRect();let first=Infinity,last=0;
-          for(const span of document.querySelectorAll('[data-source-start]')){
-            if(!range.intersectsNode(span))continue;
-            const part=document.createRange();part.selectNodeContents(span);
-            if(part.compareBoundaryPoints(Range.START_TO_START,range)<0)part.setStart(range.startContainer,range.startOffset);
-            if(part.compareBoundaryPoints(Range.END_TO_END,range)>0)part.setEnd(range.endContainer,range.endOffset);
-            if(!part.toString().trim())continue;
-            first=Math.min(first,Number(span.dataset.sourceStart));last=Math.max(last,Number(span.dataset.sourceEnd));
-          }
-          return {quote:s.toString().slice(0,2000),x:rect.right,y:rect.bottom,lineStart:Number.isFinite(first)?first:null,lineEnd:last};
-        })()
-        """
-
-        browser.evaluateJavaScript(script) { [weak self] value, _ in
-            self?.handleSelection(value, browser: browser)
-            if beginEditor, self?.selectedQuote != nil { self?.beginSelectedComment() }
+    func inspectSelection(beginEditor: Bool = false) {
+        guard readerLoaded, !saveInFlight, let storage = text.textStorage else { return }
+        let range = text.selectedRange()
+        guard range.length > 0, NSMaxRange(range) <= storage.length, reviewRecord.status == "pending" else { selectionAction?.isHidden = true; return }
+        let quote = (text.string as NSString).substring(with:range)
+        guard !quote.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { selectionAction?.isHidden = true; return }
+        if quote != selectedQuote, let sidebar = reviewSidebar, !sidebar.composer.string.isEmpty {
+            let draft = sidebar.composer.string.trimmingCharacters(in:.whitespacesAndNewlines)
+            guard let id = editingCommentID, reviewRecord.comments?.first(where: { $0.id == id })?.text == draft else {
+                queuedSelection = range; submitComment(); return
+            }
+            sidebar.composer.string = ""; editingCommentID = nil; commentEditor?.orderOut(nil)
         }
+        selectedQuote = String(quote.prefix(2000)); selectedSource = nil
+        var first = Int.max, last = 0
+        storage.enumerateAttributes(in:range) { attributes, selected, _ in
+            let value = (storage.string as NSString).substring(with:selected)
+            guard !value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
+            if let start = attributes[.sourceStart] as? Int, let end = attributes[.sourceEnd] as? Int { first = min(first,start); last = max(last,end) }
+        }
+        if first <= last { selectedSource = sourceSelection(first:first,last:last) }
+        let rect = text.firstRect(forCharacterRange:range,actualRange:nil)
+        commentPosition = NSPoint(x:rect.maxX,y:rect.minY)
+        if let button = selectionAction, let content = contentView {
+            let point = content.convert(convertPoint(fromScreen:commentPosition!),from:nil)
+            button.frame.origin = NSPoint(x:min(max(8,point.x-40),content.bounds.width-140),y:min(max(8,point.y-38),content.bounds.height-40))
+            button.isHidden = false; content.addSubview(button,positioned:.above,relativeTo:nil)
+        }
+        if beginEditor { beginSelectedComment() }
+    }
+    func textViewDidChangeSelection(_ notification: Notification) {
+        if notification.object as? NSTextView === text { inspectSelection() }
+    }
+    func rangeForComment(_ comment: DocumentComment) -> NSRange? {
+        guard let storage = text.textStorage else { return nil }
+        var result: NSRange?
+        if let selection = comment.selection {
+            let first = selection.line_start + sourceLineOffset, last = selection.line_end + sourceLineOffset
+            storage.enumerateAttributes(in:NSRange(location:0,length:storage.length)) { attributes, range, _ in
+                guard let start = attributes[.sourceStart] as? Int, let end = attributes[.sourceEnd] as? Int, start >= first, end <= last else { return }
+                result = result.map { NSUnionRange($0,range) } ?? range
+            }
+        }
+        if let quote = comment.quote, !quote.isEmpty {
+            let range = (storage.string as NSString).range(of:quote,options:[],range:result ?? NSRange(location:0,length:storage.length))
+            if range.location != NSNotFound { return range }
+        }
+        return result
     }
     func openSavedComment(_ id: String) {
         guard let comment = reviewRecord.comments?.first(where: { $0.id == id }), let sidebar = reviewSidebar else { return }
-        let draft = sidebar.composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let draft = sidebar.composer.string.trimmingCharacters(in:.whitespacesAndNewlines)
         if !draft.isEmpty {
             guard let oldID = editingCommentID, reviewRecord.comments?.first(where: { $0.id == oldID })?.text == draft, !saveInFlight else { queuedCommentID = id; submitComment(); return }
         }
         selectedQuote = comment.quote; selectedSource = comment.selection; editingCommentID = id
         sidebar.composer.string = comment.text
-        if let browser, let data = try? JSONSerialization.data(withJSONObject: [id]), let encoded = String(data: data, encoding: .utf8) {
-            let script = "(()=>{const id=\(encoded)[0],m=[...document.querySelectorAll('mark[data-review-id]')].find(m=>m.dataset.reviewId===id);if(!m)return null;m.scrollIntoView({block:'center'});const r=m.getBoundingClientRect();return {x:r.right,y:r.top};})()"
-            browser.evaluateJavaScript(script) { [weak self] value, _ in
-                guard let self, self.editingCommentID == id else { return }
-                if let coordinates = value as? [String: Any] { self.updateCommentPosition(coordinates, browser: browser) }
-                self.beginSelectedComment()
-            }
-        } else { beginSelectedComment() }
-    }
-    func updateCommentPosition(_ coordinates: [String: Any], browser: WKWebView) {
-        guard let content = contentView, let x = coordinates["x"] as? Double, let y = coordinates["y"] as? Double else { return }
-        let local = browser.convert(NSPoint(x: x, y: browser.isFlipped ? y : browser.bounds.height - y), to: content)
-        commentPosition = convertPoint(toScreen: content.convert(local, to: nil))
-    }
-    func handleSelection(_ value: Any?, browser: WKWebView) {
-        if let result = value as? [String: Any] { updateCommentPosition(result, browser: browser) }
-        if let result = value as? [String: Any], let id = result["commentID"] as? String { openSavedComment(id); return }
-        guard reviewRecord.status == "pending" else { selectionAction?.isHidden = true; return }
-        guard let selection = value as? [String: Any], let quote = selection["quote"] as? String, !quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { selectionAction?.isHidden = true; return }
-        if quote != selectedQuote, let sidebar = reviewSidebar, !sidebar.composer.string.isEmpty {
-            let draft = sidebar.composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let id = editingCommentID, reviewRecord.comments?.first(where: { $0.id == id })?.text == draft, !saveInFlight else { queuedSelection = value; submitComment(); return }
-            sidebar.composer.string = ""; editingCommentID = nil
-            commentEditor?.orderOut(nil)
+        if let range = rangeForComment(comment) {
+            text.scrollRangeToVisible(range)
+            let rect = text.firstRect(forCharacterRange:range,actualRange:nil)
+            commentPosition = NSPoint(x:rect.maxX,y:rect.minY)
         }
-        selectedQuote = quote
-        selectedSource = nil
-        if let first = selection["lineStart"] as? Int, let last = selection["lineEnd"] as? Int { selectedSource = sourceSelection(first: first, last: last) }
-        guard let button = selectionAction, let content = contentView else { return }
-        let jsY = selection["y"] as? Double ?? 0
-        let point = browser.convert(NSPoint(x: selection["x"] as? Double ?? 0, y: browser.isFlipped ? jsY : browser.bounds.height - jsY), to: content)
-        button.frame.origin = NSPoint(x: min(max(8, point.x - 40), max(8, browser.frame.maxX - 140)), y: min(max(8, point.y - 38), content.bounds.height - 40))
-        button.isHidden = false; content.addSubview(button, positioned: .above, relativeTo: nil)
+        beginSelectedComment()
     }
     var sourceLineOffset: Int {
         let extensionName = (reviewRecord.documentName as NSString?)?.pathExtension.lowercased()
@@ -1901,14 +2142,13 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         let area = screen?.visibleFrame ?? frame
         let target = commentPosition ?? NSPoint(x: frame.maxX - 360, y: frame.maxY - 100)
         var sideX = target.x + 12
-        if let browser {
-            let documentFrame = convertToScreen(browser.convert(browser.bounds, to: nil))
+        if let scroll = fallbackScroll {
+            let documentFrame = convertToScreen(scroll.convert(scroll.bounds,to:nil))
             if documentFrame.maxX + editor.frame.width + 24 <= area.maxX { sideX = documentFrame.maxX + 12 }
             else if documentFrame.minX - editor.frame.width - 24 >= area.minX { sideX = documentFrame.minX - editor.frame.width - 12 }
         }
         let origin = NSPoint(x: min(max(area.minX + 12, sideX), area.maxX - editor.frame.width - 12), y: min(max(area.minY + 12, target.y - editor.frame.height), area.maxY - editor.frame.height - 12))
         updateEditorState()
-        browser?.evaluateJavaScript("window.getSelection().removeAllRanges()") { _, _ in }
         editor.setFrameOrigin(origin); editor.makeKeyAndOrderFront(nil)
         editor.makeFirstResponder(sidebar.composer)
     }
@@ -1932,7 +2172,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         reviewSidebar?.composer.string = ""
         editingCommentID = nil; selectedQuote = nil; selectedSource = nil
         updateEditorState()
-        makeFirstResponder(browser ?? text)
+        makeFirstResponder(text)
     }
     func textDidChange(_ notification: Notification) {
         guard notification.object as? NSTextView === reviewSidebar?.composer else { return }
@@ -1974,9 +2214,9 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
             if sidebar.composer.string.trimmingCharacters(in: .whitespacesAndNewlines) != draft { self.submitComment(); return }
             if let id = self.queuedCommentID {
                 self.queuedCommentID = nil; self.openSavedComment(id)
-            } else if let selection = self.queuedSelection, let browser = self.browser {
+            } else if let selection = self.queuedSelection {
                 self.queuedSelection = nil; sidebar.composer.string = ""; self.editingCommentID = nil; self.commentEditor?.orderOut(nil)
-                self.handleSelection(selection, browser: browser)
+                self.text.setSelectedRange(selection); self.inspectSelection()
             }
             if self.editorCloseAfterSave { self.editorCloseAfterSave = false; self.hideCommentEditor() }
             if self.finishAfterSave { self.finishAfterSave = false; self.completeReview() }
@@ -2013,53 +2253,17 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         }
     }
     func highlightComments() {
-        guard let browser, let data = try? JSONSerialization.data(withJSONObject: (reviewRecord.comments ?? []).compactMap { comment -> [String: String]? in guard let quote = comment.quote else { return nil }; var result = ["id": comment.id, "quote": quote, "text": comment.text]
-            if let selection = comment.selection { result["lineStart"] = String(selection.line_start + self.sourceLineOffset); result["lineEnd"] = String(selection.line_end + self.sourceLineOffset) }
-            return result }), let json = String(data: data, encoding: .utf8) else { return }
-        // Only app-generated native evaluation runs; document scripts stay disabled.
-        let script = """
-        (()=>{
-          for(const m of document.querySelectorAll('mark[data-review-id]'))m.replaceWith(...m.childNodes);
-          document.body.normalize();
-          const comments=\(json), walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-          const runs=[];let flat='',node,space=false;
-          while(node=walker.nextNode()){
-            if(node.parentElement.closest('script,style'))continue;
-            const offsets=[],start=flat.length,t=node.textContent;
-            for(let i=0;i<t.length;i++){
-              if(/\\s/.test(t[i])){if(space)continue;flat+=' ';space=true;}
-              else{flat+=t[i];space=false;}
-              offsets.push(i);
-            }
-            runs.push({node,start,end:flat.length,offsets,line:Number(node.parentElement.closest('[data-source-start]')?.dataset.sourceStart||0)});
-          }
-          const matches=[];
-          for(const c of comments){const q=c.quote.replace(/\\s+/g,' ').trim();if(!q)continue;const located=c.lineStart?runs.filter(r=>r.line>=Number(c.lineStart)&&r.line<=Number(c.lineEnd)):runs;const lower=located[0]?.start??0,upper=located[located.length-1]?.end??flat.length;const start=flat.indexOf(q,lower);if(start>=0&&start+q.length<=upper)matches.push({start,end:start+q.length,c});}
-          for(const run of runs){
-            const segments=matches.filter(m=>m.start<run.end&&m.end>run.start).map(m=>({start:run.offsets[Math.max(0,m.start-run.start)],end:Math.min(m.end,run.end)===run.end?run.node.length:run.offsets[Math.min(m.end,run.end)-run.start],c:m.c})).sort((a,b)=>b.start-a.start);
-            let limit=run.node.length;
-            for(const seg of segments){if(seg.end>limit||seg.end<=seg.start)continue;const r=document.createRange();r.setStart(run.node,seg.start);r.setEnd(run.node,seg.end);const mark=document.createElement('mark');mark.dataset.reviewId=seg.c.id;mark.title=seg.c.text;mark.style.cssText='background:rgba(255,193,7,.23);color:inherit;border-bottom:2px solid rgba(215,153,0,.55);border-radius:2px;cursor:pointer';r.surroundContents(mark);limit=seg.start;}
-          }
-        })()
-        """
-        browser.evaluateJavaScript(script) { _, _ in }
-
-    }
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        if navigationAction.navigationType == .linkActivated {
-            if url.scheme == "about", url.fragment != nil { decisionHandler(.allow); return }
-            decisionHandler(.cancel)
-            if ["https", "http", "file", "mailto"].contains(url.scheme?.lowercased() ?? "") { openURL(url) }
-        } else {
-            decisionHandler(url.scheme == "about" ? .allow : .cancel)
+        guard readerLoaded, let storage = text.textStorage, let layout = text.layoutManager else { return }
+        let whole = NSRange(location:0,length:storage.length)
+        storage.enumerateAttribute(.reviewComment,in:whole) { value, range, _ in
+            if value != nil { layout.removeTemporaryAttribute(.backgroundColor,forCharacterRange:range) }
         }
-    }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { readerLoaded = true; highlightComments() }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        guard !rendererReloaded, let renderedDocument else { return }
-        rendererReloaded = true
-        webView.loadHTMLString(renderedDocument, baseURL: nil)
+        storage.removeAttribute(.reviewComment,range:whole)
+        for comment in reviewRecord.comments ?? [] {
+            guard let range = rangeForComment(comment), range.length > 0 else { continue }
+            storage.addAttribute(.reviewComment,value:comment.id,range:range)
+            layout.addTemporaryAttribute(.backgroundColor,value:NSColor.systemYellow.withAlphaComponent(0.22),forCharacterRange:range)
+        }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard reviewRecord.commentsEnabled == true, reviewRecord.status == "pending" else { return true }
@@ -2071,6 +2275,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         return false
     }
     func windowWillClose(_ notification: Notification) {
+        readerClosed = true; imageRequests.forEach { $0.cancel() }; imageRequests.removeAll()
         autosaveTimer?.invalidate()
         if let commentEditor { removeChildWindow(commentEditor); commentEditor.close() }
         if let selectionObserver { NSEvent.removeMonitor(selectionObserver) }
@@ -2078,6 +2283,12 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
     }
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         guard let url = link as? URL else { return false }
+        if url.scheme == nil, let anchor = url.fragment, let storage = text.textStorage {
+            storage.enumerateAttribute(.nativeAnchor,in:NSRange(location:0,length:storage.length)) { value, range, stop in
+                if value as? String == anchor { text.scrollRangeToVisible(range); stop.pointee = true }
+            }
+            return true
+        }
         openURL(url)
         return true
     }
@@ -2085,13 +2296,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate, WKNavigatio
         let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
         let key = event.charactersIgnoringModifiers?.lowercased()
         if modifiers == [.command, .shift] && key == "m", reviewSidebar != nil {
-            if browser != nil {
-                inspectSelection(beginEditor: true)
-            } else {
-                let range = text.selectedRange()
-                if range.length > 0 { selectedQuote = (text.string as NSString).substring(with: range) }
-                beginSelectedComment()
-            }
+            inspectSelection(beginEditor:true)
             return true
         }
         if (modifiers == .command || modifiers == .control) && key == "w" {
