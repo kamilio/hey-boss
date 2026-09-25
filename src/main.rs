@@ -225,6 +225,8 @@ enum Command {
         output: std::path::PathBuf,
         #[arg(long)]
         source_map: bool,
+        #[arg(long, conflicts_with = "source_map")]
+        native: bool,
     },
     /// List running Codex/Claude processes and matched session activity.
     Agents {
@@ -915,12 +917,15 @@ fn run() -> std::io::Result<()> {
         input,
         output,
         source_map,
+        native,
     } = &cli.command
     {
         let markdown = read_markdown_file(input)?;
         return std::fs::write(
             output,
-            if *source_map {
+            if *native {
+                hey_boss::markdown::render_native_document(&markdown)
+            } else if *source_map {
                 hey_boss::markdown::render_review_document(&markdown)
             } else {
                 hey_boss::markdown::render_document(&markdown)

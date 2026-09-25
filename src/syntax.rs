@@ -9,6 +9,15 @@ pub fn escape(text: &str) -> String {
 }
 
 pub fn highlight(source: &str, language: &str) -> Option<String> {
+    tokens(source, language).map(|tokens| {
+        tokens
+            .into_iter()
+            .map(|(kind, text)| span(kind, text))
+            .collect()
+    })
+}
+
+pub fn tokens<'a>(source: &'a str, language: &str) -> Option<Vec<(&'static str, &'a str)>> {
     let language = language.to_ascii_lowercase();
     let family = match language.as_str() {
         "js" | "javascript" | "jsx" | "ts" | "typescript" | "tsx" | "rust" | "rs" | "swift"
@@ -36,12 +45,12 @@ pub fn highlight(source: &str, language: &str) -> Option<String> {
                     } else {
                         "plain"
                     };
-                    span(kind, line)
+                    (kind, line)
                 })
                 .collect(),
         );
     }
-    let mut output = String::new();
+    let mut output: Vec<(&'static str, &'a str)> = Vec::new();
     let mut i = 0;
     while i < source.len() {
         let rest = &source[i..];
@@ -170,7 +179,13 @@ pub fn highlight(source: &str, language: &str) -> Option<String> {
                 kind = "type";
             }
         }
-        output.push_str(&span(kind, &source[i..end]));
+        if let Some((previous_kind, previous_text)) = output.last_mut()
+            && *previous_kind == kind
+        {
+            *previous_text = &source[i - previous_text.len()..end];
+        } else {
+            output.push((kind, &source[i..end]));
+        }
         i = end;
     }
     Some(output)
