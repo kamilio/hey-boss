@@ -592,6 +592,7 @@ pub fn harvest(
                     detail: format!("Inspection incomplete; preserved: {error}"),
                     eligible: false,
                     worktree: None,
+                    error: None,
                 });
                 continue;
             }
@@ -642,6 +643,7 @@ pub fn harvest(
             detail,
             eligible: ready,
             worktree: None,
+            error: None,
         });
     }
     observations.retain(|key, _| retained.contains(key));
@@ -1195,6 +1197,7 @@ pub(super) fn aggressive_harvest(
             detail,
             eligible: true,
             worktree: None,
+            error: None,
         });
     }
     if !signaled.is_empty() {

@@ -594,6 +594,7 @@ pub fn clean(
                         detail,
                         eligible: false,
                         worktree: Some(metadata),
+                        error: None,
                     });
                     continue;
                 }
@@ -672,6 +673,7 @@ pub fn clean(
                 detail,
                 eligible: ready,
                 worktree: Some(metadata),
+                error: None,
             });
         }
     }
@@ -1037,7 +1039,9 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
         if entry.file_name() == ".git" {
             continue;
         }
-        if let Err(e) = super::databases::remove_tree(&entry.path()) {
+        if let Err(e) = super::databases::remove_tree(&entry.path())
+            && error.as_ref().is_none_or(super::is_preserved)
+        {
             error = Some(e);
         }
     }
@@ -1071,7 +1075,7 @@ fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
             return Ok(false);
         }
     }
-    let out = output(
+    super::visit_nul_output(
         &mut git(
             &w.path,
             &[
@@ -1082,30 +1086,86 @@ fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
                 "--exclude-standard",
             ],
         ),
-        Duration::from_secs(10),
-    )?;
-    if !out.status.success() {
-        return Err(io::Error::other("Cannot inspect checkout activity"));
+        Duration::from_secs(30),
+        |name| {
+            let relative = Path::new(std::ffi::OsStr::from_bytes(name));
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(io::Error::other("Invalid checkout path"));
+            }
+            let p = w.path.join(relative);
+            match std::fs::symlink_metadata(p) {
+                Ok(m) => {
+                    use std::os::unix::fs::MetadataExt;
+                    if m.mtime().max(m.ctime()).max(0) as u64 > cutoff {
+                        return Ok(false);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            Ok(true)
+        },
+    )
+}
+
+/// Retire only the exact, old registration of a checkout already removed by
+/// another agent. Never run a repository-wide prune or follow a symlink.
+fn retire_missing(repo: &Path, w: &Worktree, at: u64, apply: bool) -> io::Result<bool> {
+    if std::fs::symlink_metadata(&w.path).is_ok() {
+        return Err(super::preserved(
+            "Checkout reappeared; registration preserved",
+        ));
     }
-    use std::os::unix::ffi::OsStrExt;
-    for name in out.stdout.split(|c| *c == 0).filter(|s| !s.is_empty()) {
-        let relative = Path::new(std::ffi::OsStr::from_bytes(name));
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(io::Error::other("Invalid checkout path"));
+    let common = common_directory(repo)?;
+    for entry in std::fs::read_dir(common.join("worktrees"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
         }
-        let p = w.path.join(relative);
-        if let Ok(m) = std::fs::symlink_metadata(p) {
-            use std::os::unix::fs::MetadataExt;
-            if m.mtime().max(m.ctime()).max(0) as u64 > cutoff {
-                return Ok(false);
+        let admin = entry.path();
+        let pointer = std::fs::read_to_string(admin.join("gitdir"))?;
+        if Path::new(pointer.trim()) != w.path.join(".git") {
+            continue;
+        }
+        for name in ["", "gitdir", "HEAD", "index", "logs/HEAD"] {
+            let path = admin.join(name);
+            match modified(&path) {
+                Ok(time) if time > at.saturating_sub(86400) => return Ok(false),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
             }
         }
+        if apply {
+            // A missing checkout may have held a detached, unpushed commit.
+            git_text(
+                repo,
+                &[
+                    "update-ref",
+                    &format!("refs/cleanup/worktrees/{}", w.head),
+                    &w.head,
+                ],
+            )?;
+            match std::fs::symlink_metadata(&w.path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(super::preserved(
+                        "Checkout reappeared; registration preserved",
+                    ));
+                }
+            }
+            if std::fs::read_to_string(admin.join("gitdir"))? != pointer {
+                return Err(io::Error::other("Worktree registration changed"));
+            }
+            super::databases::remove_tree(&admin)?;
+        }
+        return Ok(true);
     }
-    Ok(true)
+    Ok(false)
 }
 
 fn aggressive_clean(
@@ -1142,24 +1202,31 @@ fn aggressive_clean(
         }
     }
     let mut candidates = Vec::new();
+    let mut items = Vec::new();
     for repo in repositories(&search) {
-        if let Ok(trees) = list(&repo) {
-            candidates.extend(trees.into_iter().skip(1));
+        match list(&repo) {
+            Ok(trees) => candidates.extend(trees.into_iter().skip(1).map(|w| (w, repo.clone()))),
+            Err(e) => items.push(Item {
+                name: repo.display().to_string(),
+                detail: format!("Inspection failed: {e}"),
+                eligible: false,
+                error: Some(e.to_string()),
+                worktree: None,
+            }),
         }
     }
-    candidates.sort_by(|a, b| a.path.cmp(&b.path));
-    candidates.dedup_by(|a, b| a.path == b.path);
+    candidates.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+    candidates.dedup_by(|a, b| a.0.path == b.0.path);
     let cursor = observations
         .get("aggressive-cursor")
         .and_then(|o| o.activity_fingerprint.clone())
         .unwrap_or_default();
     let split =
-        candidates.partition_point(|w| w.path.to_string_lossy().as_ref() <= cursor.as_str());
+        candidates.partition_point(|(w, _)| w.path.to_string_lossy().as_ref() <= cursor.as_str());
     candidates.rotate_left(split);
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let mut items = Vec::new();
     let mut removed = 0;
-    for w in candidates {
+    for (w, repo) in candidates {
         if std::time::Instant::now() >= deadline {
             break;
         }
@@ -1176,9 +1243,35 @@ fn aggressive_clean(
         if !allowed.iter().any(|r| under(&w.path, r)) || w.bare {
             continue;
         }
+        if matches!(std::fs::symlink_metadata(&w.path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+            && !active_codex_paths.iter().any(|p| p.starts_with(&w.path))
+        {
+            let result = retire_missing(&repo, &w, now(), apply);
+            let error = result
+                .as_ref()
+                .err()
+                .filter(|e| !super::is_preserved(e))
+                .map(ToString::to_string);
+            let detail = match result {
+                Ok(true) if apply => {
+                    "Removed stale registration; HEAD retained in recovery ref".into()
+                }
+                Ok(true) => "Old missing checkout; stale registration eligible for removal".into(),
+                Ok(false) => "Missing checkout; recent or already retired registration".into(),
+                Err(e) => e.to_string(),
+            };
+            items.push(Item {
+                name,
+                detail,
+                error,
+                eligible: false,
+                worktree: Some(details(&w, "", &None, now())),
+            });
+            continue;
+        }
         let result = (|| -> io::Result<bool> {
             if active_codex_paths.iter().any(|p| p.starts_with(&w.path)) {
-                return Err(io::Error::other(
+                return Err(super::preserved(
                     "Running Codex session uses this worktree; preserved",
                 ));
             }
@@ -1200,6 +1293,11 @@ fn aggressive_clean(
             }
             Ok(true)
         })();
+        let error = result
+            .as_ref()
+            .err()
+            .filter(|e| !super::is_preserved(e))
+            .map(ToString::to_string);
         let (eligible, detail) = match result {
             Ok(true) => (
                 true,
@@ -1211,13 +1309,15 @@ fn aggressive_clean(
                 .into(),
             ),
             Ok(false) => (false, "Source or Git activity within 24 hours".into()),
-            Err(e) => (false, format!("Cleanup incomplete: {e}")),
+            Err(e) if super::is_preserved(&e) => (false, e.to_string()),
+            Err(e) => (false, format!("Cleanup failed: {e}")),
         };
         items.push(Item {
             name,
             detail,
             eligible,
             worktree: Some(details(&w, "", &None, now())),
+            error,
         });
     }
     Ok((items, removed))
@@ -1226,6 +1326,64 @@ fn aggressive_clean(
 #[cfg(test)]
 mod aggressive_tests {
     use super::*;
+    #[test]
+    fn large_git_index_streams_and_missing_registration_is_retired_exactly() {
+        use std::io::Write;
+        let root =
+            std::env::temp_dir().join(format!("harvester-large-index-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("main")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main = root.join("main");
+        git_text(&main, &["init", "-b", "main"]).unwrap();
+        git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+        git_text(&main, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(main.join("seed"), "fixture").unwrap();
+        git_text(&main, &["add", "seed"]).unwrap();
+        git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+        let work = root.join("work");
+        git_text(
+            &main,
+            &["worktree", "add", "--detach", work.to_str().unwrap()],
+        )
+        .unwrap();
+        let w = list(&main).unwrap().remove(1);
+        let hash = git_text(&work, &["rev-parse", "HEAD:seed"]).unwrap();
+        let input = root.join("index-input");
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&input).unwrap());
+        let prefix = format!("{}/", "segment".repeat(5)).repeat(9);
+        for i in 0..30000 {
+            writeln!(f, "100644 {hash}\t{prefix}{i:08}").unwrap();
+        }
+        f.flush().unwrap();
+        let result = git(&work, &["update-index", "--index-info"])
+            .stdin(std::fs::File::open(input).unwrap())
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(expired(&w, now() + 172800).unwrap());
+        std::fs::write(work.join("recent"), "keep").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(work.join("recent"))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(now() + 172800))
+            .unwrap();
+        assert!(!expired(&w, now() + 172800).unwrap());
+        assert!(retire_missing(&main, &w, now() + 172800, true).is_err());
+        std::fs::remove_dir_all(&work).unwrap();
+        assert!(retire_missing(&main, &w, now() + 172800, true).unwrap());
+        assert_eq!(list(&main).unwrap().len(), 1);
+        assert_eq!(
+            git_text(
+                &main,
+                &["rev-parse", &format!("refs/cleanup/worktrees/{}", w.head)]
+            )
+            .unwrap(),
+            w.head
+        );
+        assert!(main.join("seed").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn old_locked_dirty_worktree_is_removable_but_live_sqlite_stays_in_place() {
         let root =

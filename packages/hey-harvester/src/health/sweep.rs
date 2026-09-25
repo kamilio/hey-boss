@@ -24,6 +24,31 @@ pub struct Progress {
     project_roots: VecDeque<PathBuf>,
     #[serde(default)]
     projects: Vec<Frame>,
+    #[serde(default)]
+    pub stats: Statistics,
+}
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Statistics {
+    pub pass_started_at: u64,
+    pub last_completed_at: Option<u64>,
+    pub last_pass_seconds: Option<u64>,
+    pub visited_this_cycle: u64,
+    pub removed_this_cycle: u64,
+    /// Logical file lengths, not net free-space gain (hard links may share blocks).
+    pub unlinked_bytes_this_cycle: u64,
+    pub visited_this_pass: u64,
+    pub removed_this_pass: u64,
+    pub roots_pending: usize,
+    pub discovery_pending: bool,
+    pub slice_millis: u64,
+}
+impl Statistics {
+    pub fn last_completion(&self) -> String {
+        self.last_completed_at
+            .map(|at| format!("{}s ago", now().saturating_sub(at)))
+            .unwrap_or_else(|| "not yet observed".into())
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Frame {
@@ -292,10 +317,18 @@ fn advance(
         }
         let frame = progress.stack.last_mut().unwrap();
         // Never follow a changed ancestor or walk into a repository from /tmp.
-        if frame.path.canonicalize().ok().as_ref() != Some(&frame.path)
-            || frame.path.join(".git").exists()
-            || databases::protected(&frame.path).unwrap_or(true)
+        let permitted = (|| -> io::Result<bool> {
+            Ok(frame.path.canonicalize()? == frame.path
+                && !frame.path.join(".git").exists()
+                && !databases::protected(&frame.path)?)
+        })();
+        if let Err(e) = &permitted
+            && e.kind() != io::ErrorKind::NotFound
+            && errors.len() < 8
         {
+            errors.push(format!("{}: {e}", frame.path.display()));
+        }
+        if !permitted.unwrap_or(false) {
             progress.stack.pop();
             continue;
         }
@@ -314,6 +347,11 @@ fn advance(
                     if m.uid() != unsafe { libc::geteuid() } && !clone_file {
                         return Ok(());
                     }
+                    // Fresh files cannot be deleted. Avoid opening every fresh
+                    // build artifact just to inspect its database header.
+                    if !m.is_dir() && !old_enough(&path, &m, at, clone_file) {
+                        return Ok(());
+                    }
                     if path.file_name().is_some_and(|n| n == ".git") || databases::protected(&path)?
                     {
                         protected += 1;
@@ -329,6 +367,7 @@ fn advance(
                     {
                         fs::remove_file(path)?;
                         removed += 1;
+                        progress.stats.unlinked_bytes_this_cycle += m.len();
                     }
                     Ok(())
                 })();
@@ -351,12 +390,16 @@ fn advance(
             }
             Err(e) => {
                 progress.stack.pop();
-                if errors.len() < 8 {
+                if e.kind() != io::ErrorKind::NotFound && errors.len() < 8 {
                     errors.push(e.to_string());
                 }
             }
         }
     }
+    progress.stats.visited_this_cycle += visited as u64;
+    progress.stats.visited_this_pass += visited as u64;
+    progress.stats.removed_this_cycle += removed as u64;
+    progress.stats.removed_this_pass += removed as u64;
     (removed, protected, errors)
 }
 
@@ -366,7 +409,7 @@ pub(super) fn clean(
     apply: bool,
 ) -> io::Result<(Vec<Item>, usize)> {
     if !apply {
-        return Ok((vec![Item { name: "24-hour cache expiration".into(), detail: "Enabled roots are inspected incrementally during cleanup; SQLite and sidecars are always retained".into(), eligible: true, worktree: None }], 0));
+        return Ok((vec![Item { name: "24-hour cache expiration".into(), detail: "Enabled roots are inspected incrementally during cleanup; SQLite and sidecars are always retained".into(), eligible: true, worktree: None, error: None }], 0));
     }
     if progress.roots.is_empty()
         && progress.stack.is_empty()
@@ -380,7 +423,17 @@ pub(super) fn clean(
             .filter_map(|p| p.canonicalize().ok())
             .collect();
         progress.discovered_at = now();
+        progress.stats.pass_started_at = now();
+        progress.stats.visited_this_pass = 0;
+        progress.stats.removed_this_pass = 0;
     }
+    if progress.stats.pass_started_at == 0 {
+        progress.stats.pass_started_at = progress.discovered_at;
+    }
+    progress.stats.visited_this_cycle = 0;
+    progress.stats.removed_this_cycle = 0;
+    progress.stats.unlinked_bytes_this_cycle = 0;
+    let started = Instant::now();
     discover_projects(progress);
     let (removed, protected, errors) = advance(
         progress,
@@ -389,14 +442,26 @@ pub(super) fn clean(
         Instant::now() + Duration::from_secs(25),
         100_000,
     );
+    progress.stats.slice_millis = started.elapsed().as_millis() as u64;
+    progress.stats.roots_pending = progress.roots.len() + usize::from(!progress.stack.is_empty());
+    progress.stats.discovery_pending =
+        !progress.projects.is_empty() || !progress.project_roots.is_empty();
+    if progress.stats.roots_pending == 0 && !progress.stats.discovery_pending {
+        progress.stats.last_completed_at = Some(now());
+        progress.stats.last_pass_seconds =
+            Some(now().saturating_sub(progress.stats.pass_started_at));
+    }
     let detail = format!(
-        "Deleted {removed} expired files; preserved {protected} database paths; {} roots pending; {}. {}",
+        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths; {} roots pending; {}; pass age {}s. {}",
+        progress.stats.visited_this_cycle,
+        progress.stats.slice_millis,
         progress.roots.len(),
         if progress.stack.is_empty() {
             "between roots"
         } else {
             "cursor saved for next cycle"
         },
+        now().saturating_sub(progress.stats.pass_started_at),
         errors.join("; ")
     );
     Ok((
@@ -405,6 +470,7 @@ pub(super) fn clean(
             detail,
             eligible: true,
             worktree: None,
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
         }],
         removed,
     ))

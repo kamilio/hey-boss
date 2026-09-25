@@ -303,7 +303,13 @@ fn rows(d: &Dashboard) -> Vec<String> {
             .map(|i| {
                 format!(
                     "{} {} — {}",
-                    if i.eligible { "eligible" } else { "preserved" },
+                    if i.error.is_some() {
+                        "failed"
+                    } else if i.eligible {
+                        "eligible"
+                    } else {
+                        "preserved"
+                    },
                     i.name,
                     i.detail
                 )
@@ -380,7 +386,19 @@ fn rows(d: &Dashboard) -> Vec<String> {
                 format!(
                     "Last scan: {} · {}",
                     s.observed_at,
-                    if s.running { s.phase.as_str() } else { "idle" }
+                    if s.phase.is_empty() {
+                        "idle"
+                    } else {
+                        s.phase.as_str()
+                    }
+                ),
+                format!("Inspection errors: {}", s.errors.len()),
+                format!(
+                    "Cache sweep: {} entries / {} ms; {} roots pending; last complete {}",
+                    s.cache_progress.visited_this_cycle,
+                    s.cache_progress.slice_millis,
+                    s.cache_progress.roots_pending,
+                    s.cache_progress.last_completion()
                 ),
             ];
             rows.extend(
@@ -538,7 +556,7 @@ mod tests {
             name: "/Users/example/Workspace/very-long-project-name/active-issue-worktree".into(),
             detail: "Locked worktree; preserved — issue 147; owner fixture-session; queued validation; retain staged changes and receipts".into(),
             eligible: false,
-            worktree: None,
+            worktree: None, error: None,
         });
         d.complete(0, Ok(snapshot));
         d.page = 2;

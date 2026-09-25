@@ -2,6 +2,7 @@
 mod codex;
 mod databases;
 mod sweep;
+pub use sweep::Statistics as CacheProgress;
 
 mod caches;
 #[cfg(target_os = "linux")]
@@ -29,6 +30,21 @@ pub fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[derive(Debug)]
+struct Preserved(&'static str);
+impl std::fmt::Display for Preserved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for Preserved {}
+fn preserved(reason: &'static str) -> io::Error {
+    io::Error::other(Preserved(reason))
+}
+fn is_preserved(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Preserved>())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +170,8 @@ pub struct Item {
     pub detail: String,
     pub eligible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<worktrees::Details>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +199,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub removed_caches: usize,
     #[serde(default)]
+    pub cache_progress: CacheProgress,
+    #[serde(default)]
     pub trimmed_logs: usize,
     /// Net volume free-space change, including concurrent filesystem activity.
     #[serde(default)]
@@ -194,6 +214,21 @@ pub struct Snapshot {
     pub phase: String,
 }
 impl Snapshot {
+    fn collect_item_errors(&mut self) {
+        for item in self
+            .processes
+            .iter()
+            .chain(&self.caches)
+            .chain(&self.worktrees)
+        {
+            if let Some(error) = &item.error {
+                let message = format!("{}: {error}", item.name);
+                if !self.errors.contains(&message) {
+                    self.errors.push(message);
+                }
+            }
+        }
+    }
     fn refresh_process_inventory(&mut self) {
         self.process_inventory = match processes::display_inventory() {
             Ok(rows) => Some(rows),
@@ -478,6 +513,7 @@ impl Store {
         for item in snapshot.caches.clone() {
             snapshot.record("cache", format!("{} — {}", item.name, item.detail));
         }
+        snapshot.cache_progress = state.sweep.stats.clone();
         if let Some(home) = std::env::var_os("HOME") {
             match logs::clean(&PathBuf::from(home), apply && config.trim_worker_logs) {
                 Ok((mut items, count)) => {
@@ -565,6 +601,7 @@ impl Store {
                 snapshot.record("disk", format!("Net available disk-space change: {change:+} bytes (includes concurrent writes and APFS shared blocks)"));
             }
         }
+        snapshot.collect_item_errors();
         for error in snapshot.errors.clone() {
             snapshot.record("error", error);
         }
@@ -659,6 +696,60 @@ fn output_with_limit(
     timeout: Duration,
     stdout_limit: usize,
 ) -> io::Result<Output> {
+    let mut stdout = Vec::new();
+    let mut result = stream_output(command, timeout, |bytes| {
+        if stdout.len().saturating_add(bytes.len()) > stdout_limit {
+            return Err(io::Error::other("Inspection output exceeds limit"));
+        }
+        stdout.extend_from_slice(bytes);
+        Ok(true)
+    })?
+    .ok_or_else(|| io::Error::other("Inspection unexpectedly stopped"))?;
+    result.stdout = stdout;
+    Ok(result)
+}
+
+/// Visit NUL-delimited Git paths without retaining a whole checkout's listing.
+/// False means the visitor proved it could stop early; true requires clean EOF
+/// and successful exit. A truncated or failed inspection can never authorize deletion.
+fn visit_nul_output(
+    command: &mut Command,
+    timeout: Duration,
+    mut visit: impl FnMut(&[u8]) -> io::Result<bool>,
+) -> io::Result<bool> {
+    let mut pending = Vec::new();
+    let result = stream_output(command, timeout, |mut bytes| {
+        while let Some(end) = bytes.iter().position(|b| *b == 0) {
+            pending.extend_from_slice(&bytes[..end]);
+            if !pending.is_empty() && !visit(&pending)? {
+                return Ok(false);
+            }
+            pending.clear();
+            bytes = &bytes[end + 1..];
+        }
+        pending.extend_from_slice(bytes);
+        if pending.len() > 1024 * 1024 {
+            return Err(io::Error::other("Inspection record exceeds limit"));
+        }
+        Ok(true)
+    })?;
+    let Some(result) = result else {
+        return Ok(false);
+    };
+    if !result.status.success() || !result.stderr.is_empty() {
+        return Err(io::Error::other("Git path inspection failed"));
+    }
+    if !pending.is_empty() {
+        return Err(io::Error::other("Incomplete Git path record"));
+    }
+    Ok(true)
+}
+
+fn stream_output(
+    command: &mut Command,
+    timeout: Duration,
+    mut consume: impl FnMut(&[u8]) -> io::Result<bool>,
+) -> io::Result<Option<Output>> {
     use std::os::unix::process::CommandExt;
     command
         .process_group(0)
@@ -679,36 +770,45 @@ fn output_with_limit(
         }
         fn drain(
             reader: &mut impl Read,
-            data: &mut Vec<u8>,
             eof: &mut bool,
-            limit: usize,
-        ) -> io::Result<()> {
+            consume: &mut impl FnMut(&[u8]) -> io::Result<bool>,
+        ) -> io::Result<bool> {
             let mut buffer = [0u8; 8192];
-            loop {
+            // A continuously writing subprocess must not starve the deadline
+            // check or its stderr pipe.
+            for _ in 0..16 {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
                         *eof = true;
-                        return Ok(());
+                        return Ok(true);
                     }
                     Ok(n) => {
-                        data.extend_from_slice(&buffer[..n]);
-                        if data.len() > limit {
-                            return Err(io::Error::other("Inspection output exceeds limit"));
+                        if !consume(&buffer[..n])? {
+                            return Ok(false);
                         }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(true),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e),
                 }
             }
+            Ok(true)
         }
         let deadline = Instant::now() + timeout;
-        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut err = Vec::new();
         let (mut out_eof, mut err_eof) = (false, false);
         let mut status = None;
         loop {
-            drain(&mut stdout, &mut out, &mut out_eof, stdout_limit)?;
-            drain(&mut stderr, &mut err, &mut err_eof, 8 * 1024 * 1024)?;
+            if !drain(&mut stdout, &mut out_eof, &mut consume)? {
+                return Ok(None);
+            }
+            drain(&mut stderr, &mut err_eof, &mut |bytes: &[u8]| {
+                err.extend_from_slice(bytes);
+                if err.len() > 8 * 1024 * 1024 {
+                    return Err(io::Error::other("Inspection stderr exceeds limit"));
+                }
+                Ok(true)
+            })?;
             if status.is_none() {
                 status = child.try_wait()?;
             }
@@ -716,11 +816,11 @@ fn output_with_limit(
                 && err_eof
                 && let Some(status) = status
             {
-                return Ok(Output {
+                return Ok(Some(Output {
                     status,
-                    stdout: out,
+                    stdout: Vec::new(),
                     stderr: err,
-                });
+                }));
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::other("Inspection command timed out"));
@@ -728,7 +828,7 @@ fn output_with_limit(
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
-    if result.is_err() {
+    if !matches!(result, Ok(Some(_))) {
         // This group is created solely for this inspection, never an existing user's group.
         unsafe {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
@@ -760,6 +860,73 @@ pub(crate) fn under(path: &Path, root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_items_count_as_errors_but_protected_items_do_not() {
+        let mut snapshot = super::Snapshot::default();
+        for (detail, error) in [
+            ("Inspection failed", Some("Cannot read index".to_owned())),
+            ("SQLite database or sidecar preserved", None),
+            ("Running Codex session uses this worktree; preserved", None),
+        ] {
+            snapshot.worktrees.push(super::Item {
+                name: detail.into(),
+                detail: detail.into(),
+                error,
+                eligible: false,
+                worktree: None,
+            });
+        }
+        snapshot.collect_item_errors();
+        snapshot.collect_item_errors();
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(snapshot.errors[0].contains("Cannot read index"));
+        let legacy: super::Item =
+            serde_json::from_str(r#"{"name":"old","detail":"protected","eligible":false}"#)
+                .unwrap();
+        assert!(legacy.error.is_none());
+    }
+    #[test]
+    fn streamed_records_have_no_total_output_cap_and_reject_incomplete_results() {
+        let mut count = 0;
+        assert!(
+            super::visit_nul_output(
+                std::process::Command::new("sh").args([
+                    "-c",
+                    "awk 'BEGIN { for (i=0;i<100000;i++) printf \"%0100d%c\", i, 0 }'"
+                ]),
+                std::time::Duration::from_secs(20),
+                |_| {
+                    count += 1;
+                    Ok(true)
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(count, 100000);
+        for script in ["printf unterminated", "printf 'entry\\0'; exit 1"] {
+            assert!(
+                super::visit_nul_output(
+                    std::process::Command::new("sh").args(["-c", script]),
+                    std::time::Duration::from_secs(5),
+                    |_| Ok(true),
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn streamed_records_can_stop_early_and_reap_the_inspector() {
+        let started = std::time::Instant::now();
+        assert!(
+            !super::visit_nul_output(
+                std::process::Command::new("sh").args(["-c", "printf 'recent\\0'; sleep 30"]),
+                std::time::Duration::from_secs(5),
+                |_| Ok(false),
+            )
+            .unwrap()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: AtomicU64 = AtomicU64::new(0);

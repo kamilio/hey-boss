@@ -96,6 +96,7 @@ pub(super) fn clean(home: &Path, apply: bool) -> io::Result<(Vec<Item>, usize)> 
             detail,
             eligible: safe,
             worktree: None,
+            error: None,
         });
     }
     Ok((items, count))
