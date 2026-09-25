@@ -1157,6 +1157,15 @@ fn apply_row(
             for field in fields {
                 row[field] = local[field].clone();
             }
+            // These fields form one valid lifecycle. A pending claim combined
+            // with a canonical closure/deletion (or the reverse) violates the
+            // issue constraints and prevents the journal from reaching arbitration.
+            let lifecycle = ["state", "assignee", "deleted_at", "closed_at", "closed_by"];
+            if table == "issues" && lifecycle.iter().any(|field| fields.contains(*field)) {
+                for field in lifecycle {
+                    row[field] = local[field].clone();
+                }
+            }
         }
         if table == "projects" {
             let old = current_row(db, table, &row)?;
@@ -2288,6 +2297,80 @@ mod tests {
         // Deletion must never make a snapshot cursor go backward.
         f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
         assert_eq!(snapshot(&f.db, "agent").unwrap()["cursor"], head);
+    }
+
+    #[test]
+    fn pending_issue_lifecycle_stays_valid_until_controller_arbitration() {
+        for (local, remote) in [
+            (
+                "assignee='human:fixture'",
+                "state='closed',closed_at=2,closed_by='human:fixture'",
+            ),
+            (
+                "state='closed',closed_at=1,closed_by='human:fixture'",
+                "assignee='human:fixture'",
+            ),
+            ("assignee='human:fixture'", "deleted_at=2"),
+            ("deleted_at=1", "assignee='human:fixture'"),
+        ] {
+            let main = Fixture::new();
+            main.capture();
+            let agent = Fixture::new();
+            install_capture(&agent.db, "agent", "agent").unwrap();
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &[],
+            )
+            .unwrap();
+            agent
+                .db
+                .execute(&format!("UPDATE issues SET {local}"), [])
+                .unwrap();
+            let key = json!({"project_id":"named:Native fleet","number":1});
+            let before = current_row(&agent.db, "issues", &key).unwrap();
+            let pending = journal(&agent.db, 0).unwrap();
+            main.db
+                .execute(
+                    &format!("UPDATE issues SET {remote},title='Online title'"),
+                    [],
+                )
+                .unwrap();
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &[],
+            )
+            .unwrap();
+            let merged = current_row(&agent.db, "issues", &key).unwrap();
+            for field in ["state", "assignee", "deleted_at", "closed_at", "closed_by"] {
+                assert_eq!(merged[field], before[field], "{local} / {remote}: {field}");
+            }
+            assert_eq!(merged["title"], "Online title");
+            assert_eq!(journal(&agent.db, 0).unwrap(), pending);
+            let receipts = accept_changes(&main.db, "agent", &pending).unwrap();
+            assert!(receipts.iter().all(|r| r["state"] == "conflict"));
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &receipts,
+            )
+            .unwrap();
+            assert_eq!(
+                current_row(&agent.db, "issues", &key).unwrap(),
+                current_row(&main.db, "issues", &key).unwrap()
+            );
+            assert_eq!(journal_count(&agent), 0);
+            assert_eq!(
+                rows(&agent.db, "SELECT * FROM fleet_conflicts", &[])
+                    .unwrap()
+                    .len(),
+                pending.len()
+            );
+        }
     }
 
     #[test]
