@@ -2735,7 +2735,7 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            14
+            15
         );
         let issue = f.cli(&["view", "1"]);
         assert_eq!(issue["issue"]["state"], "closed");
