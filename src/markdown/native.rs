@@ -54,16 +54,44 @@ impl Node {
     }
 }
 pub fn render_native_document(source: &str) -> String {
+    // CommonMark accepts all newline conventions. Strip the BOM before looking
+    // for a leading metadata block, while retaining original line numbers.
+    let normalized;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let source = if source.contains('\r') {
+        normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+        normalized.as_str()
+    } else {
+        source
+    };
     let lines: Vec<usize> = std::iter::once(0)
         .chain(source.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
     let line = |offset| lines.partition_point(|start| *start <= offset).max(1);
     let mut stack = vec![Node::new("root", 1, lines.len())];
+    // The parser's metadata option also recognizes fences later in a document.
+    // Only a complete leading block is frontmatter; later fences are Markdown.
+    let mut body_start = 0;
+    if let Some(metadata) = source.strip_prefix("---\n") {
+        let mut offset = 4;
+        for part in metadata.split_inclusive('\n') {
+            offset += part.len();
+            if part.trim_end_matches('\n') == "---" {
+                body_start = offset;
+                stack[0]
+                    .children
+                    .push(Node::new("frontmatter", 1, line(offset.saturating_sub(1))));
+                break;
+            }
+        }
+    }
+    let mut options = super::parser_options();
+    options.remove(pulldown_cmark::Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let mut links = linkify::LinkFinder::new();
     links.url_must_have_scheme(false);
-    for (event, range) in Parser::new_ext(source, super::parser_options()).into_offset_iter() {
-        let first = line(range.start);
-        let last = line(range.end.saturating_sub(1));
+    for (event, range) in Parser::new_ext(&source[body_start..], options).into_offset_iter() {
+        let first = line(body_start + range.start);
+        let last = line((body_start + range.end).saturating_sub(1));
         match event {
             Event::Start(tag) => {
                 if stack.len() >= 48 {
