@@ -775,7 +775,7 @@ impl Codex {
         if stop.load(Ordering::Relaxed) || store.worker_cancelled(job)? {
             return Err(Error::new(
                 "cancelled",
-                "Worker stopped, claim deadline expired, or issue ownership changed",
+                "Worker stopped or issue ownership changed",
             ));
         }
         Ok(())

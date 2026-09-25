@@ -440,15 +440,16 @@ impl Store {
         Ok(self.db.query_row("SELECT state<>'awaiting_model' AND claimed_at IS NULL AND reservation_expires IS NOT NULL AND reservation_expires<=?2 FROM worker_runs WHERE id=?1",params![job.id,now()],|r|r.get(0))?)
     }
     pub(crate) fn worker_cancelled(&self, job: &Job) -> Result<bool> {
-        let (stop, expiry, claimed): (bool, Option<i64>, Option<i64>) = self.db.query_row(
-            "SELECT stop_requested,reservation_expires,claimed_at FROM worker_runs WHERE id=?1",
+        // Deadline checks have their own terminal states. Rechecking time here
+        // can turn a deadline crossed between queries into a cancellation.
+        let (stop, claimed): (bool, Option<i64>) = self.db.query_row(
+            "SELECT stop_requested,claimed_at FROM worker_runs WHERE id=?1",
             [&job.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let issue = get_issue(&self.db, &job.project.id, job.number(), true)?;
         let waiting = claimed.is_none();
         Ok(stop
-            || expiry.is_some_and(|t| t <= now())
             || issue.deleted_at.is_some()
             || if waiting {
                 issue.state != "open"
@@ -1336,6 +1337,29 @@ mod tests {
             json!({"scope":"session","text":"Focus"}),
         ] {
             assert!(f.store.worker_steer(&f.job.id, &input).is_err());
+        }
+    }
+
+    #[test]
+    fn expired_reservations_are_timeouts_not_cancellations() {
+        let f = HandoffFixture::new(false);
+        for state in ["awaiting_model", "awaiting_claim"] {
+            f.store
+                .db
+                .execute(
+                    "UPDATE worker_runs SET state=?1,claimed_at=NULL,reservation_expires=0",
+                    [state],
+                )
+                .unwrap();
+            assert_eq!(
+                f.store.worker_model_expired(&f.job).unwrap(),
+                state == "awaiting_model"
+            );
+            assert_eq!(
+                f.store.worker_claim_expired(&f.job).unwrap(),
+                state == "awaiting_claim"
+            );
+            assert!(!f.store.worker_cancelled(&f.job).unwrap(), "{state}");
         }
     }
 
