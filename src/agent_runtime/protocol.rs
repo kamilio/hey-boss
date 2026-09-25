@@ -303,8 +303,7 @@ impl AgentSession {
             required(params, "threadId")?;
         }
         if value.get("id").is_some() && !method.is_empty() {
-            if value["id"].as_i64().is_none()
-                && !value["id"].as_str().is_some_and(|id| !id.is_empty())
+            if value["id"].as_i64().is_none() && value["id"].as_str().is_none_or(|id| id.is_empty())
             {
                 return Err(io::Error::other("Codex returned an invalid callback ID"));
             }
