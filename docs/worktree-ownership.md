@@ -92,3 +92,68 @@ screenshots at 820/920 points in light/dark appearances. The project-settings
 preview completed 33 browser checks at 320/390/768/1440 pixels in both themes.
 The unrelated inbox service was deliberately absent from that disposable fixture;
 its 503 responses were fixture limitations, not a check of inbox availability.
+
+## Installation verification — September 25, 2026
+
+Commit `a07020b979b55ae53c4e360ac29acb641469ef05` is published on main.
+Its completed GitHub runs are [Check 36088860139](https://github.com/kamilio/hey-boss/actions/runs/36088860139)
+and [Worker TUI 36088860144](https://github.com/kamilio/hey-boss/actions/runs/36088860144):
+19/19 macOS steps, 8/8 Linux steps, 9/9 mobile steps, and 21/21 TUI steps
+on each platform. Every step was completed successfully; no cancelled or skipped
+step was counted as validation. These results cover this commit, not later main
+changes, whose separate CI failures were observed during the handoff.
+
+The original fleet upgrade ended with SIGTERM and is incomplete. A subsequent
+read-only fleet audit found the main CLI already updated on this MacBook,
+`devbox`, and `kamils-macbook-pro.local` to build `e20efe1410f1cf31`, commit
+`4254d7d84fe4479154ecdd3855cc10ac2723a678`, which includes the ownership fix.
+The installed CLI probe completed normally with 4/4 checks on each host.
+Installed canonical skill hashes also match. A fresh browser run using the
+installed CLI completed 33/33 checks across 320/390/768/1440-pixel widths in
+both themes; the native audit completed with four ownership-detail captures
+at 820/920 points. The full selected ownership reason remains readable and
+wraps without clipping. The isolated browser fixture has no inbox service.
+
+Fly release 211 was deployed from the validated commit with a normal exit,
+completed machine checks, and image digest
+`sha256:6bf1ba856422381f2568e82b99697836fe056986f7713661ef27b969eb5e2c4f`.
+The fresh machine audit reports it started and passing; `/healthz` returns
+`{"ok":true}`.
+
+**Standalone health workers must be verified separately.** Remote health
+commands prefer `~/.local/bin/hey-boss-health` over the main CLI. All three
+standalone workers initially remained at `d7552906194359d1`; the ownership
+probe failed because the old worker omitted the lock reason. Updating only
+the main CLI therefore does not complete this issue's installation.
+
+Both Mac standalone workers were subsequently installed at `9b70030bd678bbda`
+from the validated release. Each final installer command exited normally after
+30/30 health tests, 2/2 selected hey-gh tests, the release build, and the explicit
+installation marker. Their installed ownership probes completed 4/4. Earlier
+Mac installer attempts ended with shell errors after replacement when their
+script was changed during execution; those attempts were not accepted. The final
+runs used an unchanged script. The local rerun waited normally for both Cargo's
+build cache and an active harvester's maintenance lock; neither owner was stopped
+and no lock was released by this task.
+
+During verification, main advanced through `b6019be` and extracted maintenance
+into `packages/hey-harvester`. Its `health/worktrees.rs` is byte-for-byte identical
+to the validated implementation. The installation probe now also supports the
+standalone `hey-harvester` command shape; its previous `health` prefix was
+rejected before exercising any checks. After adaptation, the installed local and
+devbox harvesters completed 4/4 checks, and the legacy Mac worker completed 4/4.
+This verifies the new entry point but does not establish that every existing
+client and schedule has stopped using the old helper.
+
+Devbox's required installer validation is currently blocked: 31/35 health tests
+passed, while four real-process/worktree tests could not inspect a non-dumpable
+process through `/proc`. The worker correctly preserved worktrees when process
+visibility was incomplete. Linux CI runs these tests with privileged inspection;
+devbox requires a sudo password and rejects unprivileged PID namespaces. Neither
+test failure nor an unsuccessful privileged-runner attempt permits installation.
+The old standalone devbox worker remains installed. Provide an authorized test
+runner with the necessary process visibility, rerun all required health tests and
+the installer, then require the standalone worker's 4/4 ownership probe before
+closing issue 147. Alternatively, finish and verify the harvester migration,
+including legacy callers, so the outdated helper is no longer selected.
+Do not stop the unrelated process or weaken cleanup checks.
