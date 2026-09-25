@@ -896,6 +896,7 @@ project dependency/build/output directories. New siblings do not protect old
 files. Directory discovery and file traversal save cursors between bounded runs,
 so large caches make forward progress. Worker diagnostic log rotation is enabled
 with this policy.
+Sweeps rotate bounded traversal cursors so a large temp directory cannot monopolize every later root.
 Status reports cache throughput, pending roots and full-pass completion; failed inspections count as errors, while SQLite/Codex protection stays separate.
 
 Aggressive process cleanup stops orphan developer runtimes after an hour, expired

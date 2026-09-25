@@ -25,6 +25,8 @@ pub struct Progress {
     #[serde(default)]
     projects: Vec<Frame>,
     #[serde(default)]
+    deferred: VecDeque<Vec<Frame>>,
+    #[serde(default)]
     pub stats: Statistics,
 }
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -308,12 +310,43 @@ fn advance(
     let mut protected = 0;
     let mut errors = Vec::new();
     let mut visited = 0;
+    let mut root_visits = 0;
     while visited < maximum && Instant::now() < deadline {
+        if root_visits >= 256 && !progress.stack.is_empty() {
+            progress
+                .deferred
+                .push_back(std::mem::take(&mut progress.stack));
+        }
         if progress.stack.is_empty() {
-            let Some(path) = progress.roots.pop_front() else {
+            root_visits = 0;
+            // Give later roots a turn without retaining thousands of open
+            // traversal stacks. Estimate their serialized size conservatively.
+            let deferred_bytes: usize = progress
+                .deferred
+                .iter()
+                .flatten()
+                .map(|frame| {
+                    frame.path.as_os_str().as_bytes().len() * 6
+                        + 128
+                        + frame
+                            .batch
+                            .iter()
+                            .map(|name| name.len() * 4 + 4)
+                            .sum::<usize>()
+                })
+                .sum();
+            if !progress.roots.is_empty()
+                && progress.deferred.len() < 8
+                && deferred_bytes < 512 * 1024
+            {
+                progress
+                    .stack
+                    .push(Frame::new(progress.roots.pop_front().unwrap()));
+            } else if let Some(stack) = progress.deferred.pop_front() {
+                progress.stack = stack;
+            } else {
                 break;
-            };
-            progress.stack.push(Frame::new(path));
+            }
         }
         let frame = progress.stack.last_mut().unwrap();
         // Never follow a changed ancestor or walk into a repository from /tmp.
@@ -334,6 +367,7 @@ fn advance(
         }
         let next = frame.next();
         visited += 1;
+        root_visits += 1;
         match next {
             Ok(Some(path)) => {
                 let result = (|| -> io::Result<()> {
@@ -359,13 +393,13 @@ fn advance(
                     }
                     if m.is_dir() {
                         if progress.stack.len() < 128 {
-                            progress.stack.push(Frame::new(path));
+                            progress.stack.push(Frame::new(path.clone()));
                         }
                     } else if (m.is_file() || m.file_type().is_symlink())
                         && old_enough(&path, &m, at, clone_file)
                         && apply
                     {
-                        fs::remove_file(path)?;
+                        fs::remove_file(&path)?;
                         removed += 1;
                         progress.stats.unlinked_bytes_this_cycle += m.len();
                     }
@@ -375,7 +409,7 @@ fn advance(
                     && e.kind() != io::ErrorKind::NotFound
                     && errors.len() < 8
                 {
-                    errors.push(e.to_string());
+                    errors.push(format!("{}: {e}", path.display()));
                 }
             }
             Ok(None) => {
@@ -389,9 +423,9 @@ fn advance(
                 }
             }
             Err(e) => {
-                progress.stack.pop();
+                let failed = progress.stack.pop().unwrap();
                 if e.kind() != io::ErrorKind::NotFound && errors.len() < 8 {
-                    errors.push(e.to_string());
+                    errors.push(format!("{}: {e}", failed.path.display()));
                 }
             }
         }
@@ -415,6 +449,7 @@ pub(super) fn clean(
         && progress.stack.is_empty()
         && progress.projects.is_empty()
         && progress.project_roots.is_empty()
+        && progress.deferred.is_empty()
     {
         progress.roots = discover();
         progress.project_roots = config
@@ -443,7 +478,8 @@ pub(super) fn clean(
         100_000,
     );
     progress.stats.slice_millis = started.elapsed().as_millis() as u64;
-    progress.stats.roots_pending = progress.roots.len() + usize::from(!progress.stack.is_empty());
+    progress.stats.roots_pending =
+        progress.roots.len() + progress.deferred.len() + usize::from(!progress.stack.is_empty());
     progress.stats.discovery_pending =
         !progress.projects.is_empty() || !progress.project_roots.is_empty();
     if progress.stats.roots_pending == 0 && !progress.stats.discovery_pending {
@@ -455,7 +491,7 @@ pub(super) fn clean(
         "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths; {} roots pending; {}; pass age {}s. {}",
         progress.stats.visited_this_cycle,
         progress.stats.slice_millis,
-        progress.roots.len(),
+        progress.stats.roots_pending,
         if progress.stack.is_empty() {
             "between roots"
         } else {
@@ -479,6 +515,57 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_root_does_not_starve_later_cleanup_and_rotated_cursors_resume() {
+        let root = std::env::temp_dir().join(format!("harvester-fair-{}", std::process::id()));
+        fs::create_dir_all(root.join("large")).unwrap();
+        fs::create_dir_all(root.join("small")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let at = now() + 90000;
+        for n in 0..1000 {
+            let path = root.join(format!("large/fresh-{n}"));
+            fs::write(&path, b"fresh").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(at))
+                .unwrap();
+        }
+        let old = root.join("small/expired");
+        fs::write(&old, b"old").unwrap();
+        let mut p = Progress {
+            roots: VecDeque::from([root.join("large"), root.join("small")]),
+            ..Default::default()
+        };
+        advance(
+            &mut p,
+            at,
+            true,
+            Instant::now() + Duration::from_secs(10),
+            512,
+        );
+        assert!(
+            !old.exists(),
+            "A large retained root must not block later disposable files"
+        );
+        assert_eq!(fs::read_dir(root.join("large")).unwrap().count(), 1000);
+        assert!(!p.deferred.is_empty() || !p.stack.is_empty());
+        p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        for _ in 0..10 {
+            advance(
+                &mut p,
+                at,
+                true,
+                Instant::now() + Duration::from_secs(10),
+                512,
+            );
+            p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        }
+        assert!(p.deferred.is_empty() && p.stack.is_empty() && p.roots.is_empty());
+        assert_eq!(fs::read_dir(root.join("large")).unwrap().count(), 1000);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn flat_directory_resumes_without_retained_entries_starving_later_files() {
         let root = std::env::temp_dir().join(format!("harvester-flat-{}", std::process::id()));
