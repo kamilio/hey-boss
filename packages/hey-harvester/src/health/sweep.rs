@@ -299,6 +299,20 @@ fn old_enough(path: &std::path::Path, m: &fs::Metadata, at: u64, clone_file: boo
     at.saturating_sub(newest.max(0) as u64) >= 86400
 }
 
+fn checkout_marker(path: &std::path::Path) -> io::Result<bool> {
+    let marker = path.join(".git");
+    match fs::symlink_metadata(&marker) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+        Ok(m) if m.is_dir() => {
+            // Some tools leave an empty .git in /tmp. It must not disable the
+            // whole temp sweep. Nonempty or unreadable markers stay protected.
+            Ok(fs::read_dir(marker)?.next().transpose()?.is_some())
+        }
+        Ok(_) => Ok(true),
+    }
+}
+
 fn advance(
     progress: &mut Progress,
     at: u64,
@@ -352,7 +366,7 @@ fn advance(
         // Never follow a changed ancestor or walk into a repository from /tmp.
         let permitted = (|| -> io::Result<bool> {
             Ok(frame.path.canonicalize()? == frame.path
-                && !frame.path.join(".git").exists()
+                && !checkout_marker(&frame.path)?
                 && !databases::protected(&frame.path)?)
         })();
         if let Err(e) = &permitted
@@ -515,6 +529,30 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_git_marker_does_not_disable_temp_cleanup_but_real_checkouts_stay_protected() {
+        let root = std::env::temp_dir().join(format!("harvester-marker-{}", std::process::id()));
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("repo/.git")).unwrap();
+        let root = root.canonicalize().unwrap();
+        fs::write(root.join("expired"), b"disposable").unwrap();
+        fs::write(root.join("repo/.git/HEAD"), b"ref: refs/heads/main").unwrap();
+        fs::write(root.join("repo/source"), b"keep").unwrap();
+        let mut p = Progress {
+            roots: VecDeque::from([root.clone()]),
+            ..Default::default()
+        };
+        advance(
+            &mut p,
+            now() + 90000,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+        );
+        assert!(!root.join("expired").exists());
+        assert!(root.join("repo/source").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn large_root_does_not_starve_later_cleanup_and_rotated_cursors_resume() {
         let root = std::env::temp_dir().join(format!("harvester-fair-{}", std::process::id()));

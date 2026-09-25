@@ -198,6 +198,9 @@ fn common_directory(repo: &Path) -> io::Result<PathBuf> {
             .ok_or_else(|| io::Error::other("Invalid Git pointer"))?;
         repo.join(target)
     };
+    if !std::fs::metadata(admin.join("HEAD"))?.is_file() {
+        return Err(io::Error::other("Git HEAD is not a file"));
+    }
     match std::fs::read_to_string(admin.join("commondir")) {
         Ok(relative) => admin.join(relative.trim()).canonicalize(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => admin.canonicalize(),
@@ -1326,6 +1329,13 @@ fn aggressive_clean(
 #[cfg(test)]
 mod aggressive_tests {
     use super::*;
+    #[test]
+    fn empty_git_marker_is_not_a_repository() {
+        let root = std::env::temp_dir().join(format!("harvester-empty-git-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        assert!(repositories(std::slice::from_ref(&root)).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn large_git_index_streams_and_missing_registration_is_retired_exactly() {
         use std::io::Write;
