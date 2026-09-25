@@ -7,8 +7,13 @@ use super::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::{BufReader, Write},
-    sync::{Arc, Mutex, mpsc},
+    io::{BufReader, Read, Write},
+    os::fd::{AsRawFd, FromRawFd},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 fn local_config(ctx: &Context) -> Result<Vec<Value>> {
@@ -59,6 +64,114 @@ impl PullProgress {
 impl Drop for PullProgress {
     fn drop(&mut self) {
         drop(self.done.take());
+        let _ = self.thread.take().unwrap().join();
+    }
+}
+
+// Receive replies independently of database work. Four wire-bounded frames
+// retain backpressure for bulk transfers; repeated pings occupy only one slot
+// until their heartbeat has finished. A slow pull must not hide an RPC reply.
+struct Incoming {
+    messages: Option<mpsc::Receiver<Result<Option<Value>>>>,
+    ping: Arc<AtomicBool>,
+    handling_ping: bool,
+    cancel: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+struct Interruptible<R> {
+    input: R,
+    cancel: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+impl<R: Read + AsRawFd> Read for Interruptible<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        while !self.cancel.load(Ordering::Acquire) && !self.stop.load(Ordering::Acquire) {
+            let mut fd = libc::pollfd {
+                fd: self.input.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut fd, 1, 100) };
+            if ready > 0 {
+                return self.input.read(bytes);
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(0)
+    }
+}
+impl Incoming {
+    fn start<R: Read + AsRawFd + Send + 'static>(
+        input: R,
+        replies: mpsc::SyncSender<Value>,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
+        let (messages, received) = mpsc::sync_channel(4);
+        let ping = Arc::new(AtomicBool::new(false));
+        let pending_ping = ping.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reader_cancel = cancel.clone();
+        let thread = std::thread::spawn(move || {
+            let mut input = BufReader::new(Interruptible {
+                input,
+                cancel: reader_cancel,
+                stop,
+            });
+            loop {
+                let frame = read_frame(&mut input).and_then(|message| {
+                    if message.as_ref().is_some_and(|m| m["version"] != 1) {
+                        Err(invalid("Unsupported fleet protocol version"))
+                    } else {
+                        Ok(message)
+                    }
+                });
+                if let Ok(Some(message)) = &frame {
+                    if message["kind"] == "authority_reply" {
+                        let _ = replies.try_send(frame.unwrap().unwrap());
+                        continue;
+                    }
+                    if message["kind"] == "ping" && pending_ping.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                }
+                let done = !matches!(frame, Ok(Some(_)));
+                if messages.send(frame).is_err() || done {
+                    break;
+                }
+            }
+        });
+        Self {
+            messages: Some(received),
+            ping,
+            handling_ping: false,
+            cancel,
+            thread: Some(thread),
+        }
+    }
+    fn next(&mut self) -> Result<Option<Value>> {
+        if self.handling_ping {
+            self.ping.store(false, Ordering::Release);
+        }
+        let message = self
+            .messages
+            .as_ref()
+            .unwrap()
+            .recv()
+            .map_err(|_| invalid("Fleet input reader exited"))??;
+        self.handling_ping = message.as_ref().is_some_and(|m| m["kind"] == "ping");
+        Ok(message)
+    }
+}
+impl Drop for Incoming {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        // Wake both a blocked sender and a reader waiting for a partial frame.
+        drop(self.messages.take());
         let _ = self.thread.take().unwrap().join();
     }
 }
@@ -124,15 +237,17 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
             }
         }
     });
-    let mut input = BufReader::new(std::io::stdin());
+    let fd = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let input = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut input = Incoming::start(input, relay.replies(), ctx.stop.clone());
     let mut pulls = pull::PullReader::default();
     while !ctx.stopped() {
-        let Some(message) = read_frame(&mut input)? else {
+        let Some(message) = input.next()? else {
             break;
         };
-        if message["version"] != 1 {
-            return Err(invalid("Unsupported fleet protocol version"));
-        }
         let _progress = matches!(message["kind"].as_str(), Some("pull" | "pull_end"))
             .then(|| PullProgress::start(output.clone()));
         let Some(message) = pulls.receive(message)? else {
@@ -143,7 +258,6 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                 relay.configure(&message);
                 reply(&output, control::configure_companion(&ctx, &message)?)?;
             }
-            Some("authority_reply") => relay.receive(message),
             Some("pull") => {
                 replica::apply_pull(
                     &db,
@@ -254,6 +368,67 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_delivers_authority_replies_ahead_of_work_and_coalesces_pings() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replies, received) = mpsc::sync_channel(2);
+        let mut input = Incoming::start(reader, replies, Arc::new(AtomicBool::new(false)));
+        send(&mut writer, json!({"kind":"pull"})).unwrap();
+        for _ in 0..100 {
+            send(&mut writer, json!({"kind":"ping"})).unwrap();
+        }
+        send(
+            &mut writer,
+            json!({"kind":"authority_reply","id":"waiting"}),
+        )
+        .unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap()["id"],
+            "waiting"
+        );
+        assert_eq!(input.next().unwrap().unwrap()["kind"], "pull");
+        assert_eq!(input.next().unwrap().unwrap()["kind"], "ping");
+        drop(writer);
+        assert!(input.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn input_shutdown_interrupts_partial_frames_and_full_queues() {
+        for bytes in [
+            b"{\"kind\":".to_vec(),
+            b"{\"version\":1,\"kind\":\"configure\"}\n".repeat(8),
+        ] {
+            let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (replies, _) = mpsc::sync_channel(2);
+            let input = Incoming::start(reader, replies, Arc::new(AtomicBool::new(false)));
+            writer.write_all(&bytes).unwrap();
+            let started = std::time::Instant::now();
+            drop(input);
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn input_rejects_incompatible_replies_before_routing_them() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replies, received) = mpsc::sync_channel(2);
+        let mut input = Incoming::start(reader, replies, Arc::new(AtomicBool::new(false)));
+        writeln!(
+            writer,
+            "{}",
+            json!({"version":2,"kind":"authority_reply","id":"invalid"})
+        )
+        .unwrap();
+        assert!(
+            input
+                .next()
+                .unwrap_err()
+                .to_string()
+                .contains("protocol version")
+        );
+        assert!(received.try_recv().is_err());
+    }
 
     struct Recording {
         bytes: Vec<u8>,
