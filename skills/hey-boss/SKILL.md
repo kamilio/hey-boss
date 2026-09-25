@@ -125,10 +125,22 @@ History tab remains available.
 `issue subtask create PARENT --title TITLE --body MARKDOWN` creates and links an
 ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
-Siblings run sequentially in queue order; later branches wait for earlier work to
+By default, siblings run sequentially in queue order; later branches wait for earlier work to
 reach Ready (PR-enabled projects) or Closed. Claim responses include the parent, position, and previous/next subtasks.
 Read the parent requirements and previous task's completion notes/PRs, then leave
 a clear handoff before finishing your own subtask.
+
+For parallel plans, `issue settings set --subtask-scheduling explicit` preserves
+grouping and parent completion but schedules siblings only by declared
+`blocked-by` links. Declare intentional sequences with those links; Ready handoff
+is unchanged. `--subtask-scheduling sequential` restores the default. Mode changes
+reject cycles and blocking claimed/reserved work; hierarchy claim guards remain.
+In explicit mode, previous/next siblings are context, not prerequisites.
+
+`issue reopen NUMBER --clear-manual-hold --if-version VERSION` clears a reconciled
+manual hold while retaining automatic dependency blocking. The issue remains
+Blocked until dependencies are satisfied. Ordinary reopen errors list effective
+blocker numbers and sources; never unlink dependencies just to clear a hold.
 
 For PR-enabled projects, make stacked PRs when dependencies have unmerged PRs:
 start from the prerequisite PR branch and use it as the new PR’s base. Keep your

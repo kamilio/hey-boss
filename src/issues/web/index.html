@@ -334,6 +334,16 @@
         <div class="project-settings-body">
           <div class="settings-editor">
             <p id="project-settings-name" class="settings-project-name"></p>
+            <section class="settings-section" aria-labelledby="settings-scheduling-title">
+              <h3 id="settings-scheduling-title">Subtask scheduling</h3>
+              <label class="field-label" for="project-subtask-scheduling">Dependencies between siblings</label>
+              <select class="text-input" id="project-subtask-scheduling" aria-describedby="project-scheduling-help">
+                <option value="sequential">Sequential siblings</option>
+                <option value="explicit">Explicit dependencies</option>
+              </select>
+              <p class="field-help" id="project-scheduling-help"></p>
+              <p class="field-help">Parent tasks still wait for their subtasks. Dependencies hand off at Ready when using pull requests, or Closed otherwise. Existing claims are preserved.</p>
+            </section>
             <section class="settings-section" aria-labelledby="settings-base-title">
               <h3 id="settings-base-title">Implementation</h3>
               <p class="field-help" id="project-prompt-live-help">Saving prompt edits also updates running agents that use these instructions, including connected devices. They keep their progress and session. The selected branches below are added automatically.</p>

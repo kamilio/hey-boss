@@ -843,7 +843,7 @@ CLI-created children append. Dragging or using the
 arrow keys on a child handle updates the shared project queue, which governs
 web, CLI and worker order.
 
-Subtasks run sequentially in their displayed queue order. A later sibling and its
+By default, subtasks run sequentially in their displayed queue order. A later sibling and its
 entire subtree stay **Blocked** until every earlier sibling and its descendants
 reach Ready in PR-enabled projects, or Closed otherwise. A closed intermediate issue does not bypass unfinished descendants;
 deleted subtrees are skipped. Reordering, linking, unlinking, reopening, deleting,
@@ -852,8 +852,33 @@ block a claimed or reserved task are rejected. Reopening upstream work preserves
 running claims and sends a rework notice; unstarted dependents become Blocked.
 Independent parent trees can still run concurrently.
 
+For plans with independent branches, select **Explicit dependencies** under
+**Project settings → Subtask scheduling**, or run:
+
+```sh
+hey-boss issue settings set --subtask-scheduling explicit
+hey-boss issue blocked-by 243 240
+```
+
+This keeps the parent/group relationships and parent completion rules, but removes
+all implicit `previous_subtask` dependencies, including those inherited from an
+ancestor's siblings. Queue order remains pickup priority, not a dependency.
+Declare intentional sequences with `blocked-by CHILD PREDECESSOR`; declared links
+still hand off at Ready in PR projects and Closed otherwise. Use
+`--subtask-scheduling sequential` to restore the default. A mode change that
+would introduce a dependency cycle or block claimed/reserved work is rejected
+atomically. Existing claims are preserved; hierarchy mutations retain the same
+parent and ancestor claim protections in either mode.
+
+`issue reopen NUMBER` reports effective blocker numbers and sources (`linked`,
+`subtask`, or `previous_subtask`). To clear a reconciled manual hold while keeping
+automatic dependency blocking, use
+`issue reopen NUMBER --clear-manual-hold --if-version VERSION`. The issue stays
+Blocked until its dependencies are satisfied, then resumes automatically. This
+does not remove dependency links, change the hierarchy, or release a live claim.
+
 Claims and issue details include `subtask_context`: parent, one-based position,
-sibling count, and previous/next sibling summaries (including state and PR links).
+sibling count, scheduling mode, and previous/next sibling summaries (including state and PR links).
 Worker prompts include the same context and commands to read the parent and the
 previous task's results. Agents should use those requirements and handoff notes,
 complete their own subtask, and leave a completion summary for the next agent.

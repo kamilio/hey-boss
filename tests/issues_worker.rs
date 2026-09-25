@@ -2368,18 +2368,20 @@ fn parallel_worker_refreshes_subtask_readiness_before_reserving_parents() {
     });
     let runs = status["runs"].as_array().unwrap();
     assert!(runs.iter().all(|r| r["state"] == "completed"), "{status}");
+    let closed_at: Vec<_> = (1..=5)
+        .map(|number| {
+            let issue = f.cli(&["view", &number.to_string()]);
+            assert_eq!(issue["issue"]["state"], "closed");
+            issue["issue"]["closed_at"].as_i64().unwrap()
+        })
+        .collect();
     for (parent, child) in [(1, 2), (2, 3), (1, 5)] {
         let p = runs.iter().find(|r| r["number"] == parent).unwrap();
-        let c = runs.iter().find(|r| r["number"] == child).unwrap();
+        // The agent closes its issue before worker cleanup records finished_at.
+        // Pickup must follow issue resolution, not later process bookkeeping.
         assert!(
-            p["started_at"].as_i64().unwrap() >= c["finished_at"].as_i64().unwrap(),
-            "Parent {parent} was reserved before child {child} completed: {status}"
-        );
-    }
-    for number in 1..=5 {
-        assert_eq!(
-            f.cli(&["view", &number.to_string()])["issue"]["state"],
-            "closed"
+            p["started_at"].as_i64().unwrap() >= closed_at[child - 1],
+            "Parent {parent} was reserved before child {child} closed: {status}"
         );
     }
     let transcript = f.transcript();

@@ -62,6 +62,7 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
 
 struct Graph {
     satisfied: RefCell<BTreeMap<i64, bool>>,
+    explicit: bool,
     prs_enabled: bool,
     issues: BTreeMap<i64, Value>,
     children: BTreeMap<i64, Vec<i64>>,
@@ -73,6 +74,7 @@ impl Graph {
     fn load(db: &Connection, project: &str) -> Result<Self> {
         let mut graph = Self {
             satisfied: RefCell::new(BTreeMap::new()),
+            explicit: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND subtask_scheduling='explicit')", [project], |r| r.get(0))?,
             prs_enabled: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)", [project], |r| r.get(0))?,
             issues: BTreeMap::new(),
             children: BTreeMap::new(),
@@ -95,7 +97,7 @@ impl Graph {
             graph.children.entry(parent).or_default().push(child);
         }
         for (&parent, children) in &graph.children {
-            if !graph.issues[&parent]["deleted_at"].is_null() {
+            if graph.explicit || !graph.issues[&parent]["deleted_at"].is_null() {
                 continue;
             }
             let mut previous = Vec::new();
@@ -290,6 +292,36 @@ pub(super) fn validate_subtask(
 }
 pub(super) fn has_dependencies(db: &Connection, project: &str, number: i64) -> Result<bool> {
     Ok(!Graph::load(db, project)?.active(number).is_empty())
+}
+
+pub(super) fn reopen_blockers(db: &Connection, project: &str, number: i64) -> Result<Vec<Value>> {
+    let graph = Graph::load(db, project)?;
+    Ok(graph
+        .active(number)
+        .into_iter()
+        .map(|(n, source)| graph.reference(n, source))
+        .collect())
+}
+
+/// Mode changes may remove dependencies, but cannot add blockers to running work.
+pub(super) fn validate_scheduling_change(db: &Connection, project: &str) -> Result<()> {
+    let graph = Graph::load(db, project)?;
+    graph.validate_edges()?;
+    for (&number, issue) in &graph.issues {
+        if issue["deleted_at"].is_null()
+            && issue["state"] == "open"
+            && (!issue["assignee"].is_null() || issue["reserved"] == true)
+            && graph
+                .active(number)
+                .values()
+                .any(|source| *source == "previous_subtask")
+        {
+            return Err(Error::conflict(format!(
+                "Cannot change subtask scheduling: issue #{number} is claimed or reserved and would gain sibling blockers. Finish or release that work first."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Validate an incoming fleet relationship inside its savepoint, before the
@@ -490,6 +522,24 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
         let Some(n) = issue["number"].as_i64() else {
             return;
         };
+        issue["subtask_scheduling"] = json!(if graph.explicit {
+            "explicit"
+        } else {
+            "sequential"
+        });
+        if let Some(context) = issue
+            .get_mut("subtask_context")
+            .and_then(Value::as_object_mut)
+        {
+            context.insert(
+                "scheduling".into(),
+                json!(if graph.explicit {
+                    "explicit"
+                } else {
+                    "sequential"
+                }),
+            );
+        }
         let mut dependencies = BTreeMap::new();
         for root in graph.sequence_roots(n) {
             for prior in std::iter::once(root).chain(graph.descendants(root)) {

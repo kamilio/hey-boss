@@ -43,6 +43,7 @@ impl Store {
                 &job.project,
                 &job.actor,
                 &Operation::Reopen {
+                    clear_manual_hold: false,
                     number: job.number(),
                     if_version: None,
                 },
@@ -881,6 +882,7 @@ mod tests {
                 .unwrap();
         }
         f.apply(Operation::Reopen {
+            clear_manual_hold: false,
             number: 1,
             if_version: None,
         });
@@ -1128,6 +1130,7 @@ mod tests {
             .unwrap();
         assert_eq!(f.issue().version, version);
         f.apply(Operation::Reopen {
+            clear_manual_hold: false,
             number: 1,
             if_version: None,
         });
@@ -1929,6 +1932,7 @@ mod tests {
         assert_eq!(f.issue().state, "blocked");
         assert!(f.issue().assignee.is_none());
         f.apply(Operation::Reopen {
+            clear_manual_hold: false,
             number: 1,
             if_version: None,
         });

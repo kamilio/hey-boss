@@ -324,6 +324,7 @@ pub fn run(o: &Options) -> Result<()> {
         for project in &c.projects {
             store.execute(&request(
                 Operation::ConfigureProject {
+                    subtask_scheduling: None,
                     chief_enabled: Some(o.chief),
                     chief_prompt: None,
                     prompt: None,
