@@ -55,7 +55,7 @@ or risk changes, and at least every ten minutes during active work:
 
 `issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
 its claim; `list --state blocked` finds paused work. Add repeatable `--by NUMBER`
-to link the issues that must close first. `issue blocked-by NUMBER BLOCKER...`
+to link prerequisites: Ready or Closed in PR-enabled projects, Closed otherwise. `issue blocked-by NUMBER BLOCKER...`
 sets these links on an existing issue; omit BLOCKERs to remove them. Blocking should be rare:
 make every effort to resolve the issue, raise questions via `hey-boss ask`, and
 ask the user for help before giving up. Explain the blocker and what enables
@@ -126,9 +126,19 @@ History tab remains available.
 ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
 Siblings run sequentially in queue order; later branches wait for earlier work to
-close. Claim responses include the parent, position, and previous/next subtasks.
+reach Ready (PR-enabled projects) or Closed. Claim responses include the parent, position, and previous/next subtasks.
 Read the parent requirements and previous task's completion notes/PRs, then leave
-a clear handoff before closing your own subtask.
+a clear handoff before finishing your own subtask.
+
+For PR-enabled projects, make stacked PRs when dependencies have unmerged PRs:
+start from the prerequisite PR branch and use it as the new PR’s base. Keep your
+diff scoped to this task; update/rebase when upstream changes or merges. Read
+`dependency_context` and attached PRs from the claim response. Attach your delivery
+PR and run `hey-boss issue ready NUMBER` when handing it to Boss. You decide
+readiness; there is no independent CI verification gate. Ready unblocks both
+explicit dependencies and subsequent subtasks before merge. Reopen Ready work
+before changing it so new downstream pickups pause. Running agents keep their
+claims and receive rework notices.
 
 Subtasks are scheduling dependencies: unfinished descendants put the parent in
 Blocked. Subtask mutations reject any automatic release of an existing parent or

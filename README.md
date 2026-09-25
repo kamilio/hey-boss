@@ -431,10 +431,17 @@ hey-boss issue list --state blocked
 hey-boss issue blocked-by 12  # Remove explicit blocker links
 ```
 
+In PR-enabled projects, `hey-boss issue ready NUMBER` marks an attached delivery PR
+Ready for Boss. Workers also mark Ready when completing PR delivery. The worker
+decides readiness; Hey Boss does not independently verify CI. Both explicit
+dependencies and subtask sequencing unblock at **Ready** or **Closed**, enabling
+stacked PRs before merge. Reopen a Ready task before rework: new dependent pickups
+pause, while running agents keep their claims and receive a dependency update.
+
 Dependencies must belong to the same project and cannot form cycles. Closing or
 deleting all blockers reopens the dependent issue automatically; reopening or
 restoring a blocker blocks it again. Subtasks remain blocking until every reachable
-unfinished descendant closes. A manual block without linked issues requires
+unfinished descendant reaches the project’s dependency completion state. A manual block without linked issues requires
 explicit reopening. Pending agent approval requests also appear as Blocked.
 
 Agent crashes, startup failures, incomplete completion reports and service outages
@@ -983,7 +990,7 @@ Create a child from the parent's Subtasks card or add an existing issue. Each
 child keeps its own Markdown, labels, assignee, PRs and lifecycle. Parent links
 and completion progress appear in the list; unlinking preserves the issue.
 Sibling subtasks run sequentially in queue order, including nested work. Later
-subtasks stay Blocked until earlier work closes; the parent runs after its descendants.
+subtasks stay Blocked until earlier work is Ready (PR projects) or Closed; the parent follows its descendants.
 Claims and worker prompts identify the parent, sequence position, and previous/next
 subtasks so agents can read requirements and prior handoffs.
 

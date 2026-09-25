@@ -2334,7 +2334,7 @@ mod tests {
         }
     }
     #[test]
-    fn configured_prompts_are_the_complete_implementation_instructions() {
+    fn configured_prompts_keep_their_instructions_and_add_pr_handoff_context() {
         for prs_enabled in [false, true] {
             for worktree_enabled in [false, true] {
                 let config = ProjectConfig {
@@ -2351,20 +2351,23 @@ mod tests {
                     ..Default::default()
                 };
                 let (text, goal, objective) = preview(&config, &project(), issue());
-                assert_eq!(
-                    text,
-                    format!(
-                        "Task 7.\n\n{} 7.\n\n{} 7.",
-                        if worktree_enabled {
-                            "Worktree"
-                        } else {
-                            "Checkout"
-                        },
-                        if prs_enabled { "PR" } else { "Main" }
-                    )
+                let base = format!(
+                    "Task 7.\n\n{} 7.\n\n{} 7.",
+                    if worktree_enabled {
+                        "Worktree"
+                    } else {
+                        "Checkout"
+                    },
+                    if prs_enabled { "PR" } else { "Main" }
                 );
+                assert!(text.starts_with(&base));
+                if prs_enabled {
+                    assert!(text.contains("stacked PRs"));
+                } else {
+                    assert_eq!(text, base);
+                }
                 assert!(!goal);
-                assert_eq!(objective, text);
+                assert_eq!(objective, base);
             }
         }
     }

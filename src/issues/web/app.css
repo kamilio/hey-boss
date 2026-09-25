@@ -2901,3 +2901,8 @@ button.avatar.self:hover {
 .pr-status-closed { color:#da3633; }
 .pr-status-unknown, .pr-status-stale { color:var(--muted); }
 .pr-link-heading .pr-status { font-size:11px; margin-right:4px; }
+
+.state-tabs button[data-state="ready"].selected svg, .issue-state.ready { color: var(--accent); }
+.state-pill.ready { color: var(--accent); background: var(--accent-soft); }
+
+.state-tabs button[hidden] { display: none; }

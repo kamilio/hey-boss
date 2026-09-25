@@ -449,6 +449,7 @@ the associated agent.
 | `claim 1` | Atomically assign an open issue to this session |
 | `assign-to-boss 1` | Assign an open issue to Boss |
 | `unassign 1` | Clear your claim, leaving the issue open |
+| `ready 1` | Mark an attached delivery PR Ready for Boss; unblock dependencies in PR-enabled projects |
 | `close 1` | Complete the issue, clear its claim, and record who closed it |
 | `reopen 1` | Reopen the issue without assigning it |
 | `reopen 1 --if-version N` | Reopen only if the issue still has revision N; conflicts exit 4 without changing the issue or history, including on `--host` |
@@ -494,7 +495,7 @@ hey-boss issue list --state deleted
 hey-boss issue restore 1
 ```
 
-`list` defaults to open, nondeleted issues. `--state all` includes open, blocked, and closed
+`list` defaults to open, nondeleted issues. `--state all` includes open, blocked, ready, and closed
 issues; `--state deleted` selects deleted ones separately. Results follow the shared queue
 order. `--mine` and `--unassigned` are mutually exclusive. Repeat `--label` to
 require every named label. Labels are case-sensitive, at most 64 UTF-8 bytes
@@ -839,10 +840,11 @@ web, CLI and worker order.
 
 Subtasks run sequentially in their displayed queue order. A later sibling and its
 entire subtree stay **Blocked** until every earlier sibling and its descendants
-are closed. A closed intermediate issue does not bypass unfinished descendants;
+reach Ready in PR-enabled projects, or Closed otherwise. A closed intermediate issue does not bypass unfinished descendants;
 deleted subtrees are skipped. Reordering, linking, unlinking, reopening, deleting,
-and restoring issues recompute the sequence. Changes that would block an already
-claimed or reserved task are rejected; finish or release that work first.
+and restoring issues recompute the sequence. Reordering/linking changes that would
+block a claimed or reserved task are rejected. Reopening upstream work preserves
+running claims and sends a rework notice; unstarted dependents become Blocked.
 Independent parent trees can still run concurrently.
 
 Claims and issue details include `subtask_context`: parent, one-based position,
@@ -850,6 +852,17 @@ sibling count, and previous/next sibling summaries (including state and PR links
 Worker prompts include the same context and commands to read the parent and the
 previous task's results. Agents should use those requirements and handoff notes,
 complete their own subtask, and leave a completion summary for the next agent.
+`dependency_context` includes prerequisite tasks and their attached PRs, even
+after Ready unblocks the task. PR-enabled prompts instruct workers to stack on
+unmerged prerequisite PR branches and use those branches as their PR bases.
+Workers update/rebase the stack when upstream changes or merges.
+
+Ready is worker-controlled: attach the delivery PR, then run `issue ready NUMBER`.
+It assigns Boss and unblocks explicit dependencies and sequential subtasks, without
+checking CI independently. Completed PR worker runs mark Ready automatically.
+Use `list --state ready` or the Ready tab to find PRs awaiting review. Reopen a
+Ready task before reworking it; descendants must account for upstream changes
+before returning to Ready. Closing remains a separate completion/merge action.
 
 Automatic worker pickup waits for all reachable open descendants, including those
 under a closed intermediate issue. Deleted subtrees are excluded. Manual claims
