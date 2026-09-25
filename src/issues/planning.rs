@@ -84,7 +84,15 @@ pub fn can_draft(
     assignee: Option<&str>,
 ) -> Result<()> {
     drafts_allowed(db, project)?;
-    let reserved: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)", params![project.id,number], |r|r.get(0))?;
+    let reserved: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)
+         OR EXISTS(SELECT 1 FROM fleet_allocations a
+             LEFT JOIN fleet_allocation_deadlines d USING(project_id,issue_number)
+             WHERE a.project_id=?1 AND a.issue_number=?2
+               AND (d.expires_at IS NULL OR d.expires_at>?3))",
+        params![project.id, number, super::worker::now()],
+        |r| r.get(0),
+    )?;
     if !matches!(state, "open" | "blocked") || assignee.is_some() || reserved {
         return Err(Error::conflict(
             "Only open or blocked, unassigned, unreserved issues can be drafted",
