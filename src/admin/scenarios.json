@@ -589,73 +589,6 @@
     "args": [],
     "setup": []
   },
-  "alert": {
-    "args": [
-      "Review complete",
-      "--title",
-      "Review"
-    ],
-    "setup": []
-  },
-  "update": {
-    "args": [
-      "Review complete",
-      "# Review\n\nThe command output is ready.",
-      "--title",
-      "Review"
-    ],
-    "setup": []
-  },
-  "ask": {
-    "args": [
-      "Which output should be shorter?",
-      "Review the examples.",
-      "--option",
-      "Text",
-      "--option",
-      "JSON",
-      "--async",
-      "--title",
-      "Review"
-    ],
-    "setup": []
-  },
-  "prompt": {
-    "args": [
-      "Preferred format?",
-      "Review the examples.",
-      "--title",
-      "Review"
-    ],
-    "setup": []
-  },
-  "approval": {
-    "args": [
-      "Approve the plan?",
-      "Review the examples.",
-      "--title",
-      "Review"
-    ],
-    "setup": []
-  },
-  "status": {
-    "args": [
-      "review-task-1"
-    ],
-    "setup": []
-  },
-  "wait": {
-    "args": [
-      "review-task-1"
-    ],
-    "setup": []
-  },
-  "hide": {
-    "args": [
-      "review-task-1"
-    ],
-    "setup": []
-  },
   "skill install": {
     "args": [],
     "setup": []
@@ -679,6 +612,73 @@
       "map.json",
       "--request-id",
       "review-map-batch"
+    ],
+    "setup": []
+  },
+  "notif alert": {
+    "args": [
+      "Review complete",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "notif update": {
+    "args": [
+      "Review complete",
+      "# Review\n\nThe command output is ready.",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "notif ask": {
+    "args": [
+      "Which output should be shorter?",
+      "Review the examples.",
+      "--option",
+      "Text",
+      "--option",
+      "JSON",
+      "--async",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "notif prompt": {
+    "args": [
+      "Preferred format?",
+      "Review the examples.",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "notif approval": {
+    "args": [
+      "Approve the plan?",
+      "Review the examples.",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "notif hide": {
+    "args": [
+      "review-task-1"
+    ],
+    "setup": []
+  },
+  "notif status": {
+    "args": [
+      "review-task-1"
+    ],
+    "setup": []
+  },
+  "notif wait": {
+    "args": [
+      "review-task-1"
     ],
     "setup": []
   }

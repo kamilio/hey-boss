@@ -1161,7 +1161,7 @@ async function performAction(action, button) {
     if (!yes) return;
   }
   if (action === "block") {
-    const yes = await confirmDialog("Block this issue?", "Blocking should be rare. Make every effort to resolve the issue first, raise questions and ask for help via hey-boss ask. Workers will pause pickup until you reopen it. Add a comment explaining the blocker.", "Block issue");
+    const yes = await confirmDialog("Block this issue?", "Blocking should be rare. Make every effort to resolve the issue first, raise questions and ask for help via hey-boss notif ask. Workers will pause pickup until you reopen it. Add a comment explaining the blocker.", "Block issue");
     if (!yes) return;
   }
   if (action === "delete") {

@@ -54,7 +54,7 @@
       $("#workflow").addEventListener("change",assembled);$("#refresh-assembled").addEventListener("click",assembled);
       await assembled();
     } else if(id.startsWith("command:")) {
-      const c=data.commands.find(c=>c.id===id.slice(8)); if(!c)return show("prompt:worker");
+      const c=data.commands.find(c=>c.id===id.slice(8)); if(!c){const grouped=data.commands.find(c=>c.id===`notif ${id.slice(8)}`);return show(grouped?`command:${grouped.id}`:"prompt:worker");}
       $("#content").innerHTML=heading("COMMAND OUTPUT",`hey-boss ${c.id}`,c.description,`<button class="button" id="refresh-command">Refresh preview</button>`)+`<div class="stats"><span class="pill">${c.json_supported?"Text + JSON option":"No --json option"}</span>${c.aliases.length?`<span class="pill">Aliases: ${esc(c.aliases.join(", "))}</span>`:""}<span class="pill">${c.preview==="sample"?"Disposable sample state":"Help only · external effects"}</span></div><div id="command-output"><div class="empty">Capturing output…</div></div><details><summary>Command help & options</summary><pre>${esc(c.help)}</pre></details>`;
       $("#refresh-command").addEventListener("click",()=>{cache.delete(id);show(id).catch(fail);});
       const preview=cache.get(id)||await request("/api/admin/preview",{command:c.id,issue:issue?{title:issue.title,body:String(issue.body||"").slice(0,60000)}:{}});

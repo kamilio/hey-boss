@@ -26,7 +26,7 @@ assert.ok(node.textContent.includes('artifacts#artifact=some-id'));
 context.location.href='http://localhost/mm#node=topic';listeners.popstate();
 assert.ok(node.textContent.includes('mm#node=topic'));
 assert.ok(browser('https://example.com/issues#project=Bob\'s&issue=81').node.textContent.includes("Bob'\"'\"'s"));
-assert.ok(browser('https://example.com/',true).node.textContent.includes('hey-boss inbox --json'));
+assert.ok(browser('https://example.com/',true).node.textContent.includes('hey-boss notif inbox --json'));
 assert.ok(browser('https://example.com/?task=notice-id',true).node.textContent.includes('hey-boss lookup'));
 vm.runInNewContext(script,{document:{getElementById:()=>null}});
 console.log('Agent guidance: shared routes, shell quoting, navigation and paired Inbox passed');

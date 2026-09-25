@@ -10,6 +10,7 @@ mod health_cli;
 mod issue_cli;
 mod lookup_cli;
 mod mindmap_cli;
+mod notif_cli;
 mod secret_cli;
 mod upgrade_cli;
 mod upgrade_provenance;
@@ -54,36 +55,37 @@ fn initialize(executable: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Parser)]
+#[derive(Args)]
 #[command(
     name = "hey-boss",
     version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("HEY_BOSS_BUILD_ID"), ")"),
     about = "Project issues, native Mac updates, notifications, and questions",
-    after_help = r#"Use --title when creating an item. Keep summaries short;
-put the details in Markdown. Ask only when requested or an answer is essential.
-
-Questions: --sync waits; --async returns a Task ID. Use wait for the answer.
-Save Task IDs and hide cards when they become obsolete.
-Notifications and issues infer the project from Git or the directory.
-Use --project with a full project ID or unambiguous name to override it.
-List shared projects with issue projects. Use issue create --title TITLE --body MARKDOWN.
+    after_help = "Use hey-boss <command> --help for options. Notification commands live under hey-boss notif.
 
 Examples:
   hey-boss issue list
-  hey-boss issue claim 12
-  hey-boss update --project Atlas --title Analysis 'Report ready' '# Findings'
-  hey-boss alert --project Atlas --title Build 'Checks passed' --autoclose 10
-  hey-boss ask --project Atlas --title Format 'Which format?' '' --option PDF --option Markdown --async
-  hey-boss wait '<task_id>'
-  hey-boss hide '<task_id>'
-
-Three or more notifications form a collapsible project stack. The project × clears the stack. Read update/Open dismisses the card; history is kept.
-Run hey-boss <command> --help for options and more examples."#
+  hey-boss notif alert --title Build 'Checks passed'
+  hey-boss notif inbox
+  hey-boss skill install"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+
+// Build the compatibility forms from the same enum, but keep root help focused.
+impl clap::CommandFactory for Cli {
+    fn command() -> clap::Command {
+        Self::augment_args(clap::Command::new("hey-boss")).mut_subcommands(|command| {
+            let legacy = notif_cli::Action::has_subcommand(command.get_name());
+            if legacy { command.hide(true) } else { command }
+        })
+    }
+    fn command_for_update() -> clap::Command {
+        Self::command()
+    }
+}
+impl Parser for Cli {}
 
 #[derive(Args)]
 struct Output {
@@ -159,6 +161,14 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Notifications, questions, secret requests, and Inbox.
+    #[command(
+        subcommand,
+        after_help = "Use --title when creating a notification. Keep summaries short and put details in Markdown.\nQuestions: --sync waits; --async returns a Task ID. Use notif wait for the answer.\nProject context is inferred from Git or the directory; use --project to override it.\nExisting root notification commands remain accepted as compatibility aliases."
+    )]
+    Notif(notif_cli::Action),
+    #[command(flatten)]
+    LegacyNotif(notif_cli::Action),
     /// Review command help and isolated text/JSON output previews.
     Admin(admin_cli::Options),
     /// Show or install the canonical agent skill.
@@ -170,8 +180,6 @@ enum Command {
         #[command(subcommand)]
         action: hey_boss::fleet::Action,
     },
-    /// Request one or two secrets without history or agent-visible output.
-    Secret(secret_cli::Options),
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
@@ -238,11 +246,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Open the web Inbox; --json lists notices without opening a browser.
-    Inbox {
-        #[arg(long)]
-        json: bool,
-    },
     /// Open the native agent overview window.
     Overview {
         /// Print the running overview's local/server snapshots and current view as JSON.
@@ -256,184 +259,6 @@ enum Command {
     },
     /// Upgrade this installation and every registered companion from one source build.
     Upgrade(upgrade_cli::Options),
-    #[command(
-        about = "Post a short update with a Markdown preview",
-        after_help = r#"Keep SUMMARY to one short sentence. MARKDOWN is inline text; use --file PATH to load a Markdown document instead.
-Headings, emphasis, lists, code, and http/https/file links are supported.
-Read update opens the document and dismisses the card. History is kept. Returns a Task ID immediately.
-
-Example (zsh/bash):
-  hey-boss update --project Atlas --title 'Analysis ready' 'Three builds reviewed' $'# Results\n\n**Report complete.**\n\n[Read more](https://example.com/report)'
-  hey-boss hide '<task_id>'"#
-    )]
-    Update {
-        #[command(flatten)]
-        metadata: Metadata,
-        #[arg(help = "Short sentence visible on the compact card")]
-        summary: String,
-        #[arg(
-            value_name = "MARKDOWN",
-            help = "Full Markdown text opened by Read update"
-        )]
-        #[arg(required_unless_present = "file", conflicts_with = "file")]
-        content: Option<String>,
-        #[arg(
-            long,
-            help = "Enable document comments; status includes feedback and wait completes when review finishes"
-        )]
-        comments: bool,
-        #[arg(
-            long,
-            requires = "comments",
-            help = "Wait until the enabled review is finished or cancelled"
-        )]
-        sync: bool,
-        #[arg(
-            long,
-            alias = "markdown-file",
-            value_name = "PATH",
-            conflicts_with = "content",
-            help = "Review Markdown, source/text (1 MiB), or PNG/JPEG/GIF/WebP images (4 MiB); snapshot file contents"
-        )]
-        file: Option<std::path::PathBuf>,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Show a brief notification",
-        after_help = r#"Returns a Task ID immediately. Stays visible until dismissed or hidden unless
---autoclose sets seconds on screen. Supply both --link-url and --link-label for a large
-click target. The action button opens the link and dismisses the card; history is kept.
-
-Examples:
-  hey-boss alert --project Atlas --title Build 'Checks passed' --autoclose 10
-  hey-boss alert --project Atlas --title Report '**Analysis published**' --link-url https://example.com/report --link-label 'Open report'"#
-    )]
-    Alert {
-        #[command(flatten)]
-        metadata: Metadata,
-        message: String,
-        #[arg(long, help = "Dismiss after this positive number of seconds on screen")]
-        autoclose: Option<f64>,
-        #[arg(
-            long,
-            requires = "link_label",
-            help = "Destination for the action button: http, https, or file URL"
-        )]
-        link_url: Option<String>,
-        #[arg(
-            long,
-            requires = "link_url",
-            help = "Short action label, such as Open report"
-        )]
-        link_label: Option<String>,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Ask for text or a choice",
-        after_help = r#"Ask only when requested or an answer is essential to proceed. Without --option,
-accepts free text. Repeat --option for choices. Pass '' for an empty description.
---sync waits for the answer. --async returns a Task ID immediately;
-continue independent work, then use wait to receive the answer. status checks once.
-Close all cancels unanswered questions: status is cancelled with no result.
-Interrupting wait leaves the question available. hide does not dismiss questions.
-
-Examples:
-  hey-boss ask --project Atlas --title 'Report name' 'What should the report be called?' '' --sync
-  hey-boss ask --project Atlas --title Format 'Which format?' 'Choose the output.' --option Markdown --option PDF --async
-  hey-boss wait '<task_id>'"#
-    )]
-    Ask {
-        #[command(flatten)]
-        metadata: Metadata,
-        question: String,
-        description: String,
-        #[arg(
-            long = "option",
-            help = "Choice button label; repeat for each choice (omit for free text)"
-        )]
-        options: Vec<String>,
-        #[arg(
-            long,
-            help = "Wait for the answer before returning",
-            required_unless_present = "asynchronous",
-            conflicts_with = "asynchronous"
-        )]
-        sync: bool,
-        #[arg(
-            long = "async",
-            required_unless_present = "sync",
-            help = "Return a Task ID immediately; retrieve the answer with wait"
-        )]
-        asynchronous: bool,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Ask for text asynchronously",
-        after_help = "Equivalent to ask --async without options. Returns a Task ID, not an answer.\n\nExample:\n  hey-boss prompt --project Atlas --title Name 'Name the report?' ''\n  hey-boss wait '<task_id>'"
-    )]
-    Prompt {
-        #[command(flatten)]
-        metadata: Metadata,
-        question: String,
-        description: String,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Ask for a choice asynchronously",
-        after_help = "Returns a Task ID immediately. Use --option repeatedly to replace Yes/No choices.\n\nExample:\n  hey-boss approval --project Atlas --title Publish 'Publish the report?' 'The draft is ready.'\n  hey-boss wait '<task_id>'"
-    )]
-    Approval {
-        #[command(flatten)]
-        metadata: Metadata,
-        question: String,
-        description: String,
-        #[arg(long = "option", default_values = ["Yes", "No"])]
-        options: Vec<String>,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Dismiss an alert or update",
-        after_help = "Use when a notification becomes obsolete or is superseded. Does not hide questions\nor close an already open document preview.\n\nExample:\n  hey-boss hide '<task_id>'"
-    )]
-    Hide {
-        task_id: String,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Check a task",
-        after_help = "pending = queued or displayed; ok = completed; cancelled = question dismissed by Close all.\nAn answered question includes result; cancellation has no result and is not approval.\nUse wait for a question answer instead of polling status.\n\nExample:\n  hey-boss status '<task_id>'"
-    )]
-    Status {
-        task_id: String,
-        #[arg(
-            long,
-            conflicts_with = "async",
-            help = "Wait for available review comments or an answer"
-        )]
-        sync: bool,
-        #[arg(
-            long,
-            help = "Return current state and available comments immediately (default)"
-        )]
-        r#async: bool,
-        #[command(flatten)]
-        output: Output,
-    },
-    #[command(
-        about = "Wait for an answer",
-        after_help = "Questions only; not alerts or updates. Returns immediately if answered or cancelled.\nOtherwise waits for an answer or Close all. Cancellation returns status cancelled\nwithout a result; it is not an answer or approval. Ctrl+C stops this caller and\nleaves the question available for a later wait.\n\nExample:\n  hey-boss wait '<task_id>'"
-    )]
-    Wait {
-        task_id: String,
-        #[command(flatten)]
-        output: Output,
-    },
 }
 
 impl Cli {
@@ -459,261 +284,23 @@ impl Cli {
         self,
         resolve_project: impl FnOnce(Option<&str>) -> std::io::Result<hey_boss::issues::Project>,
     ) -> std::io::Result<(Request, Output)> {
-        let invalid =
-            |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
-        let mut issue = None;
-        let (project, title, severity, icon, icon_path) = match &self.command {
-            Command::Update { metadata, .. }
-            | Command::Alert { metadata, .. }
-            | Command::Ask { metadata, .. }
-            | Command::Prompt { metadata, .. }
-            | Command::Approval { metadata, .. } => {
-                if metadata
-                    .project
-                    .as_deref()
-                    .is_some_and(|p| p.trim().is_empty())
-                    || metadata.title.trim().is_empty()
-                {
-                    return Err(invalid("creation project and title must not be blank"));
-                }
-                if let Some(number) = metadata.issue {
-                    let project = if let Some(project) = &metadata.issue_project {
-                        project.clone()
-                    } else {
-                        let cwd = std::env::current_dir()?;
-                        let machine =
-                            hey_boss::issues::identity::machine().map_err(std::io::Error::other)?;
-                        hey_boss::issues::identity::project(&cwd, &machine)
-                            .map_err(std::io::Error::other)?
-                            .id
-                    };
-                    let reference = hey_boss::notices::IssueReference {
-                        project,
-                        number,
-                        host: metadata.issue_host.clone().or_else(|| {
-                            std::env::var("HEY_BOSS_ISSUE_HOST")
-                                .ok()
-                                .filter(|s| !s.is_empty())
-                        }),
-                    };
-                    reference.validate().map_err(std::io::Error::other)?;
-                    issue = Some(reference);
-                }
-                (
-                    Some(resolve_project(metadata.project.as_deref())?.name),
-                    Some(metadata.title.clone()),
-                    metadata.severity,
-                    metadata.icon.clone(),
-                    metadata.icon_file.clone(),
-                )
-            }
-            Command::Admin(_)
-            | Command::Skill(_)
-            | Command::Secret(_)
-            | Command::Lookup(_)
-            | Command::Artifact(_)
-            | Command::Attachment(_)
-            | Command::Issue(_)
-            | Command::Mm(_)
-            | Command::Settings(_)
-            | Command::Fleet { .. }
-            | Command::Worker(_)
-            | Command::AutoWorkers(_)
-            | Command::Upgrade(_)
-            | Command::Health { .. }
-            | Command::ConfigureAgents { .. }
-            | Command::AgentControl { .. }
-            | Command::Action { .. }
-            | Command::Browser { .. }
-            | Command::RenderMarkdown { .. }
-            | Command::Companion { .. }
-            | Command::Agents { .. }
-            | Command::Inbox { .. }
-            | Command::Overview { .. } => {
-                unreachable!()
-            }
-            Command::Hide { .. } | Command::Status { .. } | Command::Wait { .. } => {
-                (None, None, None, None, None)
-            }
-        };
-        let mut request = Request {
-            issue,
-            command: String::new(),
-            question: None,
-            project,
-            title,
-            description: None,
-            options: None,
-            autoclose: None,
-            link_url: None,
-            link_label: None,
-            task_id: None,
-            sync: false,
-            comments_enabled: false,
-            attachment: None,
-            document_name: None,
-            origin: None,
-            severity,
-            icon,
-            icon_path,
-        };
-        let output = match self.command {
-            Command::Admin(_)
-            | Command::Skill(_)
-            | Command::Secret(_)
-            | Command::Lookup(_)
-            | Command::Artifact(_)
-            | Command::Attachment(_)
-            | Command::Issue(_)
-            | Command::Mm(_)
-            | Command::Settings(_)
-            | Command::Fleet { .. }
-            | Command::Worker(_)
-            | Command::AutoWorkers(_)
-            | Command::Upgrade(_)
-            | Command::Health { .. }
-            | Command::ConfigureAgents { .. }
-            | Command::AgentControl { .. }
-            | Command::Action { .. }
-            | Command::Browser { .. }
-            | Command::RenderMarkdown { .. }
-            | Command::Companion { .. }
-            | Command::Agents { .. }
-            | Command::Inbox { .. }
-            | Command::Overview { .. } => {
-                unreachable!()
-            }
-            Command::Update {
-                summary,
-                content,
-                file,
-                comments,
-                sync,
-                output,
-                ..
-            } => {
-                request.command = "update".into();
-                request.comments_enabled = comments;
-                request.sync = sync;
-                request.description = Some(summary);
-                request.question = Some(match file {
-                    Some(path) => {
-                        let (content, attachment) = hey_boss::document::read_file(&path)?;
-                        request.attachment = attachment;
-                        request.document_name = path.file_name().map(|name| {
-                            name.to_string_lossy()
-                                .chars()
-                                .filter(|c| !c.is_control())
-                                .take(256)
-                                .collect()
-                        });
-                        content
-                    }
-                    None => {
-                        content.ok_or_else(|| invalid("provide Markdown text or --file PATH"))?
-                    }
-                });
-                output
-            }
-            Command::Alert {
-                message,
-                autoclose,
-                link_url,
-                link_label,
-                output,
-                ..
-            } => {
-                if autoclose.is_some_and(|seconds| {
-                    !seconds.is_finite() || seconds <= 0.0 || seconds > 31_536_000.0
-                }) {
-                    return Err(invalid(
-                        "autoclose must be positive and at most 31536000 seconds",
-                    ));
-                }
-                if let Some(url) = &link_url {
-                    if !["https://", "http://", "file://"]
-                        .iter()
-                        .any(|prefix| url.starts_with(prefix))
-                    {
-                        return Err(invalid("link URL must use https, http, or file"));
-                    }
-                    if link_label
-                        .as_ref()
-                        .is_none_or(|label| label.trim().is_empty())
-                    {
-                        return Err(invalid("link label must not be blank"));
-                    }
-                }
-                request.command = "alert".into();
-                request.question = Some(message);
-                request.autoclose = autoclose;
-                request.link_url = link_url;
-                request.link_label = link_label;
-                output
-            }
-            Command::Ask {
-                question,
-                description,
-                options,
-                sync,
-                output,
-                ..
-            } => {
-                request.command = "ask".into();
-                request.question = Some(question);
-                request.description = Some(description);
-                request.options = Some(options);
-                request.sync = sync;
-                output
-            }
-            Command::Prompt {
-                question,
-                description,
-                output,
-                ..
-            } => {
-                request.command = "ask".into();
-                request.question = Some(question);
-                request.description = Some(description);
-                request.options = Some(Vec::new());
-                output
-            }
-            Command::Approval {
-                question,
-                description,
-                options,
-                output,
-                ..
-            } => {
-                request.command = "ask".into();
-                request.question = Some(question);
-                request.description = Some(description);
-                request.options = Some(options);
-                output
-            }
-            Command::Hide { task_id, output } => {
-                request.command = "hide".into();
-                request.task_id = Some(task_id);
-                output
-            }
-            Command::Status {
-                task_id,
-                output,
-                sync,
-                ..
-            } => {
-                request.command = "status".into();
-                request.sync = sync;
-                request.task_id = Some(task_id);
-                output
-            }
-            Command::Wait { task_id, output } => {
-                request.command = "wait".into();
-                request.task_id = Some(task_id);
-                output
-            }
-        };
-        Ok((request, output))
+        self.into_notif().into_request_with_project(resolve_project)
+    }
+
+    fn into_notif(self) -> notif_cli::Action {
+        match self.command {
+            Command::Notif(action) | Command::LegacyNotif(action) => action,
+            _ => unreachable!("not a notification command"),
+        }
+    }
+
+    fn canonicalize(self) -> Self {
+        Self {
+            command: match self.command {
+                Command::LegacyNotif(action) => Command::Notif(action),
+                command => command,
+            },
+        }
     }
 }
 
@@ -772,7 +359,7 @@ fn main() {
 }
 
 fn run() -> std::io::Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse().canonicalize();
     // Review captures use private SQLite files without starting a database service.
     match &cli.command {
         Command::Admin(options) => return admin_cli::run(options),
@@ -794,7 +381,7 @@ fn run() -> std::io::Result<()> {
         }
         Command::Upgrade(options) => return upgrade_cli::run(options),
         Command::Fleet { action } => return hey_boss::fleet::run(action),
-        Command::Secret(options) => return secret_cli::run(options),
+        Command::Notif(notif_cli::Action::Secret(options)) => return secret_cli::run(options),
         Command::AutoWorkers(options) => {
             if let Err(error) = auto_workers_cli::run(options) {
                 eprintln!("hey-boss auto-workers: {error}");
@@ -970,7 +557,9 @@ fn run() -> std::io::Result<()> {
         }
         return Ok(());
     }
-    if let Command::Overview { json } | Command::Inbox { json } = &cli.command {
+    if let Command::Overview { json } | Command::Notif(notif_cli::Action::Inbox { json }) =
+        &cli.command
+    {
         let executable = std::env::current_exe()?.canonicalize()?;
         initialize(&executable)?;
         let state = std::fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
@@ -978,7 +567,7 @@ fn run() -> std::io::Result<()> {
             hey_boss::require_protocol(std::path::Path::new(&state))?;
         }
         let mut request: Request =
-            serde_json::from_value(serde_json::json!({"command":if matches!(cli.command,Command::Inbox { .. }) { if *json { "inbox_list" } else { "inbox" } } else if *json { "overview_snapshot" } else { "overview" },"sync":false}))
+            serde_json::from_value(serde_json::json!({"command":if matches!(cli.command,Command::Notif(notif_cli::Action::Inbox { .. })) { if *json { "inbox_list" } else { "inbox" } } else if *json { "overview_snapshot" } else { "overview" },"sync":false}))
                 .map_err(std::io::Error::other)?;
         request.origin = None;
         let result = Client::new(std::path::Path::new(&state).join("daemon.sock"))
@@ -1092,6 +681,108 @@ mod tests {
             });
             let _ = std::fs::remove_dir_all(root);
             result
+        }
+    }
+
+    #[test]
+    fn notification_group_matches_legacy_wire_requests() {
+        for args in [
+            vec!["alert", "Ready", "--title", "Review"],
+            vec!["update", "Ready", "# Report", "--title", "Review"],
+            vec!["ask", "Proceed?", "Details", "--async", "--title", "Review"],
+            vec!["prompt", "Name?", "Details", "--title", "Review"],
+            vec!["approval", "Proceed?", "Details", "--title", "Review"],
+            vec!["status", "task-1", "--sync"],
+            vec!["wait", "task-1"],
+            vec!["hide", "task-1"],
+        ] {
+            let parse = |prefix: &[&str]| {
+                Cli::try_parse_from(
+                    prefix
+                        .iter()
+                        .copied()
+                        .chain(args.iter().copied())
+                        .chain(["--json"]),
+                )
+                .unwrap()
+                .into_request_with_project(|_| {
+                    Ok(hey_boss::issues::Project {
+                        id: "named:Review".into(),
+                        name: "Review".into(),
+                    })
+                })
+                .unwrap()
+            };
+            let (legacy, legacy_output) = parse(&["hey-boss"]);
+            let (grouped, grouped_output) = parse(&["hey-boss", "notif"]);
+            assert_eq!(
+                serde_json::to_value(legacy).unwrap(),
+                serde_json::to_value(grouped).unwrap()
+            );
+            assert!(legacy_output.json && grouped_output.json);
+        }
+    }
+
+    #[test]
+    fn notification_help_groups_commands_and_hides_root_compatibility_names() {
+        use clap::CommandFactory;
+        let mut root = Cli::command();
+        root.build();
+        let notif = root.find_subcommand("notif").unwrap();
+        for name in [
+            "alert", "update", "ask", "prompt", "approval", "status", "wait", "hide", "inbox",
+            "secret",
+        ] {
+            assert!(
+                notif.find_subcommand(name).is_some(),
+                "missing notif {name}"
+            );
+            assert!(
+                root.find_subcommand(name).unwrap().is_hide_set(),
+                "visible root {name}"
+            );
+        }
+        assert!(notif.find_subcommand("issue").is_none());
+        assert!(
+            root.find_subcommand("render-markdown")
+                .unwrap()
+                .is_hide_set()
+        );
+        for command in ["inbox", "secret"] {
+            assert!(
+                Cli::try_parse_from(["hey-boss", "notif", command, "--help"])
+                    .err()
+                    .unwrap()
+                    .kind()
+                    == clap::error::ErrorKind::DisplayHelp
+            );
+        }
+        assert!(Cli::try_parse_from(["hey-boss", "notif", "alert", "Missing title"]).is_err());
+    }
+
+    #[test]
+    fn inbox_and_secret_aliases_use_the_same_dispatch() {
+        for prefix in [vec!["hey-boss"], vec!["hey-boss", "notif"]] {
+            assert!(matches!(
+                Cli::try_parse_from(prefix.iter().copied().chain(["inbox", "--json"]))
+                    .unwrap()
+                    .canonicalize()
+                    .command,
+                Command::Notif(notif_cli::Action::Inbox { json: true })
+            ));
+            assert!(matches!(
+                Cli::try_parse_from(prefix.iter().copied().chain([
+                    "secret",
+                    "--field",
+                    "TOKEN",
+                    "--env-file",
+                    "credentials.env"
+                ]))
+                .unwrap()
+                .canonicalize()
+                .command,
+                Command::Notif(notif_cli::Action::Secret(_))
+            ));
         }
     }
 
@@ -1389,12 +1080,12 @@ mod tests {
                 output,
             ])
             .unwrap();
-            let Command::Update {
+            let notif_cli::Action::Update {
                 metadata,
                 summary,
                 content,
                 ..
-            } = cli.command
+            } = cli.into_notif()
             else {
                 panic!()
             };

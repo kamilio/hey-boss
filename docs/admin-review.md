@@ -9,6 +9,8 @@ overrides, template expansion, workflow branches, and handoff context.
 
 The command catalog comes from Clap, including nested commands, aliases, help,
 and JSON option support. Search filters names, descriptions, and prompt content.
+Notification commands appear under `notif`; their older root forms remain hidden
+CLI compatibility aliases and redirect to the grouped previews.
 Text and JSON appear side by side, with the invocation, exit status, stderr, and
 copy controls. Nothing is stored in browser storage.
 
@@ -32,6 +34,7 @@ The CLI exposes the same catalog and samples:
 hey-boss admin catalog --json
 hey-boss admin preview 'issue view' --json
 hey-boss admin preview 'artifact create' --json
+hey-boss admin preview 'notif alert' --json
 hey-boss skill show
 hey-boss skill show --json
 hey-boss skill install
