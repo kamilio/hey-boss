@@ -25,6 +25,11 @@ hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 Bodies and comments are Markdown text stored directly in SQLite. No Markdown
 file is required. `create` allows an empty body; comments must contain text.
 
+New CLI issues go to the front of the queue. Use `create --at-bottom` to append
+work deliberately; `--at-top` remains supported. Connected companions refresh
+their number reservations on demand, including projects without workers. See
+[companion issue creation](companion-issue-creation.md) for offline behavior.
+
 Issues have **Open**, **Blocked**, **Closed**, and **Deleted** views. Blocked
 issues retain their content and history, release their claim, and pause worker
 pickup. Blocking should be rare: make every effort to resolve the problem first,

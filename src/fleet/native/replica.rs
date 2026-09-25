@@ -1512,6 +1512,14 @@ pub(super) fn apply_pull(
             "SELECT first_number,last_number FROM fleet_number_ranges WHERE project_id=?",
             &[r["project_id"].clone()],
         )?;
+        // A pull may have been prepared before an on-demand reservation reply.
+        // Never restore the older range or rewind its local allocation cursor.
+        if previous
+            .first()
+            .is_some_and(|p| p["first_number"].as_i64() > r["first_number"].as_i64())
+        {
+            continue;
+        }
         execute(
             db,
             "INSERT INTO fleet_number_ranges VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number",
@@ -1605,6 +1613,66 @@ pub(super) fn refresh_allocation_deadlines(
         }
     }
     Ok(())
+}
+
+/// Reserve independently of worker pools. Historical blocks stay reserved so
+/// delayed offline creations remain valid after this machine receives a new one.
+pub(super) fn reserve_numbers(
+    db: &mut Connection,
+    node: &str,
+    project: &str,
+    next: i64,
+) -> Result<Value> {
+    let tx = db.transaction_with_behavior(crate::database::TransactionBehavior::Immediate)?;
+    let db = &*tx;
+    let latest: i64 = db.query_row(
+        "SELECT coalesce(max(number),0) FROM issues WHERE project_id=?1",
+        [project],
+        |r| r.get(0),
+    )?;
+    let ranges = rows(
+        db,
+        "SELECT project_id,first_number,last_number FROM fleet_ranges WHERE node=? AND project_id=?",
+        &[json!(node), json!(project)],
+    )?;
+    let range = if let Some(range) = ranges.first().filter(|r| {
+        next.max(r["first_number"].as_i64().unwrap()) > latest
+            && next <= r["last_number"].as_i64().unwrap()
+    }) {
+        range.clone()
+    } else {
+        let cursor: i64 = db.query_row(
+            "SELECT next_number FROM projects WHERE id=?1",
+            [project],
+            |r| r.get(0),
+        )?;
+        let first = cursor.max(
+            latest
+                .checked_add(1)
+                .ok_or_else(|| invalid("Issue numbers exhausted"))?,
+        );
+        let after = first
+            .checked_add(100)
+            .ok_or_else(|| invalid("Issue numbers exhausted"))?;
+        db.execute(
+            "UPDATE projects SET next_number=?2 WHERE id=?1",
+            rusqlite::params![project, after],
+        )?;
+        let values = [json!(node), json!(project), json!(first), json!(after - 1)];
+        execute(
+            db,
+            "INSERT INTO fleet_ranges VALUES(?,?,?,?) ON CONFLICT(node,project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number",
+            &values,
+        )?;
+        execute(
+            db,
+            "INSERT INTO fleet_number_reservations VALUES(?,?,?,?)",
+            &values,
+        )?;
+        json!({"project_id":project,"first_number":first,"last_number":after-1})
+    };
+    tx.commit()?;
+    Ok(range)
 }
 
 pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result<()> {
@@ -1786,6 +1854,59 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn on_demand_numbers_refresh_stale_and_exhausted_ranges_without_workers() {
+        let mut f = Fixture::new();
+        f.capture();
+        let first = reserve_numbers(&mut f.db, "agent", "named:Native fleet", 1).unwrap();
+        assert_eq!(first["first_number"], 2);
+        assert_eq!(
+            reserve_numbers(&mut f.db, "agent", "named:Native fleet", 3).unwrap(),
+            first
+        );
+        f.db.execute_batch("UPDATE projects SET next_number=1100; INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES('named:Native fleet',1099,'Recent','','open','human:fixture',0,0,1,'[]',2);").unwrap();
+        let fresh = reserve_numbers(&mut f.db, "agent", "named:Native fleet", 3).unwrap();
+        assert_eq!(fresh["first_number"], 1100);
+        let other = reserve_numbers(&mut f.db, "other", "named:Native fleet", 1).unwrap();
+        assert_eq!(other["first_number"], 1200);
+        let exhausted = reserve_numbers(&mut f.db, "agent", "named:Native fleet", 1200).unwrap();
+        assert_eq!(exhausted["first_number"], 1300);
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT count(*) count FROM fleet_number_reservations",
+                &[]
+            )
+            .unwrap()[0]["count"],
+            4
+        );
+    }
+
+    #[test]
+    fn delayed_pull_cannot_rewind_an_on_demand_number_reservation() {
+        let mut main = Fixture::new();
+        main.capture();
+        reserve_numbers(&mut main.db, "agent", "named:Native fleet", 1).unwrap();
+        let old = snapshot(&main.db, "agent").unwrap();
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "agent").unwrap();
+        apply_pull(&peer.db, "agent", &old, &[]).unwrap();
+        peer.db.execute_batch("UPDATE fleet_number_ranges SET first_number=1100,last_number=1199; UPDATE projects SET next_number=1102;").unwrap();
+        apply_pull(&peer.db, "agent", &old, &[]).unwrap();
+        assert_eq!(
+            rows(
+                &peer.db,
+                "SELECT first_number FROM fleet_number_ranges",
+                &[]
+            )
+            .unwrap()[0]["first_number"],
+            1100
+        );
+        assert_eq!(
+            rows(&peer.db, "SELECT next_number FROM projects", &[]).unwrap()[0]["next_number"],
+            1102
+        );
+    }
     use super::*;
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;

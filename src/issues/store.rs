@@ -1222,6 +1222,13 @@ impl Store {
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
         if matches!(
             r.operation,
+            Operation::Create { .. } | Operation::CreateSubtask { .. }
+        ) {
+            validate(r)?;
+            self.refresh_issue_numbers(r)?;
+        }
+        if matches!(
+            r.operation,
             Operation::Mindmap { .. } | Operation::Artifact { .. } | Operation::Attachment { .. }
         ) {
             validate(r)?;
@@ -1248,6 +1255,66 @@ impl Store {
             // fresh WAL snapshot. Never replay mutation or attachment effects.
             retry_contention(deadline, || self.execute_once(r, deadline))
         }
+    }
+
+    fn refresh_issue_numbers(&mut self, request: &Request) -> Result<()> {
+        if !self
+            .db
+            .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
+                r.get::<_, bool>(0)
+            })?
+        {
+            return Ok(());
+        }
+        let project = resolve_project(
+            &self.db,
+            &request.project,
+            request.project_override.as_deref(),
+        )?;
+        let next = self
+            .db
+            .query_row(
+                "SELECT next_number FROM projects WHERE id=?1",
+                [&project.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(1);
+        let path = self.db.path().ok_or_else(|| {
+            Error::invalid("Number reservations require a persistent issue database")
+        })?;
+        // No transaction is held across the network. A lost reply reserves only
+        // numbers; the local creation and its request receipt still commit once.
+        let response = match crate::fleet::issue_numbers(Path::new(path), &project, next) {
+            Ok(response) => response,
+            Err(error) if error.code == "fleet_unavailable" => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let first = response["range"]["first_number"]
+            .as_i64()
+            .filter(|n| *n > 0);
+        let last = response["range"]["last_number"]
+            .as_i64()
+            .filter(|n| *n < i64::MAX);
+        let (Some(first), Some(last)) = (first, last) else {
+            return Err(Error::invalid("Invalid fleet number reservation"));
+        };
+        if last < first || response["project"]["id"] != project.id {
+            return Err(Error::invalid(
+                "Fleet number reservation does not match the project",
+            ));
+        }
+        self.notification_project(&project, None)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let newer: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM fleet_number_ranges WHERE project_id=?1 AND first_number>?2)", params![project.id, first], |r| r.get(0))?;
+        if !newer {
+            tx.execute("INSERT INTO fleet_number_ranges VALUES(?1,?2,?3) ON CONFLICT(project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number", params![project.id, first, last])?;
+            tx.execute("UPDATE projects SET next_number=max(CASE WHEN next_number BETWEEN ?2 AND ?3+1 THEN next_number ELSE ?2 END,(SELECT coalesce(max(number),?2-1)+1 FROM issues WHERE project_id=?1 AND number BETWEEN ?2 AND ?3)) WHERE id=?1", params![project.id, first, last])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn execute_once(&mut self, r: &Request, deadline: Instant) -> Result<Value> {

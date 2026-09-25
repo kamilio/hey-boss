@@ -670,7 +670,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
-            json!({"kind":"configure","capabilities":{"authority_rpc":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","capabilities":{"authority_rpc":true,"issue_numbers":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
@@ -707,9 +707,12 @@ impl Supervisor {
             self.update(host, json!({"heartbeat":now()}))?;
             match message["kind"].as_str() {
                 Some("authority_request") => {
-                    let result = self
-                        .authoritative(&message["request"])
-                        .unwrap_or_else(authority::failure);
+                    let result = (if message["request"]["kind"] == "issue_numbers" {
+                        self.issue_numbers(node, &message["request"])
+                    } else {
+                        self.authoritative(&message["request"])
+                    })
+                    .unwrap_or_else(authority::failure);
                     send(&mut input, authority::response(&message["id"], result)?)?;
                 }
                 Some("heartbeat") => {
@@ -833,7 +836,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut input,
-                            json!({"kind":"configure","capabilities":{"authority_rpc":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","capabilities":{"authority_rpc":true,"issue_numbers":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1217,6 +1220,22 @@ impl Supervisor {
             self.ctx.wait(Duration::from_secs(5));
         }
     }
+    fn issue_numbers(&self, node: &str, value: &Value) -> crate::issues::Result<Value> {
+        let project: crate::issues::Project = serde_json::from_value(value["project"].clone())?;
+        let next = value["next"]
+            .as_i64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| crate::issues::Error::invalid("Invalid next issue number"))?;
+        let project =
+            crate::issues::Store::open(&self.ctx.path)?.notification_project(&project, None)?;
+        let result = (|| -> Result<Value> {
+            let mut db = self.ctx.db()?;
+            let range = replica::reserve_numbers(&mut db, node, &project.id, next)?;
+            Ok(json!({"ok":true,"project":project,"range":range}))
+        })();
+        result.map_err(|e| crate::issues::Error::new("fleet_error", e.to_string()))
+    }
+
     fn authoritative(&self, value: &Value) -> crate::issues::Result<Value> {
         match value["kind"].as_str() {
             Some("resource") => {
