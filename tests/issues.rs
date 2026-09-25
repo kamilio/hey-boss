@@ -10,6 +10,116 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn overlong_issue_titles_split_without_losing_content() {
+    let f = Fixture::new();
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    let prefix = "word ".repeat(100).trim_end().to_owned();
+    let overflow = "remaining details with Unicode 🦀 and a final marker";
+    let title = format!("{prefix} {overflow}");
+    let args = [
+        "create",
+        "--title",
+        &title,
+        "--body",
+        "Existing **Markdown**",
+        "--request-id",
+        "long-title",
+    ];
+    let created = f.run("session-a", &args);
+    assert_eq!(created["issue"]["title"], format!("{prefix} remaining"));
+    assert_eq!(
+        created["issue"]["body"],
+        "details with Unicode 🦀 and a final marker\n\nExisting **Markdown**"
+    );
+    assert_eq!(f.run("session-a", &args)["issue"], created["issue"]);
+
+    for (input, expected_title, expected_body) in [
+        ("a".repeat(512), "a".repeat(512), String::new()),
+        ("a".repeat(513), "a".repeat(512), "a".into()),
+        ("界".repeat(171), "界".repeat(170), "界".into()),
+        ("🦀".repeat(129), "🦀".repeat(128), "🦀".into()),
+        (
+            format!("Short heading\n\n{}", "detail ".repeat(90)),
+            "Short heading".into(),
+            "detail ".repeat(90),
+        ),
+    ] {
+        let result = f.run("session-a", &["create", "--title", &input]);
+        assert_eq!(result["issue"]["title"], expected_title);
+        assert_eq!(result["issue"]["body"], expected_body);
+    }
+}
+
+#[test]
+fn overlong_issue_titles_preserve_edit_body_and_subtask_links() {
+    let f = Fixture::new();
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    f.create();
+    let title = format!("{} more detail", "x".repeat(510));
+    let edit = f.run(
+        "session-a",
+        &["edit", "1", "--body", "Original description"],
+    );
+    let version = edit["issue"]["version"].to_string();
+    let args = [
+        "edit",
+        "1",
+        "--title",
+        &title,
+        "--if-version",
+        &version,
+        "--request-id",
+        "edit-overflow",
+    ];
+    let edit = f.run("session-a", &args);
+    assert_eq!(edit["issue"]["body"], "more detail\n\nOriginal description");
+    assert_eq!(f.run("session-a", &args)["issue"], edit["issue"]);
+    let replaced = f.run(
+        "session-a",
+        &["edit", "1", "--title", &title, "--body", "Replacement"],
+    );
+    assert_eq!(replaced["issue"]["body"], "more detail\n\nReplacement");
+    let child = f.run(
+        "session-a",
+        &[
+            "subtask",
+            "create",
+            "1",
+            "--title",
+            &title,
+            "--body",
+            "Child description",
+        ],
+    );
+    assert_eq!(child["issue"]["title"], "x".repeat(510));
+    assert_eq!(child["issue"]["body"], "more detail\n\nChild description");
+    assert_eq!(
+        f.run("session-a", &["subtask", "list", "1"])["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.sql()
+        .execute(
+            "UPDATE issues SET body=?1 WHERE number=1",
+            ["x".repeat(1024 * 1024)],
+        )
+        .unwrap();
+    let before = f.run("session-a", &["view", "1"]);
+    let rejected = f
+        .cmd("session-a", &["edit", "1", "--title", &title])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"],
+        before["issue"],
+        "Overflow must fail atomically when the description is full"
+    );
+}
+
+#[test]
 fn default_creation_stays_on_the_first_page_of_a_long_cli_queue() {
     let f = Fixture::new();
     f.create();
