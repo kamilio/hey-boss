@@ -359,8 +359,8 @@ fn rows(d: &Dashboard) -> Vec<String> {
                     bytes(s.metrics.swap_used_bytes)
                 ),
                 format!(
-                    "Automatic: {} · interval {}s",
-                    s.config.automatic, s.config.interval_seconds
+                    "Automatic: {} · interval {}s · aggressive: {}",
+                    s.config.automatic, s.config.interval_seconds, s.config.aggressive
                 ),
                 format!(
                     "Processes: {}   Worktrees: {}   Caches: {}   Log trimming: {}",

@@ -289,13 +289,7 @@ fn run(
                         eligible = false;
                         "Activity or identity changed before deletion; preserved".into()
                     } else {
-                        let result = fs::symlink_metadata(&candidate.path).and_then(|m| {
-                            if m.is_dir() {
-                                fs::remove_dir_all(&candidate.path)
-                            } else {
-                                fs::remove_file(&candidate.path)
-                            }
-                        });
+                        let result = super::databases::remove_tree(&candidate.path);
                         match result {
                             Ok(()) => {
                                 removed += 1;
@@ -390,7 +384,7 @@ mod tests {
         let unrelated = temp.join("miniflare-my-project");
         for path in [&abandoned, &live, &unrelated] {
             fs::create_dir_all(path.join("do")).unwrap();
-            fs::write(path.join("do/data.sqlite"), "fixture").unwrap();
+            fs::write(path.join("do/data.bin"), "fixture").unwrap();
         }
         let persistent = root
             .join("Workspace/project/.wrangler/state/miniflare-41cacae4eaacdedba85c60730da67a4d");
@@ -400,7 +394,7 @@ mod tests {
         assert!(candidates.iter().all(|c| c.min_age == 3600));
         let at = super::super::now();
         let mut observations = BTreeMap::new();
-        let active = vec![live.join("do/data.sqlite")];
+        let active = vec![live.join("do/data.bin")];
         assert_eq!(
             run(
                 &candidates,
