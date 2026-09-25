@@ -2489,6 +2489,17 @@ mod tests {
     fn blocker_migration_updates_existing_capture_triggers_before_normalizing() {
         for partial in [false, true] {
             let main = Fixture::new();
+            // The pre-blocker schema also predates dependency-aware readiness.
+            main.db
+                .execute_batch("DROP VIEW issue_pickup_ready;")
+                .unwrap();
+            let legacy_view = include_str!("../../issues/subtasks.sql")
+                .split_once("CREATE VIEW")
+                .unwrap()
+                .1;
+            main.db
+                .execute_batch(&format!("CREATE VIEW{legacy_view}"))
+                .unwrap();
             main.db.execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
             main.capture();
             if partial {
