@@ -1,0 +1,18 @@
+{
+  "name": "hey-boss-poe-markdown-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "FORCE_COLOR=1 vitest run --reporter=default --reporter=json --outputFile=report.json",
+    "corpus": "node -e \"require('fs').rmSync('captured',{recursive:true,force:true})\" && POE_MARKDOWN_CAPTURE=1 npm test && node corpus.mjs"
+  },
+  "devDependencies": {
+    "vitest": "4.1.11",
+    "tsx": "4.20.6",
+    "typescript": "5.9.2",
+    "fast-string-width": "3.0.2",
+    "fast-wrap-ansi": "0.2.0",
+    "yaml": "2.8.2",
+    "@poe-code/frontmatter": "file:./frontmatter"
+  }
+}

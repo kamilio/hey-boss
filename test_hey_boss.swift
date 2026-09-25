@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_POE_CORPUS"] { auditPoeMarkdownCorpus(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NATIVE_READER"] == "1" {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-native-reader-"+UUID().uuidString)
         try! FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
@@ -2281,4 +2282,64 @@ func auditNotificationClicks() {
     precondition(opens == 4 && toggles == 1, "Nested card click must not collapse its group")
     window.close()
     print("Passed: native mouse events open body/title, preserve dragging, avoid duplicate CTA/dismiss actions, expand groups and isolate nested card clicks")
+}
+
+// Run every imported document and hand-built renderer node through AppKit.
+func auditPoeMarkdownCorpus(_ path: String) {
+    let data=try! Data(contentsOf:URL(fileURLWithPath:path))
+    let corpus=try! JSONSerialization.jsonObject(with:data) as! [String:Any]
+    var cases=corpus["documents"] as! [[String:Any]]
+    func adapt(_ original: [String:Any]) -> [String:Any] {
+        var node=original
+        node["lineStart"]=1; node["lineEnd"]=1
+        let type=node["type"] as! String
+        var children=(node["children"] as? [[String:Any]] ?? []).map(adapt)
+        if type=="alert" {node["value"]=(node["kind"] as? String)?.capitalized}
+        if type=="footnoteReference" || type=="footnoteDefinition" {node["value"]=node["label"]}
+        if type=="image", let alt=node["alt"] as? String {children=[adapt(["type":"text","value":alt])]}
+        if type=="listItem", let checked=node["checked"] as? Bool {children.insert(adapt(["type":"task","checked":checked]),at:0)}
+        if type=="list", node["ordered"] as? Bool == false {node.removeValue(forKey:"start")}
+        if type=="list", node["ordered"] as? Bool == true && node["start"]==nil {node["start"]=1}
+        if type=="table", let align=node["align"] as? [Any] {node["align"]=align.map { $0 as? String ?? "left" }}
+        if !children.isEmpty {node["children"]=children}
+        return node
+    }
+    for fixture in corpus["renderNodes"] as! [[String:Any]] {
+        cases.append(["name":fixture["test"]!,"ast":adapt(fixture["ast"] as! [String:Any])])
+    }
+    let pasteboard=NSPasteboard(name:.init("hey-boss-poe-corpus-"+UUID().uuidString))
+    defer {pasteboard.releaseGlobally()}
+    var count=0
+    for fixture in cases {
+        autoreleasepool {
+            let bytes=try! JSONSerialization.data(withJSONObject:fixture["ast"]!)
+            let node=try! JSONDecoder().decode(NativeMarkdownNode.self,from:bytes)
+            let rendered=NativeMarkdownRenderer.render(node)
+            let text=DocumentText(frame:NSRect(x:0,y:0,width:720,height:640))
+            text.isEditable=false; text.isSelectable=true
+            text.textStorage!.setAttributedString(rendered)
+            text.copyPasteboard=pasteboard
+            text.selectAll(nil)
+            if rendered.length>0 {
+                text.copy(nil)
+                precondition(pasteboard.string(forType:.string) != nil,"Copy failed: \(fixture["name"]!)")
+                precondition(pasteboard.data(forType:.rtf) != nil,"Rich copy failed: \(fixture["name"]!)")
+            }
+            func literals(_ node: NativeMarkdownNode, insideTable: Bool = false) -> [String] {
+                if ["tableRow","tableCell"].contains(node.type) && !insideTable {return []}
+                if ["frontmatter","image"].contains(node.type) {return []}
+                if ["text","html","inlineCode","code"].contains(node.type) {return [node.value ?? ""]}
+                return (node.children ?? []).flatMap { literals($0,insideTable:insideTable || node.type == "table") }
+            }
+            let string=rendered.string as NSString
+            var cursor=0
+            for value in literals(node) where !value.isEmpty {
+                let found=string.range(of:value,range:NSRange(location:cursor,length:string.length-cursor))
+                precondition(found.location != NSNotFound,"Native rendering lost text \(value.debugDescription) in \(fixture["name"]!)")
+                cursor=NSMaxRange(found)
+            }
+            count += 1
+        }
+    }
+    print("Passed: all \(count) upstream document/renderer inputs retain text order and native plain/rich selection copying")
 }

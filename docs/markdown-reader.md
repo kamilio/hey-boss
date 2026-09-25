@@ -34,3 +34,13 @@ nesting. `HEY_BOSS_AUDIT_NATIVE_READER=1` runs the native reader, selection/copy
 large-document, image and review-comment audits against `HEY_BOSS_CLI_PATH`.
 `HEY_BOSS_AUDIT_SNAPSHOT_DIR` optionally saves synthetic light/dark/loading
 snapshots without exposing production notifications.
+
+## Complete upstream regression suite
+
+The [full poe-code Markdown suite](../tools/poe-markdown-tests/README.md) is
+vendored with all 346 original tests and its supporting fixtures. Its complete
+input corpus also runs through Rust's native document builder and AppKit's text
+renderer/copy path. Exact, documented dialect expectations distinguish CommonMark
+behavior from poe-code's parser without dropping cases. These regressions caught
+BOM handling, carriage-return frontmatter, empty frontmatter, and non-leading
+fences incorrectly hidden as metadata; the native builder now handles them.

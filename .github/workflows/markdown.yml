@@ -1,0 +1,33 @@
+name: Markdown compatibility
+on:
+  push:
+    paths: ['src/markdown*', 'src/markdown/**', 'src/syntax.rs', 'test_hey_boss.swift', 'hey_boss_daemon.swift', 'tests/markdown*', 'tests/fixtures/poe-markdown*', 'tools/poe-markdown-tests/**', '.github/workflows/markdown.yml']
+  pull_request:
+    paths: ['src/markdown*', 'src/markdown/**', 'src/syntax.rs', 'test_hey_boss.swift', 'hey_boss_daemon.swift', 'tests/markdown*', 'tests/fixtures/poe-markdown*', 'tools/poe-markdown-tests/**', '.github/workflows/markdown.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/poe-markdown-tests/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: tools/poe-markdown-tests
+      - run: npm run corpus
+        working-directory: tools/poe-markdown-tests
+      - run: git diff --exit-code -- tests/fixtures/poe-markdown-suite.json
+  native:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: |
+          mkdir -p out
+          HEY_BOSS_NATIVE_CORPUS_OUTPUT="$PWD/out/poe-native-corpus.json" cargo test --locked -p hey-boss --test markdown_poe_suite
+          xcrun swiftc -g -Onone -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test
+          HEY_BOSS_AUDIT_POE_CORPUS="$PWD/out/poe-native-corpus.json" out/hey-boss-test

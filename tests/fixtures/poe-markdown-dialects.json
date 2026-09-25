@@ -1,0 +1,747 @@
+{
+  "151e80216d7f530e": {
+    "reason": "CommonMark parses blockquotes nested within list items.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "list",
+          "start": 0,
+          "children": [
+            {
+              "type": "listItem",
+              "checked": null,
+              "children": [
+                {
+                  "type": "blockquote",
+                  "children": [
+                    {
+                      "type": "list",
+                      "start": 0,
+                      "children": [
+                        {
+                          "type": "listItem",
+                          "checked": null,
+                          "children": [
+                            {
+                              "type": "blockquote",
+                              "children": [
+                                {
+                                  "type": "paragraph",
+                                  "children": [
+                                    {
+                                      "type": "text",
+                                      "value": "text"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "2ad612b2865f18f7": {
+    "reason": "CommonMark supports indented code blocks; upstream calls these paragraphs for now.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "code",
+          "value": "const value = 1;\nconsole.log(value);",
+          "lang": ""
+        }
+      ]
+    }
+  },
+  "4433d8ee119235b5": {
+    "reason": "Native document URLs are sanitized before entering AppKit.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "link",
+              "url": "../docs/readme.md",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "safe"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "link",
+              "url": "#top",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "anchor"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "link",
+              "url": "",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "bad"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "image",
+              "url": "",
+              "alt": "bad image"
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "image",
+              "url": "./img.png",
+              "alt": "safe image"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "4af8b2de3fec7202": {
+    "reason": "Linkify recognizes the valid bare URL inside an unfinished Markdown link.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "[text]("
+            },
+            {
+              "type": "link",
+              "url": "https://example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "https://example.com"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "57ead4154dc4d542": {
+    "reason": "CommonMark removes one surrounding space from code spans.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "inlineCode",
+              "value": "spaces"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "5b4cc83043a99a1f": {
+    "reason": "CommonMark removes one surrounding space from code spans.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "before "
+            },
+            {
+              "type": "inlineCode",
+              "value": " code "
+            },
+            {
+              "type": "text",
+              "value": " after"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "683487f1dd05eb9d": {
+    "reason": "Bare www destinations default to HTTPS in hey-boss.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "Alpha "
+            },
+            {
+              "type": "footnoteReference",
+              "label": "note"
+            },
+            {
+              "type": "text",
+              "value": " and "
+            },
+            {
+              "type": "link",
+              "url": "https://example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "https://example.com"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " next"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "children": [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "quote "
+                },
+                {
+                  "type": "emphasis",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "em"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "start": 0,
+          "children": [
+            {
+              "type": "listItem",
+              "checked": null,
+              "children": [
+                {
+                  "type": "paragraph",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "item with "
+                    },
+                    {
+                      "type": "link",
+                      "url": "mailto:user@example.com",
+                      "children": [
+                        {
+                          "type": "text",
+                          "value": "user@example.com"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "align": [
+            "left",
+            "left"
+          ],
+          "children": [
+            {
+              "type": "tableRow",
+              "children": [
+                {
+                  "type": "tableCell",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "Head"
+                    }
+                  ]
+                },
+                {
+                  "type": "tableCell",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "Value"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tableRow",
+              "children": [
+                {
+                  "type": "tableCell",
+                  "children": [
+                    {
+                      "type": "inlineCode",
+                      "value": "code"
+                    }
+                  ]
+                },
+                {
+                  "type": "tableCell",
+                  "children": [
+                    {
+                      "type": "link",
+                      "url": "https://www.example.com",
+                      "children": [
+                        {
+                          "type": "text",
+                          "value": "www.example.com"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "alert",
+          "kind": "NOTE",
+          "children": [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "alert with "
+                },
+                {
+                  "type": "link",
+                  "url": "https://example.com",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "link"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnoteDefinition",
+          "label": "note",
+          "children": [
+            {
+              "type": "paragraph",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "footnote with "
+                },
+                {
+                  "type": "strong",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "strong"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "value": "literal https://example.com [^note]",
+          "lang": ""
+        },
+        {
+          "type": "text",
+          "value": "<div>*literal*</div>"
+        }
+      ]
+    }
+  },
+  "8e5befc577b11c0d": {
+    "reason": "Bare www destinations default to HTTPS in hey-boss.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "link",
+              "url": "https://example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "https://example.com"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "link",
+              "url": "http://example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "http://example.com"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "link",
+              "url": "https://www.example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "www.example.com"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " "
+            },
+            {
+              "type": "link",
+              "url": "mailto:user@example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "user@example.com"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "98b608ac28a83a3c": {
+    "reason": "CommonMark discards trailing paragraph whitespace.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "heading",
+          "depth": 1,
+          "children": [
+            {
+              "type": "text",
+              "value": "Trailing"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "alpha beta"
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "start": 0,
+          "children": [
+            {
+              "type": "listItem",
+              "checked": null,
+              "children": [
+                {
+                  "type": "paragraph",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "gamma"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "a7032d6b6879a677": {
+    "reason": "CommonMark resolves reference links and hides their definitions.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "heading",
+          "depth": 1,
+          "children": [
+            {
+              "type": "text",
+              "value": "Links"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "Reference syntax stays readable."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "link",
+              "url": "https://example.com/docs",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "docs"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "b7130d0621ec7b23": {
+    "reason": "CommonMark supports indented code blocks; upstream treats these as paragraphs.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "heading",
+          "depth": 1,
+          "children": [
+            {
+              "type": "text",
+              "value": "CLI Help"
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "value": "poe-code configure [options]\n--provider <name>    Select a provider\n--yes                Accept defaults for CI",
+          "lang": ""
+        },
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "Use the snippet above during onboarding."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "c615acc55f05e5fe": {
+    "reason": "CommonMark recognizes this as an HTML block, retained as literal text.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "text",
+          "value": "<not a tag>"
+        }
+      ]
+    }
+  },
+  "c9263c96362f4cf3": {
+    "reason": "CommonMark disallows unescaped spaces in destinations; Linkify recognizes the remaining bare URL.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "[spacey]("
+            },
+            {
+              "type": "link",
+              "url": "https://example.com/a",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "https://example.com/a"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": " path) "
+            },
+            {
+              "type": "link",
+              "url": "https://example.com/a_(b)",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "paren"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "db5312965b821eb3": {
+    "reason": "CommonMark gives a thematic break precedence over a nested list item.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "list",
+          "start": 0,
+          "children": [
+            {
+              "type": "listItem",
+              "checked": null,
+              "children": [
+                {
+                  "type": "paragraph",
+                  "children": [
+                    {
+                      "type": "text",
+                      "value": "parent"
+                    }
+                  ]
+                },
+                {
+                  "type": "thematicBreak"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "e739928e739e7dce": {
+    "reason": "Bare www destinations default to HTTPS in hey-boss.",
+    "expected": {
+      "type": "root",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "text",
+              "value": "See "
+            },
+            {
+              "type": "link",
+              "url": "https://www.example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "www.example.com"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": ", "
+            },
+            {
+              "type": "link",
+              "url": "https://example.com/path(ok)",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "https://example.com/path(ok)"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": ". and "
+            },
+            {
+              "type": "link",
+              "url": "mailto:user@example.com",
+              "children": [
+                {
+                  "type": "text",
+                  "value": "user@example.com"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "value": "."
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -11,7 +11,7 @@ description = "Native macOS notifications, Markdown updates, and agent questions
 readme = "README.md"
 keywords = ["macos", "notifications", "cli", "agents"]
 categories = ["command-line-utilities"]
-include = ["packages/hey-harvester/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**"]
+include = ["packages/hey-harvester/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "tools/poe-markdown-tests/*.json", "tools/poe-markdown-tests/*.mjs", "tools/poe-markdown-tests/*.ts", "tools/poe-markdown-tests/.npmrc", "tools/poe-markdown-tests/upstream/**", "tools/poe-markdown-tests/frontmatter/**", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**", "!tools/poe-markdown-tests/node_modules/**", "!tools/poe-markdown-tests/captured/**", "!tools/poe-markdown-tests/report.json"]
 
 [workspace]
 exclude = ["worker-tui"]
