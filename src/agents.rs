@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -274,6 +274,23 @@ fn public_assistant_message(message: &Value) -> bool {
         })
     })
 }
+fn saved_codex_git(agent: &mut Agent, git: &Value) {
+    if agent.kind == "Codex"
+        && let (Some(origin), Some(cwd)) = (
+            git["repository_url"].as_str().and_then(normalize_origin),
+            agent.cwd.as_ref(),
+        )
+    {
+        agent.git = Some(GitInfo {
+            repository_root: cwd.clone(),
+            common_dir: String::new(),
+            worktree: cwd.clone(),
+            branch: git["branch"].as_str().map(str::to_owned),
+            repository_id: origin.clone(),
+            origin: Some(origin),
+        });
+    }
+}
 fn apply_event(agent: &mut Agent, event: &Value) {
     let payload = event.get("payload").unwrap_or(event);
     let category = event["type"].as_str().unwrap_or("");
@@ -294,6 +311,7 @@ fn apply_event(agent: &mut Agent, event: &Value) {
             .as_str()
             .map(str::to_owned)
             .or(agent.cwd.take());
+        saved_codex_git(agent, &payload["git"]);
     }
     if ty == "item_completed" || ty == "item_started" {
         let item = &payload["item"];
@@ -523,6 +541,19 @@ fn read_session(agent: &mut Agent, path: &Path, cache: &mut Cache) -> bool {
         *agent = previous.summary.clone();
         agent.id = id;
         agent.pid = pid;
+    }
+    if offset > 0 && agent.kind == "Codex" && agent.git.is_none() {
+        // Older caches lack saved Git metadata. Read just the first record;
+        // preserve their offsets, activity, and current working directories.
+        let mut header = BufReader::new((&mut file).take(MAX_EVENT_BYTES as u64));
+        let mut line = Vec::new();
+        if let Ok((_, true)) = read_event_line(&mut header, &mut line)
+            && let Ok(event) = serde_json::from_slice::<Value>(&line)
+            && event["type"] == "session_meta"
+            && event["payload"]["id"].as_str() == agent.session_id.as_deref()
+        {
+            saved_codex_git(agent, &event["payload"]["git"]);
+        }
     }
     let _ = file.seek(SeekFrom::Start(offset));
     let mut reader = BufReader::new(file);
@@ -827,98 +858,57 @@ fn codex_home() -> Option<PathBuf> {
         .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".codex")))
 }
 
-/// Exact-thread metadata only. Older stores without a model column simply
-/// return None; opening a store never creates it or starts an agent process.
-pub(crate) fn codex_model(home: &Path, session: &str) -> Option<String> {
-    ThreadStore::open(home)?
-        .connection
-        .query_row(
-            "SELECT model FROM threads WHERE id = ?1",
-            [session],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-}
-struct ThreadRecord {
+// Never open Codex's SQLite state, even read-only: observers must not
+// participate in its locking or WAL recovery. These are plain session files.
+struct SessionRecord {
     title: Option<String>,
     rollout: Option<PathBuf>,
-    git_origin: Option<String>,
-    git_branch: Option<String>,
 }
-struct ThreadStore {
-    connection: rusqlite::Connection,
-    has_name: bool,
-    has_git: bool,
+struct SessionFiles {
+    root: PathBuf,
+    titles: BTreeMap<String, String>,
 }
-impl ThreadStore {
+impl SessionFiles {
     fn open(root: &Path) -> Option<Self> {
-        let path = std::fs::read_dir(root)
-            .ok()?
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let version = name
-                    .strip_prefix("state_")?
-                    .strip_suffix(".sqlite")?
-                    .parse::<u32>()
-                    .ok()?;
-                Some((version, e.path()))
-            })
-            .max_by_key(|(v, _)| *v)?
-            .1;
-        let connection = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()?;
-        connection
-            .busy_timeout(std::time::Duration::from_millis(20))
-            .ok()?;
-        let columns = connection
-            .prepare("PRAGMA table_info(threads)")
-            .ok()?
-            .query_map([], |r| r.get::<_, String>(1))
-            .ok()?
-            .flatten()
-            .collect::<BTreeSet<_>>();
-        let has_name = columns.contains("name");
-        let has_git = columns.contains("git_origin_url") && columns.contains("git_branch");
+        if !root.is_dir() {
+            return None;
+        }
         Some(Self {
-            connection,
-            has_name,
-            has_git,
+            root: root.to_owned(),
+            titles: Self::titles(root).unwrap_or_default(),
         })
     }
-    fn thread(&self, id: &str) -> Option<ThreadRecord> {
-        let sql = format!(
-            "SELECT title, rollout_path, {}, {} FROM threads WHERE id = ?1",
-            if self.has_name { "name" } else { "NULL" },
-            if self.has_git {
-                "git_origin_url, git_branch"
-            } else {
-                "NULL, NULL"
+    fn titles(root: &Path) -> std::io::Result<BTreeMap<String, String>> {
+        let mut file = std::fs::File::open(root.join("session_index.jsonl"))?;
+        let size = file.metadata()?.len();
+        let base = size.saturating_sub(4 * 1024 * 1024);
+        file.seek(SeekFrom::Start(base))?;
+        let mut reader = BufReader::new(file.take(size - base));
+        let mut line = Vec::new();
+        if base > 0 {
+            read_event_line(&mut reader, &mut line)?;
+        }
+        let mut titles = BTreeMap::new();
+        loop {
+            let (bytes, complete) = read_event_line(&mut reader, &mut line)?;
+            if bytes == 0 || !complete {
+                break;
             }
-        );
-        self.connection
-            .query_row(&sql, [id], |r| {
-                let title: Option<String> = r.get(0)?;
-                let rollout: Option<String> = r.get(1)?;
-                let name: Option<String> = r.get(2)?;
-                Ok(ThreadRecord {
-                    title: name
-                        .as_deref()
-                        .and_then(short)
-                        .or_else(|| title.as_deref().and_then(short)),
-                    rollout: rollout.map(PathBuf::from),
-                    git_origin: r
-                        .get::<_, Option<String>>(3)?
-                        .as_deref()
-                        .and_then(normalize_origin),
-                    git_branch: r.get(4)?,
-                })
-            })
-            .ok()
+            if let Ok(record) = serde_json::from_slice::<Value>(&line)
+                && let Some(id) = record["id"].as_str()
+                && let Some(title) = record["thread_name"].as_str().and_then(short)
+            {
+                titles.insert(id.to_owned(), title);
+            }
+        }
+        Ok(titles)
+    }
+    fn thread(&self, id: &str) -> Option<SessionRecord> {
+        let rollout = crate::agent_conversations::rollout(&self.root, id)?;
+        Some(SessionRecord {
+            title: self.titles.get(id).cloned(),
+            rollout: Some(rollout),
+        })
     }
 }
 fn metadata_state(status: &str) -> Option<&'static str> {
@@ -1019,7 +1009,7 @@ pub fn scan() -> Snapshot {
     let pids = processes.iter().map(|(pid, _)| *pid).collect::<Vec<_>>();
     let details = files(&pids);
     let arguments = process_arguments(&pids);
-    let thread_store = codex_home().and_then(|root| ThreadStore::open(&root));
+    let session_files = codex_home().and_then(|root| SessionFiles::open(&root));
     let mut cache: Cache = cache_path()
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|data| serde_json::from_slice(&data).ok())
@@ -1067,7 +1057,7 @@ pub fn scan() -> Snapshot {
                     continue;
                 }
                 if let Some(id) = resume_session_id(args)
-                    && let Some(record) = thread_store.as_ref().and_then(|s| s.thread(id))
+                    && let Some(record) = session_files.as_ref().and_then(|s| s.thread(id))
                     && let Some(path) = record.rollout
                 {
                     let mut resumed = base.clone();
@@ -1123,19 +1113,9 @@ pub fn scan() -> Snapshot {
     for agent in &mut snapshot.agents {
         if agent.kind == "Codex"
             && let Some(id) = &agent.session_id
-            && let Some(record) = thread_store.as_ref().and_then(|s| s.thread(id))
+            && let Some(title) = session_files.as_ref().and_then(|s| s.titles.get(id))
         {
-            agent.title = record.title.or(agent.title.take());
-            if let (Some(origin), Some(cwd)) = (record.git_origin, agent.cwd.as_ref()) {
-                agent.git = Some(GitInfo {
-                    repository_root: cwd.clone(),
-                    common_dir: String::new(),
-                    worktree: cwd.clone(),
-                    branch: record.git_branch,
-                    repository_id: origin.clone(),
-                    origin: Some(origin),
-                });
-            }
+            agent.title = Some(title.clone());
         }
     }
     let mut repositories = BTreeMap::<String, Option<GitInfo>>::new();
@@ -1242,52 +1222,61 @@ mod tests {
         assert_eq!(kind("/usr/local/bin/claude"), Some("Claude"));
     }
     #[test]
-    fn exact_thread_titles_prefer_custom_names_and_support_older_schema() {
-        let root = std::env::temp_dir().join(format!("hb-thread-titles-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+    fn session_metadata_works_while_codex_database_is_exclusively_locked() {
+        let root = std::env::temp_dir().join(format!("hb-session-files-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("archived_sessions")).unwrap();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         let path = root.join("state_5.sqlite");
         let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, rollout_path TEXT, name TEXT); INSERT INTO threads VALUES ('live', 'Generated title', '/exact/live.jsonl', 'My custom chat'); INSERT INTO threads VALUES ('other', 'Unrelated chat', '/other.jsonl', NULL);").unwrap();
-        drop(db);
-        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let store = ThreadStore::open(&root).unwrap();
-        let row = store.thread("live").unwrap();
-        assert_eq!(row.title.as_deref(), Some("My custom chat"));
-        assert_eq!(row.rollout, Some(PathBuf::from("/exact/live.jsonl")));
-        assert!(store.thread("unknown").is_none());
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().modified().unwrap(),
-            modified
+        db.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY, title TEXT, rollout_path TEXT, name TEXT); BEGIN EXCLUSIVE;").unwrap();
+        let rollout = root
+            .join("archived_sessions")
+            .join(format!("rollout-{id}.jsonl"));
+        std::fs::write(&rollout, format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":"/deleted/worktree","git":{"repository_url":"git@github.com:poe-internal/poe2.git","branch":"codex/deleted-worktree"}}}))).unwrap();
+        std::fs::write(
+            root.join("session_index.jsonl"),
+            format!(
+                "{}\n{}\ninvalid\n{{\"id\":",
+                serde_json::json!({"id":id,"thread_name":"Original name"}),
+                serde_json::json!({"id":id,"thread_name":"Renamed chat"})
+            ),
+        )
+        .unwrap();
+        let store = SessionFiles::open(&root).unwrap();
+        let row = store.thread(id).unwrap();
+        assert_eq!(row.title.as_deref(), Some("Renamed chat"));
+        assert_eq!(row.rollout, Some(rollout.clone()));
+        assert!(
+            store
+                .thread("ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee")
+                .is_none()
         );
-        assert!(row.git_origin.is_none());
-        drop(store);
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("ALTER TABLE threads ADD COLUMN git_origin_url TEXT; ALTER TABLE threads ADD COLUMN git_branch TEXT; UPDATE threads SET git_origin_url='git@github.com:poe-internal/poe2.git',git_branch='codex/deleted-worktree' WHERE id='live';").unwrap();
-        drop(db);
-        let store = ThreadStore::open(&root).unwrap();
-        let historical = store.thread("live").unwrap();
+        let mut a = agent();
+        let mut cache = Cache::default();
+        assert!(read_session(&mut a, &rollout, &mut cache));
         assert_eq!(
-            historical.git_origin.as_deref(),
+            a.git.as_ref().unwrap().origin.as_deref(),
             Some("github.com/poe-internal/poe2")
         );
         assert_eq!(
-            historical.git_branch.as_deref(),
+            a.git.as_ref().unwrap().branch.as_deref(),
             Some("codex/deleted-worktree")
         );
-        assert!(store.thread("other").unwrap().git_origin.is_none());
-        drop(store);
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("DROP TABLE threads; CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, rollout_path TEXT); INSERT INTO threads VALUES ('old', 'Older chat', '/old.jsonl');").unwrap();
+        // Upgrade old observer caches without rescanning transcript history or
+        // replacing the most recent working directory with the session header.
+        let saved = &mut cache.entries.get_mut(&rollout).unwrap().summary;
+        saved.git = None;
+        saved.cwd = Some("/current/worktree".into());
+        saved.task = Some("Current task".into());
+        assert!(read_session(&mut a, &rollout, &mut cache));
+        assert!(a.git.is_some());
+        assert_eq!(a.cwd.as_deref(), Some("/current/worktree"));
+        assert_eq!(a.task.as_deref(), Some("Current task"));
+        db.execute_batch("COMMIT; BEGIN EXCLUSIVE; COMMIT;")
+            .unwrap();
+        assert!(!root.join("state_5.sqlite-wal").exists());
+        assert!(!root.join("state_5.sqlite-shm").exists());
         drop(db);
-        assert_eq!(
-            ThreadStore::open(&root)
-                .unwrap()
-                .thread("old")
-                .unwrap()
-                .title
-                .as_deref(),
-            Some("Older chat")
-        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

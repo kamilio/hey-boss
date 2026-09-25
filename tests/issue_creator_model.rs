@@ -100,7 +100,7 @@ fn missing_metadata_and_explicit_humans_never_inherit_a_model() {
 }
 
 #[test]
-fn model_comes_from_the_exact_thread_when_turn_context_is_outside_the_tail() {
+fn model_never_reads_codex_database_when_turn_context_is_outside_the_tail() {
     let f = Fixture::new("thread");
     let db = rusqlite::Connection::open(f.0.join("codex/state_5.sqlite")).unwrap();
     db.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY,model TEXT); INSERT INTO threads VALUES('another-session','wrong-model');").unwrap();
@@ -111,7 +111,10 @@ fn model_comes_from_the_exact_thread_when_turn_context_is_outside_the_tail() {
         json!({"type":"turn_context","payload":{"model":"outside-tail"}}),
         json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(9 * 1024 * 1024)}}),
     ]);
-    assert_eq!(f.create()["origin"]["model"], "gpt-6-sol");
+    assert!(
+        f.create()["origin"]["model"].is_null(),
+        "Metadata outside the bounded session tail stays unknown; never open Codex SQLite"
+    );
     f.transcript(&[json!({"type":"turn_context","payload":{"model":"gpt-turn-override"}})]);
     assert_eq!(f.create()["origin"]["model"], "gpt-turn-override");
     db.execute("DELETE FROM threads WHERE id=?1", [SESSION])
