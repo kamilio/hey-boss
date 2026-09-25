@@ -12,6 +12,19 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NATIVE_READER"] == "1" {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-native-reader-"+UUID().uuidString)
+        try! FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:root) }
+        let sample = Record(taskID:"native-sample",kind:"update",question:"# Sample\n\nText",project:"Synthetic",title:"Sample",description:"",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:0,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+        auditNativeMarkdownReader(sample:sample)
+        auditLargeNativeMarkdownReader(sample:sample)
+        auditDocumentComments(root:root,sample:sample)
+        auditReviewImage(sample:sample)
+        auditCommentComposer(root:root)
+        auditMultilineSourceComment(root:root)
+        return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_CLICKS"] == "1" { auditNotificationClicks(); return }
     if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_HUB"] { auditNotificationLatency(endpoint:endpoint); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_OPTIMISTIC"] == "1" { auditOptimisticNotifications(); return }
@@ -86,10 +99,15 @@ func audit() {
     precondition(ui.cards.count == 2 && ui.projectGroups.isEmpty, "Two survivors must no longer be grouped")
     precondition(ui.previews.count == 1)
     let preview = ui.previews[updates[0].taskID]!
-    precondition(preview.linkButtons.count == 2)
+    waitForNativeReader(preview)
+    var previewLinks: [URL] = []
+    preview.text.textStorage!.enumerateAttribute(.link,in:NSRange(location:0,length:preview.text.textStorage!.length)) { value,_,_ in
+        if let url = value as? URL, url.scheme != nil { previewLinks.append(url) }
+    }
+    precondition(previewLinks.count == 2)
     precondition(preview.text.string.contains("Relative Anchor Unsupported"))
-    preview.linkButtons[0].performClick(nil)
-    preview.linkButtons[1].performClick(nil)
+    _ = preview.textView(preview.text,clickedOnLink:previewLinks[0],at:0)
+    _ = preview.textView(preview.text,clickedOnLink:previewLinks[1],at:0)
     precondition(openedURLs == [URL(string: "https://example.com")!, URL(fileURLWithPath: "/Users/example/My Project/WIP.md")])
     for preview in ui.previews.values { preview.close() }
     for project in ["frontend-web", "frontend-api"] {
@@ -135,7 +153,7 @@ func audit() {
     auditSocketDeadlines()
     auditOverviewExpansionPersistence()
     _ = auditAgentOverview()
-    auditMarkdownWebReader(sample: updates[0])
+    auditNativeMarkdownReader(sample: updates[0])
     auditDocumentComments(root: root, sample: updates[0])
     auditReviewImage(sample: updates[0])
     auditCommentComposer(root: root)
@@ -1477,42 +1495,104 @@ func auditConnectionSettings() {
     print("Passed: native connection settings, DNS/host validation, normalized inputs, save errors, duplicate callbacks, preview isolation")
 }
 
-func auditMarkdownWebReader(sample: Record) {
-    var row = sample
-    row = Record(taskID: "markdown-web-audit", kind: "update", question: "# Report 🌍\n\n| A | B |\n|---|---|\n|one|two|\n\n```text\n" + String(repeating: "x", count: 2000) + "\n```\n\n> [!WARNING]\n> Review carefully.\n\n<script>window.bad = true</script>", project: "Synthetic", title: "Markdown reader", description: "Fixture", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 0, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
-    let reader = Preview(row, openURL: { _ in })
+func waitForNativeReader(_ reader: Preview) {
     let deadline = Date().addingTimeInterval(25)
-    while !reader.readerLoaded && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-    precondition(reader.readerLoaded, "Controlled Markdown web reader must load through installed CLI")
-    var result: [String: Any]?
-    reader.browser!.evaluateJavaScript("({heading:document.querySelector('h1').textContent,cells:document.querySelectorAll('td').length,alert:!!document.querySelector('.markdown-alert-warning'),scripts:document.querySelectorAll('script').length,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})") { value, error in
-        precondition(error == nil, "Markdown DOM inspection failed")
-        result = value as? [String: Any]
+    while !reader.readerLoaded && Date() < deadline { RunLoop.main.run(until:Date().addingTimeInterval(0.01)) }
+    precondition(reader.readerLoaded,"Native Markdown renderer did not finish")
+}
+func auditNativeMarkdownReader(sample: Record) {
+    let source = "---\ntitle: Hidden\n---\n\n# Report 🌍\n\n| Name | Value |\n|---|---:|\n| alpha | 2 |\n\n- [x] **Done**\n  - Nested\n\n> [!WARNING]\n> Review carefully.\n\n```rust\nlet first = true;\n    let next = 2;\n```\n\n<script>literal HTML</script>"
+    let row = Record(taskID:"native-reader-audit",kind:"update",question:source,project:"Synthetic",title:"Native Markdown",description:"Fixture",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:0,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+    let start = ProcessInfo.processInfo.systemUptime
+    let reader = Preview(row,openURL:{ _ in })
+    func snapshot(_ name: String) {
+        guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"], let view = reader.contentView else { return }
+        try! FileManager.default.createDirectory(atPath:directory,withIntermediateDirectories:true)
+        view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+        let bitmap = view.bitmapImageRepForCachingDisplay(in:view.bounds)!
+        view.cacheDisplay(in:view.bounds,to:bitmap)
+        try! bitmap.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:directory).appendingPathComponent(name+".png"))
     }
-    while result == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-    precondition(result?["heading"] as? String == "Report 🌍")
-    precondition(result?["cells"] as? Int == 2)
-    precondition(result?["alert"] as? Bool == true)
-    precondition(result?["scripts"] as? Int == 0)
-    precondition(result?["overflow"] as? Bool == false, "Long code should scroll inside its block")
-    for (width, height, appearance) in [(CGFloat(420), CGFloat(500), NSAppearance.Name.aqua), (CGFloat(1000), CGFloat(740), NSAppearance.Name.darkAqua)] {
-        reader.setContentSize(NSSize(width: width, height: height))
-        reader.appearance = NSAppearance(named: appearance)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        var layout: [String: Any]?
-        reader.browser!.evaluateJavaScript("({width:window.innerWidth,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,codeScroll:document.querySelector('pre').scrollWidth>document.querySelector('pre').clientWidth,tableCells:document.querySelectorAll('td').length})") { value, error in
-            precondition(error == nil)
-            layout = value as? [String: Any]
-        }
-        let layoutDeadline = Date().addingTimeInterval(5)
-        while layout == nil && Date() < layoutDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        precondition(layout?["width"] as? Int == Int(width), "Web reader must resize with the native window")
-        precondition(layout?["overflow"] as? Bool == false)
-        precondition(layout?["codeScroll"] as? Bool == true)
-        precondition(layout?["tableCells"] as? Int == 2)
+    precondition(reader.loadingView != nil && reader.text.string.isEmpty && reader.fallbackScroll!.isHidden,"Never expose an intermediate document")
+    reader.makeKeyAndOrderFront(nil)
+    snapshot("native-markdown-loading")
+    waitForNativeReader(reader)
+    precondition(reader.loadingView == nil && !reader.fallbackScroll!.isHidden)
+    precondition(!reader.contentView!.subviews.contains { $0 is WKWebView },"Document rendering must be native")
+    let storage = reader.text.textStorage!
+    precondition(storage.string.contains("Report 🌍") && !storage.string.contains("title: Hidden"))
+    precondition(storage.string.contains("☑\tDone") && storage.string.contains("Nested"))
+    precondition(storage.string.contains("Warning") && storage.string.contains("<script>literal HTML</script>"))
+    var table = false, highlighted = false
+    storage.enumerateAttributes(in:NSRange(location:0,length:storage.length)) { attributes, _, _ in
+        if (attributes[.paragraphStyle] as? NSParagraphStyle)?.textBlocks.contains(where: { $0 is NSTextTableBlock }) == true { table = true }
+        if attributes[.nativeCode] as? Bool == true && attributes[.foregroundColor] as? NSColor == .systemPurple { highlighted = true }
     }
+    precondition(table && highlighted,"Native tables and highlighted code must retain their structure")
+    for phrase in ["Review carefully.", "let first = true;"] {
+        let range = (storage.string as NSString).range(of:phrase)
+        let layout = reader.text.layoutManager!, container = reader.text.textContainer!
+        let glyphs = layout.glyphRange(forCharacterRange:range,actualCharacterRange:nil)
+        let bounds = layout.boundingRect(forGlyphRange:glyphs,in:container)
+        precondition(bounds.height < 50 && bounds.width > 80,"Native blocks must use the available width: \(phrase) \(bounds)")
+    }
+    reader.appearance = NSAppearance(named:.aqua); snapshot("native-markdown-light")
+    reader.appearance = NSAppearance(named:.darkAqua); snapshot("native-markdown-dark")
+    let pasteboard = NSPasteboard(name:.init("hey-boss-copy-audit-"+UUID().uuidString))
+    defer { pasteboard.releaseGlobally() }
+    reader.text.copyPasteboard = pasteboard
+    reader.makeFirstResponder(reader.text)
+    let code = "let first = true;\n    let next = 2;\n"
+    reader.text.setSelectedRange((storage.string as NSString).range(of:code))
+    let copy = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:.command,timestamp:0,windowNumber:reader.windowNumber,context:nil,characters:"c",charactersIgnoringModifiers:"c",isARepeat:false,keyCode:8)!
+    precondition(reader.performKeyEquivalent(with:copy),"Command-C must reach the native selection")
+    precondition(pasteboard.string(forType:.string) == code,"Copy changed code indentation or newlines")
+    precondition(pasteboard.data(forType:.rtf) != nil,"Copy must include rich text")
+    let cells = "Name\nValue\nalpha\n2\n"
+    reader.text.setSelectedRange((storage.string as NSString).range(of:cells))
+    reader.text.copy(nil)
+    precondition(pasteboard.string(forType:.string) == "Name\tValue\nalpha\t2\n","Table selection must paste as TSV")
+    reader.text.selectAll(nil); reader.text.copy(nil)
+    precondition(pasteboard.string(forType:.string)?.contains("Report 🌍") == true && pasteboard.string(forType:.string)?.contains(code) == true,"Copy must cross every document block")
+    for width: CGFloat in [720,420] {
+        reader.setContentSize(NSSize(width:width,height:640)); reader.contentView!.layoutSubtreeIfNeeded()
+        reader.text.layoutManager!.ensureLayout(for:reader.text.textContainer!)
+        precondition(reader.text.frame.width <= reader.fallbackScroll!.contentSize.width+1)
+    }
+    let savedSelection = reader.text.selectedRange()
+    RunLoop.main.run(until:Date().addingTimeInterval(0.2))
+    precondition(reader.text.selectedRange() == savedSelection,"A late renderer must not replace an active selection")
+    print("Passed: native blocks, stable loading, tables, code, lists, callouts, literal HTML, Unicode and rich copy, exact code whitespace, TSV, cross-block selection; ready_ms=\(Int((ProcessInfo.processInfo.systemUptime-start)*1000))")
     reader.close()
-    print("Passed: installed Markdown renderer, WebKit DOM, Unicode, tables, callout, literal HTML, bounded horizontal code scrolling")
+}
+
+func auditLargeNativeMarkdownReader(sample: Record) {
+    let paragraph = String(repeating:"Readable **native text** with Unicode 🌍 and selectable words. ",count:6)
+    let source = (0..<3000).map { "## Section \($0)\n\n\(paragraph)\n\n" }.joined() + "## Final section\n\nFinal selectable text 🌍.\n"
+    let row = Record(taskID:"native-large-audit",kind:"update",question:source,project:"Synthetic",title:"Large document",description:"",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:0,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+    precondition(row.question.utf8.count > 1024*1024)
+    let start = ProcessInfo.processInfo.systemUptime
+    let reader = Preview(row,openURL:{ _ in })
+    precondition(ProcessInfo.processInfo.systemUptime-start < 1,"Opening a large document must not block the UI")
+    precondition(reader.loadingView != nil && reader.text.string.isEmpty)
+    reader.makeKeyAndOrderFront(nil)
+    var ticks = 0
+    let timer = Timer.scheduledTimer(withTimeInterval:0.02,repeats:true) { _ in ticks += 1 }
+    waitForNativeReader(reader)
+    timer.invalidate()
+    let renderTime = ProcessInfo.processInfo.systemUptime-start
+    precondition(ticks > 0,"Loading must allow the main run loop to process events")
+    precondition(!reader.subtitle.contains("Plain text"),"Large Markdown must render natively without fallback")
+    let final = "Final selectable text 🌍."
+    let range = (reader.text.string as NSString).range(of:final)
+    precondition(range.location != NSNotFound,"Large documents must not be truncated")
+    reader.text.setSelectedRange(range)
+    reader.text.scrollRangeToVisible(range)
+    let pasteboard = NSPasteboard(name:.init("hey-boss-large-copy-"+UUID().uuidString))
+    defer { pasteboard.releaseGlobally(); reader.close() }
+    reader.text.copyPasteboard = pasteboard; reader.text.copy(nil)
+    precondition(pasteboard.string(forType:.string) == final)
+    print("Passed: large native document bytes=\(row.question.utf8.count), render_ms=\(Int(renderTime*1000)), main_loop_ticks=\(ticks), final section selection/copy")
 }
 
 func auditDocumentComments(root: URL, sample: Record) {
@@ -1558,11 +1638,11 @@ func auditDocumentComments(root: URL, sample: Record) {
     }
     // Test native sidebar geometry with synthetic content; no production data.
     reader.sidebarCollapsed = false
-    reader.showRenderedMarkdown("<html><body><p>Review text</p></body></html>")
+    waitForNativeReader(reader)
     reader.contentView!.layoutSubtreeIfNeeded()
     reader.reviewSidebar!.arrange()
     precondition(reader.reviewSidebar!.bounds.width == 280)
-    precondition(reader.browser!.frame.maxX <= reader.reviewSidebar!.frame.minX)
+    precondition(reader.fallbackScroll!.frame.maxX <= reader.reviewSidebar!.frame.minX)
     precondition(reader.reviewSidebar!.entries.subviews.count == 1)
     reader.close()
     print("Passed: durable document comments, synchronous status wakes on first comment while reader stays open, async response payload, synchronous review wait, completion payload, disabled comments omitted, native sidebar geometry")
@@ -1580,14 +1660,12 @@ func auditReviewImage(sample: Record) {
     let deadline = Date().addingTimeInterval(10)
     while !reader.readerLoaded && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
     precondition(reader.readerLoaded && reader.reviewSidebar != nil)
-    var result: [String: Any]?
-    reader.browser!.evaluateJavaScript("({images:document.images.length,width:document.images[0].naturalWidth,height:document.images[0].naturalHeight})") { value, error in precondition(error == nil); result = value as? [String: Any] }
-    while result == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-    precondition(result?["images"] as? Int == 1 && result?["width"] as? Int == 8 && result?["height"] as? Int == 8)
+    let picture = reader.text.textStorage!.attribute(.attachment,at:0,effectiveRange:nil) as! NSTextAttachment
+    precondition(picture.image?.size == NSSize(width:8,height:8))
     reader.close()
     let invalid = DocumentAttachment(name: "bad.png", mime: "image/png", data: "not-an-image")
     do { _ = try invalid.validatedImage(); preconditionFailure("Invalid image accepted") } catch {}
-    print("Passed: snapshotted image review, decoded image dimensions in WebKit, image comments sidebar, invalid image rejection")
+    print("Passed: snapshotted image review, native image dimensions and comments sidebar")
 }
 
 func auditCommentComposer(root: URL) {
@@ -1605,13 +1683,9 @@ func auditCommentComposer(root: URL) {
     let deadline = Date().addingTimeInterval(25)
     while !reader.readerLoaded && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
     precondition(reader.readerLoaded)
-    var selected = false
-    reader.browser!.evaluateJavaScript("(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('p'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);return document.querySelectorAll('.token-keyword,.token-constant,.token-comment').length;})()") { value, error in
-        precondition(error == nil && (value as? Int ?? 0) >= 3, "Actual web reader must display highlighted code")
-        selected = true
-    }
-    while !selected && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-    precondition(selected)
+    let paragraphRange = (reader.text.string as NSString).range(of:"Selected paragraph.\nNext line 🌍.")
+    precondition(paragraphRange.location != NSNotFound)
+    reader.text.setSelectedRange(paragraphRange)
     let sidebar = reader.reviewSidebar!
     precondition(reader.sidebarCollapsed && sidebar.isHidden)
     reader.inspectSelection()
@@ -1650,10 +1724,9 @@ func auditCommentComposer(root: URL) {
     precondition(sidebar.composer.string.contains("timing"))
     reader.commentsToggle!.performClick(nil)
     precondition(reader.sidebarCollapsed && sidebar.isHidden)
-    var marks: Int?
-    reader.browser!.evaluateJavaScript("document.querySelectorAll('mark[data-review-id]').length") { value, error in precondition(error == nil); marks = value as? Int }
-    while marks == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-    precondition((marks ?? 0) > 0, "Saved selection must be visibly anchored")
+    var marks = 0
+    reader.text.textStorage!.enumerateAttribute(.reviewComment,in:NSRange(location:0,length:reader.text.textStorage!.length)) { value,_,_ in if value != nil { marks += 1 } }
+    precondition(marks > 0,"Saved selection must remain visibly anchored")
     sidebar.composer.string = "Final edit saved on closing."
     reader.textDidChange(Notification(name: NSText.didChangeNotification, object: sidebar.composer))
     reader.performClose(nil)
@@ -1680,9 +1753,9 @@ func auditMultilineSourceComment(root: URL) {
     while !reader.readerLoaded && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
     precondition(reader.readerLoaded)
     precondition(reader.sourceSelection(first: 2, last: 2)?.source_text == "fn main() {\n")
-    var selected = false
-    reader.browser!.evaluateJavaScript("(()=>{const a=document.querySelector('[data-source-start=\"3\"]'),b=document.querySelector('[data-source-start=\"4\"]');const r=document.createRange();r.setStartBefore(a);r.setEndAfter(b);const s=window.getSelection();s.removeAllRanges();s.addRange(r);})()") { _, error in precondition(error == nil); selected = true }
-    while !selected && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    let sourceRange = (reader.text.string as NSString).range(of:"    let first = true;\n    let next = 2;\n")
+    precondition(sourceRange.location != NSNotFound)
+    reader.text.setSelectedRange(sourceRange)
     reader.inspectSelection()
     while reader.selectionAction?.isHidden != false && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
     precondition(reader.selectedSource?.line_start == 2 && reader.selectedSource?.line_end == 3)
@@ -2099,7 +2172,7 @@ func auditOptimisticNotifications() {
     let largePreview = Preview(large,openURL:{ _ in })
     let elapsed = ProcessInfo.processInfo.systemUptime - started
     precondition(elapsed < 0.5, "Large document opening parses the entire body on the main thread")
-    precondition(!largePreview.text.string.isEmpty)
+    precondition(largePreview.text.string.isEmpty && largePreview.loadingView != nil)
     largePreview.close()
     print("Large document initial preview: \(Int(elapsed * 1000))ms")
     print("Passed: card clicks open immediately; optimistic read, dismiss-all and answers; stale-refresh suppression; partial rollback and draft recovery")
