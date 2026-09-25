@@ -84,6 +84,33 @@
   background: #bd850f15;
   border-color: #bd850f40;
 }
+.issue-state.blocked.on-hold,
+.state-pill.blocked.on-hold,
+.issue-hold-label,
+.blocked-notice.on-hold > div:first-child { color: var(--hold-text, #b42332); }
+.state-pill.blocked.on-hold,
+.blocked-notice.on-hold { background: #d43b4810; border-color: #d43b4840; }
+.issue-hold-label { font-weight: 600; }
+.blocked-filter-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: -4px 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.blocked-filter-control select {
+  min-height: 40px;
+  max-width: 100%;
+  padding: 8px 30px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--input);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
 .blocked-notice {
   display: flex;
   align-items: center;
@@ -100,7 +127,7 @@
 .blocked-notice p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .blocked-notice .button { flex-shrink: 0; }
 @media (prefers-color-scheme: dark) {
-  :root { --blocked-text: #e5b75d; }
+  :root { --blocked-text: #e5b75d; --hold-text: #ff929b; }
 }
 @media (max-width: 640px) {
   .state-tabs { overflow-x: auto; overflow-y: hidden; min-width: 0; scrollbar-width: none; }

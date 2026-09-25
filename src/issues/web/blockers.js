@@ -1,19 +1,32 @@
 "use strict";
 const IssueBlockers = (() => {
+  function kind(issue) {
+    if (issue.deleted_at || issue.state !== "blocked") return "";
+    return issue.manual_blocked ? "hold" : "dependencies";
+  }
+  function matches(issue, filter) {
+    if (!filter) return true;
+    if (!kind(issue)) return false;
+    return filter === "hold" ? !!issue.manual_blocked : !!issue.blocked_by?.length;
+  }
+  const description = issue => kind(issue) === "hold"
+    ? `On hold${issue.blocked_by?.length ? " · also waiting for dependencies" : ""}`
+    : "Waiting for dependencies";
   let context = null, generation = 0, busy = false;
   const href = number => routeHash({...model.route, view:"issues", issue:number});
   const link = i => `<a class="issue-blocker-link" data-issue="${i.number}" href="${esc(href(i.number))}" title="${esc(i.title)}">#${i.number} ${esc(i.title)}</a>`;
   function list(issue) {
     const active = issue.blocked_by || [];
-    if (!active.length) return "";
-    return `<span class="issue-blocked-by">${icon("blocked")}<span>Blocked by</span>${active.slice(0,3).map(link).join("")}${active.length>3 ? `<a data-issue="${issue.number}" href="${esc(href(issue.number))}">+${active.length-3} more</a>` : ""}</span>`;
+    const hold = kind(issue) === "hold" ? '<span class="issue-hold-label">On hold</span>' : "";
+    if (!active.length) return hold;
+    return `${hold}<span class="issue-blocked-by">${icon("blocked")}<span>Blocked by</span>${active.slice(0,3).map(link).join("")}${active.length>3 ? `<a data-issue="${issue.number}" href="${esc(href(issue.number))}">+${active.length-3} more</a>` : ""}</span>`;
   }
   function card(issue) {
     if (issue.deleted_at || issue.state==="closed") return "";
     const active = issue.blocked_by || [], linked = issue.blocker_links || [];
     const linkedNumbers = new Set(linked.map(i=>i.number));
     const inherited = active.filter(i=>!linkedNumbers.has(i.number));
-    return `<div class="side-section issue-blockers"><h2 class="side-heading">Blocked by${icon("blocked")}</h2>${[...linked,...inherited].length ? `<ul class="blocker-list">${[...linked,...inherited].map(i=>`<li>${link(i)}<span class="muted-text">${i.deleted_at ? "Deleted" : i.state==="ready" ? "Ready" : i.state==="closed" ? "Closed" : i.source==="previous_subtask" ? "Earlier subtask" : i.source==="subtask" ? "Unfinished subtask" : "Unfinished issue"}</span>${linkedNumbers.has(i.number) ? `<button type="button" class="icon-button" data-remove-blocker="${i.number}" aria-label="Remove blocker #${i.number}">${icon("x")}</button>` : ""}</li>`).join("")}</ul>` : `<p>${issue.state==="blocked" ? "No linked issue. Review the blocker in comments." : "No blocking issues."}</p>`}<button type="button" class="button" data-add-blocker>${icon("plus")}Add blocker</button>${active.length ? `<p>${issue.draft && issue.state === "open" ? "These links are kept while you draft. Mark ready to check them again." : issue.manual_blocked ? "Clear the manual hold once it is resolved. These dependencies will still pause pickup." : issue.dependency_ready_state === "ready" ? "Reopens automatically when blockers are Ready or Closed. Stack your PR on the prerequisite PR branches." : "Reopens automatically when all blocking issues are Closed."}</p>` : ""}</div>`;
+    return `<div class="side-section issue-blockers"><h2 class="side-heading">Blocked by${icon("blocked")}</h2>${[...linked,...inherited].length ? `<ul class="blocker-list">${[...linked,...inherited].map(i=>`<li>${link(i)}<span class="muted-text">${i.deleted_at ? "Deleted" : i.state==="ready" ? "Ready" : i.state==="closed" ? "Closed" : i.source==="previous_subtask" ? "Earlier subtask" : i.source==="subtask" ? "Unfinished subtask" : "Unfinished issue"}</span>${linkedNumbers.has(i.number) ? `<button type="button" class="icon-button" data-remove-blocker="${i.number}" aria-label="Remove blocker #${i.number}">${icon("x")}</button>` : ""}</li>`).join("")}</ul>` : `<p>${issue.state==="blocked" ? "No linked issue. Review the blocker in comments." : "No blocking issues."}</p>`}<button type="button" class="button" data-add-blocker>${icon("plus")}Add blocker</button>${active.length ? `<p>${issue.draft && issue.state === "open" ? "These links are kept while you draft. Mark ready to check them again." : issue.manual_blocked ? "Release the hold once it is resolved. These dependencies will still pause pickup." : issue.dependency_ready_state === "ready" ? "Reopens automatically when blockers are Ready or Closed. Stack your PR on the prerequisite PR branches." : "Reopens automatically when all blocking issues are Closed."}</p>` : ""}</div>`;
   }
   function close() { if(busy)return;generation++;context=null;$("#blocker-picker-dialog").close();$("[data-add-blocker]")?.focus(); }
   function options() {
@@ -60,5 +73,5 @@ const IssueBlockers = (() => {
     for(const id of ["blocker-picker-close","blocker-picker-cancel"])$("#"+id).onclick=close;
     $("#blocker-picker-dialog").addEventListener("cancel",e=>{e.preventDefault();close();});
   }
-  return {list,card,init};
+  return {list,card,init,kind,matches,description};
 })();
