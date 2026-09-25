@@ -1000,12 +1000,24 @@ impl Store {
         }
         // Healthy opens never take a writer lock. Recheck under the lock before
         // repairing, since another startup may have completed the migration.
+        let prior_readiness: Option<String> = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='issue_pickup_ready'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let needs_sequence = prior_readiness
+            .as_ref()
+            .is_none_or(|sql| !sql.contains("sequence_ancestors"));
         let needs_repair = version >= 10
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
                 .is_empty()
                 || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?
-                || !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_pickup_ready' AND instr(sql,'coalesce(r.retry_at')>0)", [], |r| r.get::<_, bool>(0))?);
+                || prior_readiness
+                    .as_ref()
+                    .is_none_or(|sql| !sql.contains("coalesce(r.retry_at")));
         if version < SCHEMA_VERSION || needs_repair {
             db.pragma_update(None, "foreign_keys", false)?;
             let mut migrate = || -> Result<()> {
@@ -1083,7 +1095,18 @@ impl Store {
                     migrate_blocked(&tx)?;
                 }
                 registry::repair_pr_capture(&tx)?;
-                tx.execute_batch(include_str!("subtask-readiness.sql"))?;
+                if needs_sequence {
+                    // Publish the new readiness view only with its reconciled
+                    // states below, after additive blocker columns exist.
+                    tx.execute_batch("DROP VIEW issue_pickup_ready;")?;
+                    let fallback = format!(
+                        "CREATE VIEW{}",
+                        subtasks::SCHEMA.split_once("CREATE VIEW").unwrap().1
+                    );
+                    tx.execute_batch(prior_readiness.as_deref().unwrap_or(&fallback))?;
+                } else {
+                    tx.execute_batch(include_str!("subtask-readiness.sql"))?;
+                }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.commit()?;
                 Ok(())
@@ -1135,6 +1158,12 @@ impl Store {
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
         super::blockers::migrate(&mut db)?;
+        if needs_sequence {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            super::blockers::reconcile_sequence_upgrade(&tx)?;
+            tx.execute_batch(include_str!("subtask-readiness.sql"))?;
+            tx.commit()?;
+        }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index')", [], |r| r.get::<_,bool>(0))? {
             db.execute_batch(SUMMARY_INDEX)?;
         }
@@ -1646,6 +1675,8 @@ impl Store {
                 | Operation::CreateSubtask { .. }
                 | Operation::AddSubtask { .. }
                 | Operation::RemoveSubtask { .. }
+                | Operation::Move { .. }
+                | Operation::Unassign { .. }
                 | Operation::Block { .. }
                 | Operation::SetBlockers { .. }
                 | Operation::Close { .. }
@@ -2147,6 +2178,13 @@ fn mutate(
             registry::claim_lock(db, project, number, actor, *force)?;
             if issue.state != "open" {
                 return Err(Error::conflict("Reopen the issue before claiming it"));
+            }
+            if issue.assignee.is_none()
+                && super::blockers::has_dependencies(db, &project.id, number)?
+            {
+                return Err(Error::conflict(
+                    "This issue is blocked by unfinished issues. Complete earlier subtasks and other dependencies before claiming it.",
+                ));
             }
             let target = if matches!(operation, Operation::AssignBoss { .. }) {
                 "human:boss"

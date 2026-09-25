@@ -1596,6 +1596,26 @@ fn print_issue_line(issue: &Value) {
             }
         );
     }
+    if let Some(context) = issue["subtask_context"].as_object() {
+        println!(
+            "  Subtask {} of {} · runs sequentially",
+            context["position"], context["total"]
+        );
+        for (key, label) in [("previous", "Previous"), ("next", "Next")] {
+            let sibling = &context[key];
+            if sibling["number"].is_number() {
+                println!(
+                    "  {label}: #{} {} [{}]",
+                    sibling["number"],
+                    line(&sibling["title"]),
+                    line(&sibling["state"])
+                );
+            }
+        }
+        println!(
+            "  Read the parent and previous subtask with `hey-boss issue view NUMBER` for requirements, completion notes, and PRs. Leave a handoff before closing; later subtasks wait for this one."
+        );
+    }
     if let Some(total) = issue["subtasks"]["total"].as_u64() {
         println!(
             "  Subtasks: {}/{} closed · {} open descendants",

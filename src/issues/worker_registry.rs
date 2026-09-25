@@ -645,7 +645,7 @@ pub(super) fn execute(
             };
             let (project, n) = candidate.clone().unwrap_or((fallback, 1));
             let mut issue = if candidate.is_some() {
-                json!(get_issue(db, &project.id, n, false)?)
+                super::subtasks::worker_issue(db, &project.id, n)?
             } else {
                 json!({"number":"<number>","title":"<issue title>","body":"<issue body>"})
             };
@@ -943,7 +943,7 @@ pub(super) fn reserve(
                 creation_run: None,
                 model: None,
             };
-            let issue = json!(get_issue(&tx, &project.id, number, false)?);
+            let issue = super::subtasks::worker_issue(&tx, &project.id, number)?;
             // Thread rollouts and unfinished checkout edits belong to this host
             // and directory. A completed latest attempt starts fresh when reopened.
             // A rejected startup schema cannot be recovered by resuming the same
@@ -1069,6 +1069,68 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reserved_subtasks_exclude_siblings_and_keep_context() {
+        let root =
+            std::env::temp_dir().join(format!("hb-sequence-worker-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            let request = |operation: Value| -> Request {
+                serde_json::from_value(json!({"version":1,
+                    "project":{"id":"named:Sequence","name":"Sequence"},
+                    "actor":{"id":"codex:test","kind":"codex","session_id":"test","machine":"unit","host":"test","pid":null,"process_start":null,"cwd":root,"source":"test"},
+                    "operation":operation})).unwrap()
+            };
+            store
+                .execute(&request(
+                    json!({"action":"create","title":"Feature","body":"","labels":[]}),
+                ))
+                .unwrap();
+            for _ in 0..2 {
+                store.execute(&request(json!({"action":"create_subtask","number":1,"title":"Step","body":"","labels":[]}))).unwrap();
+            }
+            let settings = Settings {
+                concurrency: 3,
+                directory: root.to_string_lossy().into(),
+                projects: vec!["named:Sequence".into()],
+                ..Settings::default()
+            };
+            let (project, number) = candidates(&store.db, &settings, 3).unwrap().remove(0);
+            assert_eq!(number, 2);
+            let issue =
+                super::super::subtasks::worker_issue(&store.db, &project.id, number).unwrap();
+            assert_eq!(issue["subtask_context"]["next"]["number"], 3);
+            store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('reserved',?1,2,'{}','reserved','reserved',1,'test','unit',0,0)", [&project.id]).unwrap();
+            assert!(candidates(&store.db, &settings, 3).unwrap().is_empty());
+            assert!(
+                store
+                    .execute(&request(json!({"action":"move","number":3,"before":2})))
+                    .is_err()
+            );
+            store
+                .db
+                .execute(
+                    "UPDATE worker_runs SET finished_at=?1,state='completed'",
+                    [now()],
+                )
+                .unwrap();
+            store
+                .execute(&request(json!({"action":"close","number":2,"force":false})))
+                .unwrap();
+            let (project, number) = candidates(&store.db, &settings, 3).unwrap().remove(0);
+            assert_eq!(number, 3);
+            let issue =
+                super::super::subtasks::worker_issue(&store.db, &project.id, number).unwrap();
+            assert_eq!(issue["subtask_context"]["previous"]["state"], "closed");
+            assert!(
+                worker::preview(&ProjectConfig::default(), &project, issue)
+                    .0
+                    .contains("Subtask 2 of 2")
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn multi_checkout_runtime_and_chief_use_the_project_mapping() {
         let root = std::env::temp_dir().join(format!("hb-multi-checkout-{}", random_id().unwrap()));

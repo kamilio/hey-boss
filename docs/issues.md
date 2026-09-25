@@ -837,6 +837,20 @@ CLI-created children append. Dragging or using the
 arrow keys on a child handle updates the shared project queue, which governs
 web, CLI and worker order.
 
+Subtasks run sequentially in their displayed queue order. A later sibling and its
+entire subtree stay **Blocked** until every earlier sibling and its descendants
+are closed. A closed intermediate issue does not bypass unfinished descendants;
+deleted subtrees are skipped. Reordering, linking, unlinking, reopening, deleting,
+and restoring issues recompute the sequence. Changes that would block an already
+claimed or reserved task are rejected; finish or release that work first.
+Independent parent trees can still run concurrently.
+
+Claims and issue details include `subtask_context`: parent, one-based position,
+sibling count, and previous/next sibling summaries (including state and PR links).
+Worker prompts include the same context and commands to read the parent and the
+previous task's results. Agents should use those requirements and handoff notes,
+complete their own subtask, and leave a completion summary for the next agent.
+
 Automatic worker pickup waits for all reachable open descendants, including those
 under a closed intermediate issue. Deleted subtrees are excluded. Manual claims
 remain available for coordination. Fleet allocation uses the same readiness view,

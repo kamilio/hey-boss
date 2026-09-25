@@ -125,6 +125,10 @@ History tab remains available.
 `issue subtask create PARENT --title TITLE --body MARKDOWN` creates and links an
 ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
+Siblings run sequentially in queue order; later branches wait for earlier work to
+close. Claim responses include the parent, position, and previous/next subtasks.
+Read the parent requirements and previous task's completion notes/PRs, then leave
+a clear handoff before closing your own subtask.
 
 Subtasks are scheduling dependencies: unfinished descendants put the parent in
 Blocked. Subtask mutations reject any automatic release of an existing parent or

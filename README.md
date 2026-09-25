@@ -982,7 +982,10 @@ closes an issue or assigns it to Boss.
 Create a child from the parent's Subtasks card or add an existing issue. Each
 child keeps its own Markdown, labels, assignee, PRs and lifecycle. Parent links
 and completion progress appear in the list; unlinking preserves the issue.
-Workers finish reachable open descendants before picking up their parent.
+Sibling subtasks run sequentially in queue order, including nested work. Later
+subtasks stay Blocked until earlier work closes; the parent runs after its descendants.
+Claims and worker prompts identify the parent, sequence position, and previous/next
+subtasks so agents can read requirements and prior handoffs.
 
 Subtasks are scheduling dependencies: unfinished descendants put a parent in
 **Blocked**. Creating, linking, or unlinking subtasks is rejected atomically if
