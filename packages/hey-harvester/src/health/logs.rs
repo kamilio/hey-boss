@@ -27,6 +27,11 @@ fn trim(path: &Path, maximum: u64, keep: u64) -> io::Result<bool> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    if super::databases::protected(path)? || super::databases::header(&mut file)? {
+        return Err(io::Error::other(
+            "SQLite database preserved; not a diagnostic log",
+        ));
+    }
     let keep = keep.min(m.len());
     file.seek(SeekFrom::Start(m.len() - keep))?;
     let mut tail = Vec::new();
@@ -101,6 +106,16 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    #[test]
+    fn disguised_sqlite_log_is_never_truncated() {
+        let path =
+            std::env::temp_dir().join(format!("harvester-database-log-{}.log", std::process::id()));
+        let bytes = b"SQLite format 3\0database content that must remain";
+        fs::write(&path, bytes).unwrap();
+        assert!(trim(&path, 1, 1).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn trim_retains_recent_diagnostics_and_existing_append_writer() {
         let root = std::env::temp_dir().join(format!("hb-health-log-{}", std::process::id()));

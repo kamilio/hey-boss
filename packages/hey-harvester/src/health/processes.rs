@@ -486,7 +486,7 @@ fn observed(
 }
 
 /// Signal only a freshly reidentified process. Never signal a process group.
-fn signal(p: &Process, signal: i32) -> io::Result<bool> {
+pub(super) fn signal(p: &Process, signal: i32) -> io::Result<bool> {
     #[cfg(target_os = "linux")]
     {
         super::linux_harvest::signal(p, signal)
@@ -1052,5 +1052,207 @@ int main(int argc, char **argv) {
         drop(connected);
         drop(owned);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn essential(p: &Process) -> bool {
+    if super::codex::is_codex(p) {
+        return true;
+    }
+    let name = Path::new(&p.executable)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "hey-boss" | "hey-harvester" | "hey-proxy" | "sqlite3" | "postgres" | "mysqld"
+    ) || name.contains("hables")
+        || p.arguments.to_ascii_lowercase().contains("hables")
+}
+fn expired_kind(p: &Process, pressure: &str) -> Option<&'static str> {
+    if essential(p) {
+        return None;
+    }
+    let name = Path::new(&p.executable)
+        .file_name()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let runtime = matches!(
+        name.as_str(),
+        "node"
+            | "bun"
+            | "python"
+            | "python3"
+            | "python3.12"
+            | "python3.13"
+            | "python3.14"
+            | "workerd"
+            | "deno"
+            | "uv"
+    );
+    let testing = p.executable.contains("ms-playwright")
+        || p.executable.contains("/.wrangler/chrome/")
+        || p.executable.contains("chrome-for-testing")
+        || p.arguments.contains("--headless")
+        || p.arguments.contains("/playwright_");
+    if (name.contains("chrome") || name.contains("chromium") || name.contains("firefox"))
+        && testing
+        && p.age_seconds >= if pressure == "Normal" { 3600 } else { 600 }
+    {
+        return Some("Expired automated browser");
+    }
+    if name.contains("crashpad") && p.parent == 1 && p.age_seconds >= 600 {
+        return Some("Orphan crash helper");
+    }
+    if runtime && p.parent == 1 && p.age_seconds >= 3600 {
+        return Some("Orphan developer runtime");
+    }
+    if (runtime || matches!(name.as_str(), "claude" | "cargo" | "rustc")) && p.age_seconds >= 86400
+    {
+        return Some("Expired developer workload");
+    }
+    if pressure != "Normal"
+        && pressure != "Unavailable"
+        && runtime
+        && p.age_seconds >= 3600
+        && (p.arguments.contains("node_modules/")
+            || p.arguments.contains("vitest")
+            || p.arguments.contains("playwright")
+            || name == "workerd")
+    {
+        return Some("Developer worker under memory pressure");
+    }
+    if pressure == "Critical"
+        && name.contains("chrome")
+        && (name.contains("renderer") || p.arguments.contains("--type=renderer"))
+        && p.age_seconds >= 3600
+    {
+        return Some("Browser renderer under critical memory pressure");
+    }
+    None
+}
+
+pub(super) fn aggressive_harvest(
+    table: &Table,
+    pressure: &str,
+    config: &Config,
+    observations: &mut BTreeMap<String, Observation>,
+    apply: bool,
+) -> io::Result<(Vec<Item>, usize)> {
+    let uid = unsafe { libc::geteuid() };
+    let mut protected = super::codex::family(table);
+    let mut pid = std::process::id();
+    while pid > 1 && protected.insert(pid) {
+        pid = table.get(&pid).map_or(0, |p| p.parent);
+    }
+    let mut selected = BTreeSet::new();
+    let mut labels = BTreeMap::new();
+    for p in table.values() {
+        if p.uid != uid || protected.contains(&p.pid) {
+            continue;
+        }
+        if let Some(kind) = expired_kind(p, pressure) {
+            selected.insert(p.pid);
+            labels.insert(p.pid, kind);
+        }
+    }
+    // Stop descendants too, or killing a controller creates tomorrow's orphans.
+    loop {
+        let before = selected.len();
+        for p in table.values() {
+            if p.uid == uid
+                && selected.contains(&p.parent)
+                && !protected.contains(&p.pid)
+                && !essential(p)
+            {
+                selected.insert(p.pid);
+                labels.entry(p.pid).or_insert("Expired workload descendant");
+            }
+        }
+        if before == selected.len() {
+            break;
+        }
+    }
+    let mut items = Vec::new();
+    let mut signaled = Vec::new();
+    for pid in selected {
+        let p = &table[&pid];
+        let detail = if apply {
+            match signal(p, libc::SIGTERM) {
+                Ok(true) => {
+                    signaled.push(p);
+                    "Sent TERM; checking exit".into()
+                }
+                Ok(false) => "Already exited or identity changed".into(),
+                Err(e) => format!("Termination failed: {e}"),
+            }
+        } else {
+            "Expired under aggressive policy".into()
+        };
+        items.push(Item {
+            name: format!("{} · PID {}", labels[&pid], pid),
+            detail,
+            eligible: true,
+            worktree: None,
+        });
+    }
+    if !signaled.is_empty() {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    for p in &signaled {
+        signal(p, libc::SIGKILL)?;
+    }
+    if !signaled.is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let killed = signaled
+        .iter()
+        .filter(|p| identity(p.pid).as_deref() != Some(&p.identity) || executable(p.pid).is_none())
+        .count();
+    for item in &mut items {
+        if apply && item.detail.starts_with("Sent TERM") {
+            item.detail = format!(
+                "TERM/KILL completed with identity checks; {killed} processes confirmed gone in this batch"
+            );
+        }
+    }
+    let (idle_items, exited) = super::codex::graceful_idle(table, config, observations, apply)?;
+    items.extend(idle_items);
+    Ok((items, killed + exited))
+}
+
+#[cfg(test)]
+mod aggressive_tests {
+    use super::*;
+    #[test]
+    fn expires_realistic_leaks_and_preserves_young_work_and_database_services() {
+        let mut p = Process {
+            pid: 222,
+            parent: 1,
+            uid: 501,
+            age_seconds: 4000,
+            cpu_seconds: 900.0,
+            executable: "/tmp/bun".into(),
+            identity: "fixture".into(),
+            arguments: String::new(),
+        };
+        assert!(expired_kind(&p, "Normal").is_some());
+        p.parent = 100;
+        p.age_seconds = 100;
+        assert!(expired_kind(&p, "Critical").is_none());
+        p.age_seconds = 90000;
+        p.executable = "/bin/codex".into();
+        assert!(expired_kind(&p, "Normal").is_none());
+        p.executable = "/bin/hey-boss".into();
+        assert!(expired_kind(&p, "Critical").is_none());
+        p.executable = "/bin/node".into();
+        p.arguments = "node /srv/Hables/server.js".into();
+        assert!(expired_kind(&p, "Critical").is_none());
+        p.arguments.clear();
+        p.executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into();
+        assert!(expired_kind(&p, "Normal").is_none());
+        p.arguments = "--headless".into();
+        assert!(expired_kind(&p, "Warning").is_some());
     }
 }
