@@ -1,7 +1,7 @@
 use crate::health::{Snapshot, Store, readable_bytes, remote};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     widgets::{Block, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
@@ -23,6 +23,7 @@ struct Dashboard {
     selected: usize,
     page: usize,
     row: usize,
+    detail_scroll: Option<u16>,
     confirmation: Option<(usize, Vec<String>, String)>,
 }
 impl Dashboard {
@@ -50,6 +51,7 @@ impl Dashboard {
             selected,
             page: 0,
             row: 0,
+            detail_scroll: None,
             confirmation: None,
         }
     }
@@ -57,6 +59,7 @@ impl Dashboard {
         let len = self.machines.len();
         self.selected = (self.selected + if backward { len - 1 } else { 1 }) % len;
         self.row = 0;
+        self.detail_scroll = None;
     }
     fn complete(&mut self, index: usize, result: Result<Snapshot, String>) {
         let machine = &mut self.machines[index];
@@ -190,9 +193,30 @@ pub fn run(selected: Option<&str>) -> io::Result<()> {
             }
             continue;
         }
+        if let Some(offset) = dashboard.detail_scroll {
+            let size = terminal.size()?;
+            let area = sections(Rect::new(0, 0, size.width, size.height))[2];
+            let limit = detail_limit(&dashboard, area);
+            let offset = offset.min(limit);
+            dashboard.detail_scroll = match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Esc | KeyCode::Enter => None,
+                KeyCode::Down | KeyCode::Char('j') => Some(offset.saturating_add(1).min(limit)),
+                KeyCode::Up | KeyCode::Char('k') => Some(offset.saturating_sub(1)),
+                KeyCode::PageDown => Some(
+                    offset
+                        .saturating_add(area.height.saturating_sub(2))
+                        .min(limit),
+                ),
+                KeyCode::PageUp => Some(offset.saturating_sub(area.height.saturating_sub(2))),
+                _ => Some(offset),
+            };
+            continue;
+        }
         let mut args = None;
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Enter => dashboard.detail_scroll = Some(0),
             KeyCode::Tab | KeyCode::Right => dashboard.switch(false),
             KeyCode::BackTab | KeyCode::Left => dashboard.switch(true),
             KeyCode::Char(c @ '1'..='5') => {
@@ -370,14 +394,32 @@ fn rows(d: &Dashboard) -> Vec<String> {
         }
     }
 }
-fn render(frame: &mut ratatui::Frame, d: &Dashboard) {
-    let chunks = Layout::vertical([
+fn sections(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Min(3),
         Constraint::Length(4),
     ])
-    .split(frame.area());
+    .split(area)
+}
+fn detail(d: &Dashboard) -> Paragraph<'static> {
+    Paragraph::new(
+        rows(d)
+            .get(d.row)
+            .cloned()
+            .unwrap_or_else(|| "No selected entry.".into()),
+    )
+    .wrap(Wrap { trim: false })
+}
+fn detail_limit(d: &Dashboard, area: Rect) -> u16 {
+    detail(d)
+        .line_count(area.width.saturating_sub(2))
+        .saturating_sub(usize::from(area.height.saturating_sub(2)))
+        .min(usize::from(u16::MAX)) as u16
+}
+fn render(frame: &mut ratatui::Frame, d: &Dashboard) {
+    let chunks = sections(frame.area());
     let titles = d
         .machines
         .iter()
@@ -415,17 +457,30 @@ fn render(frame: &mut ratatui::Frame, d: &Dashboard) {
         .block(Block::bordered()),
         chunks[1],
     );
-    let values = rows(d);
-    let mut state =
-        ListState::default().with_selected(Some(d.row.min(values.len().saturating_sub(1))));
-    frame.render_stateful_widget(
-        List::new(values.into_iter().map(ListItem::new))
-            .highlight_style(Style::default().bg(Color::DarkGray))
-            .block(Block::bordered()),
-        chunks[2],
-        &mut state,
-    );
-    let status = d.confirmation.as_ref().map(|(_, _, text)| text.as_str()).or(d.machines[d.selected].error.as_deref()).unwrap_or("r Refresh · s Scan · c Clean · a Automatic · x Remove selected worktree\np Processes · w Worktrees · b Caches · l Log trimming · ↑/↓ Scroll · q Quit");
+    if let Some(offset) = d.detail_scroll {
+        frame.render_widget(
+            detail(d)
+                .scroll((offset.min(detail_limit(d, chunks[2])), 0))
+                .block(Block::bordered().title("Selected entry")),
+            chunks[2],
+        );
+    } else {
+        let values = rows(d);
+        let mut state =
+            ListState::default().with_selected(Some(d.row.min(values.len().saturating_sub(1))));
+        frame.render_stateful_widget(
+            List::new(values.into_iter().map(ListItem::new))
+                .highlight_style(Style::default().bg(Color::DarkGray))
+                .block(Block::bordered()),
+            chunks[2],
+            &mut state,
+        );
+    }
+    let status = if d.detail_scroll.is_some() {
+        "↑/↓ or PgUp/PgDn Scroll details · Esc Back · q Quit"
+    } else {
+        d.confirmation.as_ref().map(|(_, _, text)| text.as_str()).or(d.machines[d.selected].error.as_deref()).unwrap_or("Enter Details · r Refresh · s Scan · c Clean · a Automatic · x Remove worktree\np Processes · w Worktrees · b Caches · l Log trimming · ↑/↓ Scroll · q Quit")
+    };
     frame.render_widget(
         Paragraph::new(status)
             .wrap(Wrap { trim: false })
@@ -473,5 +528,56 @@ mod tests {
         assert!(rendered.contains("devbox"));
         assert!(rendered.contains("Automatic: false"));
         assert!(rendered.contains("Tab / Shift-Tab"));
+    }
+
+    #[test]
+    fn selected_worktree_details_wrap_and_scroll_without_losing_ownership() {
+        let mut d = Dashboard::new(vec![], None);
+        let mut snapshot = Snapshot::default();
+        snapshot.worktrees.push(crate::health::Item {
+            name: "/Users/example/Workspace/very-long-project-name/active-issue-worktree".into(),
+            detail: "Locked worktree; preserved — issue 147; owner fixture-session; queued validation; retain staged changes and receipts".into(),
+            eligible: false,
+            worktree: None,
+        });
+        d.complete(0, Ok(snapshot));
+        d.page = 2;
+        d.detail_scroll = Some(0);
+        for (width, height) in [(120, 24), (80, 24), (48, 20)] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| render(f, &d)).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(
+                text.contains("fixture-session"),
+                "Ownership missing at {width}x{height}: {text}"
+            );
+            assert!(
+                text.contains("receipts"),
+                "Preservation detail missing at {width}x{height}"
+            );
+            assert!(text.contains("Esc Back"));
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 14)).unwrap();
+        d.detail_scroll = Some(4);
+        terminal.draw(|f| render(f, &d)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("receipts"),
+            "The last lines must remain reachable by scrolling"
+        );
     }
 }
