@@ -2715,6 +2715,11 @@ mod tests {
     fn blocker_migration_updates_existing_capture_triggers_before_normalizing() {
         for partial in [false, true] {
             let main = Fixture::new();
+            main.db
+                .execute_batch(include_str!(
+                    "../../../tests/fixtures/pre_dependency_notices.sql"
+                ))
+                .unwrap();
             // The pre-blocker schema also predates dependency-aware readiness.
             main.db
                 .execute_batch("DROP VIEW issue_pickup_ready;")
@@ -3542,6 +3547,11 @@ mod tests {
     #[test]
     fn scheduling_capture_upgrade_republishes_and_preserves_legacy_replays() {
         let main = Fixture::new();
+        main.db
+            .execute_batch(include_str!(
+                "../../../tests/fixtures/pre_dependency_notices.sql"
+            ))
+            .unwrap();
         main.db.execute_batch("INSERT INTO project_settings(project_id,prompt,version) VALUES('named:Native fleet','Work',1);
             DROP VIEW issue_pickup_ready;
             CREATE VIEW issue_pickup_ready AS SELECT project_id,number FROM issues WHERE state='open';
