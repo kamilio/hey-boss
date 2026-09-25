@@ -1879,15 +1879,10 @@ document.addEventListener("keydown", (e) => {
     $("#issue-search").focus();
   }
 });
-window.addEventListener("beforeunload", (e) => {
-  if (
-    model.editor ||
-    (model.route.view === "issues" && model.route.issue && $("#comment-body")?.value.trim())
-  ) {
-    saveEditor();
-    saveComment();
-    e.preventDefault();
-  }
+// Flush draft buffers without asking the browser to block navigation.
+window.addEventListener("pagehide", () => {
+  saveEditor();
+  saveComment();
 });
 window.addEventListener("hashchange", () => {
   saveComment();
