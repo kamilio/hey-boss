@@ -57,8 +57,8 @@ try {
   await worker.resize(48, 12);
   await worker.waitFor("Active agents", { scope: "screen", timeout: 1000 });
   await worker.resize(120, 36);
-  // Status is a dashboard too, but quitting it must leave the worker running.
-  const dashboard = await start(["status"]);
+  // Watching a dashboard must leave the worker running when it is closed.
+  const dashboard = await start(["watch"]);
   await dashboard.waitFor("Integrated builder", { scope: "screen", timeout: 12000 });
   await quit(dashboard);
   assert.ok(status().workers.find(w => w.id === live.id)?.pid);
