@@ -277,7 +277,7 @@ Mac banners disappear after 12 seconds (alerts) or 20 seconds (updates), pausing
 
 The pinned **Close all** button dismisses notification cards across all projects and cancels active and queued questions. History and already-open readers are kept. Waiting clients (`ask --sync` or `wait`) receive `status: cancelled` without a result; cancellation is not an answer or approval. Items arriving after the click remain available. CLI responses, including cancellation, exit successfully when the request was handled; inspect `status` to distinguish `ok`, `pending`, and `cancelled`.
 
-With mobile connected, native dismissal sends bounded bulk requests off the database queue and removes each acknowledged batch together. Notices not yet synced are included in the same request. Answers already submitted on another device are preserved; failed batches stay visible for retry.
+Click a notification’s title or body to open it; click a collapsed project summary to expand it. Reading, answering, dismissing, and closing reviews update the native UI immediately. Relay requests run off the database queue, and failed actions restore only the affected notices and answer drafts. Close all uses bounded bulk requests and preserves concurrent arrivals. Answers already submitted on another device remain authoritative. Large documents show an initial preview while the full document renders in the background.
 `hide` also cancels a question, whether it is queued on the server or already
 displayed on the Mac. Repeating it preserves the stored terminal status and answer.
 

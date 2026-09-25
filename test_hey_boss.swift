@@ -12,6 +12,9 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_CLICKS"] == "1" { auditNotificationClicks(); return }
+    if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_HUB"] { auditNotificationLatency(endpoint:endpoint); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_OPTIMISTIC"] == "1" { auditOptimisticNotifications(); return }
     if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CLOSE_ALL_HUB"] { auditCloseAllPerformance(endpoint: endpoint); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ISSUES_SHORTCUT_ONLY"] == "1" { auditIssuesShortcut(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_NATIVE_QUICK_ISSUE_PREVIEW"] == "1" {
@@ -137,6 +140,8 @@ func audit() {
     auditReviewImage(sample: updates[0])
     auditCommentComposer(root: root)
     auditMultilineSourceComment(root: root)
+    auditOptimisticNotifications()
+    auditNotificationClicks()
     print("Passed: grouping threshold, CTA dismissal, preview with local/web/unsupported links, project isolation, queued questions, Unicode answers, durable history, Markdown links")
 }
 
@@ -629,10 +634,10 @@ func auditCloseAllPerformance(endpoint: String) {
     store.mobile = hub
     let ui = Interface(present: true)
     ui.coalescesArrivalLayout = true
+    connectNotificationActions(store, ui)
     var removals = 0
     store.removeMany = { ids in onMain { removals += 1; ui.remove(ids) } }
     store.remove = { id in onMain { ui.remove(id) } }
-    ui.onDismissMany = { ids in store.queue.async { store.dismiss(ids) } }
     let rows = (0..<205).map { index -> Record in
         var row = Record(taskID: "bulk-\(index)", kind: index % 5 == 0 ? "approval" : "alert", question: "Ready for review", project: index % 2 == 0 ? "Atlas" : "Orion", title: "Review \(index)", description: "Checks passed", options: ["Approve", "Reject"], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Double(index), presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
         row.sourceHost = "This Mac"; row.sourceKnown = true
@@ -672,6 +677,7 @@ func auditCloseAllPerformance(endpoint: String) {
     snapshot("close-all-question", window: ui.question)
     let start = ProcessInfo.processInfo.systemUptime
     ui.closeAll.performClick(nil)
+    precondition(ui.cards.isEmpty && ui.current == nil && removals == 0, "Close all must update before its first HTTP response")
     let queueStart = ProcessInfo.processInfo.systemUptime // Exclude AppKit's simulated button highlight delay.
     var queueDelay: Double = -1
     store.queue.async { let delay = (ProcessInfo.processInfo.systemUptime - queueStart) * 1000; onMain { queueDelay = delay } }
@@ -688,6 +694,10 @@ func auditCloseAllPerformance(endpoint: String) {
     print("Close all metrics: elapsed_ms=\(elapsed), store_queue_ms=\(queueDelay), removals=\(removals), cards=\(ui.cards.count), questions=\(ui.questions.count)")
     precondition(queueDelay < 100, "Close all must not block the store queue on HTTP")
     precondition(elapsed < 2000, "Three delayed bulk requests should finish within two seconds")
+    while !ui.pendingCompletions.isEmpty {
+        precondition(ProcessInfo.processInfo.systemUptime - start < 8, "Bulk acknowledgements did not settle")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
     precondition(removals == 3, "One removal per 100-item acknowledgement, not per card")
     precondition(ui.cards.map { $0.row.taskID } == [arrival.taskID])
     let cancelled = try! JSONDecoder().decode([String: String].self, from: waiter.readToEnd()!)
@@ -710,7 +720,7 @@ func auditCloseAllPerformance(endpoint: String) {
     var failed = false
     store.dismissalQueue.async { onMain { failed = true } }
     let failureStart = ProcessInfo.processInfo.systemUptime
-    while !failed {
+    while !failed || !ui.pendingCompletions.isEmpty {
         precondition(ProcessInfo.processInfo.systemUptime - failureStart < 3)
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
@@ -2040,4 +2050,162 @@ func auditWebInbox(root:URL) {
     precondition(request("inbox_clear",nil,["task_ids":clearedIDs])["cleared"] as? Int==0)
     precondition((try! store.database.pendingCount())==1)
     print("Passed: web Inbox summaries, Markdown, creation links, relationship-only link/unlink, archived linking, read receipts, question read safety, invalid answers, winning answer preservation, cancellation, review comments and finish")
+}
+
+func auditOptimisticNotifications() {
+    let ui = Interface(present: false)
+    func row(_ id: String, kind: String = "alert") -> Record {
+        Record(taskID: id, kind: kind, question: "Notification content", project: "Synthetic", title: "Open me", description: "Description", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 1, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+    }
+    let notice = row("notice")
+    var sent: [String] = []
+    ui.onComplete = { id, _ in sent.append(id) } // Deliberately never acknowledges.
+    ui.onDismissMany = { sent += $0 }
+    ui.add(notice)
+    ui.cards[0].contentClick.activate()
+    precondition(ui.previews[notice.taskID] != nil, "Clicking the card must open it")
+    precondition(ui.cards.isEmpty && sent == [notice.taskID], "Opening must dismiss immediately without an acknowledgement")
+    ui.add(notice)
+    precondition(ui.cards.isEmpty, "A stale refresh cannot resurrect an in-flight dismissal")
+    ui.retryCompletion([notice.taskID], message: "Synthetic offline response")
+    precondition(ui.cards.count == 1, "Failed actions must restore a retryable notice")
+    ui.add(row("second")); ui.closeAll.invoke()
+    precondition(ui.cards.isEmpty, "Close all must not wait for requests")
+    ui.add(row("arrival"))
+    ui.remove(notice.taskID) // First acknowledgement succeeded; second failed.
+    ui.retryCompletion([notice.taskID, "second"], message: "Synthetic partial failure")
+    precondition(Set(ui.cards.map { $0.row.taskID }) == Set(["second", "arrival"]), "Restore only failed notices and preserve concurrent arrivals")
+    ui.add(row("question", kind: "prompt"))
+    ui.field!.stringValue = "Keep this draft"
+    ui.answer("Keep this draft")
+    precondition(ui.current == nil, "Submitting moves on before acknowledgement")
+    ui.retryCompletion(["question"], message: "Synthetic offline response")
+    precondition(ui.current?.taskID == "question" && ui.field?.stringValue == "Keep this draft", "Restore unsent answer text")
+    Array(ui.previews.values).forEach { $0.close() }
+    var review = row("review-draft",kind:"update")
+    review.commentsEnabled = true
+    let preview = Preview(review,openURL:{ _ in })
+    preview.reviewSidebar!.composer.string = "Retain unsaved review feedback"
+    var save: ((Result<Record,Error>) -> Void)?
+    preview.saveComment = { _,_,_,_,_,completion in save = completion }
+    preview.makeKeyAndOrderFront(nil)
+    preview.performClose(nil)
+    precondition(!preview.isVisible && save != nil, "Review close waits for draft persistence")
+    save?(.failure(StorageError(description:"Synthetic draft save failure")))
+    precondition(preview.isVisible && preview.reviewSidebar!.composer.string == "Retain unsaved review feedback", "Failed review save loses the draft")
+    preview.close()
+    let large = Record(taskID:"large",kind:"update",question:String(repeating:"# A heading\n\nSome **formatted** content with a [link](https://example.com).\n\n",count:15000),project:"Synthetic",title:"Large document",description:"",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:1,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+    let started = ProcessInfo.processInfo.systemUptime
+    let largePreview = Preview(large,openURL:{ _ in })
+    let elapsed = ProcessInfo.processInfo.systemUptime - started
+    precondition(elapsed < 0.5, "Large document opening parses the entire body on the main thread")
+    precondition(!largePreview.text.string.isEmpty)
+    largePreview.close()
+    print("Large document initial preview: \(Int(elapsed * 1000))ms")
+    print("Passed: card clicks open immediately; optimistic read, dismiss-all and answers; stale-refresh suppression; partial rollback and draft recovery")
+}
+
+func auditNotificationLatency(endpoint: String) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-notification-latency-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try! Store(root.appendingPathComponent("history.db").path)
+    store.mobile = try! MobileHub(store: store, configuration: .init(url: endpoint, token: String(repeating:"x",count:32)))
+    let ui = Interface(present:false)
+    connectNotificationActions(store, ui)
+    func add(_ id: String, kind: String = "alert", review: Bool = false) -> Record {
+        var row = Record(taskID:id,kind:kind,question:"# Synthetic notice",project:"Latency",title:id,description:"Fixture",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:1,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+        row.commentsEnabled = review
+        store.queue.sync { try! store.database.save(row) }
+        ui.add(row)
+        return row
+    }
+    func until(_ predicate: () -> Bool) {
+        let deadline = Date().addingTimeInterval(5)
+        while !predicate() {
+            precondition(Date() < deadline, "Delayed notification action did not settle")
+            RunLoop.main.run(until:Date().addingTimeInterval(0.01))
+        }
+    }
+    _ = add("read-ok"); _ = add("read-fail")
+    let start = ProcessInfo.processInfo.systemUptime
+    ui.completeNotification("read-ok",nil); ui.completeNotification("read-fail",nil)
+    precondition(ui.cards.isEmpty, "Read waits for HTTP")
+    _ = add("phone-won",kind:"prompt")
+    ui.answer("Desktop answer")
+    precondition(ui.current == nil, "Answer waits for HTTP")
+    var queueDelay = -1.0
+    store.queue.async { let elapsed = ProcessInfo.processInfo.systemUptime - start; onMain { queueDelay = elapsed } }
+    until { queueDelay >= 0 }
+    precondition(queueDelay < 0.35, "HTTP blocks the shared store queue")
+    precondition(store.queue.sync { try! store.database.get("read-ok").status } == "pending", "Fixture did not hold the response")
+    until { ui.pendingCompletions.isEmpty }
+    precondition(ui.cards.map { $0.row.taskID } == ["read-fail"])
+    precondition(store.queue.sync { try! store.database.get("phone-won").result } == "Phone answer", "Relay answer must remain authoritative")
+    _ = add("dismiss-fail")
+    ui.closeAll.invoke()
+    precondition(ui.cards.isEmpty, "Dismiss waits for HTTP")
+    _ = add("arrival")
+    until { ui.pendingCompletions.isEmpty }
+    precondition(Set(ui.cards.map { $0.row.taskID }) == Set(["read-fail","dismiss-fail","arrival"]))
+    let review = add("review-fail",kind:"update",review:true)
+    ui.openPreview(review)
+    let preview = ui.previews[review.taskID]!
+    preview.makeKeyAndOrderFront(nil)
+    preview.performClose(nil)
+    precondition(!preview.isVisible && preview.finishInFlight, "Closing a review waits for HTTP")
+    precondition(!ui.cards.contains { $0.row.taskID == review.taskID })
+    until { !preview.finishInFlight }
+    precondition(preview.isVisible && preview.reviewSidebar?.completed == false, "Failed review must return with its content")
+    precondition(ui.cards.contains { $0.row.taskID == review.taskID })
+    preview.close()
+    print("Passed: delayed real HTTP; immediate read, answer, dismiss and review close; shared store queue \(Int(queueDelay * 1000))ms; rollback, arrivals and authoritative phone answer")
+}
+
+func auditNotificationClicks() {
+    let window = panel("Synthetic notification click audit")
+    window.setFrame(NSRect(x:80,y:100,width:360,height:250),display:true)
+    var opens = 0, completions = 0, toggles = 0
+    let row = Record(taskID:"click",kind:"update",question:"# Document",project:"Clicks",title:"Clickable title",description:"Clickable notification content",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:1,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
+    let card = Card(row,open:{ opens += 1 },openURL:{ _ in },complete:{ _,_ in completions += 1 })
+    window.contentView!.addSubview(card.view)
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps:true)
+    RunLoop.main.run(until:Date().addingTimeInterval(0.2))
+    func click(_ view: NSView, drag: Bool = false) {
+        window.contentView!.layoutSubtreeIfNeeded()
+        let point = view.convert(NSPoint(x:view.bounds.midX,y:view.bounds.midY),to:nil)
+        let events: [NSEvent.EventType] = drag ? [.leftMouseDown,.leftMouseDragged,.leftMouseUp] : [.leftMouseDown,.leftMouseUp]
+        for (index,type) in events.enumerated() {
+            let position = NSPoint(x:point.x + (drag && index > 0 ? 50 : 0),y:point.y)
+            let event = NSEvent.mouseEvent(with:type,location:position,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime + Double(index) * 0.02,windowNumber:window.windowNumber,context:nil,eventNumber:index,clickCount:1,pressure:type == .leftMouseUp ? 0 : 1)!
+            NSApp.postEvent(event,atStart:false)
+        }
+        let until = Date().addingTimeInterval(0.3)
+        while Date() < until {
+            if let event = NSApp.nextEvent(matching:.any,until:Date().addingTimeInterval(0.005),inMode:.default,dequeue:true) { NSApp.sendEvent(event) }
+            RunLoop.main.run(until:Date().addingTimeInterval(0.005))
+        }
+    }
+    click(card.body)
+    precondition(opens == 1 && completions == 1, "Native body mouse click was swallowed")
+    click(card.header)
+    precondition(opens == 2 && completions == 2, "Title click conflicts with dragging")
+    click(card.header,drag:true)
+    precondition(opens == 2, "Dragging must not open a notice")
+    click(card.link!)
+    precondition(opens == 3 && completions == 3, "CTA fired twice through the parent click handler")
+    click(card.close)
+    precondition(opens == 3 && completions == 4, "Dismiss must not open the notice")
+    card.view.removeFromSuperview()
+    let group = ProjectGroup("Clicks",toggle:{ toggles += 1 },clear:{})
+    group.update([card],expanded:false)
+    window.contentView!.addSubview(group.view)
+    click(group.summary)
+    precondition(toggles == 1, "Group summary must expand on click")
+    group.update([card],expanded:true)
+    click(card.body)
+    precondition(opens == 4 && toggles == 1, "Nested card click must not collapse its group")
+    window.close()
+    print("Passed: native mouse events open body/title, preserve dragging, avoid duplicate CTA/dismiss actions, expand groups and isolate nested card clicks")
 }
