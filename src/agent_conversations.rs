@@ -270,7 +270,7 @@ fn find(root: &Path, suffix: &str) -> Option<PathBuf> {
     }
     None
 }
-fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
+pub(crate) fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
     let key = (home.to_owned(), session.to_owned());
     if let Some(path) = PATHS
         .get_or_init(Default::default)
@@ -312,14 +312,7 @@ fn capture_creation_context(
     let (invocation, model) = rollout(&home, session)
         .and_then(|path| creation_context_at(&path))
         .unwrap_or_default();
-    Some((
-        invocation,
-        model.or_else(|| {
-            crate::agents::codex_model(&home, session)
-                .as_deref()
-                .and_then(model_name)
-        }),
-    ))
+    Some((invocation, model))
 }
 
 fn model_name(value: &str) -> Option<String> {
