@@ -18,3 +18,13 @@ assert.ok(!matches(hold, 'dependencies'));
 assert.ok(!matches(dependency, 'hold'));
 assert.ok(matches(hold, ''));
 console.log('COMPLETE: blocked issue classification and overlapping filters');
+
+const app = fs.readFileSync('src/issues/web/app.js', 'utf8');
+context.icon = () => '';
+context.model = {};
+vm.runInContext(app.slice(app.indexOf('function issueStateActions('), app.indexOf('function renderDraftNotice(')), context);
+const closedActions = context.issueStateActions({...dependency, state:'closed'});
+assert.match(closedActions, /data-action="reopen"/);
+assert.doesNotMatch(closedActions, /disabled/, 'Closed issues can reopen into dependency waiting');
+assert.match(context.issueStateActions(dependency), /disabled/, 'Reopen cannot bypass active dependencies');
+console.log('COMPLETE: closed issue reopening retains dependency protection');

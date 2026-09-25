@@ -968,7 +968,7 @@ function renderReadiness(value) {
 function issueStateActions(issue) {
   const reopen = issue.state !== "open";
   const clearHold = issue.state === "blocked" && issue.manual_blocked;
-  let buttons = `<button type="button" class="button" data-action="${clearHold ? "clear_manual_hold" : reopen ? "reopen" : "close"}" ${reopen && !clearHold && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${clearHold ? "Release hold" : reopen ? "Reopen issue" : "Close issue"}</button>`;
+  let buttons = `<button type="button" class="button" data-action="${clearHold ? "clear_manual_hold" : reopen ? "reopen" : "close"}" ${reopen && issue.state !== "closed" && !clearHold && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${clearHold ? "Release hold" : reopen ? "Reopen issue" : "Close issue"}</button>`;
   if (issue.state === "open") buttons += `<button type="button" class="button" data-action="block">${icon("blocked")}Block issue</button>`;
   if (issue.state === "blocked" || issue.state === "ready") buttons += `<button type="button" class="button" data-action="close">${icon("closed")}Close issue</button>`;
   if (issue.state === "open" && !issue.draft && model.detail?.prs_enabled) buttons += `<button type="button" class="button" data-action="ready" ${issue.pull_requests?.some(pr => ["fix", "unspecified"].includes(pr.purpose)) ? "" : 'disabled title="Attach the task’s PR first"'}>${icon("pull-request")}PR ready</button>`;
@@ -1233,7 +1233,7 @@ async function performAction(action, button) {
         ready: "PR ready for review",
         block: "Issue blocked",
         close: "Issue closed",
-        reopen: "Issue reopened",
+        reopen: result?.issue?.state === "blocked" ? "Issue reopened; waiting for dependencies" : "Issue reopened",
         clear_manual_hold: result?.issue?.state === "blocked" ? "Hold released; waiting for dependencies" : "Hold released; issue reopened",
         delete: "Issue moved to Deleted",
         restore: "Issue restored",
