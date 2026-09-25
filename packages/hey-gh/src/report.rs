@@ -13,7 +13,9 @@ use std::{
 // observation read-only, preventing stale writes over an active refresh.
 tokio::task_local! { static PUBLICATION_READ_ONLY: Arc<AtomicBool>; }
 // A background detail projection consumes cached CI but cannot certify that
-// a failed independent CI poll has recovered.
+// a failed independent CI poll has recovered. Unlike a caller's cached read,
+// this background writer must wait for publication locks (within the report
+// deadline), or a concurrent CI poll can silently discard its combined snapshot.
 tokio::task_local! { static PRESERVE_CI_HEALTH: (); }
 
 fn preserves_ci_health() -> bool {
@@ -34,7 +36,7 @@ async fn acquire_report_lock(
     lock: Arc<tokio::sync::Mutex<()>>,
     freshness: Freshness,
 ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-    if matches!(freshness, Freshness::CachedOnly) {
+    if matches!(freshness, Freshness::CachedOnly) && !preserves_ci_health() {
         match lock.try_lock_owned() {
             Ok(guard) => Some(guard),
             Err(_) => {
@@ -1558,6 +1560,45 @@ const REVIEW_EVENTS_QUERY: &str = "query ReviewEvents($owner:String!,$repo:Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn monitored_projection_waits_for_publication_while_cached_read_stays_nonblocking() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let held = lock.clone().lock_owned().await;
+        PUBLICATION_READ_ONLY
+            .scope(Arc::default(), async {
+                assert!(
+                    acquire_report_lock(lock.clone(), Freshness::CachedOnly)
+                        .await
+                        .is_none()
+                );
+                assert!(
+                    !can_publish(),
+                    "caller cached reads must remain read-only on contention"
+                );
+            })
+            .await;
+        PRESERVE_CI_HEALTH
+            .scope(
+                (),
+                PUBLICATION_READ_ONLY.scope(Arc::default(), async {
+                    let mut pending =
+                        std::pin::pin!(acquire_report_lock(lock, Freshness::CachedOnly));
+                    std::future::poll_fn(|cx| {
+                        let state = std::future::Future::poll(pending.as_mut(), cx);
+                        assert!(state.is_pending(), "background publication must wait");
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    assert!(can_publish());
+                    drop(held);
+                    assert!(pending.await.is_some());
+                    assert!(can_publish());
+                }),
+            )
+            .await;
+    }
+
     #[test]
     fn superseded_checks_do_not_mask_successful_reruns() {
         let old = json!({"id":1,"name":"tests","app":{"id":9},"head_sha":"aaa","status":"completed","conclusion":"failure"});
