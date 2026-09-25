@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent review · Hey Boss</title>
+<link rel="icon" href="/icon.png"><link rel="stylesheet" href="/admin.css">
+<script src="/admin.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/"><img src="/icon.png" width="28" height="28" alt="">Hey Boss</a><span class="divider"></span><span>Agent review</span><a class="back" href="/">Back to issues ↗</a></header>
+<div class="workspace">
+<aside aria-label="Review catalog">
+  <div class="aside-heading"><h1>Review pane</h1><p>Everything an agent reads.</p></div>
+  <label class="search"><span class="sr-only">Find a prompt or command</span><input id="search" type="search" placeholder="Find a prompt or command…" autocomplete="off"></label>
+  <nav id="catalog" aria-label="Prompts, commands and skill"></nav>
+  <div class="aside-footer" id="build"></div>
+</aside>
+<main id="main">
+  <section class="context" aria-label="Preview context"><span class="eyebrow">PREVIEW CONTEXT</span><label>Project <select id="project" aria-label="Preview project"></select></label><label>Issue <select id="issue" aria-label="Preview issue"></select></label><span id="context-status" role="status">Loading…</span></section>
+  <div id="error" role="alert" hidden></div>
+  <div id="content" aria-live="polite"><div class="empty">Loading review catalog…</div></div>
+</main>
+</div>
+<div id="toast" role="status" hidden></div>
+</body>
+</html>

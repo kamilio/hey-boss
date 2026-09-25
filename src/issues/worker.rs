@@ -35,6 +35,14 @@ pub const DEFAULT_WORKTREE_PROMPT: &str = include_str!("prompts/worktree.md").tr
 pub const DEFAULT_CHECKOUT_PROMPT: &str = include_str!("prompts/checkout.md").trim_ascii_end();
 pub const DEFAULT_MAIN_PROMPT: &str = include_str!("prompts/main.md").trim_ascii_end();
 pub const DEFAULT_PRS_PROMPT: &str = include_str!("prompts/prs.md").trim_ascii_end();
+
+/// Shared by Chief launches and the review pane, so their visible input agrees.
+pub fn chief_instructions(project: &str, prompt: &str) -> String {
+    format!(
+        "Project: {project}. Use hey-boss issue and mm commands in this project.\n\n{prompt}\n\nRun one organizing pass, then stop. Workers handle all code changes; do not start a goal."
+    )
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptOverrides {
