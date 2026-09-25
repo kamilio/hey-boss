@@ -17,7 +17,7 @@ pub(super) fn is_codex(p: &Process) -> bool {
         || executable.contains("chatgpt.app/")
         || p.arguments.contains("@openai/codex/")
 }
-pub(super) fn family(table: &Table) -> BTreeSet<u32> {
+fn session_processes(table: &Table) -> BTreeSet<u32> {
     let mut ids: BTreeSet<_> = table
         .values()
         .filter(|p| is_codex(p))
@@ -34,6 +34,10 @@ pub(super) fn family(table: &Table) -> BTreeSet<u32> {
             break;
         }
     }
+    ids
+}
+pub(super) fn family(table: &Table) -> BTreeSet<u32> {
+    let mut ids = session_processes(table);
     // Preserve wrappers/ancestors as well; do not expand their unrelated siblings.
     for p in table.values().filter(|p| is_codex(p)) {
         let mut parent = p.parent;
@@ -229,10 +233,10 @@ pub(super) fn graceful_idle(
 
 /// Active Codex working directories cannot be retired with their running session.
 pub(super) fn working_paths(table: &Table) -> io::Result<Vec<PathBuf>> {
-    // Process ancestry can include root-owned login/session services. They do
+    // Process ancestry can include login/session services (even owned ones). They do
     // not own this user's worktrees and procfs correctly refuses their cwd.
     let uid = unsafe { libc::geteuid() };
-    let ids: BTreeSet<_> = family(table)
+    let ids: BTreeSet<_> = session_processes(table)
         .into_iter()
         .filter(|pid| table.get(pid).is_some_and(|p| p.uid == uid))
         .collect();
@@ -402,6 +406,7 @@ mod tests {
         unrelated.parent = 1;
         let table = Table::from([(100, codex), (101, child), (90, wrapper), (102, unrelated)]);
         assert_eq!(family(&table), BTreeSet::from([90, 100, 101]));
+        assert_eq!(session_processes(&table), BTreeSet::from([100, 101]));
     }
     #[test]
     fn requires_live_idle_evidence_and_never_expires_an_app_server() {
