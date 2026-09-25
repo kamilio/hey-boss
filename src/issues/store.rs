@@ -40,6 +40,8 @@ mod project_names;
 mod status;
 #[path = "transfer.rs"]
 mod transfer;
+#[path = "title_content.rs"]
+mod title_content;
 use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
@@ -603,8 +605,7 @@ fn validate(r: &Request) -> Result<()> {
             labels: values,
             ..
         } => {
-            identifier(title, "title", 512)?;
-            body(text, false)?;
+            title_content::split(title, text)?;
             labels(values)?;
         }
         Operation::Edit {
@@ -626,7 +627,7 @@ fn validate(r: &Request) -> Result<()> {
                 ));
             }
             if let Some(title) = title {
-                identifier(title, "title", 512)?;
+                title_content::split(title, text.as_deref().unwrap_or_default())?;
             }
             if let Some(text) = text {
                 body(text, false)?;
@@ -2004,6 +2005,7 @@ fn create_issue(
         } => (title, body, labels, at_top),
         _ => unreachable!(),
     };
+    let (title, body) = title_content::split(title, body)?;
     let draft = matches!(operation, Operation::Create { draft: true, .. });
     if draft {
         super::planning::drafts_allowed(db, project)?;
@@ -2246,11 +2248,13 @@ fn mutate(
                 }
                 issue.draft = *draft;
             }
-            if let Some(title) = title {
-                issue.title = title.clone();
-            }
             if let Some(body) = body {
                 issue.body = body.clone();
+            }
+            if let Some(title) = title {
+                let (title, body) = title_content::split(title, &issue.body)?;
+                issue.title = title.to_owned();
+                issue.body = body.into_owned();
             }
             if *draft == Some(false) && before["draft"] == true {
                 super::planning::final_sync(
