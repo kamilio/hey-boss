@@ -1488,12 +1488,17 @@ fn run_thread(
         c.poll_approvals(store, job, stop)?;
         if last_prompt_check.elapsed() >= Duration::from_secs(2) {
             last_prompt_check = Instant::now();
-            if let Some(instruction) = store.worker_steering(&job.id)? {
+            if let Some(instruction) = store.worker_steering(&job.id)?
+                && store.worker_steering_result(
+                    instruction["request_id"].as_str().unwrap(),
+                    "sending",
+                    None,
+                )?
+            {
                 let request = instruction["request_id"].as_str().unwrap();
                 let text = steering_text(&instruction);
                 // Persist before sending. A worker crash must never replay an
                 // instruction whose delivery cannot be established.
-                store.worker_steering_result(request, "sending", None)?;
                 match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":text}]}), store, job, stop) {
                     Ok(ack) if ack["turnId"] == turn => {
                         store.worker_steering_result(request, "delivered", None)?;
@@ -1646,9 +1651,14 @@ fn run_thread(
                         ),
                     ));
                 }
-                if let Some(instruction) = store.worker_steering(&job.id)? {
+                if let Some(instruction) = store.worker_steering(&job.id)?
+                    && store.worker_steering_result(
+                        instruction["request_id"].as_str().unwrap(),
+                        "sending",
+                        None,
+                    )?
+                {
                     let request = instruction["request_id"].as_str().unwrap();
-                    store.worker_steering_result(request, "sending", None)?;
                     let result = c.rpc(
                         "turn/start",
                         turn_params(&session, &steering_text(&instruction)),

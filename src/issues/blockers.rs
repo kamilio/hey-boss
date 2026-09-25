@@ -432,7 +432,10 @@ fn reconcile_graph(
                     "Dependency rework: upstream tasks {:?} need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.",
                     blockers.keys().collect::<Vec<_>>()
                 );
-                db.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES(?1,?2,?3,?4,?5)", params![project,number,author,body,now])?;
+                let inserted = db.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES(?1,?2,?3,?4,?5)", params![project,number,author,body,now])?;
+                if inserted == 0 {
+                    continue;
+                }
                 let id = db.last_insert_rowid();
                 super::store::event(
                     db,

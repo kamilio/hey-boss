@@ -985,10 +985,16 @@ closes an issue or assigns it to Boss.
 Create a child from the parent's Subtasks card or add an existing issue. Each
 child keeps its own Markdown, labels, assignee, PRs and lifecycle. Parent links
 and completion progress appear in the list; unlinking preserves the issue.
-Sibling subtasks run sequentially in queue order, including nested work. Later
+By default, sibling subtasks run sequentially in queue order, including nested work. Later
 subtasks stay Blocked until earlier work is Ready (PR projects) or Closed; the parent follows its descendants.
 Claims and worker prompts identify the parent, sequence position, and previous/next
 subtasks so agents can read requirements and prior handoffs.
+
+Choose **Explicit dependencies** in project settings, or run
+`hey-boss issue settings set --subtask-scheduling explicit`, to keep grouping
+while scheduling only declared blocker links. Parent completion still follows
+its descendants. [Dependency notice guards](docs/dependency-notices.md) keep
+older running clients from issuing obsolete sibling rework instructions.
 
 Subtasks are scheduling dependencies: unfinished descendants put a parent in
 **Blocked**. Creating, linking, or unlinking subtasks is rejected atomically if

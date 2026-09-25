@@ -101,8 +101,28 @@ async page => {
     stages.push('claim protection');
 
     await page.evaluate(async project=>{
-      await api({action:'unassign',number:4,force:false},project);
+      await api({action:'assign_boss',number:3,force:false},project);
       await api({action:'reopen',number:2},project);
+    },project);
+    await view(3);
+    check(await page.evaluate(()=>model.detail.issue.blocked_by.length===0 && model.detail.issue.assignee==='human:boss'),'Independent running sibling retains its claim without blockers');
+    check(await page.evaluate(()=>!model.detail.comments.some(c=>c.body.startsWith('Dependency rework:'))),'Independent sibling receives no rework notice');
+    await view(4);
+    check(await page.evaluate(()=>model.detail.comments.filter(c=>c.body.startsWith('Dependency rework: upstream tasks [2]')).length===1),'Declared dependency still produces one rework notice');
+    check(await page.evaluate(()=>model.detail.issue.assignee==='human:boss'),'Real rework notice preserves the running claim');
+    for (const theme of ['light','dark']) {
+      await page.emulateMedia({colorScheme:theme});
+      for (const width of [1440,390,320]) {
+        await page.setViewportSize({width,height:900});
+        await page.getByText('Dependency rework: upstream tasks [2]',{exact:false}).first().scrollIntoViewIfNeeded();
+        check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Rework notice wraps ${theme}/${width}`);
+        await page.screenshot({path:`output/playwright/issue149/${surface}-rework-${theme}-${width}.png`});
+      }
+    }
+    stages.push('dependency notice and claim preservation');
+
+    await page.evaluate(async project=>{
+      await api({action:'unassign',number:4,force:false},project);
       await api({action:'block',number:4,comment:null,force:false},project);
     },project);
     await view(4);
@@ -116,7 +136,7 @@ async page => {
     }
     check(errors.length===0,'No browser runtime errors');
     stages.push('manual hold visual states');
-    if(stages.length!==6) throw Error('Incomplete browser graph');
-    return {completed:stages.length,expected:6,stages,checks:checks.length,project,surface,base};
+    if(stages.length!==7) throw Error('Incomplete browser graph');
+    return {completed:stages.length,expected:7,stages,checks:checks.length,project,surface,base};
   } finally {page.off('pageerror',onError);}
 }

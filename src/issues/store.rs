@@ -1176,6 +1176,7 @@ impl Store {
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
         super::blockers::migrate(&mut db)?;
+        super::dependency_notices::migrate(&db)?;
         if needs_readiness_refresh {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if needs_sequence {
