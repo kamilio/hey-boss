@@ -34,6 +34,7 @@ for (const state of ['open', 'blocked', 'ready', 'closed', 'draft', 'deleted']) 
       persistDrafts:true, storage:{get:empty}, draftKey:empty, submitComment(){}, loadHistory(){},
       openTransfer(){checks++;},
     });
+    vm.runInContext(fs.readFileSync('src/issues/web/blockers.js', 'utf8'), context);
     if (headingStart >= 0) vm.runInContext(source.slice(headingStart, start), context);
     vm.runInContext(render, context);
     assert.doesNotThrow(() => context.renderDetail({issue:{number:1,title:'Move me',state:state==='draft'?'open':state,draft:state==='draft',deleted_at:state==='deleted'?1:null},comments:[]}));
