@@ -73,7 +73,8 @@ try {
   await observer.type('q');
   assert.equal(await observer.waitForExit({timeout: 5000}), 0);
   assert.equal((await status()).workers[0].config.enabled, false, 'Observation resumed pickup');
-  const resumed = await open(['auto-workers', 'run']);
+  await cli(['auto-workers', '--json', 'run']);
+  const resumed = await open(['auto-workers', 'watch']);
   await resumed.waitFor('0 available / 1 slots', {scope: 'screen', timeout: 15000});
   await resumed.type('w');
   await resumed.waitFor('BUSY', {scope: 'screen', timeout: 15000});
