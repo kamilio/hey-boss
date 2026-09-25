@@ -36,6 +36,15 @@ hey-boss notif secret --field API_KEY -- your-command
 
 ## Issues
 
+Connected companions already have an authenticated supervisor tunnel. Run
+`hey-boss fleet capabilities` to inspect supported operations and upgrade guidance;
+`hey-boss fleet status` shows connectivity. No new SSH hostname or worker is needed.
+Read current versions with `hey-boss issue view NUMBER --supervisor --json`.
+Use `issue edit NUMBER --draft --if-version VERSION` for an eligible unassigned,
+unreserved issue; companions route it automatically and derive a stable retry ID.
+Other metadata edits use `--supervisor --if-version VERSION --request-id ID`.
+Never claim work merely to edit metadata. See [issue coordination](references/issues.md).
+
 ```sh
 hey-boss issue list --unassigned --json
 hey-boss issue create --title 'Fix reconnect' --body 'Describe the problem' --request-id reconnect-1

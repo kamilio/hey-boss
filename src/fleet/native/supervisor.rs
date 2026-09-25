@@ -231,6 +231,7 @@ impl Supervisor {
         }
         let mut result = json!({"ok":true,"supervisor":self.ctx.node,"controller":self.ctx.node,"epoch":state.epoch,"sequence":state.sequence,"desired_build":state.desired_build});
         result["machines"] = Value::Array(machines);
+        result["capabilities"] = authority::capabilities();
         result["events"] = Value::Array(if visible.is_some() {
             vec![]
         } else {
@@ -670,7 +671,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
-            json!({"kind":"configure","capabilities":authority::capabilities(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
@@ -836,7 +837,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut input,
-                            json!({"kind":"configure","capabilities":authority::capabilities(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1627,7 +1628,7 @@ mod tests {
         for operation in [
             json!({"action":"claim","number":1,"force":true}),
             json!({"action":"reopen","number":1,"if_version":3}),
-            json!({"action":"edit","number":2,"draft":true,"if_version":3}),
+            json!({"action":"edit","number":2,"draft":false,"if_version":3}),
             json!({"action":"edit","number":2,"add_labels":["unguarded"]}),
             json!({"action":"batch","edits":[{"number":2,"if_version":3,"expected_assignee":"codex:worker","assignment":"unassign"}]}),
         ] {

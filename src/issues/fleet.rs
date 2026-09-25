@@ -179,14 +179,14 @@ pub(crate) fn allocation(
             "{}Resume on the reserved machine: {claim} --agent '<saved-agent-id>'. Unclaimed reservations expire with the worker startup or claim deadline. Claimed work remains protected. To move active work to another machine, ask Boss for a handoff; do not force a claim or change worker controls.",
             if role == "agent" {
                 format!(
-                    "This is a replica snapshot; check the supervisor for newer allocation: {command} --host '<supervisor-ssh-host>'. "
+                    "This is a replica snapshot; check the supervisor through the existing tunnel: {command} --supervisor. Inspect support with hey-boss fleet capabilities. "
                 )
             } else {
                 String::new()
             }
         ),
         "allocation_missing" => format!(
-            "Companions synchronize automatically while connected; there is no one-shot sync command. Inspect the authoritative supervisor: {command} --host '<supervisor-ssh-host>'. If it has no reservation or reserves this machine, resume through it: {claim} --host '<supervisor-ssh-host>' --agent '<saved-agent-id>'. A successful supervisor claim reserves this machine atomically. Wait for automatic synchronization and re-run the local inspection before offline work. If it reserves another machine, resume there or ask Boss for a handoff."
+            "Companions synchronize automatically while connected; there is no one-shot sync command. Inspect the authoritative supervisor through the existing tunnel: {command} --supervisor. Inspect supported operations with hey-boss fleet capabilities. Metadata edits use --supervisor with --if-version and --request-id; ordinary guarded --draft edits route automatically. No claim or SSH hostname is needed for these edits. To resume actual work, use the supervisor locally or an explicitly configured --host with your saved --agent ID; a successful supervisor claim reserves this machine atomically. Wait for synchronization before offline work. If another machine owns the reservation, resume there or ask Boss for a handoff."
         ),
         _ => format!(
             "Resume a released manual claim: {claim} --agent '<saved-agent-id>'. Session ownership and active worker reservations still apply."
@@ -254,7 +254,7 @@ pub(crate) fn check_mutation(db: &Connection, project: &str, number: i64) -> Res
     let mut error = Error::new(
         code,
         format!(
-            "Changes were not saved. This companion has no valid local reservation for issue #{number}. Edit on the supervisor, or reconnect and wait for a reservation before editing offline. Do not force a claim to obtain editing access."
+            "Changes were not saved. This companion has no valid local reservation for issue #{number}. Inspect the existing authenticated tunnel with hey-boss fleet capabilities. Read the current issue using --supervisor, then edit title/body/labels with --supervisor --if-version VERSION --request-id ID. Guarded --draft edits route automatically. No SSH hostname or claim is needed for metadata access. For offline work, reconnect and wait for your reservation; do not force a claim."
         ),
     );
     error.details = Some(info);

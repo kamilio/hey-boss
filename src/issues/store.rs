@@ -38,10 +38,10 @@ mod pr_monitor;
 mod project_names;
 #[path = "status.rs"]
 mod status;
-#[path = "transfer.rs"]
-mod transfer;
 #[path = "title_content.rs"]
 mod title_content;
+#[path = "transfer.rs"]
+mod transfer;
 use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
@@ -1246,6 +1246,41 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        // Drafting is an online authority operation on companions. Never make a
+        // local edit that cannot be accepted by the supervisor on replay.
+        if matches!(
+            r.operation,
+            Operation::Edit {
+                draft: Some(true),
+                ..
+            }
+        ) {
+            validate(r)?;
+            let companion: bool = self.db.query_row(
+                "SELECT role='agent' FROM fleet_meta WHERE id=1",
+                [],
+                |row| row.get(0),
+            )?;
+            if companion {
+                let mut request = r.clone();
+                if request.request_id.is_none() {
+                    use sha2::{Digest, Sha256};
+                    // Stable across CLI invocations; exclude transient actor
+                    // provenance while retaining project, actor and exact edit.
+                    let key = serde_json::to_vec(&json!([
+                        request.project,
+                        request.project_override,
+                        request.actor.as_ref().map(|a| &a.id),
+                        request.operation
+                    ]))?;
+                    request.request_id = Some(format!("draft-{:x}", Sha256::digest(key)));
+                }
+                let mut result = self.execute_supervisor(&request)?;
+                result["store"] = json!({"host":"supervisor"});
+                result["request_id"] = json!(request.request_id);
+                return Ok(result);
+            }
+        }
         if matches!(
             r.operation,
             Operation::Create { .. } | Operation::CreateSubtask { .. }

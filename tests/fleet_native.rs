@@ -618,8 +618,6 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
             "edit",
             "2",
             "--draft",
-            "--if-version",
-            "3",
             "--request-id",
             "unsupported",
         ],

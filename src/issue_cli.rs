@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 #[command(
-    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nRun `hey-boss issue <command> --help` for details."
+    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions already have an authenticated supervisor tunnel: inspect `hey-boss fleet capabilities`.\nUse `issue view NUMBER --supervisor --json` for the current version, then guarded edits with\n--supervisor --if-version VERSION --request-id ID. Ordinary `issue edit NUMBER --draft\n--if-version VERSION` uses that tunnel automatically. No SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
 )]
 pub struct Options {
     /// Full project ID or an unambiguous short name; defaults to this checkout.
@@ -276,6 +276,9 @@ enum Action {
         labels: Vec<String>,
     },
     /// Replace supplied fields; omitted fields are preserved.
+    #[command(
+        after_help = "On a companion, --draft uses the existing supervisor tunnel and requires --if-version.\nRead the current version with `hey-boss issue view NUMBER --supervisor --json`.\nUse --request-id ID for explicit retries; otherwise draft edits derive a stable ID from the guarded edit.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
+    )]
     Edit {
         #[arg(long)]
         draft: bool,
@@ -1149,7 +1152,7 @@ pub fn run(options: &Options) -> Result<()> {
         {
             scope_allocation(info, host);
         }
-        value["store"] = if options.supervisor {
+        value["store"] = if options.supervisor || value["store"]["host"] == "supervisor" {
             json!({"host":"supervisor"})
         } else if let Some(host) = host {
             json!({"host":host})
