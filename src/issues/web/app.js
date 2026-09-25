@@ -254,7 +254,15 @@ async function mutate(operation, project = model.project.id, host = model.route.
     const result = await api(operation, project, id, host);
     pendingMutation.delete(key);
     persistPending();
-    detailCache.delete(detailKey(project,operation.number,host));
+    const cacheKey = detailKey(project,operation.number,host);
+    const current = model.project?.id === project && model.route.issue === operation.number && (model.route.host || null) === (host || null);
+    const previous = detailCache.get(cacheKey)?.value || (current ? model.detail : null);
+    detailCache.delete(cacheKey);
+    if (result.store?.host === "supervisor" && result.issue && previous) {
+      // Keep the committed issue visible while this companion's replica catches up.
+      // Mutation responses contain null placeholders for detail-only sections.
+      detailCache.set(cacheKey, {value:{...previous, issue:{...previous.issue, ...result.issue}}, at:Date.now()});
+    }
     return result;
   } catch (error) {
     if (["conflict", "subtask_claim_conflict", "invalid_input", "not_found",
@@ -727,6 +735,8 @@ async function renderRoute() {
     try {
       const value = await api({ action: "view", number: model.route.issue });
       if (sequence !== model.sequence) return;
+      // A just-saved tunnel response can be ahead of this companion's replica.
+      if (cached && value.issue.version < cached.value.issue.version) return;
       detailCache.set(key, { value, at: Date.now() });
       if (!cached || Date.now() - cached.at >= 30000 || JSON.stringify(cached.value.issue) !== JSON.stringify(value.issue) || IssueSubtasks.signature(cached.value) !== IssueSubtasks.signature(value)) {
         const input = $("#comment-body"), focus = input === document.activeElement ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection,top:input.getBoundingClientRect().top} : null;
@@ -797,6 +807,7 @@ async function refresh(quiet = true) {
     if (!$("#project-menu").hidden) projectOptions();
     if (model.route.issue) {
       model.orderVersion = result.order_version ?? model.orderVersion;
+      if (model.detail && result.issue.version < model.detail.issue.version) return;
       if (model.detail && result.issue.agent_launch_count !== model.detail.issue.agent_launch_count) {
         model.detail.issue.agent_launch_count = result.issue.agent_launch_count;
         detailCache.delete(detailKey(project, result.issue.number));
@@ -2016,7 +2027,6 @@ document.addEventListener("click", async event => {
     await mutate(ready ? {action:"undraft",number:issue.number} : {
       action:"edit",number:issue.number,draft:true,title:null,body:null,add_labels:[],remove_labels:[],if_version:issue.version
     }, project, host);
-    detailCache.delete(detailKey(project, issue.number));
     if (!current()) return;
     saveComment();
     await renderRoute();
