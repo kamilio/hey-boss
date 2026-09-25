@@ -28,4 +28,21 @@ assert(start >= 0 && end > start);
   }
   assert.equal(completed,4);
   console.log('COMPLETE: 4/4 mutation retry cases; explicit denials clear tokens, uncertain network results retain deduplication');
+  const previous = {issue:{number:1,version:1,draft:false},comments:[{body:'Keep this discussion'}]};
+  const cache = new Map();
+  const context = vm.createContext({
+    model:{project:{id:'fixture'},route:{issue:1},detail:previous},
+    pendingMutation:new Map(), mutationKey:async ()=>'draft', HeyBossUI:{requestId:()=>'draft-id'},
+    persistPending:()=>{}, detailCache:cache, detailKey:()=> 'fixture:1',
+    api:async ()=>({ok:true,store:{host:'supervisor'},comments:null,subtasks:null,issue:{number:1,version:2,draft:true}}),
+  });
+  vm.runInContext(source.slice(start,end),context);
+  await context.mutate({number:1,draft:true});
+  assert.equal(cache.get('fixture:1').value.issue.version,2);
+  assert.equal(cache.get('fixture:1').value.issue.draft,true);
+  assert.equal(cache.get('fixture:1').value.comments,previous.comments);
+  cache.clear();context.model.route.issue=2;
+  await context.mutate({number:1,draft:true});
+  assert.equal(cache.size,0,'Do not combine the committed issue with an unrelated detail page');
+  console.log('COMPLETE: committed tunnel responses retain the detail cache and discussion without crossing issue scope');
 })().catch(error=>{console.error(error);process.exitCode=1;});

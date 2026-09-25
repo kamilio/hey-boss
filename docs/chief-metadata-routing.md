@@ -68,7 +68,9 @@ Verification uses `cargo test --locked -p hey-boss --lib --test issues --test
 fleet_native --test issue_allocation`, including real supervisor/companion
 transport, replay, stale guards, unsupported operations and disconnected failure.
 Run `HEY_BOSS_TEST_BINARY=/path/to/hey-boss node tools/chief_metadata_checks.mjs`
-to qualify an installed binary against twelve private fleet stages. It requires
+to qualify an installed binary against eighteen private fleet stages. It requires
 normal exits and removes its services and temporary stores. Add `--serve` for the
 57-assertion `tools/chief_metadata_browser_checks.js` visual session, then stop
-the fixture and require its cleanup completion message.
+the fixture and require its cleanup completion message. The 75-assertion
+`tools/fleet_tunnel_browser_checks.js` session additionally covers guarded drafts,
+tunnel recovery, phone layouts, and the committed draft response before replica sync.
