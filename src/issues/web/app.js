@@ -257,7 +257,7 @@ async function mutate(operation, project = model.project.id, host = model.route.
     detailCache.delete(detailKey(project,operation.number,host));
     return result;
   } catch (error) {
-    if (["conflict", "invalid_input", "not_found"].includes(error.code))
+    if (["conflict", "subtask_claim_conflict", "invalid_input", "not_found"].includes(error.code))
       pendingMutation.delete(key);
     persistPending();
     throw error;
@@ -1355,6 +1355,7 @@ function openEditor(issue = null, options = {}) {
     returnFocus: document.activeElement,
   };
   $("#editor-title").textContent = issue ? "Edit issue" : options.parent ? "New subtask" : "New issue";
+  $("#editor-subtask-help").hidden = !options.parent;
   $("#editor-project").textContent = project.name;
   $("#editor-subject").value = draft?.title ?? issue?.title ?? "";
   $("#editor-body").value = draft?.body ?? issue?.body ?? "";

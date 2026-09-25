@@ -1694,6 +1694,7 @@ fn issue_initial_labels_are_atomic_and_preserve_cross_project_resources() {
         ],
     );
     f.issue("Platform", &["claim", "1"]);
+    f.issue("Platform", &["unassign", "1"]);
     f.issue("Platform", &["subtask", "create", "1", "--title", "Child"]);
     f.issue(
         "Platform",

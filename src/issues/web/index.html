@@ -420,6 +420,7 @@
         <button type="button" class="icon-button" id="subtask-picker-close" aria-label="Close subtask picker"><span data-icon="x"></span></button>
       </div>
       <div class="subtask-picker-body">
+        <p class="field-help" id="subtask-picker-help">Unfinished subtasks put the parent in Blocked. Changes that would release a parent or ancestor claim are rejected. Use mindmap nesting to group issues without changing ownership.</p>
         <label class="field-label" for="subtask-picker-search">Find an issue</label>
         <input id="subtask-picker-search" class="text-input" type="search" placeholder="Search by title or number…" autocomplete="off">
         <p class="form-error" id="subtask-picker-error" role="alert" hidden></p>
@@ -444,6 +445,7 @@
           </button>
         </div>
         <div class="dialog-content">
+          <p class="field-help" id="editor-subtask-help" hidden>Unfinished subtasks put the parent in Blocked. Changes that would release a parent or ancestor claim are rejected. Use mindmap nesting to group issues without changing ownership.</p>
           <label class="field-label" for="editor-subject">Title</label
           ><input
             id="editor-subject"

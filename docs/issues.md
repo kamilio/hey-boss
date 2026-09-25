@@ -794,6 +794,20 @@ The versioned bidirectional JSON protocol and invariants are documented in
 
 ## Subtasks
 
+Subtasks affect scheduling. Unfinished descendants move the parent to **Blocked**.
+Creating, linking, or unlinking subtasks cannot automatically release an existing
+parent or ancestor claim: the whole operation fails, even for the claim owner.
+Failed creation leaves no child, number allocation, history, or partial link.
+Closed children without unfinished descendants can still be linked to claimed
+parents; unlinking a child is allowed when it preserves claims.
+Fleet sync rejects stale subtask links and state transitions that would replace
+newer canonical ownership; rejected links converge back to the canonical graph.
+
+For organization only, prefer mindmap nesting: `hey-boss mm issue 12 --id parent-work`
+then `hey-boss mm issue 15 --under parent-work`. This preserves issue ownership,
+state, and scheduling. For an actual scheduling dependency, the claim owner must
+explicitly release the affected claim before linking.
+
 Subtasks are ordinary issues linked to one parent in the same project. Each keeps
 its own Markdown, assignee, labels, PR links, lifecycle and position in the queue.
 Use **Add subtask** beside Edit, or press **Shift+N** while viewing an issue, to

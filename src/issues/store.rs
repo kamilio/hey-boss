@@ -1656,12 +1656,17 @@ impl Store {
                 | Operation::Edit { draft: Some(_), .. }
                 | Operation::Undraft { .. }
         ) {
-            super::blockers::reconcile(
-                &tx,
-                &response_project.id,
-                actor.map(|a| a.id.as_str()),
-                now,
-            )?;
+            let reconcile = if matches!(
+                r.operation,
+                Operation::CreateSubtask { .. }
+                    | Operation::AddSubtask { .. }
+                    | Operation::RemoveSubtask { .. }
+            ) {
+                super::blockers::reconcile_subtasks
+            } else {
+                super::blockers::reconcile
+            };
+            reconcile(&tx, &response_project.id, actor.map(|a| a.id.as_str()), now)?;
             for key in ["issue", "parent_issue", "child_issue"] {
                 if let Some(number) = result[key]["number"].as_i64() {
                     result[key] =

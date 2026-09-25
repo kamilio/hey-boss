@@ -2584,6 +2584,7 @@ fn schema_seven_subtask_migration_preserves_existing_issue_and_global_profile() 
             .unwrap(),
         14
     );
+    f.run("session-a", &["unassign", "1"]);
     f.run(
         "session-a",
         &["subtask", "create", "1", "--title", "Migrated child"],
@@ -2883,6 +2884,7 @@ fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss()
             "session-a",
             &["pr", "add", "1", "https://github.com/example/repo/pull/1"],
         );
+        f.run("session-a", &["unassign", "1"]);
         f.run("session-a", &["subtask", "create", "1", "--title", "Child"]);
         f.run(
             "session-a",

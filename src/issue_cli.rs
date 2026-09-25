@@ -154,7 +154,7 @@ enum Action {
         command: PrAction,
     },
     /// Create, link, list, or unlink full issues as subtasks.
-    #[command(visible_alias = "subtasks")]
+    #[command(visible_alias = "subtasks", after_help = SUBTASK_SCHEDULING_HELP)]
     Subtask {
         #[command(subcommand)]
         command: SubtaskAction,
@@ -407,6 +407,7 @@ enum SubtaskAction {
         all: bool,
     },
     /// Create and link a child issue atomically.
+    #[command(after_help = SUBTASK_SCHEDULING_HELP)]
     Create {
         number: i64,
         #[arg(long)]
@@ -419,6 +420,7 @@ enum SubtaskAction {
         if_version: Option<i64>,
     },
     /// Link an existing issue; unlink its previous parent first.
+    #[command(after_help = SUBTASK_SCHEDULING_HELP)]
     Add {
         number: i64,
         child: i64,
@@ -428,6 +430,7 @@ enum SubtaskAction {
         if_child_version: Option<i64>,
     },
     /// Unlink a subtask while preserving its issue and history.
+    #[command(after_help = SUBTASK_SCHEDULING_HELP)]
     Remove {
         number: i64,
         child: i64,
@@ -437,6 +440,8 @@ enum SubtaskAction {
         if_child_version: Option<i64>,
     },
 }
+
+const SUBTASK_SCHEDULING_HELP: &str = "Subtasks affect scheduling: unfinished descendants put the parent in Blocked.\nChanges that would release an existing parent or ancestor claim are rejected atomically,\neven for the claim owner. For organization only, prefer ownership-preserving mindmap nesting:\n  hey-boss mm issue PARENT --id parent-work\n  hey-boss mm issue CHILD --under parent-work\nFor a scheduling dependency, have the owner explicitly unassign the affected issue first.";
 
 #[derive(Subcommand)]
 enum PrAction {

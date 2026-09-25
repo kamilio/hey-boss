@@ -8,6 +8,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn subtask_claim_conflicts_are_http_conflicts_without_partial_creation() {
+    let w = Web::start();
+    w.ok(json!({"action":"create","title":"Claimed parent","body":"Keep parent","labels":[]}));
+    w.ok(json!({"action":"claim","number":1,"force":false}));
+    let before = w.ok(json!({"action":"view","number":1}));
+    let operation = json!({"action":"create_subtask","number":1,"title":"Follow-up","body":"Keep draft","labels":[]});
+    for _ in 0..2 {
+        let reply = w.action(&w.project, operation.clone(), Some("claim-guard"));
+        assert_eq!(reply.status, 409);
+        assert_eq!(reply.json()["error"]["code"], "subtask_claim_conflict");
+        assert_eq!(w.ok(json!({"action":"view","number":1})), before);
+    }
+    w.ok(json!({"action":"unassign","number":1,"force":false}));
+    let accepted = w.action(&w.project, operation.clone(), Some("claim-guard"));
+    assert_eq!(accepted.status, 200);
+    assert_eq!(accepted.json()["issue"]["number"], 2);
+    assert_eq!(accepted.json()["parent_issue"]["state"], "blocked");
+    assert_eq!(
+        w.action(&w.project, operation, Some("claim-guard")).json(),
+        accepted.json()
+    );
+}
+
 struct Web {
     child: Child,
     root: PathBuf,

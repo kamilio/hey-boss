@@ -113,6 +113,13 @@ History tab remains available.
 ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
 
+Subtasks are scheduling dependencies: unfinished descendants put the parent in
+Blocked. Subtask mutations reject any automatic release of an existing parent or
+ancestor claim, even for the owner. For organization only, prefer mindmap nesting:
+`hey-boss mm issue PARENT --id parent-work`, then
+`hey-boss mm issue CHILD --under parent-work`. This preserves ownership and scheduling.
+Do not override or restore another agent's ownership to organize follow-ups.
+
 ## Mindmaps
 
 `hey-boss mm` shows a project's nested outline. Author from the CLI;
