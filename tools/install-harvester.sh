@@ -10,7 +10,7 @@ task_run() {
     if [[ $task_host == local ]]; then sh -c "$1"; else ssh "${task_ssh[@]}" "$task_host" "$1"; fi
 }
 # The workspace manifest references the siblings, but Cargo builds only harvester.
-COPYFILE_DISABLE=1 tar --exclude=target --exclude=node_modules -czf - -C "$task_root" Cargo.toml Cargo.lock build.rs src packages/hey-gh packages/hey-harvester |
+COPYFILE_DISABLE=1 tar --no-xattrs --exclude=target --exclude=node_modules -czf - -C "$task_root" Cargo.toml Cargo.lock build.rs src packages/hey-gh packages/hey-harvester |
     task_run 'set -eu
 umask 077
 stage=$(mktemp -d)
