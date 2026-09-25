@@ -366,7 +366,7 @@ enum Action {
         force: bool,
     },
     /// Block an issue and clear its claim. Use rarely: make every effort to resolve
-    /// it first, ask the user for help via hey-boss ask, and describe the blocker.
+    /// it first, ask the user for help via hey-boss notif ask, and describe the blocker.
     /// Set the issues blocking this issue; omit blockers to remove all links.
     BlockedBy {
         number: i64,
@@ -898,7 +898,7 @@ impl Options {
                 force,
             } => {
                 eprintln!(
-                    "Warning: blocking should be rare. Make every effort to resolve the issue first; raise questions and ask the user for help via hey-boss ask. Explain the blocker in --comment. Reopen when it can proceed."
+                    "Warning: blocking should be rare. Make every effort to resolve the issue first; raise questions and ask the user for help via hey-boss notif ask. Explain the blocker in --comment. Reopen when it can proceed."
                 );
                 Operation::Block {
                     number: *number,

@@ -8,14 +8,14 @@ description: Background notifications, project issues, and secrets kept out of a
 Notify once for substantial background results or essential blocking decisions. Ask yourself - should I page user for this? Keep active chat, routine progress, and tests in chat. One outcome sentence; brief details.
 ```sh
 
-hey-boss alert --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
-hey-boss update --title Review 'Please review.' --file PATH --comments
+hey-boss notif alert --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
+hey-boss notif update --title Review 'Please review.' --file PATH --comments
 ```
 
-Use `ask --sync` to wait, or `ask --async` then `wait TASK_ID`. Cancellation is never approval; do not automatically re-ask. Remote `pending` does not confirm delivery.
+Use `hey-boss notif ask --sync` to wait, or `hey-boss notif ask --async` then `hey-boss notif wait TASK_ID`. Cancellation is never approval; do not automatically re-ask. Remote `pending` does not confirm delivery.
 
 ```sh
-hey-boss alert --project poe2 --title Ready 'Ready for review.' --issue 123
+hey-boss notif alert --project poe2 --title Ready 'Ready for review.' --issue 123
 ```
 
 `--issue` defaults to the current Git/directory issue project; use
@@ -23,13 +23,13 @@ hey-boss alert --project poe2 --title Ready 'Ready for review.' --issue 123
 
 ## Secrets
 
-Use only `secret`, never chat/ordinary prompts. Never inspect/screenshot the window or read, print, diff, or index the destination. Synthetic test values only.
+Use only `hey-boss notif secret`, never chat/ordinary prompts. Never inspect/screenshot the window or read, print, diff, or index the destination. Synthetic test values only.
 
 ```sh
-hey-boss secret --field API_KEY --env-file .env
-hey-boss secret --field LOGIN --field PASSWORD --login --env-file .env
-hey-boss secret --field API_KEY -- python3 app.py
-(set -C; umask 077; hey-boss secret --field API_KEY --stdout > .env)
+hey-boss notif secret --field API_KEY --env-file .env
+hey-boss notif secret --field LOGIN --field PASSWORD --login --env-file .env
+hey-boss notif secret --field API_KEY -- python3 app.py
+(set -C; umask 077; hey-boss notif secret --field API_KEY --stdout > .env)
 ```
 
 ## Issues
@@ -57,7 +57,7 @@ or risk changes, and at least every ten minutes during active work:
 its claim; `list --state blocked` finds paused work. Add repeatable `--by NUMBER`
 to link prerequisites: Ready or Closed in PR-enabled projects, Closed otherwise. `issue blocked-by NUMBER BLOCKER...`
 sets these links on an existing issue; omit BLOCKERs to remove them. Blocking should be rare:
-make every effort to resolve the issue, raise questions via `hey-boss ask`, and
+make every effort to resolve the issue, raise questions via `hey-boss notif ask`, and
 ask the user for help before giving up. Explain the blocker and what enables
 progress. `issue reopen NUMBER` resumes eligibility
 

@@ -23,7 +23,7 @@ fn catalog_contains_nested_commands_help_and_output_support() {
         "issue pr add",
         "artifact create",
         "mm show",
-        "secret",
+        "notif secret",
         "skill install",
     ] {
         let item = commands.iter().find(|v| v["id"] == name).unwrap();
@@ -31,6 +31,16 @@ fn catalog_contains_nested_commands_help_and_output_support() {
         assert!(item["json_supported"].is_boolean());
     }
     assert!(commands.len() > 60);
+    assert!(!commands.iter().any(|c| c["id"] == "alert"));
+    let alert = commands.iter().find(|c| c["id"] == "notif alert").unwrap();
+    assert_eq!(alert["preview"], "sample");
+    assert!(
+        alert["aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "hey-boss alert")
+    );
 }
 
 #[test]
@@ -100,8 +110,17 @@ fn preview_rejects_arbitrary_commands() {
 
 #[test]
 fn notification_samples_use_the_real_output_formatter_without_sending() {
-    let preview = cli(&["admin", "preview", "alert", "--json"]);
+    let preview = cli(&["admin", "preview", "notif alert", "--json"]);
     assert_eq!(preview["text"]["exit_code"], 0);
+    assert!(
+        preview["text"]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("hey-boss notif alert")
+    );
+    let legacy = cli(&["admin", "preview", "alert", "--json"]);
+    assert_eq!(legacy["id"], "notif alert");
+    assert_eq!(legacy["text"]["stdout"], preview["text"]["stdout"]);
     assert!(
         preview["text"]["stdout"]
             .as_str()

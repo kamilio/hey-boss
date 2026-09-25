@@ -811,7 +811,7 @@ mod tests {
                 "manual" => "Waiting for a human decision",
                 "approval" => "Codex needs input or approval: permission denied",
                 _ => {
-                    "Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss ask, then reopen to resume pickup."
+                    "Automatic retries exhausted after five unsuccessful agent attempts. Review the session findings, resolve the blocker or ask the user for help via hey-boss notif ask, then reopen to resume pickup."
                 }
             };
             f.apply(Operation::Block {

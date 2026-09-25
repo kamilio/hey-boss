@@ -94,12 +94,15 @@ pub fn catalog() -> Value {
         output: &mut Vec<Value>,
     ) {
         let id = path.join(" ");
+        if path.len() == 1 && crate::notif_cli::Action::has_subcommand(&id) {
+            return;
+        }
         if !path.is_empty() && id != "admin capture" {
             let mut help = command.clone();
             let json_supported = command
                 .get_arguments()
                 .any(|a| a.get_long() == Some("json"));
-            output.push(json!({"id":id,"group":path[0],"description":command.get_about().map(ToString::to_string).unwrap_or_default(),"aliases":command.get_all_aliases().collect::<Vec<_>>(),"help":help.render_long_help().to_string(),"usage":help.render_usage().to_string(),"json_supported":json_supported,"preview":if samples.contains_key(&id) {"sample"} else {"help"}}));
+            output.push(json!({"id":id,"group":path[0],"description":command.get_about().map(ToString::to_string).unwrap_or_default(),"aliases":command.get_all_aliases().map(str::to_owned).chain((path.len() == 2 && path[0] == "notif").then(|| format!("hey-boss {}", path[1]))).collect::<Vec<_>>(),"help":help.render_long_help().to_string(),"usage":help.render_usage().to_string(),"json_supported":json_supported,"preview":if samples.contains_key(&id) {"sample"} else {"help"}}));
         }
         for child in command
             .get_subcommands()
@@ -221,17 +224,20 @@ fn dispatch(args: Vec<String>) -> io::Result<()> {
         ]);
     }
     let cli = crate::Cli::try_parse_from(std::iter::once("hey-boss".to_owned()).chain(args))
-        .map_err(io::Error::other)?;
+        .map_err(io::Error::other)?
+        .canonicalize();
     if matches!(
         &cli.command,
-        crate::Command::Alert { .. }
-            | crate::Command::Update { .. }
-            | crate::Command::Ask { .. }
-            | crate::Command::Prompt { .. }
-            | crate::Command::Approval { .. }
-            | crate::Command::Status { .. }
-            | crate::Command::Wait { .. }
-            | crate::Command::Hide { .. }
+        crate::Command::Notif(
+            crate::notif_cli::Action::Alert { .. }
+                | crate::notif_cli::Action::Update { .. }
+                | crate::notif_cli::Action::Ask { .. }
+                | crate::notif_cli::Action::Prompt { .. }
+                | crate::notif_cli::Action::Approval { .. }
+                | crate::notif_cli::Action::Status { .. }
+                | crate::notif_cli::Action::Wait { .. }
+                | crate::notif_cli::Action::Hide { .. }
+        )
     ) {
         let (request, output) = cli.into_request_with_project(|_| {
             Ok(hey_boss::issues::Project {
@@ -291,6 +297,12 @@ pub fn run(options: &Options) -> io::Result<()> {
             command: id,
             seed_stdin,
         } => {
+            let canonical = if crate::notif_cli::Action::has_subcommand(id) {
+                format!("notif {id}")
+            } else {
+                id.clone()
+            };
+            let id = &canonical;
             let all = catalog();
             let entry = all["commands"]
                 .as_array()
@@ -311,7 +323,7 @@ pub fn run(options: &Options) -> io::Result<()> {
                 } else {
                     json!({})
                 };
-                let mut result = json!({"mode":"sample","id":id,"reason":if matches!(id.as_str(),"alert"|"update"|"ask"|"prompt"|"approval"|"status"|"wait"|"hide") {"Sample daemon response rendered by the actual CLI formatter. No notification is sent and no answer is requested."} else {"Actual CLI output from disposable sample state. Text and JSON each start from a fresh copy."}});
+                let mut result = json!({"mode":"sample","id":id,"reason":if id.starts_with("notif ") {"Sample daemon response rendered by the actual CLI formatter. No notification is sent and no answer is requested."} else {"Actual CLI output from disposable sample state. Text and JSON each start from a fresh copy."}});
                 for (format, json_mode) in [("text", false), ("json", true)] {
                     if json_mode && entry["json_supported"] != true {
                         result[format] = Value::Null;

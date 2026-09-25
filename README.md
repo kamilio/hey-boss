@@ -200,9 +200,9 @@ whole group, including document reviews.
 Notices can optionally link to an issue, with links visible in both directions:
 
 ```sh
-hey-boss alert --project poe2 --title Ready 'Ready for review.' --issue 123
-hey-boss inbox
-hey-boss inbox --json
+hey-boss notif alert --project poe2 --title Ready 'Ready for review.' --issue 123
+hey-boss notif inbox
+hey-boss notif inbox --json
 ```
 
 `--issue` infers the current repository’s issue project. Use `--issue-project FULL_ID`
@@ -230,17 +230,21 @@ export HEY_BOSS_BIN_DIR="$HOME/bin"
 export HEY_BOSS_LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 swift install_hey_boss.swift
 export PATH="$HEY_BOSS_BIN_DIR:$PATH"
-hey-boss alert --project Atlas --title 'Migration ready' 'The migration is ready for your review.' --autoclose 10
-hey-boss update --project Atlas --title Report 'Review ready' '# Findings'
-hey-boss ask --project Atlas --title Format 'Which format?' '' --option PDF --option Markdown --async
-hey-boss wait '<task_id>'
-hey-boss hide '<task_id>'
+hey-boss notif alert --project Atlas --title 'Migration ready' 'The migration is ready for your review.' --autoclose 10
+hey-boss notif update --project Atlas --title Report 'Review ready' '# Findings'
+hey-boss notif ask --project Atlas --title Format 'Which format?' '' --option PDF --option Markdown --async
+hey-boss notif wait '<task_id>'
+hey-boss notif hide '<task_id>'
 ```
 
 The installer builds both executables and registers a launch agent. macOS starts the daemon at login so its menu-bar item is available, and can also start it when a command connects. Keep `hey-boss.state` beside the installed CLI; it records the chosen state directory. Re-run the installer to upgrade. Companion connections and overview require protocol-version metadata from the current installer and a matching daemon handshake; older installations report an upgrade error before new commands are sent. Update the server companion too so remote stale-socket cleanup is available. `cargo install` alone does not install the daemon.
 
+Notifications, questions, secret requests, and the Inbox are grouped under `hey-boss notif`.
+Run `hey-boss notif --help` to see them. Existing root forms such as `hey-boss alert`
+remain accepted as hidden compatibility aliases.
+
 Use `hb` as a shortcut for any `hey-boss` command, such as `hb issue list` or
-`hb alert --title Ready 'Build passed'`. Cargo and Homebrew install both commands;
+`hb notif alert --title Ready 'Build passed'`. Cargo and Homebrew install both commands;
 source and companion installers and `hey-boss upgrade` create an adjacent `hb`
 symlink when that name is available. An existing `hb` command is preserved.
 The shortcut uses the same configuration, output, and exit status as `hey-boss`.
@@ -306,9 +310,9 @@ Custom images are snapshotted into history at 128 × 128 pixels, preserving thei
 | `question` | `questionmark.bubble.fill` |
 
 ```sh
-hey-boss alert --project Atlas --title 'Migration ready' 'The migration is ready for your review.' --severity success --icon review
-hey-boss update --project Atlas --title Report --icon docs 'Review ready' '# Findings'
-hey-boss alert --project Atlas --title Release --icon-file ./brand.png 'Release published' --severity success
+hey-boss notif alert --project Atlas --title 'Migration ready' 'The migration is ready for your review.' --severity success --icon review
+hey-boss notif update --project Atlas --title Report --icon docs 'Review ready' '# Findings'
+hey-boss notif alert --project Atlas --title Release --icon-file ./brand.png 'Release published' --severity success
 ```
 
 Rust callers can configure `Client::new(socket_path).with_appearance(hey_boss::Appearance { severity: Some(hey_boss::Severity::Success), icon: Some("build".into()), icon_path: None })`. Existing `Notification`, `Update`, and `Question` struct literals remain compatible. Appearance applies only to creation requests; all fields are optional on the wire (`severity`, `icon`, `icon_path`).
@@ -318,7 +322,7 @@ The agent skill reserves notifications for major outcomes or essential decisions
 Updates accept inline Markdown or a file snapshot:
 
 ```sh
-hey-boss update --project Atlas --title 'Migration ready' 'The migration is ready for your review.' --file report.md
+hey-boss notif update --project Atlas --title 'Migration ready' 'The migration is ready for your review.' --file report.md
 ```
 
 `--file` (also `--markdown-file`) accepts UTF-8 files up to 1 MiB, reads them before posting, and stores their contents in history. The same command works on the server: durable queue/replay transports Markdown text, so deleting or editing the original file does not change an already posted update. Relative server files and images are not transferred.
@@ -410,7 +414,7 @@ configuration defaults are never treated as evidence of the model used.
 
 Every web page includes a source comment and a `hidden` guide for agents, with a
 shell-quoted `hey-boss lookup 'URL' --json` command that follows URL navigation.
-The paired Inbox root uses `hey-boss inbox --json`. `/llms.txt` publishes the same
+The paired Inbox root uses `hey-boss notif inbox --json`. `/llms.txt` publishes the same
 Markdown guide on desktop and paired web installations. This is a discovery
 convention, not a guarantee that a browser agent reads hidden content. The guide
 is not a copy of resource data: lookup uses the existing CLI readers and JSON
@@ -938,7 +942,7 @@ jobs prevent cleanup when their open files cannot be checked.
 
 ## Secret input
 
-`hey-boss secret --field API_KEY --env-file .env` opens masked native input and
+`hey-boss notif secret --field API_KEY --env-file .env` opens masked native input and
 writes directly to a private file without returning values to the caller's output.
 For a login/password pair, use `--field LOGIN --field PASSWORD --login`.
 Use `--field API_KEY -- python3 app.py` to set the child's environment instead;
