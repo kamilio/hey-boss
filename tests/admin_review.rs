@@ -25,6 +25,12 @@ fn catalog_contains_nested_commands_help_and_output_support() {
         "mm show",
         "notif secret",
         "skill install",
+        "agent list",
+        "agent overview",
+        "agent configure",
+        "agent control",
+        "worker run",
+        "auto-workers watch",
     ] {
         let item = commands.iter().find(|v| v["id"] == name).unwrap();
         assert!(item["help"].as_str().unwrap().contains("Usage:"));
@@ -41,6 +47,38 @@ fn catalog_contains_nested_commands_help_and_output_support() {
             .iter()
             .any(|a| a == "hey-boss alert")
     );
+}
+
+#[test]
+fn agent_preview_aliases_point_to_the_grouped_command_without_running_it() {
+    let catalog = cli(&["admin", "catalog", "--json"]);
+    let commands = catalog["commands"].as_array().unwrap();
+    for (old, current) in [
+        ("agents", "agent list"),
+        ("overview", "agent overview"),
+        ("configure-agents", "agent configure"),
+        ("agent-control", "agent control"),
+    ] {
+        assert!(!commands.iter().any(|entry| entry["id"] == old));
+        let entry = commands
+            .iter()
+            .find(|entry| entry["id"] == current)
+            .unwrap();
+        assert!(
+            entry["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == &format!("hey-boss {old}"))
+        );
+        let preview = cli(&["admin", "preview", old, "--json"]);
+        assert_eq!(preview["id"], current);
+        assert_eq!(preview["mode"], "help");
+        assert_eq!(
+            preview["text"]["command"],
+            format!("hey-boss {current} --help")
+        );
+    }
 }
 
 #[test]

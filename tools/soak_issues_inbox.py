@@ -107,7 +107,7 @@ def main():
         issue('create','--title','Boss control','--body','Never pick this','--label','ready');issue('assign-to-boss','2')
         (root/'mode.txt').write_text('completed')
         issue('settings','set','--prompt','/goal Assign and implement `{{issue_command}}`. {{commit_instruction}}')
-        worker=spawn([str(cli),'worker','--project',worker_project,'--directory',str(root),'--concurrency','2','--tag','ready','--name','Isolated timed soak','--json'],'worker',cwd=root)
+        worker=spawn([str(cli),'worker','run','--project',worker_project,'--directory',str(root),'--concurrency','2','--tag','ready','--name','Isolated timed soak','--json'],'worker',cwd=root)
         web_ready=(root/'web-ready.log').open('w');handles.append(web_ready)
         web=subprocess.Popen([str(cli),'issue','web','--port','0','--project','Soak UI','--no-discovery','--json'],env=env,cwd=root,stdout=web_ready,stderr=web_ready);children.append(web)
         deadline=time.monotonic()+20

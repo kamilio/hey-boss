@@ -7,15 +7,19 @@ and Pi sessions through one API, including resume, activity, steering, interrupt
 explicit approvals/input, and provider-neutral goal continuation. Issue workers
 continue using Codex; worker/task agent selection is deferred.
 
-Run `hey-boss auto-workers` to use this machine's saved workers in one dashboard.
+Run `hey-boss auto-workers run` to start or resume saved workers, then
+`hey-boss auto-workers watch` to open their dashboard.
 Tab / Shift+Tab switches project tabs; `a` adds a worker, and `w` then `d` removes
 one after its current agents and Chief finish. Reopening the dashboard reuses the
 same workers. Separate checkouts and shared multi-project pools retain their own
 slots. See [per-machine configuration and live controls](docs/auto-workers.md).
 
 The [worker terminal dashboard](worker-tui/README.md) shows the current worker, live sessions,
-activity, queue state, and worker controls. Run `hey-boss worker` to start a worker
-with the dashboard, or `hey-boss worker status` to watch existing workers.
+activity, queue state, and worker controls. Run `hey-boss worker run` to start a worker
+with its dashboard, or `hey-boss worker watch` to watch existing workers.
+Use `hey-boss worker status` (or `list`) for one text snapshot; add `--json` for JSON.
+Bare `worker` and `auto-workers` commands show help and do not start work.
+The older `worker --id ID` restore form remains accepted so running workers can reload during upgrades.
 For a live log in scripts or agent sessions, use `hey-boss worker watch`.
 It observes every registered worker on the selected machine every two seconds,
 showing slots, pickup state, active issues, latest activity and session IDs.
@@ -28,7 +32,7 @@ attempts per worker (default: active only), or `--host HOST` for an SSH companio
 Disconnected hosts fail explicitly; they never fall back to this Mac's queue.
 It is included in normal installations and SSH companion upgrades. The dashboard
 opens automatically in an interactive terminal; use `--json` for scripts. Quitting a started worker stops its
-sessions; quitting a status dashboard leaves workers running.
+sessions; quitting a watch dashboard leaves workers running.
 
 Native macOS notifications and questions for coding agents. Short updates stack by project; Read update opens a Markdown preview. Rust library and CLI, Swift/AppKit daemon, SQLite history. No Python or Electron.
 
@@ -81,7 +85,7 @@ Projects appear automatically from running agents and first CLI use, ordered by
 recent activity. Hide projects you no longer want in the switcher, then restore
 them from **Hidden projects** at any time; their issues and history remain intact.
 
-Codex workers launch from the CLI: `hey-boss worker --concurrency 2 --tag ready`.
+Codex workers launch from the CLI: `hey-boss worker run --concurrency 2 --tag ready`.
 Each worker owns its concurrency and filters, uses its current directory, and
 shows only that worker, with prominent availability and busy/free slot counts.
 Active work is the default; h switches to a separate completed-attempt history.
@@ -177,12 +181,12 @@ Issue database writes are coordinated by one owner inside an existing local
 service. CLI commands, web requests, workers and replication connect to it
 automatically; no database server setup is needed. Reads remain available while
 another transaction writes, and the service starts automatically when absent.
-Standalone workers still use their local queue. `worker --host HOST --directory
+Standalone workers still use their local queue. `worker run --host HOST --directory
 /remote/checkout` runs a worker and its Codex agents on that host.
 **Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,
 with a live assembled preview. Implementation instructions contain only the shared
 prompt and selected workspace and delivery branches; no extra cleanup or PR handoff
-paragraphs are appended. Each branch inherits a code default or uses a project override. `worker --worktree` selects a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
+paragraphs are appended. Each branch inherits a code default or uses a project override. `worker run --worktree` selects a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
 See [automatic workers](docs/issues.md#automatic-codex-workers).
 For validation queue diagnosis and the single-admission workflow, see
 [nested verification reservations](docs/verification-slots.md).
@@ -249,13 +253,16 @@ source and companion installers and `hey-boss upgrade` create an adjacent `hb`
 symlink when that name is available. An existing `hb` command is preserved.
 The shortcut uses the same configuration, output, and exit status as `hey-boss`.
 
+`hey-boss agent` groups `list`, `overview`, `configure`, and `control`. The old
+root names remain accepted as hidden compatibility aliases.
+
 Source and remote companion installation also allow `hey-boss` globally in Codex
 and Claude Code. Homebrew queues this step for first-run daemon setup because its
 post-install hook is sandboxed away from user configs. To apply it immediately,
 or configure an existing installation, run:
 
 ```sh
-hey-boss configure-agents
+hey-boss agent configure
 ```
 
 This writes command-specific `allow` rules to `~/.codex/rules/hey-boss.rules` and
@@ -273,7 +280,7 @@ its managed rules file, preserves existing symlinks and file permissions, and ma
 a private, uniquely named `.hey-boss-*.bak` copy before replacing a changed file.
 Writes use atomic replacement, with installer locks and checks for concurrent edits.
 Re-running without changes creates no backups. An error reports the affected path;
-correct it and rerun `configure-agents`. To remove these permissions, delete the
+correct it and rerun `agent configure`. To remove these permissions, delete the
 managed `hey-boss.rules` file and remove only the hey-boss entries from Claude's
 `permissions.allow` array.
 
@@ -354,7 +361,7 @@ with version checks and request IDs for safe retries.
 
 ## Chief
 
-Enable a project's **Chief** in Project settings or with `hey-boss worker --chief`.
+Enable a project's **Chief** in Project settings or with `hey-boss worker run --chief`.
 It is disabled by default. While a worker monitors that project, Chief runs one
 organizing pass each hour, outside issue concurrency. Its separate prompt covers
 issues, PR readiness, and mindmap maintenance; workers handle code changes.
@@ -693,7 +700,7 @@ These semantics also apply through the server companion and its offline cache.
 
 ## Agent overview
 
-Run `hey-boss overview` on the Mac, or choose **Agent overview** from the new
+Run `hey-boss agent overview` on the Mac, or choose **Agent overview** from the new
 menu-bar item. The native window lists Codex and Claude sessions/processes with
 project, latest task, activity, state, and host. Search by task/project/host, filter
 using agent names, open local projects, and copy session IDs. Press ⌘F to focus search and
@@ -706,8 +713,8 @@ scanner times; JSON includes the latest and p95 rebuild milliseconds. Unchanged
 cards are reused and search is debounced to avoid rebuilding on every keystroke.
 
 The CLI also provides
-`hey-boss agents` and `hey-boss agents --json` for a local read-only snapshot.
-`hey-boss overview --json` reads the running window's current state through its
+`hey-boss agent list` and `hey-boss agent list --json` for a local read-only snapshot.
+`hey-boss agent overview --json` reads the running window's current state through its
 existing socket, including local and received server snapshots. Its `rows` reflect
 the current search. It does not open the window, change selection,
 refresh discovery, or start a network connection. Connected server companions can
@@ -716,7 +723,7 @@ error immediately and are never queued.
 
 Discovery runs once when the overview opens, or when you choose **Refresh agents**
 while it is open. There is no periodic refresh on the Mac or server broker.
-Reading `overview --json` returns the cached view without launching scanners or SSH.
+Reading `agent overview --json` returns the cached view without launching scanners or SSH.
 Last-known snapshots are retained and marked stale when the view is rebuilt.
 
 Additional machines are read from the shared `ssh_hosts` inventory in

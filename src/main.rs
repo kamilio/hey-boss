@@ -89,7 +89,7 @@ impl Parser for Cli {}
 
 #[derive(Args)]
 struct Output {
-    #[arg(long, conflicts_with = "markdown", hide = true)]
+    #[arg(long, conflicts_with = "markdown")]
     json: bool,
     #[arg(long, help = "Print human-readable text (the default output format)")]
     markdown: bool,
@@ -161,6 +161,9 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// List agents, open their overview, configure access, and control threads.
+    #[command(subcommand)]
+    Agent(AgentAction),
     /// Notifications, questions, secret requests, and Inbox.
     #[command(
         subcommand,
@@ -207,12 +210,14 @@ enum Command {
         action: health_cli::Action,
     },
     /// Allow hey-boss globally in Codex and Claude Code, preserving existing settings.
+    #[command(hide = true)]
     ConfigureAgents {
         /// Installed executable path to allow (repeatable; defaults to this executable).
         #[arg(long, value_name = "PATH")]
         binary: Vec<std::path::PathBuf>,
     },
     /// Control a loaded Codex thread on its configured owning server (JSON stdin/output).
+    #[command(hide = true)]
     AgentControl {
         #[arg(long)]
         thread: String,
@@ -242,11 +247,13 @@ enum Command {
         native: bool,
     },
     /// List running Codex/Claude processes and matched session activity.
+    #[command(hide = true)]
     Agents {
         #[arg(long)]
         json: bool,
     },
     /// Open the native agent overview window.
+    #[command(hide = true)]
     Overview {
         /// Print the running overview's local/server snapshots and current view as JSON.
         #[arg(long)]
@@ -259,6 +266,43 @@ enum Command {
     },
     /// Upgrade this installation and every registered companion from one source build.
     Upgrade(upgrade_cli::Options),
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// List running Codex/Claude processes and matched session activity.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the native overview, or read its cached state with --json.
+    Overview {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Allow hey-boss in Codex and Claude Code, preserving existing settings.
+    Configure {
+        /// Executable paths to allow; defaults to this executable.
+        #[arg(long, value_name = "PATH")]
+        binary: Vec<std::path::PathBuf>,
+    },
+    /// Control a loaded Codex thread on its owning server (JSON stdin/output).
+    Control {
+        #[arg(long)]
+        thread: String,
+        #[arg(value_parser = ["inspect", "enable-goal", "disable-goal", "steer"])]
+        action: String,
+    },
+}
+
+fn canonical_agent_command(id: &str) -> Option<&'static str> {
+    match id {
+        "agents" => Some("agent list"),
+        "overview" => Some("agent overview"),
+        "configure-agents" => Some("agent configure"),
+        "agent-control" => Some("agent control"),
+        _ => None,
+    }
 }
 
 impl Cli {
@@ -298,6 +342,14 @@ impl Cli {
         Self {
             command: match self.command {
                 Command::LegacyNotif(action) => Command::Notif(action),
+                Command::Agents { json } => Command::Agent(AgentAction::List { json }),
+                Command::Overview { json } => Command::Agent(AgentAction::Overview { json }),
+                Command::ConfigureAgents { binary } => {
+                    Command::Agent(AgentAction::Configure { binary })
+                }
+                Command::AgentControl { thread, action } => {
+                    Command::Agent(AgentAction::Control { thread, action })
+                }
                 command => command,
             },
         }
@@ -384,14 +436,22 @@ fn run() -> std::io::Result<()> {
         Command::Notif(notif_cli::Action::Secret(options)) => return secret_cli::run(options),
         Command::AutoWorkers(options) => {
             if let Err(error) = auto_workers_cli::run(options) {
-                eprintln!("hey-boss auto-workers: {error}");
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss auto-workers: {error}");
+                }
                 std::process::exit(error.exit_code());
             }
             return Ok(());
         }
         Command::Worker(options) => {
             if let Err(error) = worker_cli::run(options) {
-                eprintln!("hey-boss worker: {error}");
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss worker: {error}");
+                }
                 std::process::exit(error.exit_code());
             }
             return Ok(());
@@ -457,7 +517,7 @@ fn run() -> std::io::Result<()> {
                 None => health_cli::run(action),
             };
         }
-        Command::ConfigureAgents { binary } => {
+        Command::Agent(AgentAction::Configure { binary }) => {
             if binary.is_empty()
                 && agent_permissions::configure_pending(&std::env::current_exe()?.canonicalize()?)?
             {
@@ -465,7 +525,7 @@ fn run() -> std::io::Result<()> {
             }
             return agent_permissions::configure(binary);
         }
-        Command::AgentControl { thread, action } => {
+        Command::Agent(AgentAction::Control { thread, action }) => {
             use std::io::Read;
             let mut bytes = Vec::new();
             std::io::stdin().take(32769).read_to_end(&mut bytes)?;
@@ -534,7 +594,7 @@ fn run() -> std::io::Result<()> {
             },
         );
     }
-    if let Command::Agents { json } = &cli.command {
+    if let Command::Agent(AgentAction::List { json }) = &cli.command {
         let snapshot = hey_boss::agents::scan();
         if *json {
             println!("{}", serde_json::to_string(&snapshot)?);
@@ -557,8 +617,8 @@ fn run() -> std::io::Result<()> {
         }
         return Ok(());
     }
-    if let Command::Overview { json } | Command::Notif(notif_cli::Action::Inbox { json }) =
-        &cli.command
+    if let Command::Agent(AgentAction::Overview { json })
+    | Command::Notif(notif_cli::Action::Inbox { json }) = &cli.command
     {
         let executable = std::env::current_exe()?.canonicalize()?;
         initialize(&executable)?;
@@ -659,6 +719,56 @@ fn print_response(result: hey_boss::Response, json: bool) -> std::io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn agent_commands_are_grouped_and_legacy_names_still_parse() {
+        for args in [
+            vec!["agent", "list", "--json"],
+            vec!["agent", "overview", "--json"],
+            vec!["agent", "configure"],
+            vec!["agent", "control", "--thread", "thread-1", "inspect"],
+            vec!["agents", "--json"],
+            vec!["overview", "--json"],
+            vec!["configure-agents"],
+            vec!["agent-control", "--thread", "thread-1", "inspect"],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("hey-boss").chain(args))
+                .unwrap()
+                .canonicalize();
+            assert!(matches!(cli.command, Command::Agent(_)));
+        }
+        let cli = Cli::parse_from(["hey-boss", "agents", "--json"]).canonicalize();
+        assert!(matches!(
+            cli.command,
+            Command::Agent(AgentAction::List { json: true })
+        ));
+        let cli = Cli::parse_from([
+            "hey-boss",
+            "agent-control",
+            "--thread",
+            "thread-1",
+            "inspect",
+        ])
+        .canonicalize();
+        assert!(
+            matches!(cli.command, Command::Agent(AgentAction::Control { thread, action }) if thread == "thread-1" && action == "inspect")
+        );
+        let root = Cli::command();
+        for name in ["agents", "overview", "configure-agents", "agent-control"] {
+            assert!(root.find_subcommand(name).unwrap().is_hide_set());
+        }
+    }
+
+    #[test]
+    fn worker_commands_require_an_action_and_accept_trailing_json() {
+        for group in ["worker", "auto-workers"] {
+            assert!(Cli::try_parse_from(["hey-boss", group]).is_err());
+            for action in ["run", "status", "list", "watch"] {
+                assert!(Cli::try_parse_from(["hey-boss", group, action, "--json"]).is_ok());
+            }
+        }
+    }
 
     impl Cli {
         fn into_test_request(self) -> std::io::Result<(Request, Output)> {

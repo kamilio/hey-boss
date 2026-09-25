@@ -1,68 +1,73 @@
 use clap::{Args, Subcommand};
 use hey_boss::issues::{self, Error, Operation, Request, Result, Store, worker::Settings};
 #[derive(Args)]
+#[command(arg_required_else_help = true)]
 pub struct Options {
     /// Run on the authoritative SSH host; Codex sessions run there too.
-    #[arg(long)]
+    #[arg(long, global = true)]
     host: Option<String>,
     /// Parallel Codex sessions owned by this worker; there is no shared pool cap.
-    #[arg(long)]
+    #[arg(long, global = true)]
     concurrency: Option<u32>,
     /// Only pick issues matching every selected tag; omit for unrestricted tags.
-    #[arg(long = "tag")]
+    #[arg(long = "tag", global = true)]
     tags: Vec<String>,
     /// Project ID/name; repeat to scan several projects. Defaults to this checkout.
-    #[arg(long, conflicts_with = "all_projects")]
+    #[arg(long, conflicts_with = "all_projects", global = true)]
     project: Vec<String>,
     /// Scan all visible projects with known local checkout directories.
-    #[arg(long)]
+    #[arg(long, global = true)]
     all_projects: bool,
     /// Checkout to work in; repeat for multiple projects. Paths belong to --host when remote.
     #[arg(
         long = "cwd",
         short = 'C',
         visible_alias = "directory",
-        conflicts_with = "all_projects"
+        conflicts_with = "all_projects",
+        global = true
     )]
     directory: Vec<std::path::PathBuf>,
-    #[arg(long)]
+    #[arg(long, global = true)]
     name: Option<String>,
     /// Restore this worker's saved settings; concurrent use of an ID is rejected.
-    #[arg(long)]
+    #[arg(long, id = "worker_id", global = true)]
     id: Option<String>,
-    #[arg(long)]
+    #[arg(long, global = true)]
     prompt: Option<String>,
-    #[arg(long, conflicts_with = "no_prs")]
+    #[arg(long, conflicts_with = "no_prs", global = true)]
     prs: bool,
-    #[arg(long, conflicts_with = "prs")]
+    #[arg(long, conflicts_with = "prs", global = true)]
     no_prs: bool,
     /// Use a dedicated Git worktree for each issue when the project allows it.
-    #[arg(long, conflicts_with = "no_worktree")]
+    #[arg(long, conflicts_with = "no_worktree", global = true)]
     worktree: bool,
     /// Use the existing checkout (the default workspace).
-    #[arg(long, conflicts_with = "worktree")]
+    #[arg(long, conflicts_with = "worktree", global = true)]
     no_worktree: bool,
     /// Enable the per-project hourly organizing agent, outside issue concurrency.
-    #[arg(long, conflicts_with = "no_chief")]
+    #[arg(long, conflicts_with = "no_chief", global = true)]
     chief: bool,
-    #[arg(long, conflicts_with = "chief")]
+    #[arg(long, conflicts_with = "chief", global = true)]
     no_chief: bool,
     /// Seconds allowed for Codex to claim its reserved issue.
-    #[arg(long)]
+    #[arg(long, global = true)]
     claim_timeout: Option<u32>,
-    #[arg(long)]
-    json: bool,
+    #[arg(long, global = true)]
+    pub json: bool,
     /// Finished-attempt history (0 keeps only active or pending attempts).
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=20))]
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=20), global = true)]
     history: u8,
     #[command(subcommand)]
     action: Option<Action>,
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Start an independent worker and show its live activity.
+    Run,
+    /// Print one status snapshot without starting workers or opening a dashboard.
     #[command(visible_alias = "list")]
     Status,
-    /// Observe existing workers every two seconds; never start or control them.
+    /// Watch existing workers; terminal dashboard or text/JSON snapshots every two seconds.
     Watch {
         /// Stop after this many snapshots; omit to watch until Ctrl-C.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
@@ -80,7 +85,14 @@ enum Action {
     },
 }
 pub fn run(o: &Options) -> Result<()> {
-    if matches!(o.action, Some(Action::Status)) && dashboard_enabled(o) {
+    // Already-running older workers re-exec with --id during an upgrade.
+    // Keep that restore path while requiring an explicit run for new workers.
+    if o.action.is_none() && o.id.is_none() {
+        return Err(Error::invalid(
+            "Use hey-boss worker run to start a worker, status for a snapshot, or watch for a live view",
+        ));
+    }
+    if dashboard_enabled(o) {
         use hey_boss::worker_tui::{backend::Client, runtime};
         use std::sync::{Arc, atomic::AtomicBool};
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -144,7 +156,9 @@ pub fn run(o: &Options) -> Result<()> {
     let actor_id = format!("worker-control:{machine}:{}", std::process::id());
     let actor = issues::identity::resolve(Some(&actor_id), &machine, &cwd)?;
     let path = issues::database_path()?;
-    let mut store = if o.action.is_none() || matches!(o.action, Some(Action::Watch { .. })) {
+    let mut store = if matches!(o.action, None | Some(Action::Run))
+        || matches!(o.action, Some(Action::Watch { .. }))
+    {
         issues::worker::retry_database_busy(|| Store::open(&path))?
     } else {
         Store::open(&path)?
@@ -204,8 +218,9 @@ pub fn run(o: &Options) -> Result<()> {
         }
         return Ok(());
     }
-    if let Some(action) = &o.action {
+    if let Some(action) = o.action.as_ref().filter(|a| !matches!(a, Action::Run)) {
         let operation = match action {
+            Action::Run => unreachable!("Run starts a worker below"),
             Action::Restart { .. } => {
                 unreachable!("Restart is routed through the fleet supervisor")
             }
@@ -232,7 +247,7 @@ pub fn run(o: &Options) -> Result<()> {
             Action::Pause { id } => {
                 hey_boss::fleet::record_local_worker(id, None, "pause")?;
             }
-            Action::Status | Action::Restart { .. } | Action::Watch { .. } => {}
+            Action::Run | Action::Status | Action::Restart { .. } | Action::Watch { .. } => {}
         }
         value["store"] = serde_json::json!({"host":issues::identity::host(),"database":issues::database_path()?});
         if matches!(action, Action::Status) {
@@ -351,10 +366,11 @@ pub fn run(o: &Options) -> Result<()> {
 
 fn dashboard_enabled(o: &Options) -> bool {
     use std::io::IsTerminal;
-    !matches!(o.action, Some(Action::Watch { .. }))
-        && !o.json
-        && std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal()
+    dashboard_requested(o) && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn dashboard_requested(o: &Options) -> bool {
+    matches!(o.action, Some(Action::Watch { count: None })) && !o.json
 }
 
 fn watch_snapshot(
@@ -565,6 +581,7 @@ fn remote_arguments(o: &Options) -> Vec<String> {
         }
     }
     match &o.action {
+        Some(Action::Run) => args.push("run".into()),
         Some(Action::Status) => args.push("status".into()),
         Some(Action::Watch { count }) => {
             args.push("watch".into());
@@ -575,7 +592,7 @@ fn remote_arguments(o: &Options) -> Vec<String> {
         Some(Action::Restart { id }) => args.extend(["restart".into(), id.clone()]),
         Some(Action::Stop { id }) => args.extend(["stop".into(), id.clone()]),
         Some(Action::Pause { id }) => args.extend(["pause".into(), id.clone()]),
-        None => {}
+        None => args.push("run".into()),
     }
     args
 }
@@ -596,7 +613,7 @@ fn run_remote(o: &Options, host: &str) -> Result<()> {
     if !hey_boss::health::remote::valid_host(host) {
         return Err(Error::invalid("Invalid authoritative SSH host"));
     }
-    if o.action.is_none()
+    if matches!(o.action, None | Some(Action::Run))
         && o.id.is_none()
         && o.directory.is_empty()
         && !o.all_projects
@@ -606,11 +623,12 @@ fn run_remote(o: &Options, host: &str) -> Result<()> {
             "A remote worker needs --cwd PATH, --project, or --all-projects on the authoritative host; Codex sessions run on that host",
         ));
     }
-    let status = std::process::Command::new("ssh")
+    let mut command = std::process::Command::new("ssh");
+    command
         .args([
             if std::io::stdin().is_terminal()
                 && !o.json
-                && !matches!(o.action, Some(Action::Watch { .. }))
+                && matches!(o.action, None | Some(Action::Run))
             {
                 "-t"
             } else {
@@ -627,8 +645,22 @@ fn run_remote(o: &Options, host: &str) -> Result<()> {
             host,
         ])
         .arg(remote_script(&remote_arguments(o)))
-        .env("SFT_NO_BROWSER", "1")
-        .status()?;
+        .env("SFT_NO_BROWSER", "1");
+    let status = if o.json && !matches!(o.action, None | Some(Action::Run | Action::Watch { .. })) {
+        use std::io::Write;
+        let output = command.output()?;
+        std::io::stderr().write_all(&output.stderr)?;
+        if output.status.success() {
+            std::io::stdout().write_all(&output.stdout)?;
+        } else if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            && let Ok(error) = serde_json::from_value::<Error>(value["error"].clone())
+        {
+            return Err(error);
+        }
+        output.status
+    } else {
+        command.status()?
+    };
     if !status.success() {
         return Err(Error::new(
             "transport_error",
@@ -748,7 +780,8 @@ mod tests {
     #[test]
     fn explicit_checkouts_cannot_be_combined_with_all_projects() {
         assert!(
-            TestCli::try_parse_from(["worker", "-C", "/work/atlas", "--all-projects"]).is_err()
+            TestCli::try_parse_from(["worker", "run", "-C", "/work/atlas", "--all-projects"])
+                .is_err()
         );
     }
     #[test]
@@ -765,6 +798,7 @@ mod tests {
             "Atlas",
             "--project",
             "Beacon",
+            "run",
         ])
         .unwrap();
         let args = remote_arguments(&cli.options);
@@ -828,8 +862,27 @@ mod tests {
 
     #[test]
     fn json_status_does_not_enable_the_dashboard() {
-        let cli = TestCli::parse_from(["worker", "--json", "status"]);
-        assert!(!dashboard_enabled(&cli.options));
+        for args in [
+            vec!["status"],
+            vec!["status", "--json"],
+            vec!["watch", "--json"],
+            vec!["watch", "--count", "1"],
+        ] {
+            let cli = TestCli::parse_from(std::iter::once("worker").chain(args));
+            assert!(!dashboard_requested(&cli.options));
+        }
+        let cli = TestCli::parse_from(["worker", "watch"]);
+        assert!(dashboard_requested(&cli.options));
+    }
+
+    #[test]
+    fn legacy_saved_worker_reload_survives_but_new_workers_need_run() {
+        let legacy = TestCli::parse_from(["worker", "--id", "saved", "--json"]);
+        let forwarded = remote_arguments(&legacy.options);
+        assert_eq!(forwarded.last().unwrap(), "run");
+        assert!(forwarded.windows(2).any(|args| args == ["--id", "saved"]));
+        let missing = TestCli::parse_from(["worker", "--json"]);
+        assert_eq!(run(&missing.options).unwrap_err().code, "invalid_input");
     }
 
     #[test]

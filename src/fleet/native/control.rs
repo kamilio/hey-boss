@@ -43,7 +43,7 @@ pub(super) fn start_worker(ctx: &Context, worker: &Value) -> Result<u32> {
     let logfile = open_worker_log(ctx, id)?;
     let mut command = Command::new(&ctx.binary);
     command
-        .args(["worker", "--id", id, "--json"])
+        .args(["worker", "run", "--id", id, "--json"])
         .env_remove("HEY_BOSS_ISSUE_HOST")
         .env("HEY_BOSS_FLEET_MANAGED", "1")
         .env("HEY_BOSS_ISSUE_DB", &ctx.path)

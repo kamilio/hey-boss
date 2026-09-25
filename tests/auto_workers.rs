@@ -64,7 +64,11 @@ impl Fixture {
         c
     }
     fn cli(&self, args: &[&str]) -> Value {
-        let output = self.command(args).output().unwrap();
+        let mut command = self.command(args);
+        if !args.contains(&"--json") {
+            command.arg("--json");
+        }
+        let output = command.output().unwrap();
         assert!(
             output.status.success(),
             "{args:?}: {} {}",
@@ -168,7 +172,7 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
             f.root.join("checkout").to_str().unwrap(),
         ]);
         assert_eq!(replay["worker_id"], id);
-        let snapshot = f.cli(&["auto-workers", "--json"]);
+        let snapshot = f.cli(&["auto-workers", "--json", "run"]);
         assert_eq!(snapshot["workers"].as_array().unwrap().len(), 1);
         assert_eq!(snapshot["workers"][0]["pid"], pid);
     }
@@ -176,8 +180,26 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
     let paused = f.cli(&["auto-workers", "--json", "status"]);
     assert_eq!(paused["workers"][0]["config"]["enabled"], false);
     assert_eq!(paused["workers"][0]["intent"], "pause");
+    let observed = f.cli(&["auto-workers", "watch", "--json", "--count", "1"]);
+    assert_eq!(observed["workers"][0]["intent"], "pause");
+    assert_eq!(observed["workers"][0]["pid"], pid);
+    let text = f.command(&["auto-workers", "status"]).output().unwrap();
+    assert!(text.status.success());
+    assert!(serde_json::from_slice::<Value>(&text.stdout).is_err());
+    assert!(String::from_utf8_lossy(&text.stdout).contains(id));
+    assert!(
+        !f.command(&["auto-workers"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        f.cli(&["auto-workers", "list", "--json"])["workers"][0]["intent"],
+        "pause"
+    );
     for _ in 0..2 {
-        let resumed = f.cli(&["auto-workers", "--json"]);
+        let resumed = f.cli(&["auto-workers", "--json", "run"]);
         assert_eq!(resumed["workers"][0]["config"]["enabled"], true);
         assert_eq!(resumed["workers"][0]["intent"], "running");
         assert_eq!(resumed["workers"][0]["pid"], pid);
@@ -185,12 +207,12 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
         assert_eq!(resumed["workers"][0]["config"]["concurrency"], 1);
         assert_eq!(unsafe { libc::kill(agent, 0) }, 0);
     }
-    let saved = f.cli(&["auto-workers", "config"]);
+    let saved = f.cli(&["auto-workers", "config", "--json"]);
     assert_eq!(saved["workers"][0]["intent"], "running");
     assert_eq!(saved["workers"][0]["config"]["enabled"], true);
     assert!(saved["workers"][0]["local_revision"].is_i64());
     f.cli(&["auto-workers", "--json", "remove", id]);
-    let draining = f.cli(&["auto-workers", "--json"]);
+    let draining = f.cli(&["auto-workers", "--json", "run"]);
     assert_eq!(draining["workers"][0]["intent"], "drain");
     assert_eq!(draining["workers"][0]["config"]["enabled"], false);
     assert_eq!(draining["workers"][0]["active"], 1);
@@ -211,7 +233,7 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
     );
     fs::write(f.root.join("checkout/release-agent"), "").unwrap();
     f.wait(|s| s["workers"][0]["active"] == 0);
-    f.cli(&["auto-workers", "--json"]);
+    f.cli(&["auto-workers", "--json", "run"]);
     f.wait(|s| s["workers"].as_array().unwrap().is_empty());
     let state: String = db
         .query_row(
@@ -222,7 +244,7 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
         .unwrap();
     assert_eq!(state, "completed");
     assert!(
-        f.cli(&["auto-workers", "--json"])["workers"]
+        f.cli(&["auto-workers", "--json", "run"])["workers"]
             .as_array()
             .unwrap()
             .is_empty(),
@@ -250,17 +272,17 @@ fn launch_resumes_saved_pauses_but_never_stopped_workers() {
     let observed = f.cli(&["auto-workers", "--json", "status"]);
     assert!(observed["workers"].as_array().unwrap().is_empty());
     assert_eq!(
-        f.cli(&["auto-workers", "config"])["workers"][0]["intent"],
+        f.cli(&["auto-workers", "config", "--json"])["workers"][0]["intent"],
         "pause"
     );
-    let started = f.cli(&["auto-workers", "--json"]);
+    let started = f.cli(&["auto-workers", "--json", "run"]);
     assert_eq!(started["workers"].as_array().unwrap().len(), 1);
     assert_eq!(started["workers"][0]["id"], "paused");
     assert!(started["workers"][0]["pid"].is_u64());
     assert_eq!(started["workers"][0]["config"]["enabled"], true);
     assert_eq!(started["workers"][0]["intent"], "running");
     assert_eq!(
-        f.cli(&["auto-workers", "config"])["workers"][1]["intent"],
+        f.cli(&["auto-workers", "config", "--json"])["workers"][1]["intent"],
         "stop"
     );
 }
@@ -282,13 +304,14 @@ fn invalid_configuration_never_starts_an_earlier_valid_worker() {
         .to_string(),
     )
     .unwrap();
-    assert!(
-        !f.command(&["auto-workers", "--json"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
+    let rejected = f
+        .command(&["auto-workers", "run", "--json"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let error: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(error["ok"], false);
+    assert!(error["error"].is_object());
     let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
     assert_eq!(
         db.query_row("SELECT count(*) FROM issue_workers", [], |r| r
@@ -382,10 +405,10 @@ fn saves_separate_checkouts_and_a_shared_multi_project_pool() {
         pool["config"]["directories"],
         json!({"github.com/fixture/left":paths[2],"github.com/fixture/right":paths[3]})
     );
-    let saved = f.cli(&["auto-workers", "config"]);
+    let saved = f.cli(&["auto-workers", "config", "--json"]);
     assert_eq!(saved["workers"].as_array().unwrap().len(), 3);
     assert_eq!(
-        f.cli(&["auto-workers", "--json"])["workers"]
+        f.cli(&["auto-workers", "--json", "run"])["workers"]
             .as_array()
             .unwrap()
             .len(),
@@ -428,7 +451,7 @@ fn dashboard_owns_only_explicit_workers_and_cannot_control_other_sessions() {
     }
     for args in [
         vec!["auto-workers", "--json", "status"],
-        vec!["auto-workers", "--json"],
+        vec!["auto-workers", "--json", "run"],
     ] {
         let snapshot = f.cli(&args);
         assert_eq!(

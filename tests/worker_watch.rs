@@ -1,5 +1,22 @@
 use hey_boss::issues::{Store, worker::Settings};
 use serde_json::Value;
+
+#[test]
+fn worker_json_failure_is_machine_readable_and_does_not_fall_back_locally() {
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .args(["worker", "status", "--host", "invalid/host", "--json"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(error["ok"], false);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid authoritative SSH host")
+    );
+}
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -7,6 +24,23 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
+
+#[test]
+fn remote_status_failure_returns_one_json_error_and_preserves_its_exit_code() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = hey_boss::admin::Temporary::new().unwrap();
+    let ssh = root.0.join("ssh");
+    fs::write(&ssh, "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"Worker missing\"}}'\nexit 3\n").unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .env("PATH", &root.0)
+        .args(["worker", "status", "--host", "fixture", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(3));
+    let error: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(error["error"]["message"], "Worker missing");
+}
 
 struct Fixture(PathBuf);
 impl Fixture {
