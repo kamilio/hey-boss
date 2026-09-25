@@ -2588,7 +2588,9 @@ fn mutate(
                     "--clear-manual-hold requires a blocked issue; use ordinary reopen for ready or closed issues",
                 ));
             }
-            if !*clear_manual_hold && !blockers.is_empty() {
+            // Reopening a closed lifecycle does not release dependency blocking.
+            // Reconciliation below keeps the issue ineligible until blockers finish.
+            if !*clear_manual_hold && issue.state != "closed" && !blockers.is_empty() {
                 let summary = blockers
                     .iter()
                     .map(|b| format!("#{} ({})", b["number"], b["source"].as_str().unwrap()))

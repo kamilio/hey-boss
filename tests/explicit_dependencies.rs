@@ -224,6 +224,52 @@ fn scheduling_changes_preserve_claims_and_reject_cycles_atomically() {
 }
 
 #[test]
+fn closed_issues_reopen_into_dependency_waiting_with_guarded_retries() {
+    let mut f = Fixture::new("closed-dependencies");
+    f.create(None);
+    f.create(Some(1));
+    f.create(None);
+    f.run(json!({"action":"set_blockers","number":3,"blockers":[2],"force":false}));
+    for number in [1, 3] {
+        f.close(number);
+        let before = f.view(number);
+        let stale = f
+            .store
+            .execute(&Fixture::request(
+                json!({"action":"reopen","number":number,"if_version":0}),
+            ))
+            .unwrap_err();
+        assert!(stale.message.contains("version"));
+        assert_eq!(f.view(number), before);
+        let mut request = Fixture::request(
+            json!({"action":"reopen","number":number,"if_version":before["version"]}),
+        );
+        request.request_id = Some(format!("reopen-{number}"));
+        let reopened = f.store.execute(&request).unwrap();
+        assert_eq!(reopened["issue"]["state"], "blocked");
+        assert!(reopened["issue"]["closed_at"].is_null());
+        assert!(reopened["issue"]["closed_by"].is_null());
+        assert_eq!(
+            reopened["issue"]["blocker_numbers"],
+            before["blocker_numbers"]
+        );
+        assert_eq!(reopened["issue"]["blocked_by"], before["blocked_by"]);
+        assert_eq!(f.store.execute(&request).unwrap(), reopened);
+        assert_eq!(f.ready(), vec![2]);
+        assert!(
+            f.store
+                .execute(&Fixture::request(
+                    json!({"action":"claim","number":number,"force":false})
+                ))
+                .is_err()
+        );
+    }
+    f.close(2);
+    assert_eq!(f.view(1)["state"], "open");
+    assert_eq!(f.view(3)["state"], "open");
+}
+
+#[test]
 fn clear_manual_hold_keeps_dependencies_and_checks_version_first() {
     let mut f = Fixture::new("explicit-hold");
     f.create(None);
