@@ -261,13 +261,16 @@ fn publish_to(
             return Err(error("Installed CLI failed build verification"));
         }
         shortcut(binary)?;
+        // The running updater can be older than the staged skill bundle.
+        let skill_source = snapshot.join("skills/hey-boss");
+        let mut skill_files = Vec::new();
+        if !skills.is_empty() {
+            collect(&skill_source, &skill_source, &mut skill_files)?;
+            skill_files.sort_by_key(|path| path == Path::new("SKILL.md"));
+        }
         for skill in skills {
-            for (relative, _) in hey_boss::skill::FILES {
-                atomic_copy(
-                    &snapshot.join("skills/hey-boss").join(relative),
-                    &skill.join(relative),
-                    0o644,
-                )?;
+            for relative in &skill_files {
+                atomic_copy(&skill_source.join(relative), &skill.join(relative), 0o644)?;
             }
         }
         // The durable receipt is the last publication step. Failed installations
@@ -456,6 +459,11 @@ mod tests {
             fs::create_dir_all(source.parent().unwrap()).unwrap();
             fs::write(source, format!("staged {relative}")).unwrap();
         }
+        fs::write(
+            temp.0.join("skills/hey-boss/references/new-workflow.md"),
+            "New in this release",
+        )
+        .unwrap();
         let skill = temp.0.join("deployed");
         let state = temp.0.join("state");
         publish_to(
@@ -490,6 +498,10 @@ mod tests {
                 format!("staged {relative}")
             );
         }
+        assert_eq!(
+            fs::read_to_string(skill.join("references/new-workflow.md")).unwrap(),
+            "New in this release"
+        );
         assert_eq!(
             fs::read_to_string(bin.with_file_name("hey-harvester")).unwrap(),
             "#!/bin/sh\necho new-hey-harvester\n"
