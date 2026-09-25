@@ -1789,7 +1789,16 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
                 }
             );
             let text = preview["prompt"].as_str().unwrap();
-            assert_eq!(text, expected);
+            if prs {
+                let (workflow, handoff) = text
+                    .split_once("\n\nThis project unblocks dependencies at Ready")
+                    .expect("PR workflows explain their Ready handoff");
+                assert_eq!(workflow, expected);
+                assert!(handoff.contains("Make stacked PRs"));
+                assert!(handoff.contains("hey-boss issue ready 1"));
+            } else {
+                assert_eq!(text, expected);
+            }
             assert_eq!(preview["use_goal"], true);
             web.ok(json!({"action":"configure_project","prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides}));
             let settings = web.ok(json!({"action":"project_settings"}));
