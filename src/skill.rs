@@ -77,7 +77,7 @@ pub fn archive() -> io::Result<Vec<u8>> {
     let output = std::process::Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
         .current_dir(&temporary.0)
-        .args(["-cf", "-", "--"])
+        .args(["--no-xattrs", "-cf", "-", "--"])
         .args(FILES.iter().map(|(path, _)| path))
         .output()?;
     if !output.status.success() {
