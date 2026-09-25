@@ -203,3 +203,37 @@ pub(crate) fn check_create(db: &Connection, project: &str, number: i64) -> Resul
     }
     Ok(())
 }
+
+/// A local success must not enqueue metadata that replay will necessarily reject.
+/// Keep this check under the caller's write transaction; never acquire or release
+/// an allocation here, and never treat an explicit ownership override as one.
+pub(crate) fn check_mutation(db: &Connection, project: &str, number: i64) -> Result<()> {
+    let denied: bool = db.query_row(
+        "SELECT role='agent' AND NOT EXISTS(
+            SELECT 1 FROM fleet_allocations a
+            JOIN fleet_allocation_deadlines d USING(project_id,issue_number)
+            JOIN issues i ON i.project_id=a.project_id AND i.number=a.issue_number
+            WHERE a.project_id=?1 AND a.issue_number=?2 AND a.node=fleet_meta.node
+              AND (i.assignee IS NOT NULL OR d.expires_at>?3)
+        ) FROM fleet_meta WHERE id=1",
+        params![project, number, super::worker::now()],
+        |row| row.get(0),
+    )?;
+    if !denied {
+        return Ok(());
+    }
+    let info = allocation(db, project, number, None)?;
+    let code = match info["reason"].as_str() {
+        Some("reserved_elsewhere") => "fleet_reserved",
+        Some("allocation_expired") => "fleet_allocation_expired",
+        _ => "fleet_allocation_missing",
+    };
+    let mut error = Error::new(
+        code,
+        format!(
+            "Changes were not saved. This companion has no valid local reservation for issue #{number}. Edit on the supervisor, or reconnect and wait for a reservation before editing offline. Do not force a claim to obtain editing access."
+        ),
+    );
+    error.details = Some(info);
+    Err(error)
+}

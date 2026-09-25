@@ -1311,6 +1311,15 @@ pub(super) fn apply_pull(
     } else {
         None
     };
+    let cursor = payload["cursor"]
+        .as_i64()
+        .filter(|cursor| *cursor >= 0)
+        .ok_or_else(|| invalid("Invalid fleet pull cursor"))?;
+    if cursor < state_get(db, "cursor", json!(0))?.as_i64().unwrap_or(0) {
+        return Err(invalid(
+            "Stale fleet pull: the cursor precedes the last committed synchronization; no changes or receipts were applied",
+        ));
+    }
     db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
     if let Some(assignments) = payload.get("chief_ownership") {
         crate::chief_ownership::apply(
@@ -3878,6 +3887,190 @@ mod tests {
         let row = &snapshot(&f.db, "agent").unwrap()["tables"]["issues"][0];
         assert_eq!(row["title"], "Online title");
         assert_eq!(row["body"], "Offline body");
+    }
+
+    #[test]
+    fn stale_snapshot_after_acknowledgment_cannot_revert_metadata() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        let stale = snapshot(&main.db, "agent").unwrap();
+        apply_pull(&agent.db, "agent", &stale, &[]).unwrap();
+        agent
+            .db
+            .execute(
+                "UPDATE issues SET labels='[\"accepted\"]',state='closed',version=version+1",
+                [],
+            )
+            .unwrap();
+        let changes = journal(&agent.db, 0).unwrap();
+        let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+        assert!(receipts.iter().all(|r| r["state"] == "applied"));
+        let current = snapshot(&main.db, "agent").unwrap();
+        apply_pull(&agent.db, "agent", &current, &receipts).unwrap();
+        assert!(journal(&agent.db, 0).unwrap().is_empty());
+        assert!(apply_pull(&agent.db, "agent", &stale, &receipts).is_err());
+        assert_eq!(
+            state_get(&agent.db, "cursor", Value::Null).unwrap(),
+            current["cursor"]
+        );
+        assert_eq!(
+            snapshot(&agent.db, "agent").unwrap()["tables"]["issues"],
+            current["tables"]["issues"]
+        );
+        // A legitimate later write still wins and advances the cursor.
+        main.db
+            .execute(
+                "UPDATE issues SET labels='[\"later\"]',state='open',version=version+1",
+                [],
+            )
+            .unwrap();
+        let later = snapshot(&main.db, "agent").unwrap();
+        assert!(later["cursor"].as_i64() > current["cursor"].as_i64());
+        apply_pull(&agent.db, "agent", &later, &[]).unwrap();
+        assert_eq!(
+            snapshot(&agent.db, "agent").unwrap()["tables"]["issues"],
+            later["tables"]["issues"]
+        );
+    }
+
+    #[test]
+    fn concurrent_metadata_comments_and_lifecycle_converge_with_drained_journals() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        let agent = Fixture::new();
+        agent.db.execute("DELETE FROM events", []).unwrap();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let request = |mut operation: Value, id: &str| -> Request {
+            if operation["action"] == "edit" {
+                operation
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("add_labels")
+                    .or_insert(json!([]));
+                operation
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("remove_labels")
+                    .or_insert(json!([]));
+            }
+            if operation["action"] == "close" {
+                operation["force"] = json!(false);
+            }
+            serde_json::from_value(json!({"version":1,"project":{"id":"named:Native fleet","name":"Native fleet"},
+                "actor":{"id":"human:fixture","kind":"human","machine":"agent","host":"fixture","cwd":"/tmp","source":"test"},
+                "operation":operation,"request_id":id})).unwrap()
+        };
+        let run = |f: &Fixture, operation: Value, id: &str| {
+            Store::open(&f.path)
+                .unwrap()
+                .execute(&request(operation, id))
+                .unwrap()
+        };
+        let sync = || {
+            let changes = journal(&agent.db, 0).unwrap();
+            let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+            assert!(
+                receipts.iter().all(|r| r["state"] == "applied"),
+                "{receipts:?}"
+            );
+            assert_eq!(
+                accept_changes(&main.db, "agent", &changes).unwrap(),
+                receipts
+            );
+            let cursor = state_get(&agent.db, "cursor", json!(0)).unwrap();
+            let payload = incremental(&main.db, "agent", cursor.as_i64().unwrap()).unwrap();
+            assert!(payload["cursor"].as_i64() > cursor.as_i64());
+            apply_pull(&agent.db, "agent", &payload, &receipts).unwrap();
+            assert!(journal(&agent.db, 0).unwrap().is_empty());
+            assert_eq!(
+                rows(
+                    &agent.db,
+                    "SELECT title,body,labels,state,assignee,version FROM issues",
+                    &[]
+                )
+                .unwrap(),
+                rows(
+                    &main.db,
+                    "SELECT title,body,labels,state,assignee,version FROM issues",
+                    &[]
+                )
+                .unwrap()
+            );
+            for table in ["comments", "events"] {
+                assert_eq!(
+                    rows(
+                        &agent.db,
+                        &format!("SELECT count(*) count FROM {table}"),
+                        &[]
+                    )
+                    .unwrap(),
+                    rows(
+                        &main.db,
+                        &format!("SELECT count(*) count FROM {table}"),
+                        &[]
+                    )
+                    .unwrap()
+                );
+            }
+        };
+        let edit = json!({"action":"edit","number":1,"add_labels":["accepted"],"if_version":1});
+        let accepted = run(&agent, edit.clone(), "offline-label");
+        assert_eq!(run(&agent, edit, "offline-label"), accepted);
+        run(
+            &main,
+            json!({"action":"edit","number":1,"title":"Later requirements"}),
+            "online-title",
+        );
+        run(
+            &agent,
+            json!({"action":"comment","number":1,"body":"Companion comment"}),
+            "offline-comment",
+        );
+        run(
+            &main,
+            json!({"action":"comment","number":1,"body":"Supervisor comment"}),
+            "online-comment",
+        );
+        sync();
+        run(
+            &agent,
+            json!({"action":"close","number":1,"comment":"Completed"}),
+            "offline-close",
+        );
+        sync();
+        let version =
+            rows(&agent.db, "SELECT version FROM issues", &[]).unwrap()[0]["version"].clone();
+        run(
+            &agent,
+            json!({"action":"reopen","number":1,"if_version":version}),
+            "offline-reopen",
+        );
+        sync();
+        assert_eq!(
+            rows(&main.db, "SELECT state,labels FROM issues", &[]).unwrap()[0],
+            json!({"state":"open","labels":"[\"accepted\"]"})
+        );
     }
 
     #[test]

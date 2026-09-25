@@ -214,6 +214,106 @@ fn success(o: Output) -> Value {
 }
 
 #[test]
+fn companion_metadata_without_allocation_fails_before_acceptance() {
+    let f = Fixture::new();
+    f.create();
+    f.run("session-a", &["close", "1"]);
+    f.sql()
+        .execute_batch("UPDATE fleet_meta SET role='agent',node='replica';")
+        .unwrap();
+    for allocation in [None, Some("another-machine")] {
+        if let Some(node) = allocation {
+            f.sql()
+                .execute(
+                    "INSERT INTO fleet_allocations SELECT project_id,number,?1 FROM issues",
+                    [node],
+                )
+                .unwrap();
+        }
+        let before = f.run("session-a", &["view", "1"]);
+        let history = f.run("session-a", &["history", "1"]);
+        for args in [
+            vec![
+                "edit",
+                "1",
+                "--label",
+                "rework needed",
+                "--request-id",
+                "metadata-retry",
+            ],
+            vec![
+                "reopen",
+                "1",
+                "--if-version",
+                "2",
+                "--request-id",
+                "lifecycle-retry",
+            ],
+        ] {
+            let denied = f.fail("session-a", &args, 4);
+            assert_eq!(
+                denied["error"]["code"],
+                if allocation.is_some() {
+                    "fleet_reserved"
+                } else {
+                    "fleet_allocation_missing"
+                }
+            );
+            assert!(
+                denied["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not saved")
+            );
+            assert_eq!(f.run("session-a", &["view", "1"]), before);
+            assert_eq!(f.run("session-a", &["history", "1"]), history);
+        }
+        assert_eq!(
+            f.sql()
+                .query_row("SELECT count(*) FROM requests", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    f.sql().execute_batch("UPDATE fleet_allocations SET node='replica'; UPDATE fleet_allocation_deadlines SET expires_at=0;").unwrap();
+    for args in [
+        vec!["edit", "1", "--label", "expired"],
+        vec!["close", "1", "--force"],
+    ] {
+        assert_eq!(
+            f.fail("session-a", &args, 4)["error"]["code"],
+            "fleet_allocation_expired"
+        );
+    }
+    f.sql()
+        .execute("UPDATE fleet_allocations SET node='another-machine'", [])
+        .unwrap();
+    // The rejected request IDs were never cached. A deliberate retry on the
+    // authority succeeds once without taking or releasing any allocation.
+    f.sql()
+        .execute("UPDATE fleet_meta SET role='controller'", [])
+        .unwrap();
+    let args = [
+        "edit",
+        "1",
+        "--label",
+        "rework needed",
+        "--request-id",
+        "metadata-retry",
+    ];
+    let edited = f.run("session-a", &args);
+    assert_eq!(edited["issue"]["labels"], json!(["rework needed"]));
+    assert_eq!(f.run("session-a", &args), edited);
+    assert_eq!(
+        f.sql()
+            .query_row("SELECT node FROM fleet_allocations", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "another-machine"
+    );
+}
+
+#[test]
 fn home_directory_does_not_create_a_project_but_explicit_projects_work() {
     let f = Fixture::new();
     let mut list = f.cmd("session-a", &["projects"]);

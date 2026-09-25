@@ -2167,6 +2167,23 @@ fn mutate(
             "This issue moved to another project; open its destination to make changes",
         ));
     }
+    // Claims and handoffs retain their dedicated registry/ownership checks.
+    // Append-only comments do not require an issue allocation during replay.
+    if matches!(
+        operation,
+        Operation::Edit { .. }
+            | Operation::SetYolo { .. }
+            | Operation::BindPlan { .. }
+            | Operation::Undraft { .. }
+            | Operation::Close { .. }
+            | Operation::Block { .. }
+            | Operation::SetBlockers { .. }
+            | Operation::Reopen { .. }
+            | Operation::Delete { .. }
+            | Operation::Restore { .. }
+    ) {
+        super::fleet::check_mutation(db, &project.id, number)?;
+    }
     let before = serde_json::to_value(&issue)?;
     let mut action = "";
     let mut data = json!({});

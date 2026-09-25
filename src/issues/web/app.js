@@ -257,7 +257,8 @@ async function mutate(operation, project = model.project.id, host = model.route.
     detailCache.delete(detailKey(project,operation.number,host));
     return result;
   } catch (error) {
-    if (["conflict", "subtask_claim_conflict", "invalid_input", "not_found"].includes(error.code))
+    if (["conflict", "subtask_claim_conflict", "invalid_input", "not_found",
+      "fleet_reserved", "fleet_allocation_expired", "fleet_allocation_missing"].includes(error.code))
       pendingMutation.delete(key);
     persistPending();
     throw error;
@@ -1114,7 +1115,11 @@ $("#detail-view").addEventListener("click", async (e) => {
   const button = e.target.closest("button");
   if (!button) return;
   if (button.hasAttribute("data-back")) navigate({ issue: null });
-  if (button.hasAttribute("data-edit")) openEditor(model.detail.issue);
+  if (button.hasAttribute("data-edit")) {
+    // Safari does not focus buttons on pointer activation.
+    button.focus({ preventScroll: true });
+    openEditor(model.detail.issue);
+  }
   if (button.hasAttribute("data-retry")) renderRoute();
   if (button.hasAttribute("data-reload")) {
     saveComment();
@@ -1575,6 +1580,7 @@ $("#editor-form").onsubmit = async (e) => {
         : error.message;
     $("#editor-error").hidden = false;
     editorBusy(false);
+    $("#editor-error").scrollIntoView({ block: "nearest" });
     if (error.code === "conflict" && (ctx.number || ctx.parent)) {
       try {
         const latest = await api(

@@ -2857,6 +2857,9 @@ button.avatar.self:hover {
 #editor-form { display:flex; flex-direction:column; max-height:calc(100dvh - 48px); }
 #editor-form .dialog-heading, #editor-form .dialog-footer { flex-shrink:0; }
 #editor-form .dialog-content { min-height:0; overflow-y:auto; }
+@media (prefers-color-scheme: dark) {
+  #editor-submit:hover { background:#4655b5; }
+}
 @media (max-width:480px) {
   .draft-notice { display:grid; grid-template-columns:18px minmax(0,1fr); gap:10px; padding:16px; }
   .draft-notice-icon { padding-top:2px; }
