@@ -3,9 +3,12 @@
 import assert from 'node:assert/strict';
 import {mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {basename, join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
 const binary=resolve(process.argv[2]);
+// The extracted worker exposes maintenance commands directly; legacy binaries
+// retain the `health` command group during a rolling installation.
+const command=basename(binary)==='hey-harvester'?[]:['health'];
 const root=realpathSync(mkdtempSync(join(tmpdir(),'hb-ownership-qa-')));
 const main=join(root,'main'), work=join(root,'owned');
 const env={...process.env,HEY_BOSS_HEALTH_DIR:join(root,'health')};
@@ -26,7 +29,7 @@ try {
   const admin=run('git',['rev-parse','--absolute-git-dir'],work).trim();
   const receipt=join(root,'receipt');writeFileSync(receipt,'pending');
   for(const state of ['queued','interrupted']) {
-    const reply=JSON.parse(run(binary,['health','remove-worktree',work,'--json']));
+    const reply=JSON.parse(run(binary,[...command,'remove-worktree',work,'--json']));
     assert(reply.errors.some(error=>error.includes(reason)),'Installed CLI must expose ownership reason');
     assert.equal(reply.phase,'Worktree preserved');
     assert(existsSync(work)&&existsSync(admin));
@@ -35,7 +38,7 @@ try {
   }
   writeFileSync(join(work,'file'),'staged recovery work');run('git',['add','file'],work);
   const index=readFileSync(join(admin,'index'));
-  const refusal=JSON.parse(run(binary,['health','remove-worktree',work,'--json']));
+  const refusal=JSON.parse(run(binary,[...command,'remove-worktree',work,'--json']));
   assert(refusal.errors.some(error=>error.includes(reason)));
   assert(readFileSync(join(admin,'index')).equals(index));
   assert.equal(run('git',['show',':file'],work).trim(),'staged recovery work');
