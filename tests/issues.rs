@@ -3157,6 +3157,64 @@ fn blocked_issue_cannot_be_drafted_while_a_worker_is_still_running() {
     f.fail("a", &["claim", "1"], 4);
 }
 
+#[test]
+fn draft_preserves_live_fleet_reservations_without_worker_runs() {
+    let f = Fixture::new();
+    let created = f.create();
+    let project = created["project"]["id"].as_str().unwrap();
+    f.sql()
+        .execute(
+            "UPDATE fleet_meta SET role='controller',node='supervisor' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    f.sql()
+        .execute(
+            "INSERT INTO fleet_allocations(project_id,issue_number,node) VALUES(?1,1,'companion')",
+            [project],
+        )
+        .unwrap();
+    f.sql().execute("UPDATE fleet_allocation_deadlines SET expires_at=9223372036854775807 WHERE project_id=?1 AND issue_number=1", [project]).unwrap();
+    let args = [
+        "edit",
+        "1",
+        "--draft",
+        "--if-version",
+        "1",
+        "--request-id",
+        "reserved-draft",
+    ];
+    let error = f.fail("a", &args, 4);
+    assert_eq!(error["error"]["code"], "conflict");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unreserved")
+    );
+    let current = f.run("a", &["view", "1"]);
+    assert_eq!(current["issue"]["draft"], false);
+    assert_eq!(current["issue"]["version"], 1);
+    assert_eq!(current["allocation"]["reserved_machine"], "companion");
+    // Expired allocations no longer reserve unassigned work. Drafting does not
+    // acquire or release the allocation, and a rejected request is retryable.
+    f.sql().execute("UPDATE fleet_allocation_deadlines SET expires_at=1 WHERE project_id=?1 AND issue_number=1", [project]).unwrap();
+    let saved = f.run("a", &args);
+    assert_eq!(saved["issue"]["draft"], true);
+    assert_eq!(saved["issue"]["assignee"], Value::Null);
+    assert_eq!(f.run("a", &args), saved);
+    assert_eq!(
+        f.sql()
+            .query_row(
+                "SELECT node FROM fleet_allocations WHERE project_id=?1 AND issue_number=1",
+                [project],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "companion"
+    );
+}
+
 // Model the released pre-draft schema without touching any live store.
 fn remove_draft_schema(f: &Fixture, version: i64) {
     f.sql().execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft; ALTER TABLE issues DROP COLUMN plan;
