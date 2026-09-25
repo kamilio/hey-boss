@@ -134,8 +134,21 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         let manual = i64::from(m["state"] == "blocked");
         m.entry("manual_blocked").or_insert(json!(manual));
         m.entry("blockers").or_insert(json!("[]"));
-        m.entry("draft").or_insert(json!(0));
-        m.entry("plan").or_insert(Value::Null);
+        // Older peers cannot express these fields. Preserve local values when
+        // merging their rows; only an explicit modern value may change them.
+        // Full modern rows take no extra database read.
+        if !m.contains_key("draft") || !m.contains_key("plan") {
+            let existing: Option<(i64, Option<String>)> = db
+                .query_row(
+                    "SELECT draft,plan FROM issues WHERE project_id=?1 AND number=?2",
+                    rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (draft, plan) = existing.unwrap_or((0, None));
+            m.entry("draft").or_insert(json!(draft));
+            m.entry("plan").or_insert(json!(plan));
+        }
         if m.get("origin").is_none_or(Value::is_null) {
             let existing: Option<Option<String>> = db
                 .query_row(
@@ -3386,6 +3399,110 @@ mod tests {
                 .unwrap(),
             "controller"
         );
+    }
+
+    #[test]
+    fn legacy_issue_rows_cannot_erase_an_existing_draft_or_plan() {
+        let f = Fixture::new();
+        let mut legacy = current_row(
+            &f.db,
+            "issues",
+            &json!({"project_id":"named:Native fleet","number":1}),
+        )
+        .unwrap();
+        legacy.as_object_mut().unwrap().remove("draft");
+        legacy.as_object_mut().unwrap().remove("plan");
+        f.db.execute(
+            "UPDATE issues SET draft=1,plan='plans/retained.md' WHERE number=1",
+            [],
+        )
+        .unwrap();
+        put_row(&f.db, "issues", &legacy).unwrap();
+        let retained = current_row(&f.db, "issues", &legacy).unwrap();
+        assert_eq!(
+            retained["draft"], 1,
+            "a sender predating drafts cannot undraft an issue"
+        );
+        assert_eq!(retained["plan"], "plans/retained.md");
+        assert_eq!(retained["version"], legacy["version"]);
+        let mut modern = retained;
+        modern["draft"] = json!(0);
+        modern["plan"] = Value::Null;
+        put_row(&f.db, "issues", &modern).unwrap();
+        let cleared = current_row(&f.db, "issues", &modern).unwrap();
+        assert_eq!(cleared["draft"], 0, "an explicit undraft still applies");
+        assert!(cleared["plan"].is_null());
+    }
+
+    #[test]
+    fn acknowledged_draft_and_close_reopen_state_survives_repeated_replication() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        for (draft, state) in [(1, "open"), (0, "open"), (0, "closed"), (0, "open")] {
+            // Each transition is an acknowledged issue-row mutation, not merely
+            // an event or a CLI receipt from an unaccepted offline write.
+            main.db.execute("INSERT OR REPLACE INTO fleet_allocations VALUES('named:Native fleet',1,'agent')", []).unwrap();
+            agent
+                .db
+                .execute(
+                    "UPDATE issues SET draft=?1,state=?2,version=version+1",
+                    rusqlite::params![draft, state],
+                )
+                .unwrap();
+            let changes = journal(&agent.db, 0).unwrap();
+            assert!(!changes.is_empty());
+            let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+            assert!(
+                receipts.iter().all(|r| r["state"] == "applied"),
+                "{receipts:?}"
+            );
+            assert_eq!(
+                accept_changes(&main.db, "agent", &changes).unwrap(),
+                receipts
+            );
+            for _ in 0..2 {
+                apply_pull(
+                    &agent.db,
+                    "agent",
+                    &snapshot(&main.db, "agent").unwrap(),
+                    &receipts,
+                )
+                .unwrap();
+                let rows = rows(
+                    &agent.db,
+                    "SELECT draft,state,version FROM issues WHERE number=1",
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(rows[0]["draft"], draft);
+                assert_eq!(rows[0]["state"], state);
+                assert_eq!(
+                    rows,
+                    super::rows(
+                        &main.db,
+                        "SELECT draft,state,version FROM issues WHERE number=1",
+                        &[]
+                    )
+                    .unwrap()
+                );
+            }
+            assert!(journal(&agent.db, 0).unwrap().is_empty());
+        }
     }
 
     #[test]

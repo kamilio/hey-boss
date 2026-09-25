@@ -1,5 +1,5 @@
 use super::{
-    Result,
+    Result, authority,
     context::{Context, encode_frame, hash, id, now, read_frame, send},
     control, conversation, pull,
     replica::{self, invalid},
@@ -670,7 +670,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
-            json!({"kind":"configure","controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","capabilities":{"authority_rpc":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
@@ -706,6 +706,12 @@ impl Supervisor {
             last_message = Instant::now();
             self.update(host, json!({"heartbeat":now()}))?;
             match message["kind"].as_str() {
+                Some("authority_request") => {
+                    let result = self
+                        .authoritative(&message["request"])
+                        .unwrap_or_else(authority::failure);
+                    send(&mut input, authority::response(&message["id"], result)?)?;
+                }
                 Some("heartbeat") => {
                     workers = self.local_config(
                         host,
@@ -827,7 +833,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut input,
-                            json!({"kind":"configure","controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","capabilities":{"authority_rpc":true},"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1211,6 +1217,35 @@ impl Supervisor {
             self.ctx.wait(Duration::from_secs(5));
         }
     }
+    fn authoritative(&self, value: &Value) -> crate::issues::Result<Value> {
+        match value["kind"].as_str() {
+            Some("resource") => {
+                let request: crate::issues::Request =
+                    serde_json::from_value(value["request"].clone())?;
+                if !matches!(
+                    request.operation,
+                    crate::issues::Operation::Mindmap { .. }
+                        | crate::issues::Operation::Artifact { .. }
+                        | crate::issues::Operation::Attachment { .. }
+                ) {
+                    return Err(crate::issues::Error::invalid(
+                        "Only maps, artifacts and attachments use the authority relay",
+                    ));
+                }
+                crate::issues::Store::open(&self.ctx.path)?.execute(&request)
+            }
+            Some("status") => self
+                .status()
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
+            Some("overview") => self
+                .overview()
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
+            _ => Err(crate::issues::Error::invalid(
+                "Unsupported authority request",
+            )),
+        }
+    }
+
     fn handle(&self, mut stream: UnixStream) -> Result<()> {
         // macOS accepted sockets inherit the listener's nonblocking mode.
         // Blocking writes with the existing timeout must send the whole frame.
@@ -1464,6 +1499,24 @@ mod tests {
         (directory, app)
     }
 
+    #[test]
+    fn authority_relay_cannot_execute_arbitrary_issue_or_worker_operations() {
+        let (_directory, app) = test_supervisor();
+        for request in [
+            json!({"kind":"signal","worker":"other","signal":"stop"}),
+            json!({"kind":"resource","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"list","state":"all"}}}),
+        ] {
+            assert_eq!(
+                app.authoritative(&request).unwrap_err().code,
+                "invalid_input"
+            );
+        }
+        assert_eq!(
+            app.authoritative(&json!({"kind":"status"})).unwrap()["ok"],
+            true
+        );
+    }
+
     fn large_report_supervisor() -> (TestDirectory, Supervisor) {
         let (directory, app) = test_supervisor();
         app.ctx.db().unwrap().execute_batch(
@@ -1512,7 +1565,15 @@ mod tests {
     fn deployment_fixture(status: &str) -> (TestDirectory, Supervisor, TestTransport, Value) {
         let (directory, mut app) = test_supervisor();
         app.ctx.binary = directory.0.join("upgrade-cli");
-        let transport = TestTransport(Command::new("sleep").arg("60").spawn().unwrap());
+        // Keep the transport alive until the fixture closes it. A wall-clock
+        // sleep can expire during slow Git/source checks and mimic a kill.
+        let transport = TestTransport(
+            Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let (tx, _rx) = mpsc::sync_channel(1);
         app.state
             .lock()

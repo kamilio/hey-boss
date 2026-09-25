@@ -54,11 +54,18 @@ remain available and never remove content to meet a read budget.
 
 The default project is the current Git repository, shared across worktrees. `--project Atlas` selects an unambiguous project name or a full project ID. `HEY_BOSS_ISSUE_PROJECT` is honored in worker sessions. `--host devbox` / `HEY_BOSS_ISSUE_HOST` use the authoritative SSH issue store, with no local fallback. Both machines need a CLI version with mindmap support.
 
-Mindmaps are not included in fleet's offline issue replicas. From a fleet agent,
-target its supervisor explicitly with `--host SUPERVISOR` or
-`HEY_BOSS_ISSUE_HOST`; local map reads and edits report this requirement. The web
-viewer can use the same remote host. Standalone stores and supervisor stores
-support local maps normally.
+Mindmaps are not included in fleet's offline issue replicas. Companions route
+map reads and edits, including the web viewer's artifacts and file attachments,
+through their existing authenticated
+supervisor connection. No additional SSH host or credentials are needed. `fleet
+status` uses that connection too. Both ends must support authoritative routing;
+an offline or older supervisor produces an actionable error without reading or
+writing a local map. Explicit `--host` and `HEY_BOSS_ISSUE_HOST` still take precedence.
+Version guards, actor identity and request IDs are checked by the supervisor.
+If a connection drops during a write, retry with the same `--request-id`; an
+unacknowledged write may already have completed. Requests are not queued for
+offline replay. Fleet responses are limited to 16 MiB; narrow large map reads
+with `--bodies omit`, `view NODE`, or `links NODE`.
 
 ## References and links
 

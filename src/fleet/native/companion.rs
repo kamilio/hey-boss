@@ -1,5 +1,5 @@
 use super::{
-    Result,
+    Result, authority,
     context::{Context, now, read_frame, send},
     control, conversation, pull,
     replica::{self, invalid},
@@ -105,6 +105,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
     }
     replica::install_capture(&db, "agent", &ctx.node)?;
     let output = Arc::new(Mutex::new(std::io::stdout()));
+    let relay = authority::Relay::start(&ctx, output.clone())?;
     let chief_ownership = crate::chief_ownership::read(&db)?;
     reply(
         &output,
@@ -138,7 +139,11 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
             continue;
         };
         match message["kind"].as_str() {
-            Some("configure") => reply(&output, control::configure_companion(&ctx, &message)?)?,
+            Some("configure") => {
+                relay.configure(&message);
+                reply(&output, control::configure_companion(&ctx, &message)?)?;
+            }
+            Some("authority_reply") => relay.receive(message),
             Some("pull") => {
                 replica::apply_pull(
                     &db,
