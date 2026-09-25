@@ -64,7 +64,7 @@ try {
     await renderTerminalPng(screen.rawLines.join('\n'), {output: path.join(output, name + '.png')});
     return screen;
   };
-  const observer = await open(['auto-workers', 'status']);
+  const observer = await open(['auto-workers', 'watch']);
   await observer.waitFor('0 available / 0 slots', {scope: 'screen', timeout: 15000});
   await observer.type('w');
   await observer.waitFor('Finishing work before pause', {scope: 'screen', timeout: 15000});
@@ -73,7 +73,7 @@ try {
   await observer.type('q');
   assert.equal(await observer.waitForExit({timeout: 5000}), 0);
   assert.equal((await status()).workers[0].config.enabled, false, 'Observation resumed pickup');
-  const resumed = await open(['auto-workers']);
+  const resumed = await open(['auto-workers', 'run']);
   await resumed.waitFor('0 available / 1 slots', {scope: 'screen', timeout: 15000});
   await resumed.type('w');
   await resumed.waitFor('BUSY', {scope: 'screen', timeout: 15000});
