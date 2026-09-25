@@ -1,5 +1,6 @@
 DROP VIEW issue_pickup_ready;
 CREATE VIEW issue_pickup_ready AS
+ -- ready_dependencies: workers attest PR readiness; no CI gate.
  SELECT i.project_id,i.number FROM issues i JOIN projects p ON p.id=i.project_id
  WHERE i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
  AND NOT EXISTS(
@@ -21,7 +22,7 @@ CREATE VIEW issue_pickup_ready AS
     JOIN issues child ON child.project_id=r.project_id AND child.number=r.child_number
     WHERE r.project_id=i.project_id AND child.deleted_at IS NULL
   ) SELECT 1 FROM preceding previous JOIN issues sibling ON sibling.project_id=i.project_id AND sibling.number=previous.number
-   WHERE sibling.state IN ('open','blocked') OR EXISTS(
+   WHERE (sibling.state IN ('open','blocked') OR (sibling.state='ready' AND NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=i.project_id AND s.prs_enabled=1))) OR EXISTS(
     SELECT 1 FROM fleet_deferred_subtasks d WHERE d.project_id=i.project_id AND json_extract(d.row_json,'$.parent_number')=previous.number)
  )
  AND NOT EXISTS(
@@ -32,6 +33,7 @@ CREATE VIEW issue_pickup_ready AS
     WHERE r.project_id=i.project_id AND child.deleted_at IS NULL
   ) SELECT 1 FROM fleet_deferred_subtasks d JOIN family f ON json_extract(d.row_json,'$.parent_number')=f.number WHERE d.project_id=i.project_id
  )
+ AND NOT EXISTS(SELECT 1 FROM json_each(i.blockers) link LEFT JOIN issues dependency ON dependency.project_id=i.project_id AND dependency.number=link.value WHERE dependency.number IS NULL OR (dependency.deleted_at IS NULL AND dependency.state!='closed' AND (dependency.state!='ready' OR NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=i.project_id AND s.prs_enabled=1))))
  AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL)
  AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.id=(
   SELECT latest.id FROM worker_runs latest WHERE latest.project_id=i.project_id AND latest.issue_number=i.number AND latest.finished_at IS NOT NULL
@@ -47,5 +49,5 @@ CREATE VIEW issue_pickup_ready AS
    SELECT r.child_number FROM issue_subtasks r JOIN descendants d ON r.parent_number=d.number
     JOIN issues child ON child.project_id=r.project_id AND child.number=r.child_number
     WHERE r.project_id=i.project_id AND child.deleted_at IS NULL
-  ) SELECT 1 FROM descendants d JOIN issues child ON child.project_id=i.project_id AND child.number=d.number WHERE child.state IN ('open','blocked')
+  ) SELECT 1 FROM descendants d JOIN issues child ON child.project_id=i.project_id AND child.number=d.number WHERE (child.state IN ('open','blocked') OR (child.state='ready' AND NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=i.project_id AND s.prs_enabled=1)))
  );

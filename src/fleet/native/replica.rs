@@ -695,8 +695,8 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                     "Issue allocation was revoked or belongs to another machine",
                 ));
             }
-            if after["state"] == "closed"
-                && before["state"] != "closed"
+            if (after["state"] == "closed" || after["state"] == "ready")
+                && before["state"] != after["state"]
                 && ["title", "body", "labels"]
                     .iter()
                     .any(|k| old[*k] != before[*k])
@@ -3787,6 +3787,62 @@ mod tests {
         );
         main.db
             .execute("UPDATE issues SET state='closed' WHERE number=1", [])
+            .unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT state FROM issues WHERE number=2", &[]).unwrap()[0]["state"],
+            "open"
+        );
+        main.db
+            .execute("UPDATE issues SET state='open' WHERE number=1", [])
+            .unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT state FROM issues WHERE number=2", &[]).unwrap()[0]["state"],
+            "blocked"
+        );
+    }
+    #[test]
+    fn ready_dependencies_reopen_and_reblock_across_fleet_snapshots() {
+        let main = Fixture::new();
+        main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version) VALUES('named:Native fleet','Work',1,1)", []).unwrap();
+        main.capture();
+        main.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,blockers) VALUES('named:Native fleet',2,'Dependent','','open','human:fixture',0,0,1,'[]',2,'[1]');").unwrap();
+        crate::issues::blockers::reconcile_all(&main.db).unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT state,blockers FROM issues WHERE number=2",
+                &[]
+            )
+            .unwrap()[0],
+            json!({"state":"blocked","blockers":"[1]"})
+        );
+        main.db
+            .execute("UPDATE issues SET state='ready' WHERE number=1", [])
             .unwrap();
         crate::issues::blockers::reconcile_all(&main.db).unwrap();
         apply_pull(

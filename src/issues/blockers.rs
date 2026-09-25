@@ -3,6 +3,7 @@ use super::{Error, Result};
 use crate::database::Connection;
 use rusqlite::params;
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn migrate(db: &mut Connection) -> Result<()> {
@@ -60,6 +61,8 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
 }
 
 struct Graph {
+    satisfied: RefCell<BTreeMap<i64, bool>>,
+    prs_enabled: bool,
     issues: BTreeMap<i64, Value>,
     children: BTreeMap<i64, Vec<i64>>,
     parents: BTreeMap<i64, i64>,
@@ -69,14 +72,16 @@ struct Graph {
 impl Graph {
     fn load(db: &Connection, project: &str) -> Result<Self> {
         let mut graph = Self {
+            satisfied: RefCell::new(BTreeMap::new()),
+            prs_enabled: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)", [project], |r| r.get(0))?,
             issues: BTreeMap::new(),
             children: BTreeMap::new(),
             parents: BTreeMap::new(),
             previous: BTreeMap::new(),
             links: BTreeMap::new(),
         };
-        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL) FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
-        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?}), r.get::<_,String>(5)?)))? {
+        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
+        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?)))? {
             let (n, issue, links) = row?;
             graph.links.insert(n, serde_json::from_str(&links)?);
             graph.issues.insert(n, issue);
@@ -99,6 +104,14 @@ impl Graph {
                     graph.previous.insert(child, previous.clone());
                     previous.push(child);
                 }
+            }
+        }
+        let mut prs = db.prepare("SELECT issue_number,url,purpose,status FROM issue_pull_requests WHERE project_id=?1 ORDER BY created_at,url")?;
+        for row in prs.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"url":r.get::<_,String>(1)?,"purpose":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?}))))? {
+            let (n, pr) = row?;
+            if let Some(issue) = graph.issues.get_mut(&n) {
+                if !issue["pull_requests"].is_array() { issue["pull_requests"] = json!([]); }
+                issue["pull_requests"].as_array_mut().unwrap().push(pr);
             }
         }
         Ok(graph)
@@ -124,9 +137,16 @@ impl Graph {
         roots
     }
     fn unfinished(&self, n: i64) -> bool {
-        self.issues
-            .get(&n)
-            .is_none_or(|i| i["deleted_at"].is_null() && i["state"] != "closed")
+        if let Some(done) = self.satisfied.borrow().get(&n) {
+            return !done;
+        }
+        let unfinished = self.issues.get(&n).is_none_or(|i| {
+            i["deleted_at"].is_null()
+                && i["state"] != "closed"
+                && !(self.prs_enabled && i["state"] == "ready" && self.active(n).is_empty())
+        });
+        self.satisfied.borrow_mut().insert(n, !unfinished);
+        unfinished
     }
     fn descendants(&self, n: i64) -> BTreeSet<i64> {
         let mut found = BTreeSet::new();
@@ -194,6 +214,7 @@ impl Graph {
         issue.as_object_mut().unwrap().remove("created_by");
         issue.as_object_mut().unwrap().remove("assignee");
         issue.as_object_mut().unwrap().remove("reserved");
+        issue.as_object_mut().unwrap().remove("version");
         issue["source"] = json!(source);
         issue
     }
@@ -274,7 +295,42 @@ pub(super) fn reconcile(
     actor: Option<&str>,
     now: i64,
 ) -> Result<()> {
-    reconcile_graph(db, project, actor, now, false)
+    reconcile_graph(db, project, actor, now, false, false)
+}
+
+/// Reordering must not retroactively block a claimed or reserved branch.
+pub(super) fn reconcile_sequence_change(
+    db: &Connection,
+    project: &str,
+    actor: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    let graph = Graph::load(db, project)?;
+    for (&n, issue) in &graph.issues {
+        if issue["state"] == "open"
+            && issue["deleted_at"].is_null()
+            && (!issue["assignee"].is_null() || issue["reserved"] == true)
+            && graph
+                .active(n)
+                .values()
+                .any(|source| *source == "previous_subtask")
+        {
+            return Err(Error::conflict(format!(
+                "Cannot reorder subtasks: issue #{n} is claimed or reserved. Finish or release that work first."
+            )));
+        }
+    }
+    reconcile(db, project, actor, now)
+}
+
+/// Upstream rework pauses future pickups without taking running work away.
+pub(super) fn reconcile_rework(
+    db: &Connection,
+    project: &str,
+    actor: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    reconcile_graph(db, project, actor, now, false, true)
 }
 
 /// Subtask organization must preserve all existing parent and ancestor claims.
@@ -294,6 +350,7 @@ fn reconcile_graph(
     actor: Option<&str>,
     now: i64,
     upgrading: bool,
+    rework: bool,
 ) -> Result<()> {
     let graph = Graph::load(db, project)?;
     // Reordering or linking may introduce a cycle through a closed issue too.
@@ -311,16 +368,58 @@ fn reconcile_graph(
             || (issue["draft"] != true && !blockers.is_empty())
         {
             "blocked"
+        } else if issue["state"] == "ready" {
+            "ready"
         } else {
             "open"
         };
         if issue["state"] == state {
             continue;
         }
-        if !issue["assignee"].is_null() || issue["reserved"] == true {
+        if (rework || graph.prs_enabled)
+            && state == "blocked"
+            && !blockers.is_empty()
+            && (issue["state"] == "ready"
+                || !issue["assignee"].is_null()
+                || issue["reserved"] == true)
+        {
+            let dependencies = json!({"dependencies":blockers.keys().map(|n| json!([n,graph.issues.get(n).map(|i| &i["version"])])).collect::<Vec<_>>()});
+            let signature = serde_json::to_string(&dependencies)?;
+            let notified: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE project_id=?1 AND issue_number=?2 AND action='dependency_rework' AND data=?3)", params![project,number,signature], |r| r.get(0))?;
+            if !notified {
+                let author = actor.unwrap_or(issue["created_by"].as_str().unwrap());
+                let body = format!(
+                    "Dependency rework: upstream tasks {:?} need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.",
+                    blockers.keys().collect::<Vec<_>>()
+                );
+                db.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES(?1,?2,?3,?4,?5)", params![project,number,author,body,now])?;
+                let id = db.last_insert_rowid();
+                super::store::event(
+                    db,
+                    project,
+                    number,
+                    author,
+                    "commented",
+                    now,
+                    &json!({"comment_id":id,"body":body}),
+                )?;
+                super::store::event(
+                    db,
+                    project,
+                    number,
+                    author,
+                    "dependency_rework",
+                    now,
+                    &dependencies,
+                )?;
+                db.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,created_at) SELECT ?1||':'||id,id,'dependency',?2,?3 FROM worker_runs WHERE project_id=?4 AND issue_number=?5 AND finished_at IS NULL", params![format!("dependency-rework-{id}"),body,now,project,number])?;
+            }
+        }
+        if issue["state"] != "ready" && (!issue["assignee"].is_null() || issue["reserved"] == true)
+        {
             // An upgrade lets existing work drain without stealing ownership.
             // The readiness view already excludes later branches from new pickup.
-            if upgrading {
+            if upgrading || rework || graph.prs_enabled {
                 continue;
             }
             if state == "blocked" && blockers.values().any(|s| *s == "previous_subtask") {
@@ -364,7 +463,7 @@ fn reconcile_projects(db: &Connection, upgrading: bool) -> Result<()> {
         .unwrap_or_default()
         .as_millis() as i64;
     for project in projects {
-        reconcile_graph(db, &project, None, now, upgrading)?;
+        reconcile_graph(db, &project, None, now, upgrading, false)?;
     }
     Ok(())
 }
@@ -384,6 +483,22 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
         let Some(n) = issue["number"].as_i64() else {
             return;
         };
+        let mut dependencies = BTreeMap::new();
+        for root in graph.sequence_roots(n) {
+            for prior in std::iter::once(root).chain(graph.descendants(root)) {
+                dependencies.insert(prior, "previous_subtask");
+            }
+        }
+        for &linked in graph.links.get(&n).into_iter().flatten() {
+            dependencies.insert(linked, "linked");
+        }
+        issue["dependency_context"] = json!(
+            dependencies
+                .into_iter()
+                .map(|(n, source)| graph.reference(n, source))
+                .collect::<Vec<_>>()
+        );
+        issue["dependency_ready_state"] = json!(if graph.prs_enabled { "ready" } else { "closed" });
         issue["blocked_by"] = json!(
             graph
                 .active(n)

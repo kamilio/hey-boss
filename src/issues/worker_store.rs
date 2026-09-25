@@ -103,7 +103,7 @@ fn retry_count(db: &Connection, job: &Job) -> Result<i64> {
 // A human takeover must still stop the session and invalidate its completion.
 fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
     if !job.requires_pr()
-        || issue.state != "open"
+        || !matches!(issue.state.as_str(), "open" | "ready")
         || issue.deleted_at.is_some()
         || issue.assignee.as_deref() != Some("human:boss")
         || issue.title != job.issue["title"]
@@ -112,7 +112,7 @@ fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
         return Ok(false);
     }
     Ok(db.query_row(
-        "SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.assignee')='human:boss' AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",
+        "SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.assignee')='human:boss' AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",
         params![job.project.id, job.number(), job.actor.id],
         |r| r.get(0),
     )?)
@@ -557,7 +557,10 @@ impl Store {
                     .unwrap_or(worker_infrastructure::GUIDANCE)
             );
         }
-        if (own || handed_off) && issue.deleted_at.is_none() && issue.state == "open" {
+        if (own || handed_off)
+            && issue.deleted_at.is_none()
+            && matches!(issue.state.as_str(), "open" | "ready")
+        {
             // Delivery/goal completion is not an issue-resolution decision.
             // Only the owning agent's explicit Close may resolve the issue.
             // Failed attempts remain in run history; retries must not flood the
@@ -579,9 +582,16 @@ impl Store {
                     &tx,
                     &job.project,
                     &job.actor,
-                    &Operation::AssignBoss {
-                        number: job.number(),
-                        force: false,
+                    &if registry::project_settings(&tx, &job.project)?["prs_enabled"] == true {
+                        Operation::Ready {
+                            number: job.number(),
+                            force: false,
+                        }
+                    } else {
+                        Operation::AssignBoss {
+                            number: job.number(),
+                            force: false,
+                        }
                     },
                     now(),
                 )?;
@@ -731,6 +741,9 @@ mod tests {
                 machine: "unit".into(),
             };
             store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,claimed_at) VALUES(?1,?2,1,?3,?4,'running',1,'start','unit',0,0,0)", params![job.id,job.project.id,serde_json::to_string(&job).unwrap(),job.actor.id]).unwrap();
+            if prs {
+                store.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version) VALUES(?1,'Work',1,1)", [&job.project.id]).unwrap();
+            }
             let mut fixture = Self { store, job, root };
             fixture.apply(Operation::Comment {
                 number: 1,
@@ -1466,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_completion_hands_open_issue_to_boss_and_preserves_history() {
+    fn pr_completion_marks_ready_for_boss_and_preserves_history() {
         let mut f = HandoffFixture::new(true);
         f.store
             .worker_finish(
@@ -1475,7 +1488,7 @@ mod tests {
                 "Fix PR is ready for review; not merged.",
             )
             .unwrap();
-        assert_eq!(f.issue().state, "open");
+        assert_eq!(f.issue().state, "ready");
         assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
         assert_eq!(f.state(), "completed");
         assert!(f.issue().closed_at.is_none());
@@ -1529,7 +1542,7 @@ mod tests {
             .worker_finish(&f.job, "completed", "Ready for Boss.")
             .unwrap();
         assert_eq!(f.state(), "completed");
-        assert_eq!(f.issue().state, "open");
+        assert_eq!(f.issue().state, "ready");
         assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
         assert_eq!(
             f.store
@@ -1538,6 +1551,21 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn explicit_ready_handoff_keeps_worker_alive_and_finishes_once() {
+        let mut f = HandoffFixture::new(true);
+        f.apply(Operation::Ready {
+            number: 1,
+            force: false,
+        });
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        f.store
+            .worker_finish(&f.job, "completed", "Ready PR")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.issue().state, "ready");
     }
 
     #[test]

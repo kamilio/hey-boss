@@ -189,7 +189,7 @@ enum Action {
     RestoreProject,
     /// List open issues in the current project.
     List {
-        #[arg(long, default_value = "open", value_parser = ["open", "blocked", "closed", "all", "deleted"])]
+        #[arg(long, default_value = "open", value_parser = ["open", "blocked", "ready", "closed", "all", "deleted"])]
         state: String,
         #[arg(long, conflicts_with = "unassigned")]
         mine: bool,
@@ -305,6 +305,12 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
+    /// Mark an attached PR ready for Boss and unblock dependent tasks.
+    Ready {
+        number: i64,
+        #[arg(long)]
+        force: bool,
+    },
     /// Assign an open issue to Boss.
     #[command(visible_alias = "assign-boss")]
     AssignToBoss {
@@ -369,7 +375,7 @@ enum Action {
     },
     Block {
         number: i64,
-        /// Issue that must close first; repeat for multiple blockers.
+        /// Issue that must be Ready (PR projects) or Closed first; repeat for multiple blockers.
         #[arg(long = "by")]
         blockers: Vec<i64>,
         #[arg(long)]
@@ -377,7 +383,7 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
-    /// Reopen a blocked or closed issue without assigning it.
+    /// Reopen a blocked, ready, or closed issue without assigning it.
     Reopen {
         number: i64,
         /// Reject reopening if another writer has changed this version.
@@ -806,6 +812,10 @@ impl Options {
             Action::Undraft { number } => Operation::Undraft { number: *number },
             Action::PlanSync => unreachable!(),
             Action::Claim { number, force } => Operation::Claim {
+                number: *number,
+                force: *force,
+            },
+            Action::Ready { number, force } => Operation::Ready {
                 number: *number,
                 force: *force,
             },
@@ -1294,8 +1304,8 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(projects) = value["projects"].as_array() {
         println!(
-            "{:<28} {:>6} {:>8} {:>10} {:>8} {:>7} {:>8}  PROJECT",
-            "NAME", "OPEN", "CLAIMED", "UNASSIGNED", "BLOCKED", "CLOSED", "DELETED"
+            "{:<28} {:>6} {:>8} {:>10} {:>8} {:>7} {:>7} {:>8}  PROJECT",
+            "NAME", "OPEN", "CLAIMED", "UNASSIGNED", "BLOCKED", "READY", "CLOSED", "DELETED"
         );
         for project in projects {
             let name = format!(
@@ -1310,12 +1320,13 @@ pub(crate) fn print_text(value: &Value) {
             let open = project["open"].as_i64().unwrap_or(0);
             let unassigned = project["unassigned"].as_i64().unwrap_or(0);
             println!(
-                "{:<28} {:>6} {:>8} {:>10} {:>8} {:>7} {:>8}  {}",
+                "{:<28} {:>6} {:>8} {:>10} {:>8} {:>7} {:>7} {:>8}  {}",
                 name,
                 open,
                 open - unassigned,
                 unassigned,
                 project["blocked"].as_i64().unwrap_or(0),
+                project["ready"].as_i64().unwrap_or(0),
                 project["closed"].as_i64().unwrap_or(0),
                 project["deleted"].as_i64().unwrap_or(0),
                 line(&project["id"])
@@ -1613,7 +1624,7 @@ fn print_issue_line(issue: &Value) {
             }
         }
         println!(
-            "  Read the parent and previous subtask with `hey-boss issue view NUMBER` for requirements, completion notes, and PRs. Leave a handoff before closing; later subtasks wait for this one."
+            "  Read the parent and previous subtask with `hey-boss issue view NUMBER` for requirements, completion notes, and PRs. Leave a handoff before marking Ready (PR projects) or closing; later subtasks wait for this one."
         );
     }
     if let Some(total) = issue["subtasks"]["total"].as_u64() {

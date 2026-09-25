@@ -43,7 +43,7 @@ mod transfer;
 use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 const CONTENTION_BUDGET: Duration = Duration::from_secs(6);
 
 fn cached_response(
@@ -202,7 +202,7 @@ fn migration_error(error: Error, path: &Path) -> Error {
 // Rebuild only the constrained table, retaining every column, index and fleet
 // journal trigger. Foreign keys are disabled outside this atomic transaction;
 // copying rows must not emit changes or rewrite child references.
-fn migrate_blocked(db: &Connection) -> Result<()> {
+fn migrate_issue_states(db: &Connection) -> Result<()> {
     let sql: String = db.query_row(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='issues'",
         [],
@@ -217,7 +217,17 @@ fn migrate_blocked(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TEMP TABLE blocked_migration AS SELECT * FROM issues; DROP TABLE issues;",
     )?;
-    db.execute_batch(&sql.replace("'open','closed'", "'open','blocked','closed'"))?;
+    db.execute_batch(
+        &sql.replace("'open','closed'", "'open','blocked','closed'")
+            .replace(
+                "'open','blocked','closed'",
+                "'open','blocked','ready','closed'",
+            )
+            .replace(
+                "state='open' OR assignee IS NULL",
+                "state IN ('open','ready') OR assignee IS NULL",
+            ),
+    )?;
     db.execute_batch(
         "INSERT INTO issues SELECT * FROM blocked_migration; DROP TABLE blocked_migration;",
     )?;
@@ -660,9 +670,9 @@ fn validate(r: &Request) -> Result<()> {
             search,
             ..
         } => {
-            if !["open", "blocked", "closed", "all", "deleted"].contains(&state.as_str()) {
+            if !["open", "blocked", "ready", "closed", "all", "deleted"].contains(&state.as_str()) {
                 return Err(Error::invalid(
-                    "State must be open, blocked, closed, all, or deleted",
+                    "State must be open, blocked, ready, closed, all, or deleted",
                 ));
             }
             if assignee.is_some() && (*mine || *unassigned) {
@@ -1009,7 +1019,7 @@ impl Store {
             .optional()?;
         let needs_sequence = prior_readiness
             .as_ref()
-            .is_none_or(|sql| !sql.contains("sequence_ancestors"));
+            .is_none_or(|sql| !sql.contains("ready_dependencies"));
         let needs_repair = version >= 10
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
@@ -1091,8 +1101,8 @@ impl Store {
                         "ALTER TABLE {table} ADD COLUMN {column} {definition};"
                     ))?;
                 }
-                if version > 0 && version < 13 {
-                    migrate_blocked(&tx)?;
+                if version > 0 && version < 15 {
+                    migrate_issue_states(&tx)?;
                 }
                 registry::repair_pr_capture(&tx)?;
                 if needs_sequence {
@@ -1364,13 +1374,15 @@ impl Store {
                     coalesce(sum(i.deleted_at IS NOT NULL),0),
                     coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL),0),
                     p.activity_at,p.hidden_at,p.created_at,
-                    coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0)
+                    coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0),
+                    coalesce(sum(i.state='ready' AND i.deleted_at IS NULL),0),
+                    EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.prs_enabled=1)
                     FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
                     WHERE EXISTS(SELECT 1 FROM project_name_keys k WHERE k.project_id=p.id) AND (?1 OR p.hidden_at IS NULL) GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
-                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?
+                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 // Older discovery registered temporary and Git metadata directories.
                 // Omit only empty entries, without deleting data or changing the
@@ -1679,6 +1691,8 @@ impl Store {
                 | Operation::Unassign { .. }
                 | Operation::Block { .. }
                 | Operation::SetBlockers { .. }
+                | Operation::Ready { .. }
+                | Operation::ConfigureProject { .. }
                 | Operation::Close { .. }
                 | Operation::Reopen { .. }
                 | Operation::Delete { .. }
@@ -1694,6 +1708,14 @@ impl Store {
                     | Operation::RemoveSubtask { .. }
             ) {
                 super::blockers::reconcile_subtasks
+            } else if matches!(r.operation, Operation::Move { .. }) {
+                super::blockers::reconcile_sequence_change
+            } else if matches!(
+                r.operation,
+                Operation::Reopen { .. } | Operation::ConfigureProject { .. }
+            ) && result["changed"] != false
+            {
+                super::blockers::reconcile_rework
             } else {
                 super::blockers::reconcile
             };
@@ -1705,8 +1727,9 @@ impl Store {
                 }
             }
         }
-        result["drafts_enabled"] =
-            registry::project_settings(&tx, &response_project)?["drafts_enabled"].clone();
+        let project_settings = registry::project_settings(&tx, &response_project)?;
+        result["prs_enabled"] = project_settings["prs_enabled"].clone();
+        result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
         let settings = super::global_settings::read(&tx)?;
         result["boss"] =
             json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
@@ -2171,27 +2194,49 @@ fn mutate(
             action = "plan_bound";
             data = json!({"plan":plan});
         }
-        Operation::Claim { force, .. } | Operation::AssignBoss { force, .. } => {
+        Operation::Claim { force, .. }
+        | Operation::AssignBoss { force, .. }
+        | Operation::Ready { force, .. } => {
             if issue.draft {
                 return Err(Error::conflict("Undraft the issue before claiming it"));
             }
             registry::claim_lock(db, project, number, actor, *force)?;
-            if issue.state != "open" {
+            let ready = matches!(operation, Operation::Ready { .. });
+            if ready {
+                if registry::project_settings(db, project)?["prs_enabled"] != true {
+                    return Err(Error::conflict(
+                        "Ready requires pull requests enabled for this project",
+                    ));
+                }
+                let attached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))", params![project.id,number], |r| r.get(0))?;
+                if !attached {
+                    return Err(Error::conflict(
+                        "Attach the task's PR before marking it Ready",
+                    ));
+                }
+            }
+            if issue.state != "open" && !(ready && issue.state == "ready") {
                 return Err(Error::conflict("Reopen the issue before claiming it"));
             }
-            if issue.assignee.is_none()
+            if (issue.assignee.is_none() || ready)
                 && super::blockers::has_dependencies(db, &project.id, number)?
             {
                 return Err(Error::conflict(
                     "This issue is blocked by unfinished issues. Complete earlier subtasks and other dependencies before claiming it.",
                 ));
             }
-            let target = if matches!(operation, Operation::AssignBoss { .. }) {
+            let target = if ready || matches!(operation, Operation::AssignBoss { .. }) {
                 "human:boss"
             } else {
                 &actor.id
             };
-            if issue.assignee.as_deref() != Some(target) {
+            let own_handoff = ready && issue.assignee.as_deref() == Some("human:boss") && db.query_row(
+                "SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",
+                params![project.id,number,actor.id], |r| r.get::<_,bool>(0),
+            )?;
+            if issue.assignee.as_deref() != Some(target)
+                || (ready && issue.state != "ready" && !own_handoff)
+            {
                 ownership(&issue, actor, *force)?;
             }
             if matches!(operation, Operation::Claim { .. }) {
@@ -2211,6 +2256,14 @@ fn mutate(
                 action = "claimed";
                 data = json!({"previous_assignee":issue.assignee,"assignee":target,"forced":force});
                 issue.assignee = Some(target.into());
+            }
+            if ready && issue.state != "ready" {
+                action = "ready";
+                // Keep the original owner in the event for deliberate worker handoff.
+                if data["assignee"].is_null() {
+                    data = json!({"assignee":target,"previous_assignee":if own_handoff { Some(actor.id.clone()) } else { issue.assignee.clone() }});
+                }
+                issue.state = "ready".into();
             }
         }
         Operation::Unassign { force, .. } => {
@@ -2413,11 +2466,11 @@ CREATE INDEX project_names ON projects(name);
 CREATE TABLE agents(id TEXT PRIMARY KEY, metadata TEXT NOT NULL CHECK(json_valid(metadata)), last_seen INTEGER NOT NULL);
 CREATE TABLE issues(
  project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL CHECK(number>0),
- title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','blocked','closed')),
+ title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','blocked','ready','closed')),
  assignee TEXT REFERENCES agents(id), created_by TEXT NOT NULL REFERENCES agents(id), closed_by TEXT REFERENCES agents(id),
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER, deleted_at INTEGER,
  version INTEGER NOT NULL CHECK(version>0), labels TEXT NOT NULL CHECK(json_valid(labels)),
- PRIMARY KEY(project_id,number), CHECK(state='open' OR assignee IS NULL), CHECK(deleted_at IS NULL OR assignee IS NULL)
+ PRIMARY KEY(project_id,number), CHECK(state IN ('open','ready') OR assignee IS NULL), CHECK(deleted_at IS NULL OR assignee IS NULL)
 );
 CREATE INDEX issue_queue ON issues(project_id,state,assignee,number) WHERE deleted_at IS NULL;
 CREATE TABLE comments(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, issue_number INTEGER NOT NULL,
