@@ -101,6 +101,7 @@ impl Fixture {
                 .env_remove("HEY_BOSS_ISSUE_HOST")
                 .args([
                     "worker",
+                    "run",
                     "--project",
                     "Worker fixture",
                     "--directory",
@@ -484,7 +485,7 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
                         .join("tests/fixtures/codex-worker.mjs"),
                 )
                 .env_remove("HEY_BOSS_ISSUE_HOST")
-                .args(["worker", "--json"])
+                .args(["worker", "run", "--json"])
                 .args(args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
@@ -1661,6 +1662,7 @@ fn private_issue_database_does_not_modify_default_fleet_configuration() {
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .args([
                 "worker",
+                "run",
                 "--project",
                 "Worker fixture",
                 "--directory",

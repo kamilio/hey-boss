@@ -741,7 +741,7 @@ def lifecycle_lock(wait=True):
 
 def start_worker(worker):
     ensure_worker(worker)
-    args = [str(BINARY), 'worker', '--id', worker['id'], '--json']
+    args = [str(BINARY), 'worker', 'run', '--id', worker['id'], '--json']
     STATE.mkdir(parents=True, exist_ok=True)
     fd = os.open(STATE / ('fleet-worker-' + hashlib.sha256(worker['id'].encode()).hexdigest()[:24] + '.log'), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:

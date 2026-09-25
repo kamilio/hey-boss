@@ -64,7 +64,7 @@ progress. `issue reopen NUMBER` resumes eligibility
 
 ## Issue workers
 
-`hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
+`hey-boss worker run --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
 
 ## Issue priority order

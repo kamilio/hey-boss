@@ -16,7 +16,7 @@ try:
  issue('settings','set','--prompt','/goal Assign and implement `{{issue_command}}`. {{commit_instruction}}')
  for n in range(a.workers):
   h=(root/('worker-'+str(n)+'.log')).open('w');handles.append(h)
-  workers.append(subprocess.Popen([str(cli),'worker','--project','Worker fixture','--concurrency','2','--tag','ready','--name','Contention '+str(n),'--json'],env=env,cwd=root,stdout=h,stderr=h))
+  workers.append(subprocess.Popen([str(cli),'worker','run','--project','Worker fixture','--concurrency','2','--tag','ready','--name','Contention '+str(n),'--json'],env=env,cwd=root,stdout=h,stderr=h))
  deadline=time.monotonic()+180
  with sqlite3.connect(root/'issues.db') as db:
   while True:

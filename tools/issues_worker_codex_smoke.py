@@ -39,7 +39,7 @@ if ordered:
 run('settings', 'set', '--prompt', '/goal Assign and implement `{{issue_command}}`. {{commit_instruction}}')
 
 with (root / 'scheduler.log').open('w') as log:
-    worker = subprocess.Popen([cli, 'worker', '--tag', 'ready'], cwd=cwd, env=env, stdout=log, stderr=log)
+    worker = subprocess.Popen([cli, 'worker', 'run', '--tag', 'ready'], cwd=cwd, env=env, stdout=log, stderr=log)
     try:
         deadline = time.monotonic() + 150
         control_disabled = False

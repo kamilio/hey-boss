@@ -2139,6 +2139,7 @@ pub fn serve_instance_with_history(
         let mut command = Command::new(reload_executable);
         command.args([
             "worker",
+            "run",
             "--id",
             &id,
             "--history",

@@ -81,7 +81,7 @@ def check(binary, mode):
                 (root / "fail").touch()
         project = "Title fixture"
         title = f"hey-boss · {project} · {root}"
-        terminal = Terminal(binary, ["--project", project, "--directory", str(root)], root, env)
+        terminal = Terminal(binary, ["run", "--project", project, "--directory", str(root)], root, env)
         dashboard = None
         try:
             terminal.wait(lambda: b"AVAILABLE" in terminal.output)
@@ -100,7 +100,7 @@ def check(binary, mode):
             assert value["projects"] == [{"id": "named:" + project, "name": project}]
             # Viewing status from a different directory must still name the worker's checkout.
             if mode == "iterm":
-                dashboard = Terminal(binary, ["--id", value["worker_id"], "status"], fake, env)
+                dashboard = Terminal(binary, ["--id", value["worker_id"], "watch"], fake, env)
                 dashboard.wait(lambda: f"\x1b]1;{title}\x07".encode() in dashboard.output)
                 dashboard.close()
                 dashboard = None

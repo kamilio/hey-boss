@@ -94,7 +94,10 @@ pub fn catalog() -> Value {
         output: &mut Vec<Value>,
     ) {
         let id = path.join(" ");
-        if path.len() == 1 && crate::notif_cli::Action::has_subcommand(&id) {
+        if path.len() == 1
+            && (crate::notif_cli::Action::has_subcommand(&id)
+                || crate::canonical_agent_command(&id).is_some())
+        {
             return;
         }
         if !path.is_empty() && id != "admin capture" {
@@ -102,7 +105,16 @@ pub fn catalog() -> Value {
             let json_supported = command
                 .get_arguments()
                 .any(|a| a.get_long() == Some("json"));
-            output.push(json!({"id":id,"group":path[0],"description":command.get_about().map(ToString::to_string).unwrap_or_default(),"aliases":command.get_all_aliases().map(str::to_owned).chain((path.len() == 2 && path[0] == "notif").then(|| format!("hey-boss {}", path[1]))).collect::<Vec<_>>(),"help":help.render_long_help().to_string(),"usage":help.render_usage().to_string(),"json_supported":json_supported,"preview":if samples.contains_key(&id) {"sample"} else {"help"}}));
+            let mut aliases: Vec<_> = command.get_all_aliases().map(str::to_owned).collect();
+            if path.len() == 2 && path[0] == "notif" {
+                aliases.push(format!("hey-boss {}", path[1]));
+            }
+            for old in ["agents", "overview", "configure-agents", "agent-control"] {
+                if crate::canonical_agent_command(old) == Some(id.as_str()) {
+                    aliases.push(format!("hey-boss {old}"));
+                }
+            }
+            output.push(json!({"id":id,"group":path[0],"description":command.get_about().map(ToString::to_string).unwrap_or_default(),"aliases":aliases,"help":help.render_long_help().to_string(),"usage":help.render_usage().to_string(),"json_supported":json_supported,"preview":if samples.contains_key(&id) {"sample"} else {"help"}}));
         }
         for child in command
             .get_subcommands()
@@ -299,6 +311,8 @@ pub fn run(options: &Options) -> io::Result<()> {
         } => {
             let canonical = if crate::notif_cli::Action::has_subcommand(id) {
                 format!("notif {id}")
+            } else if let Some(grouped) = crate::canonical_agent_command(id) {
+                grouped.into()
             } else {
                 id.clone()
             };

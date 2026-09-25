@@ -1,16 +1,19 @@
 # Saved workers by machine
 
-Run `hey-boss auto-workers` on a machine to apply its saved worker configuration and open one dashboard with project tabs. Reopening the dashboard reuses worker IDs and running processes. Quitting the dashboard leaves them running. Independent ChatGPT and Codex sessions are outside this configuration.
+Run `hey-boss auto-workers run` on a machine to apply its saved worker configuration and print status. Use `hey-boss auto-workers watch` to open the dashboard with project tabs. Reopening the dashboard reuses worker IDs and running processes. Quitting the dashboard leaves them running. Independent ChatGPT and Codex sessions are outside this configuration.
 
-Launching `hey-boss auto-workers` explicitly resumes paused pickup, including
+Launching `hey-boss auto-workers run` explicitly resumes paused pickup, including
 while current agents are finishing. It saves the running intent for fleet sync
 and starts paused workers that are offline, without adding slots or restarting
 live agents. Stopped workers and pending removals stay retired. To observe a
-paused queue without resuming it, use `hey-boss auto-workers status`; refreshes
-and `config` also leave pickup unchanged. Background reconciliation preserves
+paused queue without resuming it, use `hey-boss auto-workers watch`; refreshes
+`status`, and `config` also leave pickup unchanged. Background reconciliation preserves
 a pause until an explicit start or resume.
 
 The existing fleet supervisor and machine companions keep workers running, reconcile configuration changes, and finish graceful removals. If the fleet has not been installed, run `hey-boss fleet setup` once on the supervisor.
+
+`status` (or `list`) and `config` print one text snapshot. Add `--json` for JSON;
+`watch --json --count 3` prints three JSON records. Bare `auto-workers` shows help.
 
 ## Two worker layouts
 

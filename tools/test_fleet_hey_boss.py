@@ -712,7 +712,7 @@ class FleetTests(unittest.TestCase):
             self.fail('Worker lifecycle operation timed out')
         (self.root / 'mode.txt').write_text('delay')
         command('issue', '--project', 'Worker fixture', '--agent', 'human:fixture', '--json', 'create', '--title', 'Unfinished restart work')
-        worker = subprocess.Popen([str(BINARY), 'worker', '--project', 'Worker fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        worker = subprocess.Popen([str(BINARY), 'worker', 'run', '--project', 'Worker fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         supervisor = None
         replacement = None
         identifier = None

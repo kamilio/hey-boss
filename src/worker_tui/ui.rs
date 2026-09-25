@@ -522,7 +522,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         header.push(Line::from(if app.pending {
             " Connecting to queue…"
         } else {
-            " No current worker. Start: hey-boss worker"
+            " No current worker. Start: hey-boss worker run"
         }));
         header.push(Line::default());
         header.push(Line::default());
