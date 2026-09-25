@@ -85,11 +85,14 @@ fn shortcut(binary: &Path) -> io::Result<()> {
     }
 }
 
-fn github_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![binary.with_file_name("hey-gh")];
-    let cargo = home.join(".cargo/bin/hey-gh");
-    if cargo.exists() && !paths.contains(&cargo) {
-        paths.push(cargo);
+fn companion_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for name in ["hey-gh", "hey-harvester"] {
+        paths.push(binary.with_file_name(name));
+        let cargo = home.join(".cargo/bin").join(name);
+        if cargo.exists() && !paths.contains(&cargo) {
+            paths.push(cargo);
+        }
     }
     paths
 }
@@ -117,7 +120,7 @@ pub(super) fn publish(
             app,
             companion,
             skills,
-            github_bins: github_bins(binary, &home()?),
+            companion_bins: companion_bins(binary, &home()?),
         },
     )
 }
@@ -126,7 +129,7 @@ struct Services {
     app: Option<PathBuf>,
     companion: bool,
     skills: Vec<PathBuf>,
-    github_bins: Vec<PathBuf>,
+    companion_bins: Vec<PathBuf>,
 }
 
 fn publish_to(
@@ -141,7 +144,7 @@ fn publish_to(
         app,
         companion,
         skills,
-        github_bins,
+        companion_bins,
     } = services;
     let companion = *companion;
     let temp = Temp::new()?;
@@ -205,24 +208,32 @@ fn publish_to(
     if let Some(adjacent) = &adjacent {
         copy_tree(&staged_app, adjacent)?;
     }
-    let mut github_backups = Vec::new();
-    for (index, destination) in github_bins.iter().enumerate() {
+    let mut companion_backups = Vec::new();
+    for (index, destination) in companion_bins.iter().enumerate() {
         let saved = if destination.exists() {
-            let saved = backup.join(format!("hey-gh.{index}.previous"));
+            let saved = backup.join(format!("companion.{index}.previous"));
             fs::copy(destination, &saved)?;
             Some(saved)
         } else {
             None
         };
-        github_backups.push((destination, saved));
+        companion_backups.push((destination, saved));
     }
     let mut replaced_app = false;
     let mut replaced_binary = false;
     let result = (|| -> io::Result<()> {
         atomic_copy(built, binary, 0o755)?;
         replaced_binary = true;
-        for destination in github_bins {
-            atomic_copy(&built.with_file_name("hey-gh"), destination, 0o755)?;
+        for destination in companion_bins {
+            atomic_copy(
+                &built.with_file_name(
+                    destination
+                        .file_name()
+                        .ok_or_else(|| error("Invalid companion binary path"))?,
+                ),
+                destination,
+                0o755,
+            )?;
         }
         if let (Some(app), Some(adjacent), Some(app_backup)) = (&app, &adjacent, &app_backup) {
             fs::rename(app, app_backup)?;
@@ -258,7 +269,7 @@ fn publish_to(
         write_json(&state.join("upgrade-receipt.json"), receipt)
     })();
     if let Err(e) = result {
-        for (destination, saved) in github_backups {
+        for (destination, saved) in companion_backups {
             if let Some(saved) = saved {
                 atomic_copy(&saved, destination, 0o755)?;
             } else if destination.exists() {
@@ -318,7 +329,15 @@ mod tests {
         script(&bin, "echo previous");
         script(&built, "echo migration-failed >&2; exit 1");
         script(&built.with_file_name("hey-gh"), "echo new-hey-gh");
+        script(
+            &built.with_file_name("hey-harvester"),
+            "echo new-hey-harvester",
+        );
         script(&bin.with_file_name("hey-gh"), "echo old-hey-gh");
+        script(
+            &bin.with_file_name("hey-harvester"),
+            "echo old-hey-harvester",
+        );
         let original = fs::read(&bin).unwrap();
         let state = temp.0.join("state");
         fs::create_dir(&state).unwrap();
@@ -332,12 +351,16 @@ mod tests {
             &Services {
                 app: None,
                 companion: false,
-                github_bins: vec![],
+                companion_bins: vec![],
                 skills: Vec::new(),
             },
         );
         assert!(result.unwrap_err().to_string().contains("migration-failed"));
         assert_eq!(fs::read(&bin).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(bin.with_file_name("hey-harvester")).unwrap(),
+            "#!/bin/sh\necho old-hey-harvester\n"
+        );
         assert_eq!(
             fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
             "#!/bin/sh\necho old-hey-gh\n"
@@ -358,7 +381,15 @@ mod tests {
             "if [ \"$1\" = --version ]; then echo 'hey-boss (build 0000000000000000)'; fi; exit 0",
         );
         script(&built.with_file_name("hey-gh"), "echo new-hey-gh");
+        script(
+            &built.with_file_name("hey-harvester"),
+            "echo new-hey-harvester",
+        );
         script(&bin.with_file_name("hey-gh"), "echo old-hey-gh");
+        script(
+            &bin.with_file_name("hey-harvester"),
+            "echo old-hey-harvester",
+        );
         let original = fs::read(&bin).unwrap();
         let state = temp.0.join("state");
         fs::create_dir(&state).unwrap();
@@ -372,7 +403,10 @@ mod tests {
             &Services {
                 app: None,
                 companion: false,
-                github_bins: vec![bin.with_file_name("hey-gh")],
+                companion_bins: vec![
+                    bin.with_file_name("hey-gh"),
+                    bin.with_file_name("hey-harvester"),
+                ],
                 skills: Vec::new(),
             },
         );
@@ -403,6 +437,10 @@ mod tests {
             "if [ \"$1\" = --version ]; then echo 'hey-boss (build 1234567890abcdef)'; fi; exit 0",
         );
         script(&built.with_file_name("hey-gh"), "echo new-hey-gh");
+        script(
+            &built.with_file_name("hey-harvester"),
+            "echo new-hey-harvester",
+        );
         fs::create_dir_all(temp.0.join("skills/hey-boss")).unwrap();
         fs::write(temp.0.join("skills/hey-boss/SKILL.md"), "canonical skill").unwrap();
         let skill = temp.0.join("deployed/SKILL.md");
@@ -416,7 +454,10 @@ mod tests {
             &Services {
                 app: None,
                 companion: false,
-                github_bins: vec![bin.with_file_name("hey-gh")],
+                companion_bins: vec![
+                    bin.with_file_name("hey-gh"),
+                    bin.with_file_name("hey-harvester"),
+                ],
                 skills: vec![skill.clone()],
             },
         )
@@ -431,6 +472,10 @@ mod tests {
             PathBuf::from("hey-boss")
         );
         assert_eq!(fs::read_to_string(skill).unwrap(), "canonical skill");
+        assert_eq!(
+            fs::read_to_string(bin.with_file_name("hey-harvester")).unwrap(),
+            "#!/bin/sh\necho new-hey-harvester\n"
+        );
         assert_eq!(
             fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
             "#!/bin/sh\necho new-hey-gh\n"
