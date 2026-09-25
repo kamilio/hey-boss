@@ -2255,11 +2255,21 @@ func auditNotificationClicks() {
             let event = NSEvent.mouseEvent(with:type,location:position,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime + Double(index) * 0.02,windowNumber:window.windowNumber,context:nil,eventNumber:index,clickCount:1,pressure:type == .leftMouseUp ? 0 : 1)!
             NSApp.postEvent(event,atStart:false)
         }
-        let until = Date().addingTimeInterval(0.3)
-        while Date() < until {
-            if let event = NSApp.nextEvent(matching:.any,until:Date().addingTimeInterval(0.005),inMode:.default,dequeue:true) { NSApp.sendEvent(event) }
+        // AppKit's first mouse-down can outlast a short fixed pump interval.
+        // Buttons consume mouse-up in their tracking loop, so their action also
+        // confirms dispatch. Keep the behavior assertions below independent.
+        let before = (opens, completions, toggles)
+        let until = Date().addingTimeInterval(5)
+        var dispatched = false
+        while !dispatched && Date() < until {
+            if let event = NSApp.nextEvent(matching:.any,until:Date().addingTimeInterval(0.005),inMode:.default,dequeue:true) {
+                NSApp.sendEvent(event)
+                dispatched = event.type == .leftMouseUp && event.windowNumber == window.windowNumber
+            }
             RunLoop.main.run(until:Date().addingTimeInterval(0.005))
+            dispatched = dispatched || (opens, completions, toggles) != before
         }
+        precondition(dispatched, "Native mouse sequence did not finish dispatching")
     }
     click(card.body)
     precondition(opens == 1 && completions == 1, "Native body mouse click was swallowed")
