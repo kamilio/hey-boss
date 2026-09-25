@@ -1,4 +1,6 @@
-//! CommonMark/GFM parsing with a controlled, script-free document presentation.
+mod native;
+pub use native::render_native_document;
+// CommonMark/GFM parsing with controlled HTML and native document presentations.
 use linkify::{LinkFinder, LinkKind};
 use pulldown_cmark::{
     CodeBlockKind, Event, Options, Parser, Tag, TagEnd, TextMergeWithOffset, html,
@@ -342,6 +344,76 @@ hr {{ border:0; border-top:1px solid var(--line); margin:28px 0; }} img {{ max-w
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_links_stay_literal_in_code_and_deep_documents_remain_readable() {
+        let source = "Visit https://example.com and agent@example.com.\n\n`https://code.example.com` [unsafe](javascript:alert)";
+        let document = render_native_document(source);
+        assert!(document.contains("\"url\":\"https://example.com\""));
+        assert!(document.contains("\"url\":\"mailto:agent@example.com\""));
+        assert!(!document.contains("\"url\":\"https://code.example.com\""));
+        assert!(!document.contains("javascript:"));
+        let nested = format!("{}Deep document 🌍", "> ".repeat(200));
+        let result: serde_json::Value =
+            serde_json::from_str(&render_native_document(&nested)).unwrap();
+        assert_eq!(result["type"], "code");
+        assert_eq!(result["value"], nested);
+    }
+    #[test]
+    fn native_document_preserves_structures_and_exact_source_lines() {
+        let source = "---\ntitle: Hidden\n---\n\n# Heading 🌍\n\n- [x] **Done**\n  - Nested\n\n| Name | Value |\n|---|---:|\n| a | 2 |\n\n> [!WARNING]\n> Be careful\n\n```rust\nlet first = true;\nlet second = 2;\n```\n\n[link](https://example.com)\n\n<script>literal</script>";
+        let document: serde_json::Value =
+            serde_json::from_str(&render_native_document(source)).unwrap();
+        fn collect<'a>(
+            node: &'a serde_json::Value,
+            kind: &str,
+            out: &mut Vec<&'a serde_json::Value>,
+        ) {
+            if node["type"] == kind {
+                out.push(node);
+            }
+            if let Some(children) = node["children"].as_array() {
+                for child in children {
+                    collect(child, kind, out);
+                }
+            }
+        }
+        for kind in [
+            "heading",
+            "list",
+            "listItem",
+            "table",
+            "tableRow",
+            "tableCell",
+            "alert",
+            "code",
+            "link",
+            "html",
+            "strong",
+            "task",
+        ] {
+            let mut nodes = vec![];
+            collect(&document, kind, &mut nodes);
+            assert!(!nodes.is_empty(), "Missing {kind}");
+        }
+        let mut code = vec![];
+        collect(&document, "code", &mut code);
+        assert_eq!(code[0]["lineStart"], 18);
+        assert_eq!(code[0]["value"], "let first = true;\nlet second = 2;\n");
+        let joined: String = code[0]["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|token| token["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(joined, code[0]["value"].as_str().unwrap());
+        assert!(
+            code[0]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|token| token["kind"] == "keyword")
+        );
+    }
     #[test]
     fn bare_links_handle_pr_urls_punctuation_entities_and_unicode() {
         let html = render_fragment(
