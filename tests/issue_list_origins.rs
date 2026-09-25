@@ -78,6 +78,10 @@ fn issue_lists_keep_null_and_populated_origins_with_filters_and_pagination() {
     f.run(json!({"action":"close","number":3,"force":false}));
     f.run(json!({"action":"comment","number":2,"body":"First finding"}));
     f.run(json!({"action":"comment","number":2,"body":"Second finding"}));
+    f.run_as(
+        "codex:other",
+        json!({"action":"unassign","number":2,"force":false}),
+    );
     f.run(json!({"action":"add_subtask","number":2,"child":1}));
     f.run(json!({"action":"move","number":4,"before":1}));
     f.db.execute("UPDATE issues SET origin=NULL WHERE number IN (1,3)", [])

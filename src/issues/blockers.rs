@@ -71,8 +71,8 @@ impl Graph {
             children: BTreeMap::new(),
             links: BTreeMap::new(),
         };
-        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
-        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?}), r.get::<_,String>(5)?)))? {
+        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
+        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?}), r.get::<_,String>(5)?)))? {
             let (n, issue, links) = row?;
             graph.links.insert(n, serde_json::from_str(&links)?);
             graph.issues.insert(n, issue);
@@ -121,12 +121,34 @@ impl Graph {
         }
         result
     }
+    fn validate_subtask_claims(&self) -> Result<()> {
+        for (&number, issue) in &self.issues {
+            if issue["assignee"].is_null()
+                || !issue["deleted_at"].is_null()
+                || issue["state"] == "closed"
+            {
+                continue;
+            }
+            let blocked = issue["manual_blocked"] == true
+                || (issue["draft"] != true && !self.active(number).is_empty());
+            if (issue["state"] == "blocked") != blocked {
+                return Err(Error::new(
+                    "subtask_claim_conflict",
+                    format!(
+                        "Cannot change subtasks: issue #{number} has an existing claim that this change would release. Use mindmap nesting for organization without changing ownership, or have the owner explicitly unassign the affected issue first."
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
     fn reference(&self, n: i64, source: &str) -> Value {
         let mut issue = self.issues.get(&n).cloned().unwrap_or_else(
             || json!({"number":n,"title":"Issue unavailable","state":"blocked","deleted_at":null}),
         );
         issue.as_object_mut().unwrap().remove("manual_blocked");
         issue.as_object_mut().unwrap().remove("created_by");
+        issue.as_object_mut().unwrap().remove("assignee");
         issue["source"] = json!(source);
         issue
     }
@@ -192,6 +214,12 @@ pub(super) fn has_dependencies(db: &Connection, project: &str, number: i64) -> R
     Ok(!Graph::load(db, project)?.active(number).is_empty())
 }
 
+/// Validate an incoming fleet relationship inside its savepoint, before the
+/// batch reconciler can release a claim acquired while the replica was offline.
+pub(crate) fn validate_subtask_claims(db: &Connection, project: &str) -> Result<()> {
+    Graph::load(db, project)?.validate_subtask_claims()
+}
+
 /// One graph snapshot per mutation. Reads never take a writer lock; only actual
 /// transitions advance versions and enter the fleet journal.
 pub(super) fn reconcile(
@@ -200,7 +228,31 @@ pub(super) fn reconcile(
     actor: Option<&str>,
     now: i64,
 ) -> Result<()> {
+    reconcile_with_claim_protection(db, project, actor, now, false)
+}
+
+/// Subtask organization must not transfer ownership, even indirectly through a
+/// closed ancestor. The caller's transaction rolls back the whole mutation.
+pub(super) fn reconcile_subtasks(
+    db: &Connection,
+    project: &str,
+    actor: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    reconcile_with_claim_protection(db, project, actor, now, true)
+}
+
+fn reconcile_with_claim_protection(
+    db: &Connection,
+    project: &str,
+    actor: Option<&str>,
+    now: i64,
+    protect_claims: bool,
+) -> Result<()> {
     let graph = Graph::load(db, project)?;
+    if protect_claims {
+        graph.validate_subtask_claims()?;
+    }
     for (&number, issue) in &graph.issues {
         if !issue["deleted_at"].is_null() || issue["state"] == "closed" {
             continue;

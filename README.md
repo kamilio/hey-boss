@@ -984,6 +984,20 @@ child keeps its own Markdown, labels, assignee, PRs and lifecycle. Parent links
 and completion progress appear in the list; unlinking preserves the issue.
 Workers finish reachable open descendants before picking up their parent.
 
+Subtasks are scheduling dependencies: unfinished descendants put a parent in
+**Blocked**. Creating, linking, or unlinking subtasks is rejected atomically if
+reconciliation would release an existing claim, including an ancestor's claim.
+This also applies to the claim owner. For follow-up organization while work is
+claimed, use ownership-preserving mindmap nesting:
+
+```sh
+hey-boss mm issue 12 --id parent-work
+hey-boss mm issue 15 --under parent-work
+```
+
+Mindmap nesting leaves issue state, assignees, and scheduling unchanged. To add a
+scheduling dependency instead, have the owner explicitly release the claim first.
+
 ```sh
 hey-boss issue subtask create 12 --title 'Implement the API' --body '## Requirements'
 hey-boss issue subtask add 12 15

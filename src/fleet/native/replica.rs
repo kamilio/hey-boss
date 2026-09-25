@@ -705,6 +705,14 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                     "Issue requirements changed before offline completion",
                 ));
             }
+            if after["state"] != before["state"]
+                && after["state"] != old["state"]
+                && old["assignee"] != before["assignee"]
+            {
+                return Err(invalid(
+                    "Issue ownership changed before an offline state transition",
+                ));
+            }
             if changed
                 .iter()
                 .any(|(k, v)| old[*k] != before[*k] && old[*k] != **v)
@@ -753,6 +761,16 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
         } else {
             put_row(db, table, &after)?;
         }
+    }
+    if table == "issue_subtasks" {
+        let key = if after.is_null() { &before } else { &after };
+        crate::issues::blockers::validate_subtask_claims(
+            db,
+            key["project_id"]
+                .as_str()
+                .ok_or_else(|| invalid("Invalid subtask project"))?,
+        )
+        .map_err(|error| invalid(&error.message))?;
     }
     Ok(result)
 }
@@ -1759,6 +1777,122 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn offline_content_edits_preserve_newer_state_and_ownership() {
+        let main = Fixture::new();
+        main.db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'agent')",
+                [],
+            )
+            .unwrap();
+        let key = json!({"project_id":"named:Native fleet","number":1});
+        let mut before = current_row(&main.db, "issues", &key).unwrap();
+        before["state"] = json!("blocked");
+        let mut after = before.clone();
+        after["title"] = json!("Offline title");
+        main.db
+            .execute(
+                "UPDATE issues SET assignee='human:fixture' WHERE number=1",
+                [],
+            )
+            .unwrap();
+        let change = json!({"seq":1,"table_name":"issues","before_json":before.to_string(),"after_json":after.to_string(),"created_at":0});
+        let receipts = accept_changes(&main.db, "agent", &[change]).unwrap();
+        assert_eq!(receipts[0]["state"], "applied");
+        let current = current_row(&main.db, "issues", &key).unwrap();
+        assert_eq!(current["title"], "Offline title");
+        assert_eq!(current["state"], "open");
+        assert_eq!(current["assignee"], "human:fixture");
+    }
+
+    #[test]
+    fn stale_subtask_links_cannot_release_canonical_parent_claims() {
+        for ancestor in [false, true] {
+            let main = Fixture::new();
+            main.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                VALUES('named:Native fleet',2,'Child','','open','human:fixture',0,0,1,'[]',2),
+                      ('named:Native fleet',3,'Ancestor','','open','human:fixture',0,0,1,'[]',3);").unwrap();
+            if ancestor {
+                main.db.execute_batch("UPDATE issues SET state='closed' WHERE number=1;
+                    INSERT INTO issue_subtasks(project_id,parent_number,child_number,created_at,created_by) VALUES('named:Native fleet',3,1,0,'human:fixture');").unwrap();
+            }
+            main.db
+                .execute(
+                    "INSERT INTO fleet_allocations VALUES('named:Native fleet',?1,'agent')",
+                    [if ancestor { 3 } else { 1 }],
+                )
+                .unwrap();
+            main.capture();
+            let agent = Fixture::new();
+            install_capture(&agent.db, "agent", "agent").unwrap();
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &[],
+            )
+            .unwrap();
+            agent.db.execute_batch("INSERT INTO issue_subtasks(project_id,parent_number,child_number,created_at,created_by) VALUES('named:Native fleet',1,2,0,'human:fixture');").unwrap();
+            let claimed = if ancestor { 3 } else { 1 };
+            agent
+                .db
+                .execute(
+                    "UPDATE issues SET state='blocked',version=version+1 WHERE number=?1",
+                    [claimed],
+                )
+                .unwrap();
+            main.db
+                .execute(
+                    "UPDATE issues SET assignee='human:fixture' WHERE number=?1",
+                    [claimed],
+                )
+                .unwrap();
+            let before = snapshot(&main.db, "agent").unwrap()["tables"].clone();
+            let changes = journal(&agent.db, 0).unwrap();
+            assert_eq!(changes.len(), 2);
+            let receipts = accept_changes(&main.db, "agent", &changes).unwrap();
+            assert_eq!(receipts[0]["state"], "conflict");
+            assert_eq!(receipts[1]["state"], "conflict");
+            assert!(
+                receipts[0]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("existing claim")
+            );
+            assert_eq!(snapshot(&main.db, "agent").unwrap()["tables"], before);
+            assert_eq!(
+                accept_changes(&main.db, "agent", &changes).unwrap(),
+                receipts
+            );
+            apply_pull(
+                &agent.db,
+                "agent",
+                &snapshot(&main.db, "agent").unwrap(),
+                &receipts,
+            )
+            .unwrap();
+            assert!(
+                rows(
+                    &agent.db,
+                    "SELECT * FROM issue_subtasks WHERE child_number=2",
+                    &[]
+                )
+                .unwrap()
+                .is_empty()
+            );
+            assert_eq!(
+                current_row(
+                    &agent.db,
+                    "issues",
+                    &json!({"project_id":"named:Native fleet","number":claimed})
+                )
+                .unwrap()["assignee"],
+                "human:fixture"
+            );
+        }
+    }
 
     fn grow_journal(f: &Fixture, count: i64) {
         let row = current_row(

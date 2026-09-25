@@ -472,6 +472,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
                 "forbidden" => 403,
                 "not_found" => 404,
                 "conflict"
+                | "subtask_claim_conflict"
                 | "fleet_reserved"
                 | "fleet_allocation_missing"
                 | "fleet_allocation_expired" => 409,

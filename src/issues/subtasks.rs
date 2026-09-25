@@ -1,4 +1,4 @@
-//! Issue relationships remain separate from issue ownership and lifecycle.
+//! Scheduling relationships, reconciled transactionally without releasing claims.
 use super::{Actor, Error, Operation, Project, Result, create_issue, event, get_issue};
 use crate::database::Connection;
 use rusqlite::{OptionalExtension, params};
