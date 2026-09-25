@@ -62,14 +62,9 @@ pub(in crate::fleet) fn resource(
     request: &Request,
     database: &Path,
 ) -> crate::issues::Result<Value> {
-    // A private fixture/store must never silently use the user's live fleet.
-    if std::env::var_os("HEY_BOSS_ISSUE_DB").is_some()
-        && std::env::var_os("HEY_BOSS_FLEET_STATE").is_none()
-    {
-        return Err(unavailable(
-            "a private issue database needs its own HEY_BOSS_FLEET_STATE",
-        ));
-    }
+    // Workers inherit HEY_BOSS_ISSUE_DB for the installed store. The relay
+    // verifies its canonical database identity before forwarding any request;
+    // a genuinely different private store still cannot use the live fleet.
     let socket = crate::fleet::socket_path()?;
     call(
         socket.parent().unwrap(),
@@ -91,13 +86,6 @@ pub(in crate::fleet) fn numbers(
     project: &crate::issues::Project,
     next: i64,
 ) -> crate::issues::Result<Value> {
-    if std::env::var_os("HEY_BOSS_ISSUE_DB").is_some()
-        && std::env::var_os("HEY_BOSS_FLEET_STATE").is_none()
-    {
-        return Err(unavailable(
-            "a private issue database needs its own HEY_BOSS_FLEET_STATE",
-        ));
-    }
     let socket = crate::fleet::socket_path()?;
     call(
         socket.parent().unwrap(),
@@ -241,6 +229,10 @@ impl Relay {
             Ordering::Release,
         );
     }
+    pub fn replies(&self) -> mpsc::SyncSender<Value> {
+        self.replies.clone()
+    }
+    #[cfg(test)]
     pub fn receive(&self, message: Value) {
         let _ = self.replies.try_send(message);
     }

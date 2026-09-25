@@ -135,6 +135,86 @@ impl Drop for Service {
 }
 
 #[test]
+fn authority_replies_arrive_while_a_replica_pull_waits_for_the_writer() {
+    use serde_json::json;
+    use std::sync::mpsc;
+
+    let fixture = Fixture::new();
+    fixture.issue();
+    let mut child = Service(
+        fixture
+            .command(&["fleet", "companion", "--stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = child.0.stdin.take().unwrap();
+    let output = child.0.stdout.take().unwrap();
+    let (frames, received) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if frames
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let next = || received.recv_timeout(Duration::from_secs(15)).unwrap();
+    assert_eq!(next()["kind"], "hello");
+    writeln!(input, "{}", json!({"version":1,"kind":"configure","capabilities":{"authority_rpc":true},"controller":"fixture","revision":"empty","workers":[]})).unwrap();
+    assert_eq!(next()["kind"], "ack");
+
+    let db = hey_boss::database::Connection::connect(&fixture.root.join("issues.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writeln!(input, "{}", json!({"version":1,"kind":"pull","payload":{"changes":[],"cursor":42,"allocations":[],"ranges":[]},"receipts":[]})).unwrap();
+    let progress = next();
+    assert_eq!(progress["progress"], "pull");
+    assert!(progress.get("cursor").is_none());
+    // Heartbeats must not fill the bounded input queue behind a slow pull.
+    for _ in 0..100 {
+        writeln!(input, "{}", json!({"version":1,"kind":"ping"})).unwrap();
+    }
+    let mut client = UnixStream::connect(fixture.root.join("fleet-authority.sock")).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    writeln!(
+        client,
+        "{}",
+        json!({"database":fixture.root.join("issues.db"),"request":{"kind":"status"}})
+    )
+    .unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    let request = next();
+    assert_eq!(request["kind"], "authority_request");
+    writeln!(input, "{}", json!({"version":1,"kind":"authority_reply","id":request["id"],"result":{"ok":true,"supervisor":"fixture"}})).unwrap();
+    let mut response = String::new();
+    let result = BufReader::new(client).read_line(&mut response);
+    // Release the fixture writer even when the regression assertion fails.
+    db.execute_batch("ROLLBACK").unwrap();
+    result.expect("authority reply was delayed behind the replica writer");
+    assert_eq!(
+        serde_json::from_str::<Value>(&response).unwrap()["supervisor"],
+        "fixture"
+    );
+    loop {
+        let frame = next();
+        if frame.get("cursor").is_some() && frame["kind"] == "ack" {
+            assert_eq!(frame["cursor"], 42);
+            break;
+        }
+    }
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    reader.join().unwrap();
+    assert!(!fixture.root.join("fleet-authority.sock").exists());
+}
+
+#[test]
 fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream() {
     use std::os::unix::fs::PermissionsExt;
     let main = Fixture::new();
@@ -209,6 +289,27 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     };
     let initial = mm(&["show"]);
     assert_eq!(initial["nodes"][0]["title"], "Authoritative root");
+    // Workers explicitly inherit the installed issue database. That is not a
+    // private-store mismatch and must work with the ordinary fleet state path.
+    let home = peer.root.join("home");
+    fs::create_dir_all(home.join(".local/share")).unwrap();
+    std::os::unix::fs::symlink(&peer.root, home.join(".local/share/hey-boss")).unwrap();
+    let inherited = peer
+        .command(&["mm", "--project", "Authority", "--json", "show"])
+        .env("HOME", &home)
+        .env_remove("HEY_BOSS_FLEET_STATE")
+        .output()
+        .unwrap();
+    assert!(
+        inherited.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&inherited.stdout),
+        String::from_utf8_lossy(&inherited.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&inherited.stdout).unwrap(),
+        initial
+    );
     let added = mm(&[
         "add",
         "Companion child",

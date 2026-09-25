@@ -82,7 +82,8 @@ impl Drop for Fixture {
 fn success(o: Output) -> Value {
     assert!(
         o.status.success(),
-        "{} {}",
+        "{}: {} {}",
+        o.status,
         String::from_utf8_lossy(&o.stdout),
         String::from_utf8_lossy(&o.stderr)
     );
