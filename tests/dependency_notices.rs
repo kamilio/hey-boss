@@ -1,6 +1,9 @@
 use hey_boss::issues::{Request, Store};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: std::path::PathBuf,
@@ -10,8 +13,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "hb-dependency-notices-{}-{}",
+            "hb-dependency-notices-{}-{}-{}",
             std::process::id(),
+            FIXTURE_ID.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -233,5 +237,152 @@ fn notice_admission_does_not_scan_unrelated_issues() {
     assert!(
         steps < 1000,
         "Notice guard scanned unrelated work: {steps} VM steps"
+    );
+    let mut update = f.db.prepare("UPDATE issues SET state='blocked',version=version+1 WHERE project_id='named:Notices' AND number=3").unwrap();
+    assert_eq!(update.execute([]).unwrap(), 0);
+    let steps = update.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(
+        steps < 1000,
+        "State guard scanned unrelated work: {steps} VM steps"
+    );
+}
+
+#[test]
+fn legacy_reconciliation_cannot_block_a_ready_independent_issue() {
+    let mut f = Fixture::new();
+    f.explicit();
+    f.run(json!({"action":"add_pull_request","number":3,"url":"https://github.com/example/repo/pull/3"}));
+    f.run(json!({"action":"ready","number":3,"force":false}));
+    let before = f.run(json!({"action":"view","number":3}))["issue"].clone();
+    f.reserve(3);
+    f.legacy_notice(3, &[2]);
+    // The legacy reconciler continues after its ignored notice INSERT.
+    let changed = f.db.execute("UPDATE issues SET state='blocked',assignee=NULL,version=version+1,updated_at=123 WHERE project_id='named:Notices' AND number=3", []).unwrap();
+    assert_eq!(changed, 0);
+    f.db.execute("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Notices',3,'codex:notice-test','blocked',123,'{\"blocked_by\":[2]}')", []).unwrap();
+    assert_eq!(
+        f.db.query_row(
+            "SELECT count(*) FROM events WHERE action='blocked' AND created_at=123",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(before, f.run(json!({"action":"view","number":3}))["issue"]);
+    assert_eq!(
+        f.db.query_row(
+            "SELECT count(*) FROM worker_runs WHERE finished_at IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn allocation_exposes_unclaimed_worker_reservation_without_fleet_allocation() {
+    let mut f = Fixture::new();
+    f.explicit();
+    f.reserve(3);
+    f.db.execute("UPDATE worker_runs SET actor_id='codex:another-worker',reservation_expires=9999999999999 WHERE id='run-3'", []).unwrap();
+    let view = f.run(json!({"action":"view","number":3}));
+    assert_eq!(view["allocation"]["reason"], "unallocated");
+    assert_eq!(
+        view["allocation"]["worker_reservation"]["actor_id"],
+        "codex:another-worker"
+    );
+    assert_eq!(
+        view["allocation"]["worker_reservation"]["state"],
+        "awaiting_claim"
+    );
+    assert!(
+        view["allocation"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("codex:another-worker")
+    );
+    f.db.execute(
+        "UPDATE worker_runs SET reservation_expires=0 WHERE id='run-3'",
+        [],
+    )
+    .unwrap();
+    let view = f.run(json!({"action":"view","number":3}));
+    assert_eq!(view["allocation"]["worker_reservation"]["state"], "expired");
+    f.db.execute("UPDATE worker_runs SET finished_at=1 WHERE id='run-3'", [])
+        .unwrap();
+    assert!(
+        f.run(json!({"action":"view","number":3}))["allocation"]["worker_reservation"].is_null()
+    );
+}
+
+#[test]
+fn automatic_state_guard_preserves_real_dependencies_and_manual_holds() {
+    let mut f = Fixture::new();
+    f.explicit();
+    f.db.execute("UPDATE issues SET blockers='[2]' WHERE number=4", [])
+        .unwrap();
+    assert_eq!(
+        f.db.execute("UPDATE issues SET state='blocked' WHERE number=4", [])
+            .unwrap(),
+        1
+    );
+    f.run(json!({"action":"block","number":3,"force":false}));
+    assert_eq!(
+        f.run(json!({"action":"view","number":3}))["issue"]["manual_blocked"],
+        true
+    );
+    // Ready handoff is invalid when that Ready prerequisite needs rework.
+    f.db.execute_batch(
+        "UPDATE issues SET state='open' WHERE number=4;
+        UPDATE issues SET state='ready',blockers='[3]' WHERE number=2;",
+    )
+    .unwrap();
+    assert_eq!(
+        f.db.execute("UPDATE issues SET state='blocked' WHERE number=4", [])
+            .unwrap(),
+        1
+    );
+    f.db.execute_batch(
+        "UPDATE issues SET state='open' WHERE number=4;
+        UPDATE issues SET state='closed' WHERE number=3;",
+    )
+    .unwrap();
+    assert_eq!(
+        f.db.execute("UPDATE issues SET state='blocked' WHERE number=4", [])
+            .unwrap(),
+        0
+    );
+    // Parent completion remains mandatory, including unfinished descendants.
+    f.db.execute("UPDATE issues SET state='open' WHERE number=1", [])
+        .unwrap();
+    assert_eq!(
+        f.db.execute("UPDATE issues SET state='blocked' WHERE number=1", [])
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn state_guard_upgrade_is_idempotent_and_sequential_states_remain_unchanged() {
+    let mut f = Fixture::new();
+    f.db.execute_batch(
+        "UPDATE issues SET state='ready' WHERE number=3;
+        DROP TRIGGER dependency_notice_state;",
+    )
+    .unwrap();
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    assert_eq!(
+        f.db.execute("UPDATE issues SET state='blocked' WHERE number=3", [])
+            .unwrap(),
+        1
+    );
+    f.explicit();
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    assert_eq!(
+        f.db.execute("UPDATE issues SET state='blocked' WHERE number=3", [])
+            .unwrap(),
+        0
     );
 }

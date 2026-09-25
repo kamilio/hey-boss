@@ -15,6 +15,20 @@ records, and pending agent steering. A rejected comment cannot leave a misleadin
 event pointing at an unrelated previous insert. Fleet replay acknowledges a
 suppressed append without inventing a comment-ID mapping.
 
+Legacy reconcilers also continue from their notice to an automatic state write.
+The store rejects a transition to Blocked in explicit mode when no declared
+prerequisite or descendant needs work, and suppresses audit events that cite
+obsolete siblings. This preserves a completed Ready handoff, its version, and
+any live worker reservation. Real dependency blocking and manual holds remain
+effective. The guard checks only reachable dependencies, including prerequisites
+of Ready tasks; it does not scan unrelated issues or change existing history.
+
+`issue allocation` and issue-view JSON now include `worker_reservation` separately
+from fleet allocation. The summary identifies its run, actor, machine, and claim
+deadline, so an unallocated fleet issue does not imply that a worker's pending
+claim can be bypassed. Finished attempts disappear from this readout. An expired
+deadline does not itself end an attempt or authorize releasing its ownership.
+
 A notice mixing real dependencies with obsolete siblings is suppressed as a
 whole: delivering that stack would give the worker incorrect instructions. Its
 deduplication event is also suppressed, allowing the current scheduler to issue
