@@ -290,7 +290,7 @@ function parseRoute() {
     inbox_project: params.get("inbox_project") || "",
     inbox_search: params.get("inbox_search") || "",
     issue: resource?.entity === "issue" ? Number(resource.id) : null,
-    state: ["open", "blocked", "closed", "deleted"].includes(params.get("state"))
+    state: ["open", "blocked", "ready", "closed", "deleted"].includes(params.get("state"))
       ? params.get("state")
       : "open",
     search: params.get("search") || "",
@@ -319,6 +319,7 @@ function currentProject() {
         .replace(/^named:/, ""),
       open: 0,
       blocked: 0,
+      ready: 0,
       closed: 0,
       deleted: 0,
       unassigned: 0,
@@ -336,6 +337,8 @@ function updateHeader() {
   $("#heading-count").textContent = p.open;
   $("#open-count").textContent = p.open;
   $("#blocked-count").textContent = p.blocked || 0;
+  $("#ready-count").textContent = p.ready || 0;
+  $('[data-state="ready"]').hidden = !p.prs_enabled && !p.ready && model.route.state !== "ready";
   $("#closed-count").textContent = p.closed;
   $("#deleted-count").textContent = p.deleted;
   $(".page-description").textContent =
@@ -457,14 +460,14 @@ function emptyState() {
   const state = model.route.state;
   const title = filtered
     ? "No matching issues"
-    : state === "blocked" ? "No blocked issues" : state === "closed"
+    : state === "ready" ? "No PRs ready for review" : state === "blocked" ? "No blocked issues" : state === "closed"
       ? "Nothing closed yet"
       : state === "deleted"
         ? "No deleted issues"
         : "A clear place to start";
   const description = filtered
     ? "Try another search or clear your filters."
-    : state === "blocked" ? "Issues that need help to proceed will appear here. Reopen them when the blocker is resolved." : state === "closed"
+    : state === "ready" ? "Tasks with PRs ready for Boss will appear here. Their dependent tasks can start before merge." : state === "blocked" ? "Issues that need help to proceed will appear here. Reopen them when the blocker is resolved." : state === "closed"
       ? "Completed work will appear here."
       : state === "deleted"
         ? "Deleted issues can be restored from this view."
@@ -540,7 +543,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee, i.number) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span class="issue-state ${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee, i.number) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -925,7 +928,7 @@ async function resolveComment(button) {
   }
 }
 function draftUnavailable(issue, enabled) {
-  if (issue?.state === "closed") return "Reopen this issue before moving it to draft.";
+  if (["closed", "ready"].includes(issue?.state)) return "Reopen this issue before moving it to draft.";
   if (issue?.assignee) return "Unassign this issue before moving it to draft.";
   if (enabled === false) return "Drafts are disabled in project settings.";
   return "";
@@ -937,17 +940,18 @@ function renderReadiness(value) {
   const reserved = !!a?.reserved_machine && !expired && i.state !== "closed";
   const missing = a?.role === "agent" && !a.reserved_machine;
   const reason = draftUnavailable(i, value.drafts_enabled);
-  const status = i.state === "blocked" ? "Blocked · pickup paused" : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
+  const status = i.state === "ready" ? "Ready · awaiting PR review" : i.state === "blocked" ? "Blocked · pickup paused" : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
   const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
   const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
-  const note = i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
-  return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${renderAllocation(value)}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${(i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
+  const note = i.state === "ready" ? "Dependent tasks can start. Reopen this task before reworking its PR." : i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
+  return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${renderAllocation(value)}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${(i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
 }
 function issueStateActions(issue) {
   const reopen = issue.state !== "open";
   let buttons = `<button type="button" class="button" data-action="${reopen ? "reopen" : "close"}" ${reopen && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${reopen ? "Reopen issue" : "Close issue"}</button>`;
   if (issue.state === "open") buttons += `<button type="button" class="button" data-action="block">${icon("blocked")}Block issue</button>`;
-  if (issue.state === "blocked") buttons += `<button type="button" class="button" data-action="close">${icon("closed")}Close issue</button>`;
+  if (issue.state === "blocked" || issue.state === "ready") buttons += `<button type="button" class="button" data-action="close">${icon("closed")}Close issue</button>`;
+  if (issue.state === "open" && !issue.draft && model.detail?.prs_enabled) buttons += `<button type="button" class="button" data-action="ready" ${issue.pull_requests?.some(pr => ["fix", "unspecified"].includes(pr.purpose)) ? "" : 'disabled title="Attach the task’s PR first"'}>${icon("pull-request")}PR ready</button>`;
   return buttons;
 }
 function renderDraftNotice(issue) {
@@ -967,7 +971,7 @@ function allocationSignature(value) {
 }
 function renderAllocation(value) {
   const a = value.allocation;
-  if (!a?.reserved_machine || a.reason === "allocation_expired" || a.role === "standalone" || value.issue.deleted_at || value.issue.state === "closed") return "";
+  if (!a?.reserved_machine || a.reason === "allocation_expired" || a.role === "standalone" || value.issue.deleted_at || ["closed", "ready"].includes(value.issue.state)) return "";
   const release = a.authoritative ? `<button type="button" class="button danger" data-action="release_allocation"${value.issue.assignee ? ' disabled title="Unassign the issue before releasing its reservation"' : ""}>Release reservation</button>${value.issue.assignee ? '<p>Stop any active worker attempt and unassign this issue before releasing its reservation.</p>' : ""}` : '<p>Open this issue on the supervisor to release its reservation.</p>';
   return `<div class="fleet-allocation" aria-label="Fleet allocation"><p class="fleet-device">Reserved for <strong>${esc(a.reserved_host || a.reserved_machine)}</strong></p>${a.reserved_host ? `<details><summary>Machine ID</summary><code>${esc(a.reserved_machine)}</code></details>` : ""}${release}</div>`;
 }
@@ -1010,7 +1014,7 @@ function renderDetail(value) {
   const description =
     i.body_html || '<p class="muted-text">No description provided.</p>';
   $("#detail-view").innerHTML =
-    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1><div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.state === "blocked" ? "Blocked" : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
+    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1><div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.state === "ready" ? "Ready" : i.state === "blocked" ? "Blocked" : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
   mountIssueProgress(i);
   placeIssueWork();
   document.title = `${i.title} · Hey Boss`;
@@ -1152,7 +1156,7 @@ async function performAction(action, button) {
   if (
     i.assignee &&
     !own(i.assignee) &&
-    ["claim", "assign_boss", "unassign", "close", "block", "delete"].includes(action)
+    ["claim", "assign_boss", "ready", "unassign", "close", "block", "delete"].includes(action)
   ) {
     force = await confirmDialog(
       ["claim", "assign_boss"].includes(action)
@@ -1170,7 +1174,7 @@ async function performAction(action, button) {
     operation.expected_machine = allocation.reserved_machine;
     operation.if_version = i.version;
   }
-  if (["claim", "assign_boss", "unassign", "close", "block", "delete"].includes(action))
+  if (["claim", "assign_boss", "ready", "unassign", "close", "block", "delete"].includes(action))
     operation.force = force;
   if (action === "close") operation.comment = null;
   if (action === "block") operation.comment = $("#comment-body")?.value.trim() || null;
@@ -1188,6 +1192,7 @@ async function performAction(action, button) {
         assign_boss: `Assigned to ${model.boss.name}`,
         unassign: "Claim released",
         release_allocation: "Fleet reservation released",
+        ready: "PR ready for review",
         block: "Issue blocked",
         close: "Issue closed",
         reopen: "Issue reopened",
@@ -1272,8 +1277,10 @@ async function historyPage(reset = false) {
       commented: "added a comment",
       comment_resolved: "resolved a comment",
       comment_unresolved: "unresolved a comment",
+      ready: "marked the PR ready for review",
       blocked: "blocked this issue",
       blockers_changed: "changed the blocking issues",
+      dependency_rework: "notified dependent work of upstream changes",
       closed: "closed this issue",
       reopened: "reopened this issue",
       deleted: "deleted this issue",
@@ -1725,6 +1732,7 @@ $("#add-project").onclick = async () => {
       name,
       open: 0,
       blocked: 0,
+      ready: 0,
       closed: 0,
       deleted: 0,
       unassigned: 0,
@@ -1792,7 +1800,7 @@ document.addEventListener("keydown", (e) => {
     ["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)
   ) {
     e.preventDefault();
-    const tabs = $$("[role=tab]", e.target.parentElement);
+    const tabs = $$("[role=tab]", e.target.parentElement).filter(tab => !tab.hidden);
     let n = tabs.indexOf(e.target);
     n =
       e.key === "Home"
