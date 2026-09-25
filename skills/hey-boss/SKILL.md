@@ -64,6 +64,19 @@ progress. `issue reopen NUMBER` resumes eligibility
 
 ## Issue workers
 
+Protect owned linked worktrees before editing or queuing checks: create with
+`git worktree add --lock --reason` or inspect/reuse and lock with
+`git worktree lock --reason`. Include project, issue and owning session in the
+reason; record path, branch, HEAD and receipt locations in issue progress.
+Keep the lock across queued validation and interruptions. Never replace another
+owner's lock. Inspect staged work and surviving validator ancestry on resume;
+do not reset files, prune registrations or launch duplicate validators. A saved
+branch preserves commits, not a deleted index or uncommitted work. Only after
+verified completion and no live/queued descendants may the owner explicitly
+unlock its worktree and remove it without force, retaining branch and external
+receipts. Git locks cannot prevent arbitrary filesystem deletion. This lifecycle
+lock reserves no validation capacity.
+
 Treat interrupted, cancelled, timed-out, or incompletely reported validation as
 **incomplete**, even when the command returns exit 0. Do not advance dependent
 commit, push, deploy, or issue-close steps until the required checks are verified.
