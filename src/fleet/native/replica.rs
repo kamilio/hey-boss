@@ -368,7 +368,7 @@ fn append_row(
     table: &str,
     row: &Value,
     bootstrap: bool,
-) -> Result<i64> {
+) -> Result<Option<i64>> {
     if !append(table) {
         return Err(invalid("Unknown history table"));
     }
@@ -383,7 +383,7 @@ fn append_row(
         )
         .optional()?;
     if let Some(id) = mapped {
-        return Ok(id);
+        return Ok(Some(id));
     }
     let own: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     let local_id = if own == origin {
@@ -467,7 +467,7 @@ fn append_row(
         match existing {
             Some(id) => id,
             None => {
-                execute(
+                let inserted = execute(
                     db,
                     &format!(
                         "INSERT INTO {table}({}) VALUES({})",
@@ -476,6 +476,11 @@ fn append_row(
                     ),
                     &parameters,
                 )?;
+                // Policy guards may suppress a stale generated notice. Never
+                // map its remote ID to the connection's previous insert.
+                if inserted == 0 {
+                    return Ok(None);
+                }
                 db.last_insert_rowid()
             }
         }
@@ -484,7 +489,7 @@ fn append_row(
         "INSERT OR IGNORE INTO fleet_row_ids VALUES(?,?,?,?)",
         rusqlite::params![origin, table, origin_id, local_id],
     )?;
-    Ok(local_id)
+    Ok(Some(local_id))
 }
 fn conflict(db: &Connection, node: &str, change: &Value, reason: &str) -> Result<Value> {
     let id = format!("{node}:{}", change["seq"]);
@@ -627,7 +632,10 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             }
         }
         if change["bootstrap"]==true && !rows(db,"SELECT 1 FROM fleet_conflicts WHERE node=? AND table_name='issues' AND json_extract(data,'$.after_json') IS NOT NULL AND json_extract(json_extract(data,'$.after_json'),'$.project_id')=? AND json_extract(json_extract(data,'$.after_json'),'$.number')=?",&[json!(node),after["project_id"].clone(),after["issue_number"].clone()])?.is_empty() {return Err(invalid("Legacy history belongs to an issue-number collision; retained for review"));}
-        let local = append_row(db, node, table, &after, change["bootstrap"] == true)?;
+        let Some(local) = append_row(db, node, table, &after, change["bootstrap"] == true)? else {
+            result["suppressed"] = json!("obsolete dependency notice");
+            return Ok(result);
+        };
         let origin = rows(
             db,
             "SELECT origin,origin_id FROM fleet_row_ids WHERE table_name=? AND local_id=? ORDER BY rowid LIMIT 1",
@@ -2849,6 +2857,59 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[test]
+    fn obsolete_dependency_replay_is_acknowledged_without_a_false_comment_mapping() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,subtask_scheduling) VALUES('named:Native fleet','',1,1,'explicit')", []).unwrap();
+        let body = "Dependency rework: upstream tasks [99] need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.";
+        let rows = [
+            (
+                "comments",
+                json!({"id":400,"project_id":"named:Native fleet","issue_number":1,"author":"human:fixture","body":body,"created_at":123}),
+            ),
+            (
+                "events",
+                json!({"id":401,"project_id":"named:Native fleet","issue_number":1,"actor":"human:fixture","action":"commented","created_at":123,"data":json!({"comment_id":400,"body":body}).to_string()}),
+            ),
+            (
+                "events",
+                json!({"id":402,"project_id":"named:Native fleet","issue_number":1,"actor":"human:fixture","action":"dependency_rework","created_at":123,"data":json!({"dependencies":[[99,1]]}).to_string()}),
+            ),
+        ];
+        let changes = rows.iter().enumerate().map(|(n,(table,row))|json!({"seq":n+1,"table_name":table,"before_json":null,"after_json":row.to_string()})).collect::<Vec<_>>();
+        let receipts = accept_changes(&main.db, "legacy-notice-peer", &changes).unwrap();
+        assert_eq!(receipts.len(), 3);
+        for receipt in &receipts {
+            assert_eq!(receipt["state"], "applied");
+            assert_eq!(receipt["suppressed"], "obsolete dependency notice");
+            assert!(receipt.get("canonical_append").is_none());
+        }
+        assert_eq!(
+            accept_changes(&main.db, "legacy-notice-peer", &changes).unwrap(),
+            receipts
+        );
+        assert!(
+            super::rows(
+                &main.db,
+                "SELECT * FROM fleet_row_ids WHERE origin='legacy-notice-peer'",
+                &[]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            super::rows(&main.db, "SELECT * FROM comments WHERE created_at=123", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::rows(&main.db, "SELECT * FROM events WHERE created_at=123", &[])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

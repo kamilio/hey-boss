@@ -24,6 +24,12 @@ const run = (args, code=0) => {
   return r.stdout;
 };
 const issue = (args, code=0) => JSON.parse(run(['issue','--project','Dependency installation QA','--json',...args],code));
+const sql = (statement,args=[]) => {
+  const r=spawnSync(binary,['fleet','database','--path',database],{env,cwd:root,encoding:'utf8',timeout:30000,input:JSON.stringify({sql:statement,args})+'\n'});
+  assert.equal(r.signal,null,'Database probe interrupted');
+  assert.equal(r.status,0,r.stderr||r.stdout||String(r.error));
+  const response=JSON.parse(r.stdout);assert.equal(response.ok,true,JSON.stringify(response));return response.rows;
+};
 let result;
 try {
   const version=run(['--version']).trim();
@@ -43,6 +49,15 @@ try {
   assert.equal(issue(['view','3']).issue.state,'open');
   assert.equal(issue(['view','3']).issue.parent.number,1);
   assert.deepEqual(issue(['view','3']).issue.blocked_by,[]);
+  issue(['claim','3']);
+  const independent=issue(['view','3']).issue;
+  const legacyBody='Dependency rework: upstream tasks [2] need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.';
+  sql("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Dependency installation QA',3,'codex:verification',?,123)",[legacyBody]);
+  sql("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Dependency installation QA',3,'codex:verification','commented',123,?)",[JSON.stringify({comment_id:1,body:legacyBody})]);
+  sql("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Dependency installation QA',3,'codex:verification','dependency_rework',123,?)",[JSON.stringify({dependencies:[[2,1]]})]);
+  assert.equal(sql('SELECT count(*) FROM comments WHERE created_at=123')[0][0],0);
+  assert.equal(sql('SELECT count(*) FROM events WHERE created_at=123')[0][0],0);
+  assert.deepEqual(issue(['view','3']).issue,independent);
   issue(['blocked-by','4','2']);
   issue(['block','4']);
   const before=issue(['view','4']).issue;
@@ -64,6 +79,11 @@ try {
   assert.equal(issue(['view','4']).issue.assignee,'codex:verification');
   assert.equal(issue(['subtask','create','4','--title','Unsafe child'],4).error.code,'subtask_claim_conflict');
   assert.equal(issue(['view','4']).issue.assignee,'codex:verification');
+  issue(['reopen','2']);
+  const rework=issue(['view','4']);
+  assert.equal(rework.issue.assignee,'codex:verification');
+  assert(rework.comments.some(c=>c.body.startsWith('Dependency rework: upstream tasks [2]')));
+  assert.equal(issue(['view','3']).comments.length,0);
   const web=start(['issue','web','--port','0','--no-discovery','--project','Dependency installation QA','--json']);
   const info=await new Promise((yes,no)=>{
     let text='';const timer=setTimeout(()=>no(Error('Fixture web startup incomplete')),30000);
@@ -76,7 +96,7 @@ try {
   assert(html.includes('id="project-subtask-scheduling"'));
   assert(script.includes('clear_manual_hold') && script.includes('Waiting for dependencies'));
   assert(settings.includes('subtask_scheduling'));
-  result={version,completed:5,expected:5,stages:['CLI discovery','independent siblings and grouping','manual hold and structured blockers','Ready handoff and claim safety','embedded UI']};
+  result={version,completed:6,expected:6,stages:['CLI discovery','independent siblings and grouping','legacy notice admission and unchanged claims','manual hold and structured blockers','Ready handoff and real rework','embedded UI']};
 } finally {
   await Promise.all(children.map(child=>new Promise(resolve=>{
     if(child.exitCode!==null||child.signalCode!==null)return resolve();

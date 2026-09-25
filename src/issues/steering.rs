@@ -111,12 +111,12 @@ impl Store {
         request: &str,
         state: &str,
         error: Option<&str>,
-    ) -> Result<()> {
-        self.db.execute(
-            "UPDATE agent_steering SET state=?2,error=?3 WHERE request_id=?1",
+    ) -> Result<bool> {
+        let changed = self.db.execute(
+            "UPDATE agent_steering SET state=?2,error=?3 WHERE request_id=?1 AND (?2<>'sending' OR state='queued')",
             params![request, state, error],
         )?;
-        Ok(())
+        Ok(changed != 0)
     }
 }
 
@@ -164,5 +164,14 @@ mod migration_tests {
             store.worker_steering("run").unwrap().unwrap()["issue_body"],
             "Saved issue body"
         );
+        store
+            .worker_steering_result("new", "rejected", Some("Scheduling changed"))
+            .unwrap();
+        assert!(
+            !store
+                .worker_steering_result("new", "sending", None)
+                .unwrap()
+        );
+        assert!(store.worker_steering("run").unwrap().is_none());
     }
 }
