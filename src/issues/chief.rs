@@ -394,14 +394,25 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
             command.args(["resume", id]);
         }
         crate::codex_permissions::apply(&mut command);
-        command.args(["--json","--skip-git-repo-check"])
-            .arg(format!("Project: {}. Use hey-boss issue and mm commands in this project.\n\n{}\n\nRun one organizing pass, then stop. Workers handle all code changes; do not start a goal.",job.project,job.prompt))
-            .current_dir(&job.cwd).process_group(0)
-            .env("HEY_BOSS_ISSUE_DB",path).env("HEY_BOSS_ISSUE_PROJECT",&job.project)
-            .env("PATH",std::env::join_paths(paths).map_err(|e| Error::invalid(e.to_string()))?)
-            .env_remove("HEY_BOSS_ISSUE_HOST").env_remove("HEY_BOSS_AGENT_ID")
-            .env_remove("CODEX_THREAD_ID").env_remove("CODEX_SESSION_ID").env_remove("CLAUDE_SESSION_ID")
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        command
+            .args(["--json", "--skip-git-repo-check"])
+            .arg(worker::chief_instructions(&job.project, &job.prompt))
+            .current_dir(&job.cwd)
+            .process_group(0)
+            .env("HEY_BOSS_ISSUE_DB", path)
+            .env("HEY_BOSS_ISSUE_PROJECT", &job.project)
+            .env(
+                "PATH",
+                std::env::join_paths(paths).map_err(|e| Error::invalid(e.to_string()))?,
+            )
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CLAUDE_SESSION_ID")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         let mut child = command.spawn()?;
         let pid = child.id();
         let start = crate::agents::process_identity(pid)

@@ -1,0 +1,685 @@
+{
+  "issue projects": {
+    "args": [],
+    "setup": []
+  },
+  "issue list": {
+    "args": [],
+    "setup": []
+  },
+  "issue whoami": {
+    "args": [],
+    "setup": []
+  },
+  "issue settings show": {
+    "args": [],
+    "setup": []
+  },
+  "issue worker status": {
+    "args": [],
+    "setup": []
+  },
+  "settings show": {
+    "args": [],
+    "setup": []
+  },
+  "mm show": {
+    "args": [],
+    "setup": []
+  },
+  "mm projects": {
+    "args": [],
+    "setup": []
+  },
+  "mm export": {
+    "args": [],
+    "setup": []
+  },
+  "artifact list": {
+    "args": [],
+    "setup": []
+  },
+  "issue view": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue allocation": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue comments": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue history": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue status-history": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue claim": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue assign-to-boss": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue close": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue delete": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue create": {
+    "args": [
+      "--title",
+      "Review follow-up",
+      "--body",
+      "Implement the reviewed changes."
+    ],
+    "setup": []
+  },
+  "issue edit": {
+    "args": [
+      "1",
+      "--title",
+      "Reviewed issue"
+    ],
+    "setup": []
+  },
+  "issue comment": {
+    "args": [
+      "1",
+      "--body",
+      "Review complete; keep the output concise."
+    ],
+    "setup": []
+  },
+  "issue status": {
+    "args": [
+      "1",
+      "green",
+      "--comment",
+      "Reviewing command output."
+    ],
+    "setup": []
+  },
+  "issue ready": {
+    "args": [
+      "1"
+    ],
+    "setup": [
+      [
+        "issue",
+        "claim",
+        "1"
+      ],
+      [
+        "issue",
+        "pr",
+        "add",
+        "1",
+        "https://github.com/example/review/pull/42"
+      ]
+    ]
+  },
+  "issue unassign": {
+    "args": [
+      "1"
+    ],
+    "setup": [
+      [
+        "issue",
+        "claim",
+        "1"
+      ]
+    ]
+  },
+  "issue reopen": {
+    "args": [
+      "1"
+    ],
+    "setup": [
+      [
+        "issue",
+        "close",
+        "1"
+      ]
+    ]
+  },
+  "issue restore": {
+    "args": [
+      "1"
+    ],
+    "setup": [
+      [
+        "issue",
+        "delete",
+        "1"
+      ]
+    ]
+  },
+  "issue undraft": {
+    "args": [
+      "3"
+    ],
+    "setup": [
+      [
+        "issue",
+        "create",
+        "--title",
+        "Draft follow-up",
+        "--draft"
+      ]
+    ]
+  },
+  "issue block": {
+    "args": [
+      "1",
+      "--comment",
+      "Waiting for dependency review."
+    ],
+    "setup": []
+  },
+  "issue blocked-by": {
+    "args": [
+      "1",
+      "2"
+    ],
+    "setup": []
+  },
+  "issue move": {
+    "args": [
+      "1",
+      "--after",
+      "2"
+    ],
+    "setup": []
+  },
+  "issue transfer": {
+    "args": [
+      "2",
+      "--destination",
+      "named:Destination review",
+      "--if-version",
+      "1"
+    ],
+    "setup": []
+  },
+  "issue resolve-comment": {
+    "args": [
+      "1",
+      "1"
+    ],
+    "setup": []
+  },
+  "issue unresolve-comment": {
+    "args": [
+      "1",
+      "1"
+    ],
+    "setup": [
+      [
+        "issue",
+        "resolve-comment",
+        "1",
+        "1"
+      ]
+    ]
+  },
+  "issue hide-project": {
+    "args": [],
+    "setup": []
+  },
+  "issue restore-project": {
+    "args": [],
+    "setup": [
+      [
+        "issue",
+        "hide-project"
+      ]
+    ]
+  },
+  "issue settings set": {
+    "args": [
+      "--no-prs"
+    ],
+    "setup": []
+  },
+  "settings set": {
+    "args": [
+      "--boss-name",
+      "Reviewer"
+    ],
+    "setup": []
+  },
+  "issue pr list": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue pr add": {
+    "args": [
+      "1",
+      "https://github.com/example/review/pull/42"
+    ],
+    "setup": []
+  },
+  "issue pr remove": {
+    "args": [
+      "1",
+      "https://github.com/example/review/pull/42"
+    ],
+    "setup": [
+      [
+        "issue",
+        "pr",
+        "add",
+        "1",
+        "https://github.com/example/review/pull/42"
+      ]
+    ]
+  },
+  "issue pr classify": {
+    "args": [
+      "1",
+      "https://github.com/example/review/pull/42",
+      "--purpose",
+      "fix"
+    ],
+    "setup": [
+      [
+        "issue",
+        "pr",
+        "add",
+        "1",
+        "https://github.com/example/review/pull/42"
+      ]
+    ]
+  },
+  "issue subtask list": {
+    "args": [
+      "1"
+    ],
+    "setup": []
+  },
+  "issue subtask create": {
+    "args": [
+      "1",
+      "--title",
+      "Review follow-up"
+    ],
+    "setup": []
+  },
+  "issue subtask add": {
+    "args": [
+      "1",
+      "2"
+    ],
+    "setup": []
+  },
+  "issue subtask remove": {
+    "args": [
+      "1",
+      "2"
+    ],
+    "setup": [
+      [
+        "issue",
+        "subtask",
+        "add",
+        "1",
+        "2"
+      ]
+    ]
+  },
+  "artifact view": {
+    "args": [
+      "{artifact}"
+    ],
+    "setup": []
+  },
+  "artifact export": {
+    "args": [
+      "{artifact}"
+    ],
+    "setup": []
+  },
+  "artifact create": {
+    "args": [
+      "--title",
+      "Review notes",
+      "--body",
+      "# Review\n\nKeep the important context.",
+      "--issue",
+      "1"
+    ],
+    "setup": []
+  },
+  "artifact edit": {
+    "args": [
+      "{artifact}",
+      "--title",
+      "Reviewed notes",
+      "--if-version",
+      "1"
+    ],
+    "setup": []
+  },
+  "artifact archive": {
+    "args": [
+      "{artifact}",
+      "--if-version",
+      "1"
+    ],
+    "setup": []
+  },
+  "artifact restore": {
+    "args": [
+      "{artifact}",
+      "--if-version",
+      "2"
+    ],
+    "setup": [
+      [
+        "artifact",
+        "archive",
+        "{artifact}",
+        "--if-version",
+        "1"
+      ]
+    ]
+  },
+  "artifact delete": {
+    "args": [
+      "{artifact}",
+      "--if-version",
+      "1"
+    ],
+    "setup": []
+  },
+  "artifact comment": {
+    "args": [
+      "{artifact}",
+      "--body",
+      "This context is useful."
+    ],
+    "setup": []
+  },
+  "artifact resolve": {
+    "args": [
+      "{artifact}",
+      "1"
+    ],
+    "setup": [
+      [
+        "artifact",
+        "comment",
+        "{artifact}",
+        "--body",
+        "Review comment"
+      ]
+    ]
+  },
+  "artifact link": {
+    "args": [
+      "{artifact}",
+      "--issue",
+      "2"
+    ],
+    "setup": []
+  },
+  "artifact unlink": {
+    "args": [
+      "{artifact}",
+      "--issue",
+      "1"
+    ],
+    "setup": []
+  },
+  "artifact links": {
+    "args": [
+      "--issue",
+      "1"
+    ],
+    "setup": []
+  },
+  "attachment list": {
+    "args": [
+      "--issue",
+      "1"
+    ],
+    "setup": []
+  },
+  "attachment upload": {
+    "args": [
+      "sample.md",
+      "--issue",
+      "1"
+    ],
+    "setup": []
+  },
+  "attachment download": {
+    "args": [
+      "{attachment}",
+      "--output",
+      "download.md"
+    ],
+    "setup": []
+  },
+  "attachment remove": {
+    "args": [
+      "{attachment}"
+    ],
+    "setup": []
+  },
+  "mm view": {
+    "args": [
+      "review"
+    ],
+    "setup": []
+  },
+  "mm add": {
+    "args": [
+      "Next steps",
+      "--id",
+      "next"
+    ],
+    "setup": []
+  },
+  "mm issue": {
+    "args": [
+      "1",
+      "--under",
+      "review"
+    ],
+    "setup": []
+  },
+  "mm pr": {
+    "args": [
+      "https://github.com/example/review/pull/42",
+      "--under",
+      "review"
+    ],
+    "setup": []
+  },
+  "mm edit": {
+    "args": [
+      "review",
+      "--title",
+      "Reviewed plan"
+    ],
+    "setup": []
+  },
+  "mm alias": {
+    "args": [
+      "review",
+      "reviewed"
+    ],
+    "setup": []
+  },
+  "mm move": {
+    "args": [
+      "details",
+      "--under",
+      "review"
+    ],
+    "setup": []
+  },
+  "mm remove": {
+    "args": [
+      "details"
+    ],
+    "setup": []
+  },
+  "mm links": {
+    "args": [
+      "review"
+    ],
+    "setup": []
+  },
+  "mm link": {
+    "args": [
+      "review",
+      "details",
+      "--description",
+      "Supporting context"
+    ],
+    "setup": []
+  },
+  "mm unlink": {
+    "args": [
+      "review",
+      "details"
+    ],
+    "setup": [
+      [
+        "mm",
+        "link",
+        "review",
+        "details"
+      ]
+    ]
+  },
+  "skill show": {
+    "args": [],
+    "setup": []
+  },
+  "alert": {
+    "args": [
+      "Review complete",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "update": {
+    "args": [
+      "Review complete",
+      "# Review\n\nThe command output is ready.",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "ask": {
+    "args": [
+      "Which output should be shorter?",
+      "Review the examples.",
+      "--option",
+      "Text",
+      "--option",
+      "JSON",
+      "--async",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "prompt": {
+    "args": [
+      "Preferred format?",
+      "Review the examples.",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "approval": {
+    "args": [
+      "Approve the plan?",
+      "Review the examples.",
+      "--title",
+      "Review"
+    ],
+    "setup": []
+  },
+  "status": {
+    "args": [
+      "review-task-1"
+    ],
+    "setup": []
+  },
+  "wait": {
+    "args": [
+      "review-task-1"
+    ],
+    "setup": []
+  },
+  "hide": {
+    "args": [
+      "review-task-1"
+    ],
+    "setup": []
+  },
+  "skill install": {
+    "args": [],
+    "setup": []
+  },
+  "admin catalog": {
+    "args": [],
+    "setup": []
+  },
+  "issue batch": {
+    "args": [
+      "--file",
+      "issues.json",
+      "--request-id",
+      "review-issue-batch"
+    ],
+    "setup": []
+  },
+  "mm batch": {
+    "args": [
+      "--file",
+      "map.json",
+      "--request-id",
+      "review-map-batch"
+    ],
+    "setup": []
+  }
+}

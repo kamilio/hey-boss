@@ -529,6 +529,15 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     if request.method() == &Method::Get {
+        if path == "/api/admin/catalog" {
+            static CATALOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+            if let Some(value) = CATALOG.get() {
+                return json_response(value.clone());
+            }
+            let value = crate::admin::cli(&["admin", "catalog", "--json"], &Value::Null)?;
+            let _ = CATALOG.set(value.clone());
+            return json_response(value);
+        }
         if path == "/llms.txt" {
             return Ok((
                 200,
@@ -544,6 +553,12 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             ));
         }
         let asset: Option<(&str, &[u8])> = match path.as_str() {
+            "/admin" => Some(("text/html; charset=utf-8", crate::admin::HTML.as_bytes())),
+            "/admin.js" => Some((
+                "text/javascript; charset=utf-8",
+                crate::admin::SCRIPT.as_bytes(),
+            )),
+            "/admin.css" => Some(("text/css; charset=utf-8", crate::admin::STYLE.as_bytes())),
             "/" | "/issues" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
             "/artifacts" => Some((
                 "text/html; charset=utf-8",
@@ -792,6 +807,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet/takeover",
             "/api/fleet/steer",
             "/api/mm",
+            "/api/admin/preview",
         ]
         .contains(&path.as_str())
     {
@@ -815,6 +831,33 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/admin/preview" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Preview {
+                command: String,
+                #[serde(default)]
+                issue: Value,
+            }
+            if bytes.len() > 256 * 1024 {
+                return Err(Error::invalid("Preview context exceeds 256 KiB"));
+            }
+            let input: Preview = serde_json::from_slice(&bytes)?;
+            if input.command.len() > 200 {
+                return Err(Error::invalid("Invalid command"));
+            }
+            static CAPTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = CAPTURE.try_lock().map_err(|_| {
+                Error::new(
+                    "preview_busy",
+                    "Another preview is running. Try again shortly.",
+                )
+            })?;
+            return json_response(crate::admin::cli(
+                &["admin", "preview", &input.command, "--json", "--seed-stdin"],
+                &json!({"issue":input.issue}),
+            )?);
         }
         if path == "/api/fleet" {
             let value: Value = serde_json::from_slice(&bytes)?;

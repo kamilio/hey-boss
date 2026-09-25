@@ -1,3 +1,4 @@
+mod admin_cli;
 mod agent_permissions;
 mod artifact_cli;
 mod attachment_cli;
@@ -158,6 +159,10 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Review command help and isolated text/JSON output previews.
+    Admin(admin_cli::Options),
+    /// Show or install the canonical agent skill.
+    Skill(admin_cli::SkillOptions),
     /// Resolve a web URL and read its issue, document, topic, notice or conversation.
     Lookup(lookup_cli::Options),
     /// Fleet supervisor, machine companions, durable replicas, and worker controls.
@@ -502,7 +507,9 @@ impl Cli {
                     metadata.icon_file.clone(),
                 )
             }
-            Command::Secret(_)
+            Command::Admin(_)
+            | Command::Skill(_)
+            | Command::Secret(_)
             | Command::Lookup(_)
             | Command::Artifact(_)
             | Command::Attachment(_)
@@ -551,7 +558,9 @@ impl Cli {
             icon_path,
         };
         let output = match self.command {
-            Command::Secret(_)
+            Command::Admin(_)
+            | Command::Skill(_)
+            | Command::Secret(_)
             | Command::Lookup(_)
             | Command::Artifact(_)
             | Command::Attachment(_)
@@ -764,6 +773,12 @@ fn main() {
 
 fn run() -> std::io::Result<()> {
     let cli = Cli::parse();
+    // Review captures use private SQLite files without starting a database service.
+    match &cli.command {
+        Command::Admin(options) => return admin_cli::run(options),
+        Command::Skill(options) => return admin_cli::skill(options),
+        _ => {}
+    }
     hey_boss::database::use_service();
     match &cli.command {
         Command::Lookup(options) => {
@@ -1016,7 +1031,11 @@ fn run() -> std::io::Result<()> {
             eprintln!("hey-boss: daemon unavailable or request failed: {error}");
             std::process::exit(1);
         });
-    if output.json {
+    print_response(result, output.json)
+}
+
+fn print_response(result: hey_boss::Response, json: bool) -> std::io::Result<()> {
+    if json {
         println!("{}", serde_json::to_string(&result)?);
     } else {
         println!("Task ID: {}", result.task_id);

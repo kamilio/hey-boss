@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod agent_control;
 pub mod agent_conversations;
 pub mod agent_guidance;
@@ -19,6 +20,7 @@ pub mod markdown;
 pub mod mindmap;
 pub mod notices;
 pub mod routes;
+pub mod skill;
 pub mod syntax;
 #[cfg(test)]
 mod test_allocations;
