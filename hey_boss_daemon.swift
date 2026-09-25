@@ -3017,7 +3017,7 @@ final class SecretEntry: NSObject, NSTextFieldDelegate {
 final class SecretFormStack: NSStackView { override var isFlipped: Bool { true } }
 final class SecretFormClip: NSClipView { override var isFlipped: Bool { true } }
 final class SecretPrompt: NSObject, NSWindowDelegate {
-    let window = MachineHealthWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    let window = CopyableWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     let entries: [SecretEntry]
     let submit = NSButton(title: "Use credentials", target: nil, action: nil)
     let message = NSTextField(wrappingLabelWithString: "")
@@ -3085,64 +3085,7 @@ final class SecretPrompts {
     }
 }
 
-struct HealthSnapshot: Decodable {
-    struct Metrics: Decodable {
-        var diskPath: String
-        var diskTotalBytes: UInt64?
-        var diskAvailableBytes: UInt64?
-        var memoryTotalBytes: UInt64?
-        var memoryAvailableBytes: UInt64?
-        var memoryPressure: String
-        var swapUsedBytes: UInt64?
-    }
-    struct Configuration: Decodable {
-        var automatic: Bool
-        var harvestProcesses: Bool
-        var cleanWorktrees: Bool
-        var cleanCaches: Bool?
-        var intervalSeconds: UInt64
-        var processMinAgeSeconds: UInt64
-        var browserMinAgeSeconds: UInt64? = nil
-        var observationSeconds: UInt64
-        var worktreeMinAgeDays: UInt64
-        var workspaceRoots: [String]
-    }
-    struct Worktree: Decodable {
-        var path: String; var ageSeconds: UInt64?; var repository: String; var githubUrl: String?
-    }
-    struct LiveProcess: Decodable {
-        var pid: UInt32; var parent: UInt32; var ageSeconds: UInt64
-        var cpuPercent: Double; var residentBytes: UInt64; var executable: String
-    }
-    struct Item: Decodable {
-        var name: String; var detail: String; var eligible: Bool
-        var worktree: Worktree? = nil; var process: LiveProcess? = nil
-        var selectionKey: String { worktree?.path ?? process.map { "\($0.pid):\($0.executable)" } ?? name }
-    }
-    struct Activity: Decodable { var at: Double; var category: String; var message: String }
-    var observedAt: Double
-    var lastCleanupAt: Double?
-    var metrics: Metrics
-    var config: Configuration
-    var processes: [Item]
-    var processInventory: [LiveProcess]?
-    var worktrees: [Item]
-    var harvestedProcesses: Int
-    var removedWorktrees: Int
-    var caches: [Item]?
-    var removedCaches: Int?
-    var diskAvailableChangeBytes: Int64?
-    var errors: [String]
-    var activity: [Activity]?
-    var running: Bool?
-    var phase: String?
-    static func decode(_ data: Data) throws -> HealthSnapshot {
-        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(Self.self, from: data)
-    }
-}
-
-final class MachineHealthWindow: NSWindow {
+final class CopyableWindow: NSWindow {
     var copySelection: (() -> Bool)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
@@ -3161,359 +3104,6 @@ final class MachineHealthWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown && performKeyEquivalent(with: event) { return }
         super.sendEvent(event)
-    }
-}
-
-final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSSearchFieldDelegate {
-    let window: MachineHealthWindow
-    let machine = NSPopUpButton()
-    let openRepository = NSButton(title: "Open GitHub", target: nil, action: nil)
-    var selectedHost: String? { machine.indexOfSelectedItem > 0 ? machine.titleOfSelectedItem : nil }
-    var generation = 0
-    var readingHosts = false
-    var nextHostRead = Date.distantPast
-    let disk = NSTextField(labelWithString: "Checking disk space…")
-    let memory = NSTextField(labelWithString: "Checking memory…")
-    let memoryDetail = NSTextField(labelWithString: "")
-    let diskBar = NSProgressIndicator()
-    let automatic = NSButton(checkboxWithTitle: "Automatic cleanup", target: nil, action: nil)
-    let processesEnabled = NSButton(checkboxWithTitle: "Harvest orphan processes", target: nil, action: nil)
-    let worktreesEnabled = NSButton(checkboxWithTitle: "Clean unused worktrees", target: nil, action: nil)
-    let cachesEnabled = NSButton(checkboxWithTitle: "Clean disposable caches", target: nil, action: nil)
-    let policy = NSTextField(wrappingLabelWithString: "")
-    let roots = NSTextField(wrappingLabelWithString: "")
-    let footer = NSTextField(wrappingLabelWithString: "")
-    let scan = NSButton(title: "Scan now", target: nil, action: nil)
-    let clean = NSButton(title: "Clean eligible items", target: nil, action: nil)
-    let addFolder = NSButton(title: "Add workspace…", target: nil, action: nil)
-    let kind = NSSegmentedControl(labels: ["Processes", "Worktrees", "Caches", "Activity"], trackingMode: .selectOne, target: nil, action: nil)
-    let logSearch = NSSearchField()
-    let selectedEvent = NSTextField(wrappingLabelWithString: "Select an entry to read its full message.")
-    let currentPhase = NSTextField(labelWithString: "")
-    let table = NSTableView()
-    var snapshot: HealthSnapshot?
-    var busy = false
-    var readingStatus = false
-    var timer: Timer?
-    var runner: (([String], @escaping (Result<Data, Error>) -> Void) -> Void)?
-    var cli: String?
-    let present: Bool
-    var items: [HealthSnapshot.Item] = []
-    func rebuildItems() {
-        let all: [HealthSnapshot.Item]
-        if kind.selectedSegment == 3 {
-            all = (snapshot?.activity ?? []).reversed().map { event in
-                let stamp = Date(timeIntervalSince1970: event.at).formatted(date: .abbreviated, time: .standard)
-                return .init(name: "\(stamp) · \(event.category)", detail: event.message, eligible: false)
-            }
-        } else if kind.selectedSegment == 1 { all = snapshot?.worktrees ?? [] }
-        else if kind.selectedSegment == 2 { all = snapshot?.caches ?? [] }
-        else if let inventory = snapshot?.processInventory {
-            all = inventory.map { process in
-                .init(name: "\((process.executable as NSString).lastPathComponent) · PID \(process.pid)",
-                      detail: "Parent PID \(process.parent) · \(process.executable)", eligible: false, process: process)
-            }
-        } else { all = snapshot?.processes ?? [] }
-        let query = logSearch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedKey = items.indices.contains(table.selectedRow) ? items[table.selectedRow].selectionKey : nil
-        items = query.isEmpty ? all : all.filter { ($0.name + " " + $0.detail + " " + ($0.worktree?.repository ?? "")).localizedCaseInsensitiveContains(query) }
-        table.tableColumn(withIdentifier: .init("name"))?.title = kind.selectedSegment == 3 ? "Time · Category" : kind.selectedSegment == 0 ? "Process · PID" : kind.selectedSegment == 2 ? "Cache" : "Checkout"
-        table.tableColumn(withIdentifier: .init("state"))?.title = kind.selectedSegment == 3 ? "Activity" : kind.selectedSegment == 0 ? "Process details" : "Status"
-        table.tableColumn(withIdentifier: .init("age"))?.isHidden = kind.selectedSegment >= 2
-        table.tableColumn(withIdentifier: .init("repository"))?.isHidden = kind.selectedSegment != 1
-        for id in ["memory", "cpu"] { table.tableColumn(withIdentifier: .init(id))?.isHidden = kind.selectedSegment != 0 }
-        clean.title = kind.selectedSegment == 1 ? "Remove selected worktree" : "Clean eligible items"
-        openRepository.isHidden = kind.selectedSegment != 1
-        table.deselectAll(nil); table.reloadData()
-        if let selectedKey, let row = items.firstIndex(where: { $0.selectionKey == selectedKey }) { table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
-        if items.isEmpty {
-            selectedEvent.stringValue = !query.isEmpty ? "No entries match this filter." : kind.selectedSegment == 0 ? "Process list unavailable. Check the connection or update this machine’s health worker." : "No entries yet."
-        }
-        setBusy(busy)
-    }
-    init(present: Bool = true, cli: String? = nil) {
-        self.present = present; self.cli = cli
-        window = MachineHealthWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "hey-boss · Machine Health"; window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 820, height: 640)
-        super.init(); window.delegate = self
-        window.copySelection = { [weak self] in self?.copySelected() ?? false }
-        let content = OverviewCanvas(frame: window.contentView!.bounds); window.contentView = content
-        let title = NSTextField(labelWithString: "Machine Health"); title.font = .systemFont(ofSize: 24, weight: .semibold)
-        machine.addItem(withTitle: "This Mac"); machine.target = self; machine.action = #selector(switchMachine)
-        machine.setAccessibilityLabel("Machine")
-        openRepository.target = self; openRepository.action = #selector(openGitHub); openRepository.isHidden = true
-        let subtitle = NSTextField(labelWithString: "Storage, memory, and maintenance on this Mac and SSH clients")
-        subtitle.textColor = .secondaryLabelColor
-        let diskTitle = NSTextField(labelWithString: "Disk space"); let memoryTitle = NSTextField(labelWithString: "Memory")
-        for label in [diskTitle, memoryTitle] { label.font = .systemFont(ofSize: 15, weight: .semibold) }
-        for label in [disk, memory] { label.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular) }
-        memoryDetail.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular); memoryDetail.textColor = .secondaryLabelColor
-        diskBar.isIndeterminate = false; diskBar.minValue = 0; diskBar.maxValue = 100; diskBar.style = .bar
-        let cleanupTitle = NSTextField(labelWithString: "Keep the machine tidy"); cleanupTitle.font = .systemFont(ofSize: 16, weight: .semibold)
-        automatic.target = self; automatic.action = #selector(toggleAutomatic)
-        processesEnabled.target = self; processesEnabled.action = #selector(toggleProcesses)
-        worktreesEnabled.target = self; worktreesEnabled.action = #selector(toggleWorktrees)
-        cachesEnabled.target = self; cachesEnabled.action = #selector(toggleCaches)
-        scan.target = self; scan.action = #selector(scanNow); clean.target = self; clean.action = #selector(cleanNow)
-        addFolder.target = self; addFolder.action = #selector(addWorkspace)
-        kind.selectedSegment = 0; kind.target = self; kind.action = #selector(switchKind)
-        logSearch.placeholderString = "Filter activity, processes, worktrees, or caches…"; logSearch.delegate = self
-        selectedEvent.font = .systemFont(ofSize: 12); selectedEvent.textColor = .secondaryLabelColor
-        selectedEvent.isSelectable = true
-        selectedEvent.maximumNumberOfLines = 3; selectedEvent.lineBreakMode = .byWordWrapping
-        for label in [disk, memory, memoryDetail, policy, roots, footer, selectedEvent, currentPhase] { label.isSelectable = true }
-        currentPhase.font = .systemFont(ofSize: 12, weight: .medium); currentPhase.textColor = .secondaryLabelColor
-        for label in [policy, roots, footer] { label.font = .systemFont(ofSize: 12); label.textColor = .secondaryLabelColor }
-        roots.maximumNumberOfLines = 2; roots.lineBreakMode = .byTruncatingTail
-        let name = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name")); name.title = "Item"; name.width = 360
-        let state = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("state")); state.title = "Status"; state.width = 470
-        name.width = 260
-        let age = NSTableColumn(identifier: .init("age")); age.title = "Age"; age.width = 65; age.isHidden = true
-        let repository = NSTableColumn(identifier: .init("repository")); repository.title = "GitHub repository"; repository.width = 180; repository.isHidden = true
-        let processMemory = NSTableColumn(identifier: .init("memory")); processMemory.title = "Memory (RSS)"; processMemory.width = 100
-        let cpu = NSTableColumn(identifier: .init("cpu")); cpu.title = "CPU %"; cpu.width = 65
-        table.addTableColumn(name); table.addTableColumn(age); table.addTableColumn(processMemory); table.addTableColumn(cpu); table.addTableColumn(repository); table.addTableColumn(state); table.dataSource = self; table.delegate = self
-        table.style = .inset; table.rowHeight = 36; table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        let views: [NSView] = [title, subtitle, machine, openRepository, diskTitle, disk, diskBar, memoryTitle, memory, memoryDetail, cleanupTitle, automatic, processesEnabled, worktreesEnabled, cachesEnabled, policy, roots, addFolder, kind, scan, clean, logSearch, currentPhase, scroll, selectedEvent, footer]
-        for view in views { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
-        NSLayoutConstraint.activate([
-            machine.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), machine.centerYAnchor.constraint(equalTo: title.centerYAnchor), machine.widthAnchor.constraint(equalToConstant: 245),
-            openRepository.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), openRepository.topAnchor.constraint(equalTo: selectedEvent.topAnchor), openRepository.widthAnchor.constraint(equalToConstant: 120),
-            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24), title.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor), subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
-            diskTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor), diskTitle.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 26),
-            disk.leadingAnchor.constraint(equalTo: title.leadingAnchor), disk.topAnchor.constraint(equalTo: diskTitle.bottomAnchor, constant: 7),
-            diskBar.leadingAnchor.constraint(equalTo: title.leadingAnchor), diskBar.topAnchor.constraint(equalTo: disk.bottomAnchor, constant: 10), diskBar.widthAnchor.constraint(equalTo: content.widthAnchor, multiplier: 0.43),
-            memoryTitle.leadingAnchor.constraint(equalTo: content.centerXAnchor, constant: 16), memoryTitle.topAnchor.constraint(equalTo: diskTitle.topAnchor),
-            memory.leadingAnchor.constraint(equalTo: memoryTitle.leadingAnchor), memory.topAnchor.constraint(equalTo: memoryTitle.bottomAnchor, constant: 7), memory.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
-            memoryDetail.leadingAnchor.constraint(equalTo: memory.leadingAnchor), memoryDetail.topAnchor.constraint(equalTo: memory.bottomAnchor, constant: 7), memoryDetail.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
-            cleanupTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor), cleanupTitle.topAnchor.constraint(equalTo: diskBar.bottomAnchor, constant: 27),
-            automatic.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), automatic.centerYAnchor.constraint(equalTo: cleanupTitle.centerYAnchor),
-            processesEnabled.leadingAnchor.constraint(equalTo: title.leadingAnchor), processesEnabled.topAnchor.constraint(equalTo: cleanupTitle.bottomAnchor, constant: 12),
-            worktreesEnabled.leadingAnchor.constraint(equalTo: processesEnabled.trailingAnchor, constant: 24), worktreesEnabled.centerYAnchor.constraint(equalTo: processesEnabled.centerYAnchor),
-            cachesEnabled.leadingAnchor.constraint(equalTo: worktreesEnabled.trailingAnchor, constant: 24), cachesEnabled.centerYAnchor.constraint(equalTo: worktreesEnabled.centerYAnchor),
-            policy.leadingAnchor.constraint(equalTo: title.leadingAnchor), policy.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), policy.topAnchor.constraint(equalTo: processesEnabled.bottomAnchor, constant: 10),
-            roots.leadingAnchor.constraint(equalTo: title.leadingAnchor), roots.trailingAnchor.constraint(equalTo: addFolder.leadingAnchor, constant: -16), roots.topAnchor.constraint(equalTo: policy.bottomAnchor, constant: 12),
-            addFolder.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), addFolder.topAnchor.constraint(equalTo: roots.topAnchor),
-            kind.leadingAnchor.constraint(equalTo: title.leadingAnchor), kind.topAnchor.constraint(equalTo: roots.bottomAnchor, constant: 22),
-            clean.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), clean.centerYAnchor.constraint(equalTo: kind.centerYAnchor),
-            scan.trailingAnchor.constraint(equalTo: clean.leadingAnchor, constant: -8), scan.centerYAnchor.constraint(equalTo: kind.centerYAnchor),
-            logSearch.leadingAnchor.constraint(equalTo: title.leadingAnchor), logSearch.topAnchor.constraint(equalTo: kind.bottomAnchor, constant: 12), logSearch.widthAnchor.constraint(equalTo: content.widthAnchor, multiplier: 0.48),
-            currentPhase.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), currentPhase.centerYAnchor.constraint(equalTo: logSearch.centerYAnchor),
-            scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), scroll.topAnchor.constraint(equalTo: logSearch.bottomAnchor, constant: 10), scroll.bottomAnchor.constraint(equalTo: selectedEvent.topAnchor, constant: -8),
-            selectedEvent.leadingAnchor.constraint(equalTo: title.leadingAnchor), selectedEvent.trailingAnchor.constraint(equalTo: openRepository.leadingAnchor, constant: -12), selectedEvent.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -10), selectedEvent.heightAnchor.constraint(equalToConstant: 46),
-            footer.leadingAnchor.constraint(equalTo: title.leadingAnchor), footer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), footer.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
-        ])
-    }
-    deinit { timer?.invalidate() }
-    static func bytes(_ value: UInt64?) -> String { value.map { String(format: "%.1f GB", Double($0) / 1_000_000_000) } ?? "Unavailable" }
-    func render(_ value: HealthSnapshot) {
-        snapshot = value
-        // Keep a selected table cell intact while copying; metrics and counts still refresh.
-        let selectedEditor = window.firstResponder as? NSTextView
-        let selectingCell = (selectedEditor?.selectedRange().length ?? 0) > 0 && (selectedEditor?.delegate as? NSView)?.isDescendant(of: table) == true
-        let m = value.metrics
-        disk.stringValue = "\(Self.bytes(m.diskAvailableBytes)) available of \(Self.bytes(m.diskTotalBytes))"
-        diskBar.doubleValue = m.diskTotalBytes.flatMap { total in total > 0 ? m.diskAvailableBytes.map { 100 * (1 - Double($0) / Double(total)) } : nil } ?? 0
-        memory.stringValue = "\(m.memoryPressure) pressure · \(Self.bytes(m.memoryTotalBytes)) RAM"
-        memory.textColor = m.memoryPressure == "Critical" ? .systemRed : m.memoryPressure == "Warning" ? .systemOrange : .labelColor
-        memoryDetail.stringValue = "\(Self.bytes(m.memoryAvailableBytes)) available (est.) · \(Self.bytes(m.swapUsedBytes)) swap"
-        memory.toolTip = "Estimated available: \(Self.bytes(m.memoryAvailableBytes)) · Swap used: \(Self.bytes(m.swapUsedBytes))"
-        automatic.state = value.config.automatic ? .on : .off
-        processesEnabled.state = value.config.harvestProcesses ? .on : .off
-        worktreesEnabled.state = value.config.cleanWorktrees ? .on : .off
-        cachesEnabled.state = value.config.cleanCaches == true ? .on : .off
-        policy.stringValue = "Checks every \(value.config.intervalSeconds / 60) minutes. Test browsers: \((value.config.browserMinAgeSeconds ?? value.config.processMinAgeSeconds) / 60)+ minutes; other tests: \(value.config.processMinAgeSeconds / 60)+ minutes. Worktrees: clean, unused, merged or \(value.config.worktreeMinAgeDays)+ days with a retained branch. Caches: Chrome signing copies 1+ hour; browser/build caches 1+ day. Repeated quiet checks required."
-        roots.stringValue = "Workspaces: " + (value.config.workspaceRoots.isEmpty ? "None configured" : value.config.workspaceRoots.joined(separator: " · "))
-        roots.toolTip = value.config.workspaceRoots.joined(separator: "\n")
-        kind.setLabel("Processes (\(value.processInventory?.count ?? value.processes.count))", forSegment: 0); kind.setLabel("Worktrees (\(value.worktrees.count))", forSegment: 1)
-        kind.setLabel("Caches (\(value.caches?.count ?? 0))", forSegment: 2)
-        kind.setLabel("Activity (\(value.activity?.count ?? 0))", forSegment: 3)
-        currentPhase.stringValue = value.phase?.isEmpty == false ? value.phase! : "Waiting for the next check"
-        currentPhase.textColor = value.running == true ? .systemBlue : .secondaryLabelColor
-        let date = value.observedAt > 0 ? Date(timeIntervalSince1970: value.observedAt).formatted(date: .abbreviated, time: .shortened) : "Not scanned yet"
-        let diskChange = value.diskAvailableChangeBytes.map { String(format: " · Net free space %+.1f MiB", Double($0) / 1_048_576) } ?? ""
-        footer.stringValue = value.errors.isEmpty ? "\(date) · Stopped \(value.harvestedProcesses) processes; removed \(value.removedWorktrees) worktrees and \(value.removedCaches ?? 0) caches.\(diskChange)" : value.errors.joined(separator: "\n")
-        footer.toolTip = "Net free-space change includes concurrent writes and APFS shared blocks; it is measured on the home volume."
-        footer.textColor = value.errors.isEmpty ? .secondaryLabelColor : .systemOrange
-        if !selectingCell { rebuildItems() }; setBusy(busy)
-    }
-    func show() {
-        if present { NSApplication.shared.setActivationPolicy(.regular) }
-        window.center(); window.makeKeyAndOrderFront(nil); NSApplication.shared.activate(ignoringOtherApps: true)
-        nextHostRead = .distantPast; refresh()
-        timer?.invalidate(); timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
-    }
-    func windowWillClose(_ notification: Notification) { timer?.invalidate(); timer = nil; if present { NSApplication.shared.setActivationPolicy(.accessory) } }
-    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard items.indices.contains(row) else { return nil }
-        let item = items[row]; let column = tableColumn?.identifier.rawValue
-        let value: String
-        switch column {
-        case "name": value = item.name
-        case "age": value = Self.age(item.process?.ageSeconds ?? item.worktree?.ageSeconds)
-        case "memory": value = Self.bytes(item.process?.residentBytes)
-        case "cpu": value = item.process.map { String(format: "%.1f", $0.cpuPercent) } ?? "—"
-        case "repository": value = item.worktree?.repository ?? "Unknown"
-        default: value = item.detail
-        }
-        let label = NSTextField(labelWithString: value)
-        label.isSelectable = true
-        label.font = .systemFont(ofSize: 12); label.lineBreakMode = .byTruncatingMiddle
-        label.toolTip = column == "memory" ? "Resident RAM (RSS), excluding swapped memory. Sorted largest first." : column == "cpu" ? "CPU usage reported by ps; averaging differs by operating system." : column == "age" && item.worktree != nil ? "Checkout age (Git file creation time, or modification time when unavailable). Automatic cleanup also checks the latest activity." : value
-        label.textColor = column != "state" ? .labelColor : item.eligible ? .systemGreen : .secondaryLabelColor
-        return label
-    }
-    static func age(_ seconds: UInt64?) -> String {
-        guard let seconds else { return "Unknown" }
-        if seconds < 3600 { return "\(seconds / 60)m" }
-        if seconds < 86400 { return "\(seconds / 3600)h" }
-        return "\(seconds / 86400)d"
-    }
-    @objc func switchKind() {
-        table.deselectAll(nil)
-        selectedEvent.stringValue = kind.selectedSegment == 1 ? "Select a checkout to remove. Its branch is retained; active work and local files are protected." : "Select an entry to read its full message."
-        rebuildItems()
-    }
-    func updateHosts(_ hosts: [String]) {
-        let selected = selectedHost
-        machine.removeAllItems(); machine.addItem(withTitle: "This Mac")
-        for host in hosts { machine.addItem(withTitle: host) }
-        if let selected {
-            if !hosts.contains(selected) { machine.addItem(withTitle: selected) }
-            machine.selectItem(withTitle: selected)
-        }
-    }
-    @objc func switchMachine() {
-        generation += 1; snapshot = nil; items = []; readingStatus = false; busy = false
-        table.deselectAll(nil); table.reloadData()
-        disk.stringValue = "Connecting…"; diskBar.doubleValue = 0; memory.stringValue = "Connecting…"; memoryDetail.stringValue = ""
-        roots.stringValue = ""; policy.stringValue = ""; footer.stringValue = ""
-        selectedEvent.stringValue = ""; currentPhase.stringValue = "Loading selected machine…"
-        window.title = "hey-boss · Health · " + (selectedHost ?? "This Mac")
-        setBusy(false); refresh()
-    }
-    @objc func openGitHub() {
-        guard kind.selectedSegment == 1, items.indices.contains(table.selectedRow),
-              let raw = items[table.selectedRow].worktree?.githubUrl,
-              let url = URL(string: raw), url.scheme == "https", url.host == "github.com" else { return }
-        NSWorkspace.shared.open(url)
-    }
-    func controlTextDidChange(_ obj: Notification) { rebuildItems() }
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        if items.indices.contains(table.selectedRow) {
-            let item = items[table.selectedRow]
-            if let editor = selectedEvent.currentEditor() as? NSTextView, editor.selectedRange().length > 0 { setBusy(busy); return }
-            selectedEvent.stringValue = item.name + "\n" + (item.process.map { "\(Self.bytes($0.residentBytes)) RSS · \(String(format: "%.1f", $0.cpuPercent))% CPU · \(Self.age($0.ageSeconds)) old · " } ?? "") + (item.worktree.map { "\($0.repository) · \(Self.age($0.ageSeconds)) old · " } ?? "") + item.detail
-            selectedEvent.toolTip = selectedEvent.stringValue
-        }
-        setBusy(busy)
-    }
-    @discardableResult func copySelected(to pasteboard: NSPasteboard = .general) -> Bool {
-        guard items.indices.contains(table.selectedRow) else { return false }
-        let item = items[table.selectedRow]
-        let columns = item.worktree.map { [item.name, Self.age($0.ageSeconds), $0.repository, item.detail] } ?? item.process.map { [item.name, Self.age($0.ageSeconds), Self.bytes($0.residentBytes), String(format: "%.1f%% CPU", $0.cpuPercent), item.detail] } ?? [item.name, item.detail]
-        pasteboard.clearContents()
-        return pasteboard.setString(columns.joined(separator: "\t"), forType: .string)
-    }
-    @objc func scanNow() { request(["scan", "--json"], snapshotResult: true) }
-    @objc func cleanNow() {
-        if kind.selectedSegment == 1 {
-            guard items.indices.contains(table.selectedRow), let path = items[table.selectedRow].worktree?.path else { return }
-            request(["remove-worktree", path, "--json"], snapshotResult: true)
-        } else { request(["clean", "--json"], snapshotResult: true) }
-    }
-    @objc func toggleAutomatic() { request([automatic.state == .on ? "enable" : "disable"], snapshotResult: false) }
-    @objc func toggleProcesses() { request(["configure", "--processes", processesEnabled.state == .on ? "true" : "false"], snapshotResult: false) }
-    @objc func toggleWorktrees() { request(["configure", "--worktrees", worktreesEnabled.state == .on ? "true" : "false"], snapshotResult: false) }
-    @objc func toggleCaches() { request(["configure", "--caches", cachesEnabled.state == .on ? "true" : "false"], snapshotResult: false) }
-    @objc func addWorkspace() {
-        if selectedHost != nil {
-            let alert = NSAlert(); alert.messageText = "Add workspace on " + selectedHost!; alert.informativeText = "Enter an absolute directory path on this machine."
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 24)); field.placeholderString = "/home/user/Workspace"
-            alert.accessoryView = field; alert.addButton(withTitle: "Add workspace"); alert.addButton(withTitle: "Cancel")
-            alert.beginSheetModal(for: window) { [weak self] result in
-                if result == .alertFirstButtonReturn { self?.request(["add-root", field.stringValue], snapshotResult: false) }
-            }
-            return
-        }
-        let picker = NSOpenPanel(); picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.prompt = "Add workspace"
-        picker.beginSheetModal(for: window) { [weak self] response in
-            if response == .OK, let path = picker.url?.path { self?.request(["add-root", path], snapshotResult: false) }
-        }
-    }
-    func refresh() {
-        if present && nextHostRead <= Date() && !readingHosts { nextHostRead = Date().addingTimeInterval(30); request(["hosts", "--json"], snapshotResult: false) }
-        request(["status", "--json"], snapshotResult: true)
-    }
-    func setBusy(_ value: Bool) {
-        busy = value
-        for button in [scan, clean, automatic, processesEnabled, worktreesEnabled, cachesEnabled, addFolder] { button.isEnabled = !value && snapshot != nil && snapshot?.running != true }
-        cachesEnabled.isEnabled = cachesEnabled.isEnabled && snapshot?.config.cleanCaches != nil
-        machine.isEnabled = !value
-        let worktree = items.indices.contains(table.selectedRow) ? items[table.selectedRow].worktree : nil
-        if kind.selectedSegment == 1 { clean.isEnabled = clean.isEnabled && worktree != nil }
-        openRepository.isEnabled = worktree?.githubUrl != nil
-    }
-    func request(_ args: [String], snapshotResult: Bool) {
-        let hostsRequest = args.first == "hosts"
-        let statusRequest = args.first == "status"
-        let requestGeneration = generation
-        let routedArgs = !hostsRequest && selectedHost != nil ? ["--host", selectedHost!] + args : args
-        if hostsRequest { guard !readingHosts else { return }; readingHosts = true }
-        else if statusRequest { guard !readingStatus else { return }; readingStatus = true }
-        else { guard !busy else { return }; setBusy(true); currentPhase.stringValue = "Starting health check…" }
-        let completion: (Result<Data, Error>) -> Void = { [weak self] result in
-            onMain {
-                guard let self else { return }
-                if hostsRequest { self.readingHosts = false }
-                else {
-                    guard self.generation == requestGeneration else { return }
-                    if statusRequest { self.readingStatus = false } else { self.setBusy(false) }
-                }
-                do {
-                    let data = try result.get()
-                    if hostsRequest { self.updateHosts(try JSONDecoder().decode([String].self, from: data)) }
-                    else if snapshotResult { self.render(try HealthSnapshot.decode(data)) } else { self.refresh() }
-                } catch {
-                    if let snapshot = self.snapshot { self.render(snapshot) }
-                    self.footer.stringValue = "Health check failed on \(self.selectedHost ?? "This Mac"): \(error.localizedDescription)"; self.footer.textColor = .systemOrange
-                }
-            }
-        }
-        if let runner { runner(routedArgs, completion); return }
-        let candidates = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
-        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            completion(.failure(StorageError(description: "Install the updated hey-boss CLI."))); return
-        }
-        DispatchQueue.global(qos: .utility).async {
-            let process = Process(); process.executableURL = URL(fileURLWithPath: path); process.arguments = ["health"] + routedArgs
-            let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
-            defer { try? pipe.fileHandleForReading.close() }
-            do {
-                try process.run()
-                // Status is cheap; a full worktree inspection may take several minutes.
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 300) {
-                    if process.isRunning {
-                        process.terminate()
-                        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
-                    }
-                }
-                let data = try readScannerOutput(pipe.fileHandleForReading); process.waitUntilExit()
-                guard process.terminationStatus == 0 else { throw StorageError(description: String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Maintenance is busy or inspection failed.") }
-                completion(.success(data))
-            } catch {
-                if process.isRunning {
-                    process.terminate()
-                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
-                    process.waitUntilExit()
-                }
-                completion(.failure(error))
-            }
-        }
     }
 }
 
@@ -4283,7 +3873,6 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let detailScroll = NSScrollView()
     var inspectorKey: String?
     var settingsController: ConnectionSettingsController?
-    var machineHealth: MachineHealth?
     var connectionState: [String: Any]?
     var readingConnectionState = false
     var readingHostInventory = false
@@ -4457,7 +4046,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         menu.addItem(mindmapsMenuItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Agent overview…", action: #selector(show), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Machine Health…", action: #selector(showHealth), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Harvester (Terminal)…", action: #selector(showHealth), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Refresh agents", action: #selector(refreshNow), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Machines…", action: #selector(openSettings), keyEquivalent: "").target = self
@@ -4497,8 +4086,11 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if !NSWorkspace.shared.open(config) { NSLog("Could not open machine config") }
     }
     @objc func showHealth() {
-        if machineHealth == nil { machineHealth = MachineHealth(present: present, cli: cli) }
-        machineHealth?.show()
+        // Maintenance belongs to the standalone CLI; the menu is only a launcher.
+        let script = "tell application \"Terminal\"\nactivate\ndo script \"export PATH=\\\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\\\"; hey-harvester\"\nend tell"
+        var error: NSDictionary?
+        NSAppleScript(source: script)?.executeAndReturnError(&error)
+        if let error { NSLog("Could not launch hey-harvester: %@", error) }
     }
     func applyConnectionSettings(_ preferences: ConnectionPreferences, completion: @escaping (String?) -> Void) {
         let candidates = [cli, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }

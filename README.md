@@ -787,75 +787,71 @@ Codex sessions on a managed app-server can be steered and their saved goals paus
 or re-enabled from expanded Agents rows. See [Codex controls](docs/codex-steering.md)
 for endpoint configuration and the limits of existing standalone sessions.
 
-## Machine Health
+## Harvester
 
-Open **Machine Health…** from the menu bar, or run `hey-boss health open`.
-The native window shows disk space, memory pressure, available memory and swap,
-plus process and worktree cleanup controls. The default **Processes** tab lists
-current-user processes on the selected machine, refreshed every five seconds and
-sorted by resident memory (RSS). Rows include PID, age, CPU usage and executable;
-RSS excludes swapped memory. This live inventory is separate from cleanup
-candidates: appearing here never authorizes termination. Scans run off the UI thread. The
-**Activity** tab browses the latest 1,000 timestamped events: scan phases, cleanup
-decisions, preserved items and errors. Search the log and select an entry to read
-or copy its message. The current phase refreshes while a scan runs.
-The desktop daemon is installed as **Hey Boss.app**, with a bundled icon for the Dock and app switcher.
-**Cmd+W** closes the window. Select text and use **Cmd+C** to copy it;
-editable fields also support **Cmd+V**, **Cmd+X** and **Cmd+A**. With a table
-row selected, **Cmd+C** copies the row. Refreshes preserve text selections.
+Run `hey-harvester` for the terminal dashboard. **Tab** and **Shift-Tab** switch
+between local and remote machines from Hey Boss's existing SSH inventory.
+Use **1–5** for Overview, Processes, Worktrees, Caches and Activity; **↑/↓** scroll
+and **q** quits. Status refreshes every five seconds without blocking navigation.
+The menu-bar **Harvester (Terminal)…** entry launches the same CLI.
 
-The machine selector includes configured SSH clients and connected clients from
-hey-boss's connection inventory. Metrics, logs, roots, settings and every cleanup
-action belong to the selected machine. Remote calls use unattended SSH and reuse
-the companion connection where available; failed connections show an error and
-never fall back to local cleanup. Remote Macs and Linux hosts use the same backend.
+**s** scans, **c** cleans eligible candidates after confirmation, **a** toggles
+automatic maintenance, and **p/w/b/l** toggle process/worktree/cache/log cleanup.
+In Worktrees, select a row and press **x** to request removal; **y** confirms.
+This bypasses age only: local files, live processes, locks, primary checkouts and
+detached unmerged commits remain protected, and named branches are retained.
+The Processes page shows current-user PIDs, CPU usage, resident memory and executable
+names; appearing in this inventory never authorizes termination. Activity shows
+scan phases, cleanup decisions, preservation reasons and errors.
 
-The **Worktrees** tab shows each checkout's age, path, GitHub repository and
-preservation reason. Select a row and click **Remove selected worktree** to remove
-it immediately when safe. This bypasses the automatic age threshold, retaining
-the named branch (including unmerged commits). Detached unmerged commits, local
-files, open processes, locks and primary checkouts remain protected. **Open GitHub**
-opens the repository. Age uses checkout creation time, falling back to modification
-time where birth time is unavailable; automatic eligibility also checks the latest
-Git and tracked-file activity.
+Every action targets the selected machine. Switching tabs leaves an in-flight
+operation on its original machine. Failed SSH connections show an error and never
+fall back to local cleanup. SSH reuses the companion connection where available.
 
 ```sh
-hey-boss health enable          # checks at login and every five minutes
-hey-boss health status          # current metrics and latest counters
-hey-boss health logs --limit 50  # recent activity; --json for structured output
-hey-boss health scan            # inspect only
-hey-boss health clean           # clean verified candidates
-hey-boss health disable
-hey-boss health add-root /path/to/workspaces
-hey-boss health remove-root /path/to/workspaces
-hey-boss health configure --worktrees false
-hey-boss health configure --caches false
-hey-boss health remove-worktree /absolute/path/to/checkout
-hey-boss health hosts --json
-hey-boss health --host devbox status
-hey-boss health --host devbox scan
-hey-boss health --host devbox enable
+hey-harvester                       # terminal dashboard
+hey-harvester --host devbox          # select a remote tab
+hey-harvester status --json          # metrics and latest counters
+hey-harvester logs --limit 50        # recent activity
+hey-harvester scan                   # inspect only
+hey-harvester clean                  # clean eligible candidates
+hey-harvester enable                 # schedule at login and every five minutes
+hey-harvester disable
+hey-harvester add-root /path/to/workspaces
+hey-harvester remove-root /path/to/workspaces
+hey-harvester configure --worktrees false
+hey-harvester configure --caches false
+hey-harvester remove-worktree /absolute/path/to/checkout
+hey-harvester hosts --json
+hey-harvester --host devbox scan
+hey-harvester --host devbox enable
 ```
 
-`tools/machine-health.sh` runs one cleanup cycle using the release build; pass
-`enable`, `status`, or another health subcommand to use the same backend. Set
-`HEY_BOSS_CLI_PATH` to select an installed binary. `health watch` runs the scheduler
-in the foreground; macOS `enable` installs `local.hey-boss.health` in LaunchAgents.
-Linux `enable` installs a user systemd service and timer (`hey-boss-health`); its
-schedule runs independently of the Mac. User services require a running user
-manager (and login or configured lingering).
+`hey-harvester` is an independent Rust package in `packages/hey-harvester`, alongside
+`hey-gh`. It reads the same `~/.hey-boss/config.json` machine inventory,
+`~/.local/share/hey-boss/connections.json` connections, and
+`~/.local/share/hey-boss/health` configuration/history as Hey Boss.
+`HEY_BOSS_HEALTH_DIR` still overrides the maintenance directory. Existing settings,
+observations, locks and history are preserved. `hey-boss health` remains a compatibility
+command; `hey-boss health open` now opens the terminal dashboard.
 
-Install/update the backend on each SSH client with
-`tools/install-health-worker.sh HOST`. It builds and tests on that host, installs
-`~/.local/bin/hey-boss-health` atomically under the maintenance lock, and leaves
-companion services and agents running. Builds reuse the regular upgrade cache
-with two compiler jobs instead of accumulating build products in temporary directories.
-The host needs Rust, a C compiler, Python 3,
-Git (and lsof on macOS). Linux inspects procfs directly. To reuse an existing SSH master, set `HEY_BOSS_SSH_CONTROL_PATH`.
-Pass `local` instead of a hostname to update this machine's dedicated worker.
-An updated remote `hey-boss` CLI also works when no dedicated worker is installed.
-Use the UI's **Add workspace…** or `health --host HOST add-root /remote/path` for
-repositories outside the default roots. Scheduling and cleanup settings are per host.
+Build with `cargo build --locked --release -p hey-harvester`, then run
+`target/release/hey-harvester install`, or use `tools/install-harvester.sh local`.
+Use `tools/install-harvester.sh HOST` for each SSH client. This builds only the
+harvester, installs `~/.local/bin/hey-harvester` atomically under the maintenance
+lock, and migrates an already enabled schedule without restarting Hey Boss services.
+Add `~/.local/bin` to your shell's PATH. The host needs Rust, a C compiler and Git
+(and lsof on macOS); Linux inspects procfs directly. Builds reuse
+`~/.cache/hey-harvester/build` with two compiler jobs. Set
+`HEY_BOSS_SSH_CONTROL_PATH` to reuse an SSH master during installation.
+`tools/install-health-worker.sh` remains an alias for this installer.
+
+`hey-harvester watch` runs scheduled maintenance in the foreground.
+The existing macOS `local.hey-boss.health` LaunchAgent and Linux `hey-boss-health`
+systemd timer names are retained to prevent duplicate schedules; they now invoke
+`hey-harvester run`. Linux user timers require a user manager (login or lingering).
+Disabled automatic maintenance stays disabled during installation.
+`tools/machine-health.sh` runs a one-shot cleanup using the harvester release build.
 
 The harvester targets known Wrangler/Miniflare test browsers, workerd test
 runtimes, disconnected discovery commands, and hey-boss HTTP test fixtures.
@@ -920,7 +916,7 @@ The footer and CLI report measured **net free-space change** on the home volume.
 This includes concurrent writes and shared APFS blocks, rather than summing
 directory sizes that can substantially overstate reclaimed space.
 Worker-log trimming is disabled by default; enable it separately with
-`hey-boss health configure --logs true`. It trims `fleet-worker-<id>.log` diagnostic files above
+`hey-harvester configure --logs true`. It trims `fleet-worker-<id>.log` diagnostic files above
 128 MiB, retaining the latest 64 MiB in the same inode so existing append-only
 workers keep running. Issue history, session transcripts and databases are
 preserved. As with copy-truncate log rotation, concurrent diagnostic output can
@@ -929,7 +925,7 @@ race trimming; durable issue progress remains unchanged.
 Scheduling is opt-in. The macOS job runs at standard priority with `nice 10`, not
 launchd's background tier: that tier is throttled whenever builds or tests run, which
 made process and worktree inspection exceed their timeouts on a busy Mac, so the
-leaked browsers were never harvested. Re-running `health enable` refreshes a stale
+leaked browsers were never harvested. Re-running `hey-harvester enable` refreshes a stale
 registration. Settings and the latest bounded runtime state live in
 `~/.local/share/hey-boss/health` (`HEY_BOSS_HEALTH_DIR` overrides it). There are no
 report files, notification posts, unbounded logs, or telemetry. The state contains
