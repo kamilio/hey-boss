@@ -1,24 +1,28 @@
 ---
 name: hey-boss
-description: Background notifications, project issues, and secrets kept out of agent context.
+description: Background notifications, project issues and documents, worker coordination, and secrets kept out of agent context.
 ---
 
-## Notifications
+# Hey Boss
 
-Notify once for substantial background results or essential blocking decisions. Ask yourself - should I page user for this? Keep active chat, routine progress, and tests in chat. One outcome sentence; brief details.
+Use `hey-boss COMMAND --help` for options. Commands default to readable text;
+use `--json` when available for structured results. Issue commands default to the
+current checkout's project; use `--project FULL_ID` to select another.
+
+## Notifications and questions
+
+Notify once for substantial background results or essential blocking decisions.
+Ask yourself: should I page the user for this? Keep active chat, routine progress,
+and tests in chat. One outcome sentence; brief details.
+
 ```sh
-
 hey-boss notif alert --title Ready 'Ready for review.' --link-url PR_URL --link-label 'Merge PR'
 hey-boss notif update --title Review 'Please review.' --file PATH --comments
 ```
 
 Use `hey-boss notif ask --sync` to wait, or `hey-boss notif ask --async` then `hey-boss notif wait TASK_ID`. Cancellation is never approval; do not automatically re-ask. Remote `pending` does not confirm delivery.
 
-```sh
-hey-boss notif alert --project poe2 --title Ready 'Ready for review.' --issue 123
-```
-
-`--issue` defaults to the current Git/directory issue project; use
+Add `--issue NUMBER` to link the current project's issue; use
 `--issue-project FULL_ID --issue-host HOST` for an explicit remote issue.
 
 ## Secrets
@@ -27,16 +31,13 @@ Use only `hey-boss notif secret`, never chat/ordinary prompts. Never inspect/scr
 
 ```sh
 hey-boss notif secret --field API_KEY --env-file .env
-hey-boss notif secret --field LOGIN --field PASSWORD --login --env-file .env
-hey-boss notif secret --field API_KEY -- python3 app.py
-(set -C; umask 077; hey-boss notif secret --field API_KEY --stdout > .env)
+hey-boss notif secret --field API_KEY -- your-command
 ```
 
 ## Issues
 
 ```sh
 hey-boss issue list --unassigned --json
-hey-boss issue list --all --label ready --unassigned --json
 hey-boss issue create --title 'Fix reconnect' --body 'Describe the problem' --request-id reconnect-1
 hey-boss issue claim 1
 hey-boss issue status 1 green --comment 'Checking what causes the reconnect failure.'
@@ -44,78 +45,19 @@ hey-boss issue comment 1 --body 'Sleep drops the connection before the retry tim
 hey-boss issue close 1 --comment 'Fixed and verified'
 ```
 
-Assign human work with
-`hey-boss issue assign-to-boss NUMBER`; list it with `issue list --assignee boss`.
-
-Use `issue create --title TITLE --draft` for a persisted draft without files or sessions, `issue edit NUMBER --draft` to draft an eligible issue, and `issue undraft NUMBER` to make it runnable. 
-
 While you own an issue, publish a one-line short status after claiming, when the next step
 or risk changes, and at least every ten minutes during active work:
 `hey-boss issue status NUMBER green --comment 'The fix passes tests. Checking the phone layout next.'`
 
-`issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
-its claim; `list --state blocked` finds paused work. Add repeatable `--by NUMBER`
-to link the issues that must close first. `issue blocked-by NUMBER BLOCKER...`
-sets these links on an existing issue; omit BLOCKERs to remove them. Blocking should be rare:
-make every effort to resolve the issue, raise questions via `hey-boss notif ask`, and
-ask the user for help before giving up. Explain the blocker and what enables
-progress. `issue reopen NUMBER` resumes eligibility
+## More workflows
 
+Read only the reference needed for the task:
 
-## Issue workers
+- [Issue coordination](references/issues.md): drafts, human handoffs, priority,
+  blockers, subtasks, PR links, and guarded remote metadata edits.
+- [Documents and attachments](references/documents.md): persistent Markdown
+  artifacts, mindmaps, discussions, and file uploads.
+- [Workers and agents](references/workers.md): saved workers, explicit start versus
+  observation, fleet setup, and agent controls.
 
-`hey-boss worker run --concurrency 2 --tag ready` runs an independent worker; omit
-`--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
-
-## Issue priority order
-
- Use `hey-boss issue move NUMBER --before OTHER`, `--after OTHER`,
-
-
-`hey-boss COMMAND --help`; 
-
-## Subtasks
-
-`issue subtask create PARENT --title TITLE --body MARKDOWN` creates and links an
-ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
-or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
-
-## Mindmaps
-
-`hey-boss mm` shows a project's nested outline. Author from the CLI;
-
-```sh
-hey-boss mm add 'Release' --id release
-hey-boss mm issue 12 --under release
-hey-boss mm issue 12 --under release --title 'Ship API' --if-version 5 --request-id ship-api
-hey-boss mm link issue:12 Platform::api --kind depends-on --why 'API must land first'
-hey-boss mm link pr:https://github.com/org/repo/pull/2 pr:https://github.com/org/repo/pull/1 --kind depends-on
-hey-boss mm show
-hey-boss mm view release
-hey-boss mm show --bodies preview --json
-hey-boss mm web
-```
-
-## Artifacts
-
-`hey-boss artifact` manages persistent project Markdown documents in the issue store.
-Use `create --title TITLE --file plan.md` (or `--body`, '-' for stdin), `list --query TEXT`,
-`view ID --json`, `edit ID --file updated.md --if-version N`, and `export ID` for Markdown stdout.
-`--issue NUMBER` or `--node ALIAS_OR_ID` on create/link attaches the same document;
-`unlink ID --issue NUMBER` or `--node NODE` preserves it. `links` reads resource attachments.
-`comment ID --body TEXT --quote SELECTED_TEXT` or `--parent COMMENT_ID` adds discussions.
-`resolve ID COMMENT_ID` and `--reopen` retain thread history. `archive/restore ID --if-version N`
-retain stable references. 
-
-## URL lookup
-
-`hey-boss lookup 'URL'` reads the resource identified by a copied web link
-
-## File attachments
-
-`hey-boss attachment upload PATH --issue NUMBER` stores any regular file up to
-10 MiB on the authoritative host. Use `--node SELECTOR` or `--artifact ID` instead
-for mindmap nodes and artifacts. `list --issue NUMBER --json` exposes file IDs,
-filenames, sizes and SHA-256. `download FILE_ID` materializes a private temporary
-copy on the caller's machine; `--output PATH` selects a filename or existing
-directory.
+Use `hey-boss lookup 'URL'` to read a resource from a copied Hey Boss web link.

@@ -609,9 +609,11 @@ Delivery is **at least once**: interruption after the Mac accepts an item but
 before the server saves its acknowledgment can replay a duplicate. Server icons
 use `--icon`; local files and file links cannot be transferred by this transport.
 
-Edit **only** `skills/hey-boss/SKILL.md`. Its contents are embedded into the CLI at
-build time. Rebuild/install the Mac CLI, then `hey-boss companion sync-skill`
-updates the local Codex skill and every registered server. To add/update a
+Edit `skills/hey-boss/SKILL.md` for everyday guidance and its linked `references/`
+files for advanced workflows. The bundle is embedded into the CLI at build time
+and visible in `/admin`. `hey-boss skill install` installs it for Codex, Agents,
+and Claude Code. Rebuild/install the Mac CLI, then `hey-boss companion sync-skill`
+updates the full bundle locally and on every registered server. To add/update a
 specific destination, use `hey-boss companion sync-skill HOST`. Installation and
 connection register destinations and sync automatically. Existing agent sessions
 may need to reload the skill. The registry is `~/.local/share/hey-boss/companion-hosts`.
@@ -998,7 +1000,7 @@ The same command works over a connected, updated SSH companion.
 
 Long normal answers wrap and grow, then scroll. Secret fields support long pastes;
 Show reveals the full wrapping editor locally. ⌘Return submits. See the
-[skill's secret workflow](skills/hey-boss/SKILL.md#secrets-keep-values-out-of-agent-context)
+[skill's secret workflow](skills/hey-boss/SKILL.md#secrets)
 for guarded file redirection, cancellation behavior, and environment use.
 
 ## Pull request purposes

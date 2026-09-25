@@ -134,6 +134,22 @@ fn skill_show_returns_the_canonical_document() {
         value["markdown"],
         include_str!("../skills/hey-boss/SKILL.md")
     );
+    let catalog = cli(&["admin", "catalog", "--json"]);
+    let references = value["references"].as_array().unwrap();
+    assert_eq!(references.len(), 3);
+    assert_eq!(catalog["skill"]["references"], value["references"]);
+    for reference in references {
+        let path = reference["path"].as_str().unwrap();
+        assert!(
+            value["markdown"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("({path})"))
+        );
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(reference["source"].as_str().unwrap());
+        assert_eq!(reference["text"], std::fs::read_to_string(source).unwrap());
+    }
 }
 
 #[test]

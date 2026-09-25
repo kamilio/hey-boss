@@ -108,7 +108,7 @@ pub(super) fn publish(
     let app = if companion { None } else { desktop_app()? };
     let skills = [".codex", ".agents", ".claude"]
         .into_iter()
-        .map(|root| Ok(home()?.join(root).join("skills/hey-boss/SKILL.md")))
+        .map(|root| Ok(home()?.join(root).join("skills/hey-boss")))
         .collect::<io::Result<Vec<_>>>()?;
     publish_to(
         snapshot,
@@ -262,7 +262,13 @@ fn publish_to(
         }
         shortcut(binary)?;
         for skill in skills {
-            atomic_copy(&snapshot.join("skills/hey-boss/SKILL.md"), skill, 0o644)?;
+            for (relative, _) in hey_boss::skill::FILES {
+                atomic_copy(
+                    &snapshot.join("skills/hey-boss").join(relative),
+                    &skill.join(relative),
+                    0o644,
+                )?;
+            }
         }
         // The durable receipt is the last publication step. Failed installations
         // leave the previous generation authoritative.
@@ -445,9 +451,12 @@ mod tests {
             &built.with_file_name("hey-harvester"),
             "echo new-hey-harvester",
         );
-        fs::create_dir_all(temp.0.join("skills/hey-boss")).unwrap();
-        fs::write(temp.0.join("skills/hey-boss/SKILL.md"), "canonical skill").unwrap();
-        let skill = temp.0.join("deployed/SKILL.md");
+        for (relative, _) in hey_boss::skill::FILES {
+            let source = temp.0.join("skills/hey-boss").join(relative);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::write(source, format!("staged {relative}")).unwrap();
+        }
+        let skill = temp.0.join("deployed");
         let state = temp.0.join("state");
         publish_to(
             &temp.0,
@@ -475,7 +484,12 @@ mod tests {
             fs::read_link(bin.with_file_name("hb")).unwrap(),
             PathBuf::from("hey-boss")
         );
-        assert_eq!(fs::read_to_string(skill).unwrap(), "canonical skill");
+        for (relative, _) in hey_boss::skill::FILES {
+            assert_eq!(
+                fs::read_to_string(skill.join(relative)).unwrap(),
+                format!("staged {relative}")
+            );
+        }
         assert_eq!(
             fs::read_to_string(bin.with_file_name("hey-harvester")).unwrap(),
             "#!/bin/sh\necho new-hey-harvester\n"

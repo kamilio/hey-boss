@@ -22,6 +22,7 @@
     if(matches("Complete agent input")) html+=button("assembled","Complete agent input","LIVE");
     html+='<h2>AGENT GUIDANCE</h2>';
     if(matches("Skill",data.skill.text)) html+=button("skill","Hey Boss skill",`${data.skill.text.length.toLocaleString()} ch`);
+    (data.skill.references||[]).filter(r=>matches(r.title,r.text)).forEach(r=>html+=button(`reference:${r.path}`,r.title,"REFERENCE"));
     if(matches("Page guide",data.guide.text)) html+=button("guide","Page discovery guide","WEB");
     const commands=data.commands.filter(c=>matches(c.id,c.description));
     html+=`<h2>COMMANDS <span>${commands.length} / ${data.commands.length}</span></h2>`;
@@ -46,7 +47,12 @@
       if(!p) return show("prompt:worker");
       source("PROMPT TEMPLATE",p.title,p.text,p.source,'<div class="toolbar"><button class="button" data-select="assembled">See complete agent input →</button><span class="source">Project overrides can replace these defaults.</span></div>');
     } else if(id==="skill") {
-      source("AGENT SKILL","Hey Boss skill",data.skill.text,data.skill.source,`<div class="note">Install this bundled version into the current user’s Codex, Agents and Claude Code skill directories. Existing unrelated skills are preserved.</div>${panel("Install command",data.skill.install,"Run in your terminal","install-command")}`);
+      const references=(data.skill.references||[]).map(r=>`<button class="button" data-select="reference:${esc(r.path)}">${esc(r.title)} →</button>`).join("");
+      source("AGENT SKILL","Hey Boss skill",data.skill.text,data.skill.source,`<div class="note">Install the skill and its references into the current user’s Codex, Agents and Claude Code skill directories. Read references only when needed.</div>${panel("Install command",data.skill.install,"Run in your terminal","install-command")}<div class="toolbar">${references}</div>`);
+    } else if(id.startsWith("reference:")) {
+      const r=(data.skill.references||[]).find(r=>r.path===id.slice(10));
+      if(!r) return show("skill");
+      source("SKILL REFERENCE",r.title,r.text,r.source,'<div class="toolbar"><button class="button" data-select="skill">← Hey Boss skill</button></div>');
     } else if(id==="guide") {
       source("WEB GUIDANCE","Page discovery guide",data.guide.text,data.guide.source);
     } else if(id==="assembled") {
