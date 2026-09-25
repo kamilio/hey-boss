@@ -1753,7 +1753,12 @@ impl Store {
             }
         }
         let project_settings = registry::project_settings(&tx, &response_project)?;
-        result["prs_enabled"] = project_settings["prs_enabled"].clone();
+        // Worker previews may disable PR delivery for artifact-only tasks.
+        result
+            .as_object_mut()
+            .unwrap()
+            .entry("prs_enabled")
+            .or_insert_with(|| project_settings["prs_enabled"].clone());
         result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
         let settings = super::global_settings::read(&tx)?;
         result["boss"] =
