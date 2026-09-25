@@ -843,11 +843,13 @@ func auditAppearance(root: URL, sample: Record) {
     precondition(group.badge!.row.visualSeverity == .error)
     group.update(cards, expanded: true)
     precondition(group.badge!.isHidden)
-    if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"] {
+    let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"]
+    if let directory {
         try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         for dark in [false, true] { appearanceSnapshot(sample: sample, custom: problem, directory: directory, dark: dark) }
-        for dark in [false, true] { densitySnapshot(custom: problem, directory: directory, dark: dark) }
     }
+    // Keep geometry coverage in the ordinary audit, even without PNG exports.
+    for dark in [false, true] { densitySnapshot(custom: problem, directory: directory, dark: dark) }
     print("Passed: legacy appearance, SF Symbols, safe image fallback, durable custom icon, collapsed error visibility")
 }
 
@@ -867,23 +869,12 @@ final class AuditCanvas: NSView {
     }
 }
 
-func densitySnapshot(custom: Record, directory: String, dark: Bool) {
-    let canvas = AuditCanvas(frame: NSRect(x: 0, y: 0, width: 920, height: 720))
-    canvas.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-    func caption(_ text: String, _ x: CGFloat, _ y: CGFloat, size: CGFloat = 12) {
-        let label = PlainTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: size, weight: .medium)
-        label.textColor = .secondaryLabelColor
-        label.frame = NSRect(x: x, y: y, width: 850, height: 22)
-        canvas.addSubview(label)
-    }
+func densitySnapshot(custom: Record, directory: String?, dark: Bool) {
     func fixture(_ kind: String, _ title: String, _ message: String, severity: String? = nil, options: [String] = []) -> Record {
         var row = Record(taskID: UUID().uuidString, kind: kind, question: kind == "update" ? "# Report" : message, project: "Atlas", title: title, description: kind == "update" ? message : "", options: options, autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 0, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
         row.severity = severity
         return row
     }
-    caption("hey-boss · notifications", 24, 676, size: 18)
-    caption("344 px cards · 8 px gaps", 24, 640)
     let rows = [
         fixture("update", "Review ready", "Three changes are ready for review."),
         fixture("update", "Authentication migration review", "The migration preserves current sessions. Two changes need review before rollout.", severity: "info"),
@@ -892,9 +883,11 @@ func densitySnapshot(custom: Record, directory: String, dark: Bool) {
         fixture("alert", "Checks passed", "All 13 tests passed.", severity: "success")
     ]
     var keep: [Card] = []
-    var top: CGFloat = 592
+    let sources: [String?] = ["This Mac", "devbox", nil, "build-server-with-a-long-hostname.staging.example.com", "This Mac"]
     for (index, sample) in rows.enumerated() {
         var row = sample
+        row.sourceHost = sources[index]
+        row.sourceKnown = sources[index] != nil
         if index == 3 { row.iconData = custom.iconData }
         let card = Card(row, open: {}, openURL: { _ in }, complete: { _, _ in })
         card.configure(grouped: false)
@@ -906,27 +899,63 @@ func densitySnapshot(custom: Record, directory: String, dark: Bool) {
         }
         precondition(!card.header.frame.intersects(card.close.frame))
         precondition(card.body.frame.maxY <= card.header.frame.minY)
-        if index == 0 { precondition(card.view.frame.height <= 106) }
+        let source = card.view.content.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == row.sourceLabel }!
+        precondition(!source.isHidden && source.frame.height == 14)
+        precondition(source.frame.maxY + 6 <= card.body.frame.minY, "Source attribution must not overlap the summary")
+        precondition(source.frame.minY >= 12 && source.frame.maxX <= 328)
+        precondition(source.toolTip == (row.isLocalSource || row.sourceHost == nil ? row.sourceLabel : "Sent from server: \(row.sourceLabel)"))
+        if let button = card.link {
+            precondition(button.frame.maxY + 8 <= source.frame.minY, "Source attribution must clear the action row")
+        }
+        // A one-line summary, source row and action fit in 125 px. Two-line
+        // updates stay within 140 px; alerts without an action stay within 91 px.
+        if index == 0 {
+            precondition((17...19).contains(card.body.frame.height))
+            precondition((123...125).contains(card.view.frame.height), "One-line update density changed")
+        }
+        if row.kind == "update" { precondition(card.view.frame.height <= 140) }
+        if index == 4 { precondition(card.link == nil && card.view.frame.height <= 91) }
+        keep.append(card)
+    }
+    let stackHeight = keep.reduce(CGFloat(0)) { $0 + $1.view.frame.height } + CGFloat(keep.count - 1) * 8
+    let canvas = AuditCanvas(frame: NSRect(x: 0, y: 0, width: 920, height: stackHeight + 128 + 64))
+    canvas.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    func caption(_ text: String, _ x: CGFloat, _ y: CGFloat, size: CGFloat = 12) {
+        let label = PlainTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: size, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.sizeToFit()
+        label.frame = NSRect(x: x, y: y, width: min(label.frame.width, canvas.bounds.width - x - 24), height: 22)
+        canvas.addSubview(label)
+    }
+    let height = canvas.bounds.height
+    caption("hey-boss · notifications", 24, height - 44, size: 18)
+    caption("344 px cards · 8 px gaps", 24, height - 80)
+    var top = height - 128
+    for card in keep {
         top -= card.view.frame.height
         card.view.frame.origin = NSPoint(x: 24, y: top)
         card.view.drawsSurface = false
         canvas.addSubview(card.view)
         top -= 8
-        keep.append(card)
     }
-    caption("Question", 400, 640)
+    precondition(keep.last!.view.frame.minY == 64, "The full stack must clear the footer")
+    for pair in zip(keep, keep.dropFirst()) {
+        precondition(pair.0.view.frame.minY - pair.1.view.frame.maxY == 8)
+    }
+    caption("Question", 400, height - 80)
     let ui = Interface(present: false)
     ui.onPresented = { _, _ in }
     let question = fixture("approval", "Release", "Which format should the report use?", options: ["Markdown", "PDF"])
     ui.add(question)
     ui.notificationCount.stringValue = "\(rows.count + 1) notifications"
-    ui.stackToolbar.frame.origin = NSPoint(x: 24, y: 600)
+    ui.stackToolbar.frame.origin = NSPoint(x: 24, y: height - 120)
     ui.stackToolbar.drawsSurface = false
     canvas.addSubview(ui.stackToolbar)
     let questionView = ui.question.contentView as! Surface
     precondition(questionView.frame.height < 180)
     questionView.drawsSurface = false
-    questionView.frame.origin = NSPoint(x: 400, y: 634 - questionView.frame.height)
+    questionView.frame.origin = NSPoint(x: 400, y: height - 86 - questionView.frame.height)
     canvas.addSubview(questionView)
     let groupRows = [rows[3], rows[0], rows[1]]
     let groupCards = groupRows.map { Card($0, open: {}, openURL: { _ in }, complete: { _, _ in }) }
@@ -937,19 +966,30 @@ func densitySnapshot(custom: Record, directory: String, dark: Bool) {
     group.view.frame.origin = NSPoint(x: 400, y: questionView.frame.minY - 102)
     canvas.addSubview(group.view)
     caption("Collapsed project · 3 updates", 400, group.view.frame.maxY + 6)
-    caption("One-line update: \(Int(keep[0].view.frame.height)) px (previously 123 px)", 400, group.view.frame.minY - 44)
-    caption("Summary width: 312 px (previously 254 px)", 400, group.view.frame.minY - 68)
+    caption("One-line update: \(Int(keep[0].view.frame.height)) px · source + action", 400, group.view.frame.minY - 44)
+    caption("Summary width: 312 px · source row: 14 px", 400, group.view.frame.minY - 68)
     caption("Actual-size layout capture; solid backing replaces compositor glass.", 24, 20, size: 11)
+    for view in canvas.subviews {
+        precondition(canvas.bounds.contains(view.frame), "Density capture clips a view: \(view.frame)")
+    }
+    for (index, view) in canvas.subviews.enumerated() {
+        for other in canvas.subviews.dropFirst(index + 1) {
+            precondition(!view.frame.intersects(other.frame), "Density capture overlaps views")
+        }
+    }
+    print("Compact layout (\(dark ? "dark" : "light")): update=\(Int(keep[0].view.frame.height))px, two-line=\(Int(keep[1].view.frame.height))px, question=\(Int(questionView.frame.height))px, group=\(Int(group.view.frame.height))px; source spacing and canvas bounds passed")
+    guard let directory else { return }
     let window = NSWindow(contentRect: canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
     window.contentView = canvas
     window.appearance = canvas.appearance
     canvas.layoutSubtreeIfNeeded()
-    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 920, pixelsHigh: 720, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(canvas.bounds.width), pixelsHigh: Int(canvas.bounds.height), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     bitmap.size = canvas.bounds.size
     canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
     let path = URL(fileURLWithPath: directory).appendingPathComponent("balanced-\(dark ? "dark" : "light").png")
     try! bitmap.representation(using: .png, properties: [:])!.write(to: path)
-    print("Compact layout: update=\(Int(keep[0].view.frame.height))px, two-line=\(Int(keep[1].view.frame.height))px, question=\(Int(questionView.frame.height))px, group=\(Int(group.view.frame.height))px")
     withExtendedLifetime((keep, groupCards, group, ui)) {}
 }
 
