@@ -54,7 +54,7 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
     match options.action {
         SkillAction::Show if options.json => println!(
             "{}",
-            json!({"markdown":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md"})
+            json!({"markdown":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","references":hey_boss::skill::references()})
         ),
         SkillAction::Show => print!("{}", hey_boss::skill::MARKDOWN),
         SkillAction::Install => {
@@ -138,7 +138,7 @@ pub fn catalog() -> Value {
         ("prs", "Pull request", hey_boss::issues::worker::DEFAULT_PRS_PROMPT),
         ("chief", "Chief", include_str!("issues/prompts/chief.md").trim_ascii_end()),
     ].map(|(id,title,text)|json!({"id":id,"title":title,"text":text,"source":format!("src/issues/prompts/{id}.md")}));
-    json!({"commands":commands,"prompts":prompts,"chief_wrapper":hey_boss::issues::worker::chief_instructions("{{project}}","{{prompt}}"),"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install"},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
+    json!({"commands":commands,"prompts":prompts,"chief_wrapper":hey_boss::issues::worker::chief_instructions("{{project}}","{{prompt}}"),"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install","references":hey_boss::skill::references()},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
 }
 
 fn request(root: &Path, operation: Value) -> io::Result<Request> {

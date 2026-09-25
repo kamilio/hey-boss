@@ -169,9 +169,7 @@ def apply(source, binary, expected):
                 if installed_id(binary) != expected:
                     raise RuntimeError('Installed CLI failed build verification')
                 install_shortcut(binary)
-                for root in ('.codex', '.agents', '.claude'):
-                    skill = pathlib.Path.home() / root / 'skills/hey-boss/SKILL.md'
-                    atomic_copy(source / 'skills/hey-boss/SKILL.md', skill, 0o644)
+                run([str(binary), 'skill', 'install'])
             except BaseException:
                 atomic_copy(previous, binary)
                 if replaced_app:

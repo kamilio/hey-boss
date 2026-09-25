@@ -256,7 +256,7 @@ launchctl kickstart "$domain/local.hey-boss-broker"
 else
 nohup "$HOME/.local/bin/hey-boss" companion serve --state "$HOME/.local/share/hey-boss" > "$HOME/.local/share/hey-boss/broker.log" 2>&1 < /dev/null &
 fi
-cp "$stage/skills/hey-boss/SKILL.md" "$HOME/.codex/skills/hey-boss/SKILL.md"
+"$HOME/.local/bin/hey-boss" skill install
 echo 'Installed CLI and skill. Add ~/.local/bin to PATH; connect from your Mac.'
 "#,
                 )
@@ -266,7 +266,7 @@ echo 'Installed CLI and skill. Add ~/.local/bin to PATH; connect from your Mac.'
             if !status.success() || !archived.success() {
                 return Err("remote installation failed".into());
             }
-            sync_skill(host)?;
+            register(host)?;
         }
         Action::Connect { host, unattended } => {
             if *unattended {
@@ -389,35 +389,35 @@ fn cancel_forward(host: &str, local: u16, remote: u16) -> Result<(), String> {
 
 // Combine skill distribution and readiness lookup into one SSH setup request.
 fn prepare(host: &str) -> Result<String, String> {
-    let skill = include_str!("../skills/hey-boss/SKILL.md");
+    let skill = hey_boss::skill::archive().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").ok_or("HOME is missing")?;
-    for root in [".codex", ".agents", ".claude"] {
-        let directory = PathBuf::from(&home).join(root).join("skills/hey-boss");
-        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        std::fs::write(directory.join("SKILL.md"), skill).map_err(|e| e.to_string())?;
-    }
+    hey_boss::skill::install(&PathBuf::from(home)).map_err(|e| e.to_string())?;
     let mut command = ssh(host)?;
     let mut child = command
         .arg(host)
         .arg(format!(
-            r#"{}; printf '%s' {} > "$HOME/.local/share/hey-boss/bridge-host"; printf '%s' {} > "$HOME/.local/share/hey-boss/bridge-generation""#,
+            r#"{}
+{}
+printf '1' > "$HOME/.local/share/hey-boss/bridge-protocol"
+printf '%s' {} > "$HOME/.local/share/hey-boss/bridge-host"
+printf '%s' {} > "$HOME/.local/share/hey-boss/bridge-generation"
+printf '%s' "$HOME/.local/share/hey-boss/bridge.sock""#,
             r#"set -eu
 umask 077
 test -f "$HOME/.local/bin/hey-boss.companion"
 test -x "$HOME/.local/bin/hey-boss"
 test -S "$HOME/.local/share/hey-boss/daemon.sock"
-"$HOME/.local/bin/hey-boss" companion clear-stale-bridge --state "$HOME/.local/share/hey-boss"
-mkdir -p "$HOME/.codex/skills/hey-boss"
-cat > "$HOME/.codex/skills/hey-boss/SKILL.md.new"
-mv "$HOME/.codex/skills/hey-boss/SKILL.md.new" "$HOME/.codex/skills/hey-boss/SKILL.md"
-for root in .agents .claude; do
-  mkdir -p "$HOME/$root/skills/hey-boss"
-  cp "$HOME/.codex/skills/hey-boss/SKILL.md" "$HOME/$root/skills/hey-boss/SKILL.md"
-done
-printf '1' > "$HOME/.local/share/hey-boss/bridge-protocol"
-printf '%s' "$HOME/.local/share/hey-boss/bridge.sock""#,
+"$HOME/.local/bin/hey-boss" companion clear-stale-bridge --state "$HOME/.local/share/hey-boss""#,
+            hey_boss::skill::remote_install_script(),
             quote(host),
-            quote(&format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos())),
+            quote(&format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )),
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -427,7 +427,7 @@ printf '%s' "$HOME/.local/share/hey-boss/bridge.sock""#,
         .stdin
         .take()
         .unwrap()
-        .write_all(skill.as_bytes())
+        .write_all(&skill)
         .map_err(|e| e.to_string())?;
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if !output.status.success() {
@@ -440,25 +440,21 @@ printf '%s' "$HOME/.local/share/hey-boss/bridge.sock""#,
 }
 
 fn sync_skill(host: &str) -> Result<(), String> {
-    let skill = include_str!("../skills/hey-boss/SKILL.md");
+    let skill = hey_boss::skill::archive().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").ok_or("HOME is missing")?;
-    for root in [".codex", ".agents", ".claude"] {
-        let directory = PathBuf::from(&home).join(root).join("skills/hey-boss");
-        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        std::fs::write(directory.join("SKILL.md"), skill).map_err(|e| e.to_string())?;
-    }
+    hey_boss::skill::install(&PathBuf::from(home)).map_err(|e| e.to_string())?;
     let mut command = ssh(host)?;
-    let mut child = command.arg(host).arg(r#"set -eu; umask 077; mkdir -p "$HOME/.codex/skills/hey-boss"; cat > "$HOME/.codex/skills/hey-boss/SKILL.md.new"; mv "$HOME/.codex/skills/hey-boss/SKILL.md.new" "$HOME/.codex/skills/hey-boss/SKILL.md"
-for root in .agents .claude; do
-  mkdir -p "$HOME/$root/skills/hey-boss"
-  cp "$HOME/.codex/skills/hey-boss/SKILL.md" "$HOME/$root/skills/hey-boss/SKILL.md"
-done"#)
-        .stdin(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let mut child = command
+        .arg(host)
+        .arg(hey_boss::skill::remote_install_script())
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
     child
         .stdin
         .take()
         .unwrap()
-        .write_all(skill.as_bytes())
+        .write_all(&skill)
         .map_err(|e| e.to_string())?;
     if !child.wait().map_err(|e| e.to_string())?.success() {
         return Err("skill sync failed".into());
