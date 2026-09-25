@@ -55,7 +55,7 @@ or risk changes, and at least every ten minutes during active work:
 
 `issue block NUMBER --comment REASON` moves an open issue to Blocked and releases
 its claim; `list --state blocked` finds paused work. Add repeatable `--by NUMBER`
-to link prerequisites: Ready or Closed in PR-enabled projects, Closed otherwise. `issue blocked-by NUMBER BLOCKER...`
+to link the issues that must close first. `issue blocked-by NUMBER BLOCKER...`
 sets these links on an existing issue; omit BLOCKERs to remove them. Blocking should be rare:
 make every effort to resolve the issue, raise questions via `hey-boss notif ask`, and
 ask the user for help before giving up. Explain the blocker and what enables
@@ -64,54 +64,8 @@ progress. `issue reopen NUMBER` resumes eligibility
 
 ## Issue workers
 
-Protect owned linked worktrees before editing or queuing checks: create with
-`git worktree add --lock --reason` or inspect/reuse and lock with
-`git worktree lock --reason`. Include project, issue and owning session in the
-reason; record path, branch, HEAD and receipt locations in issue progress.
-Keep the lock across queued validation and interruptions. Never replace another
-owner's lock. Inspect staged work and surviving validator ancestry on resume;
-do not reset files, prune registrations or launch duplicate validators. A saved
-branch preserves commits, not a deleted index or uncommitted work. Only after
-verified completion and no live/queued descendants may the owner explicitly
-unlock its worktree and remove it without force, retaining branch and external
-receipts. Git locks cannot prevent arbitrary filesystem deletion. This lifecycle
-lock reserves no validation capacity.
-
-Treat interrupted, cancelled, timed-out, or incompletely reported validation as
-**incomplete**, even when the command returns exit 0. Do not advance dependent
-commit, push, deploy, or issue-close steps until the required checks are verified.
-Require a normal exit and fresh completion evidence for the expected task graph;
-missing tasks or summaries are not success. For Turbo, use a run-specific
-`--summarize` report and compare it with the intended tasks, including dependencies.
-Its run-level `exitCode: 0` and `failed: 0` can coexist with unfinished tasks.
-An `18 successful, 20 total` summary is incomplete. Preserve the command, exit
-status, interruption and completed/expected counts in the handoff, then rerun
-the required checks. Keep existing hooks and project gates enabled.
-
-Use the project's single admission path for validation. Do not wrap an already
-gated command in manual `lockf`/`flock` locks or reserve additional slots to make
-slow checks exclusive unless the task explicitly requires exclusive capacity.
-Preserve the configured limit and the wrapper's inherited ownership contract;
-never manufacture a slot-held marker outside a real owning reservation. Serial
-task execution within one admitted job does not require owning every slot.
-
-For queue diagnosis, report the actual holder and waiter PIDs, parent/child
-relationship, slot paths, and whether the payload has started. A lock process
-or open file alone does not prove ownership: on macOS inspect `lsof`'s lock
-indicator alongside `ps`; on Linux inspect `/proc/locks` (including blocked
-entries) and process ancestry. Distinguish observations from inferred waits.
-Do not kill owners, unlink lock files, or release reservations based on idle or
-orphan labels. Any repair must preserve live checks and their task ownership.
-
 `hey-boss worker --concurrency 2 --tag ready` runs an independent worker; omit
 `--tag` for unrestricted pickup. Standalone queues are per machine. `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration, software deployment, and replica sync for the saved SSH inventory.
-
-`hey-boss worker --json --id WORKER_ID --history 0 status` shows only active or
-pending attempts. Live paused or approval-waiting attempts remain visible;
-`finished_at` identifies terminated attempts, regardless of their state label.
-Use `--history 20` to include up to twenty recent finished attempts. The same
-limit applies to watch and streaming JSON output; the terminal dashboard's
-History tab remains available.
 
 ## Issue priority order
 
@@ -125,39 +79,6 @@ History tab remains available.
 `issue subtask create PARENT --title TITLE --body MARKDOWN` creates and links an
 ordinary issue atomically. Use `subtask add PARENT CHILD`, `list PARENT [--all]`,
 or `remove PARENT CHILD` to link, inspect or unlink. Unlinking preserves the issue.
-By default, siblings run sequentially in queue order; later branches wait for earlier work to
-reach Ready (PR-enabled projects) or Closed. Claim responses include the parent, position, and previous/next subtasks.
-Read the parent requirements and previous task's completion notes/PRs, then leave
-a clear handoff before finishing your own subtask.
-
-For parallel plans, `issue settings set --subtask-scheduling explicit` preserves
-grouping and parent completion but schedules siblings only by declared
-`blocked-by` links. Declare intentional sequences with those links; Ready handoff
-is unchanged. `--subtask-scheduling sequential` restores the default. Mode changes
-reject cycles and blocking claimed/reserved work; hierarchy claim guards remain.
-In explicit mode, previous/next siblings are context, not prerequisites.
-
-`issue reopen NUMBER --clear-manual-hold --if-version VERSION` clears a reconciled
-manual hold while retaining automatic dependency blocking. The issue remains
-Blocked until dependencies are satisfied. Ordinary reopen errors list effective
-blocker numbers and sources; never unlink dependencies just to clear a hold.
-
-For PR-enabled projects, make stacked PRs when dependencies have unmerged PRs:
-start from the prerequisite PR branch and use it as the new PR’s base. Keep your
-diff scoped to this task; update/rebase when upstream changes or merges. Read
-`dependency_context` and attached PRs from the claim response. Attach your delivery
-PR and run `hey-boss issue ready NUMBER` when handing it to Boss. You decide
-readiness; there is no independent CI verification gate. Ready unblocks both
-explicit dependencies and subsequent subtasks before merge. Reopen Ready work
-before changing it so new downstream pickups pause. Running agents keep their
-claims and receive rework notices.
-
-Subtasks are scheduling dependencies: unfinished descendants put the parent in
-Blocked. Subtask mutations reject any automatic release of an existing parent or
-ancestor claim, even for the owner. For organization only, prefer mindmap nesting:
-`hey-boss mm issue PARENT --id parent-work`, then
-`hey-boss mm issue CHILD --under parent-work`. This preserves ownership and scheduling.
-Do not override or restore another agent's ownership to organize follow-ups.
 
 ## Mindmaps
 
