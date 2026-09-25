@@ -16,7 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(in crate::issues) const DEFAULT_PROMPT: &str = "You are this project's Chief. Keep its work organized and moving. In this turn:\n- Check every open hey-boss issue and attached PR.\n- For confirmed new conflicts or review blockers, add the label 'rework needed' and unassign the issue so a worker can pick it up. Never release a live agent's claim; report the blocker instead.\n- Add 'PR ready' only when CI passes and required reviews are complete and clean. Remove stale readiness labels.\n- Maintain the mindmap through the CLI, using simple labels and nesting confirmed follow-ups under their source.\n- Report missing capabilities or CLI friction as issues in the hey-boss project; avoid duplicate reports.\nWorkers handle code changes. Do not implement issues, edit repository files, commit, merge PRs, or deploy. Inspect current state before changing project metadata. Finish this pass and stop; you will be resumed in about an hour. Do not create a goal or wait in a monitoring loop.";
+pub(in crate::issues) const DEFAULT_PROMPT: &str =
+    include_str!("prompts/chief.md").trim_ascii_end();
 pub(in crate::issues) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS project_chiefs(
  project_id TEXT NOT NULL REFERENCES projects(id),machine TEXT NOT NULL,cwd TEXT NOT NULL,
  session_id TEXT,next_at INTEGER NOT NULL DEFAULT 0,owner_pid INTEGER,owner_start TEXT,
