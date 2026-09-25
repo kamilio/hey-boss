@@ -204,6 +204,14 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
             change as f64 / 1_048_576.0
         );
     }
+    println!(
+        "Inspection errors: {} · cache sweep: {} entries in {} ms · {} roots pending · last complete: {}",
+        s.errors.len(),
+        s.cache_progress.visited_this_cycle,
+        s.cache_progress.slice_millis,
+        s.cache_progress.roots_pending,
+        s.cache_progress.last_completion()
+    );
     if s.trimmed_logs > 0 {
         println!(
             "Trimmed {} oversized worker logs, retaining recent diagnostics and active writers",

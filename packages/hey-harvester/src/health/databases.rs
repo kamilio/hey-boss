@@ -61,7 +61,7 @@ fn remove_until(path: &Path, deadline: Instant) -> io::Result<()> {
         ));
     }
     if protected(path)? {
-        return Err(io::Error::other("SQLite database or sidecar preserved"));
+        return Err(super::preserved("SQLite database or sidecar preserved"));
     }
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
@@ -72,7 +72,9 @@ fn remove_until(path: &Path, deadline: Instant) -> io::Result<()> {
                     "Cleanup time slice exhausted; retry next cycle",
                 ));
             }
-            if let Err(e) = entry.and_then(|e| remove_until(&e.path(), deadline)) {
+            if let Err(e) = entry.and_then(|e| remove_until(&e.path(), deadline))
+                && error.as_ref().is_none_or(super::is_preserved)
+            {
                 error = Some(e);
             }
         }
@@ -83,7 +85,7 @@ fn remove_until(path: &Path, deadline: Instant) -> io::Result<()> {
     } else if meta.is_file() || meta.file_type().is_symlink() {
         fs::remove_file(path)
     } else {
-        Err(io::Error::other("Special file preserved"))
+        Err(super::preserved("Special file preserved"))
     }
 }
 

@@ -311,6 +311,7 @@ fn run(
             detail,
             eligible,
             worktree: None,
+            error: None,
         });
     }
     observations.retain(|key, _| retained.contains(key));

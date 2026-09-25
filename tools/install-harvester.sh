@@ -16,6 +16,9 @@ umask 077
 stage=$(mktemp -d)
 trap '\''rm -rf "$stage"'\'' EXIT HUP INT TERM
 tar -xzf - -C "$stage"
+# Archives preserve old mtimes; force Cargo to inspect this source revision
+# instead of reusing a newer artifact from another temporary source tree.
+touch "$stage/packages/hey-harvester/src/lib.rs"
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export CARGO_TARGET_DIR="$HOME/.cache/hey-harvester/build"
 export CARGO_BUILD_JOBS=2

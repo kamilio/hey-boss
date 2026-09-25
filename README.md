@@ -888,6 +888,7 @@ Worktrees used by a running Codex process are retained.
 Primary checkouts stay intact. HEADs are pinned under `refs/cleanup/worktrees/`
 before removal; uncommitted files are discarded. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
+Git paths stream without a total listing-size cap; old missing checkouts retire only their exact registration, retaining HEAD.
 
 Aggressive cache cleanup expires individual files after 24 hours across OS temp,
 Chrome signing copies and caches, npm/Bun/Yarn/Python caches, `~/.cache`, and
@@ -895,6 +896,7 @@ project dependency/build/output directories. New siblings do not protect old
 files. Directory discovery and file traversal save cursors between bounded runs,
 so large caches make forward progress. Worker diagnostic log rotation is enabled
 with this policy.
+Status reports cache throughput, pending roots and full-pass completion; failed inspections count as errors, while SQLite/Codex protection stays separate.
 
 Aggressive process cleanup stops orphan developer runtimes after an hour, expired
 developer workloads after a day, and automated browsers after an hour

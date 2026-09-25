@@ -117,6 +117,7 @@ pub(super) fn graceful_idle(
                 detail: "Session inventory incomplete; Codex preserved".into(),
                 eligible: false,
                 worktree: None,
+                error: None,
             }],
             0,
         ));
@@ -188,6 +189,7 @@ pub(super) fn graceful_idle(
                         detail: format!("Normal exit unavailable; session preserved: {error}"),
                         eligible: false,
                         worktree: None,
+                        error: None,
                     });
                     continue;
                 }
@@ -220,6 +222,7 @@ pub(super) fn graceful_idle(
             detail,
             eligible: ready,
             worktree: None,
+            error: None,
         });
     }
     observations.retain(|key, _| {
