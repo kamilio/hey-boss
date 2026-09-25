@@ -64,7 +64,7 @@ pub fn script(args: &[String]) -> io::Result<String> {
     }
     let args = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
     Ok(format!(
-        r#"export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; for worker in "$HOME/.local/bin/hey-boss-health" "$HOME/.local/bin/hey-boss" /opt/homebrew/bin/hey-boss /usr/local/bin/hey-boss; do if test -x "$worker"; then exec "$worker" health {args}; fi; done; echo 'Install the updated hey-boss health worker on this machine.' >&2; exit 127"#
+        r#"export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; for worker in "$HOME/.local/bin/hey-harvester" "$HOME/.cargo/bin/hey-harvester" /opt/homebrew/bin/hey-harvester /usr/local/bin/hey-harvester; do if test -x "$worker"; then exec "$worker" {args}; fi; done; for worker in "$HOME/.local/bin/hey-boss-health" "$HOME/.local/bin/hey-boss" /opt/homebrew/bin/hey-boss /usr/local/bin/hey-boss; do if test -x "$worker"; then exec "$worker" health {args}; fi; done; echo 'Install hey-harvester on this machine.' >&2; exit 127"#
     ))
 }
 
@@ -103,6 +103,18 @@ pub fn execute(host: &str, args: &[String], control: Option<PathBuf>) -> io::Res
         )));
     }
     Ok(result.stdout)
+}
+
+/// Reuse the companion's existing SSH multiplex connection when available.
+pub fn control_path(host: &str) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    host.hash(&mut hash);
+    Some(
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join(".local/share/hey-boss")
+            .join(format!("ssh-{:016x}.sock", hash.finish())),
+    )
 }
 
 #[cfg(test)]

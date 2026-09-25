@@ -787,6 +787,7 @@ dependencies = [
  "ctrlc",
  "flate2",
  "hey-gh",
+ "hey-harvester",
  "html-escape",
  "libc",
  "linkify",
@@ -841,6 +842,20 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
+]
+
+[[package]]
+name = "hey-harvester"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crossterm",
+ "libc",
+ "ratatui",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

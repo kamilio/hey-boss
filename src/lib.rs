@@ -3,7 +3,7 @@ pub mod agent_conversations;
 pub mod agent_guidance;
 pub(crate) mod agent_process;
 pub mod agent_runtime;
-pub mod agents;
+pub use hey_harvester::agents;
 pub mod artifacts;
 pub mod attachments;
 mod chief_ownership;
@@ -12,7 +12,7 @@ pub(crate) mod codex_permissions;
 pub mod database;
 pub mod document;
 pub mod fleet;
-pub mod health;
+pub use hey_harvester::health;
 /// SQLite-backed project issues and durable agent ownership.
 pub mod issues;
 pub mod markdown;

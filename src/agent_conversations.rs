@@ -3,11 +3,10 @@ use crate::database::Connection;
 use crate::issues::{Error, Result};
 use rusqlite::{OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Default, serde::Deserialize, serde::Serialize)]
@@ -24,7 +23,6 @@ pub struct Window {
 
 const PAGE_BYTES: u64 = 1024 * 1024;
 const ENTRY_BYTES: u64 = 8 * 1024 * 1024;
-static PATHS: OnceLock<Mutex<HashMap<(PathBuf, String), PathBuf>>> = OnceLock::new();
 
 fn database(path: &Path) -> Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -257,41 +255,7 @@ fn valid_session(session: &str) -> bool {
             }
         })
 }
-fn find(root: &Path, suffix: &str) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(root).ok()?.flatten() {
-        let kind = entry.file_type().ok()?;
-        if kind.is_dir() {
-            if let Some(path) = find(&entry.path(), suffix) {
-                return Some(path);
-            }
-        } else if kind.is_file() && entry.file_name().to_string_lossy().ends_with(suffix) {
-            return Some(entry.path());
-        }
-    }
-    None
-}
-pub(crate) fn rollout(home: &Path, session: &str) -> Option<PathBuf> {
-    let key = (home.to_owned(), session.to_owned());
-    if let Some(path) = PATHS
-        .get_or_init(Default::default)
-        .lock()
-        .ok()?
-        .get(&key)
-        .filter(|p| p.exists())
-        .cloned()
-    {
-        return Some(path);
-    }
-    let suffix = format!("-{session}.jsonl");
-    let path = find(&home.join("sessions"), &suffix)
-        .or_else(|| find(&home.join("archived_sessions"), &suffix))?;
-    let mut paths = PATHS.get_or_init(Default::default).lock().ok()?;
-    if paths.len() >= 256 {
-        paths.clear();
-    }
-    paths.insert(key, path.clone());
-    Some(path)
-}
+use hey_harvester::agents::rollout;
 
 /// Best-effort bounded metadata capture on the caller's device, before SSH.
 /// Tool text and arguments are deliberately excluded from persisted origins.

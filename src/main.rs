@@ -847,24 +847,6 @@ fn run() -> std::io::Result<()> {
             }
             return Ok(());
         }
-        Command::Health {
-            action: health_cli::Action::Open,
-            host: None,
-        } => {
-            let executable = std::env::current_exe()?.canonicalize()?;
-            initialize(&executable)?;
-            let state = std::fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
-            let request: Request =
-                serde_json::from_value(serde_json::json!({"command":"health", "sync":false}))?;
-            let reply = Client::new(std::path::Path::new(state.trim()).join("daemon.sock"))
-                .try_send(&request)?;
-            if reply.status.as_deref() != Some("ok") {
-                return Err(std::io::Error::other(
-                    "Install the updated daemon to open Machine Health",
-                ));
-            }
-            return Ok(());
-        }
         Command::Health { action, host } => {
             return match host {
                 Some(host) => health_cli::run_remote(host, action),
