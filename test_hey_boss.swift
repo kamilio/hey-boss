@@ -2246,7 +2246,44 @@ func auditNotificationClicks() {
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps:true)
     RunLoop.main.run(until:Date().addingTimeInterval(0.2))
+    func snapshot(_ expanded: Bool?) {
+        guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"] else { return }
+        try! FileManager.default.createDirectory(atPath:directory,withIntermediateDirectories:true)
+        let state = expanded.map { $0 ? "expanded" : "collapsed" } ?? "card"
+        for dark in [false, true] {
+            // Bitmap exports need solid backing for compositor-owned glass.
+            // Use duplicate views so captures cannot alter the event fixture.
+            let sample = Card(row,open:{},openURL:{ _ in },complete:{ _,_ in })
+            sample.configure(grouped:expanded != nil)
+            sample.view.drawsSurface = false
+            let group = ProjectGroup("Clicks",toggle:{},clear:{})
+            if let expanded { group.update([sample],expanded:expanded) }
+            let surface = expanded == nil ? sample.view : group.view
+            surface.drawsSurface = false
+            let canvas = AuditCanvas(frame:NSRect(x:0,y:0,width:360,height:surface.frame.height + 16))
+            surface.frame.origin = NSPoint(x:8,y:8)
+            canvas.addSubview(surface)
+            let preview = NSWindow(contentRect:canvas.bounds,styleMask:[.borderless],backing:.buffered,defer:false)
+            preview.isReleasedWhenClosed = false
+            preview.contentView = canvas
+            preview.appearance = NSAppearance(named:dark ? .darkAqua : .aqua)
+            canvas.layoutSubtreeIfNeeded()
+            let bitmap = canvas.bitmapImageRepForCachingDisplay(in:canvas.bounds)!
+            canvas.cacheDisplay(in:canvas.bounds,to:bitmap)
+            let path = URL(fileURLWithPath:directory).appendingPathComponent("notification-click-\(state)-\(dark ? "dark" : "light").png")
+            try! bitmap.representation(using:.png,properties:[:])!.write(to:path)
+            withExtendedLifetime((sample,group)) { preview.close() }
+        }
+    }
     func click(_ view: NSView, drag: Bool = false) {
+        // The audit drives AppKit without NSApplication.run(). Earlier fixtures
+        // leave window/activation events queued; dispatch those before timestamping
+        // this gesture, just as an idle application's event loop would.
+        let readyBy = ProcessInfo.processInfo.systemUptime + 10
+        while let event = NSApp.nextEvent(matching:.any,until:.distantPast,inMode:.default,dequeue:true) {
+            NSApp.sendEvent(event)
+            precondition(ProcessInfo.processInfo.systemUptime < readyBy,"Native event queue did not settle before mouse input")
+        }
         window.contentView!.layoutSubtreeIfNeeded()
         let point = view.convert(NSPoint(x:view.bounds.midX,y:view.bounds.midY),to:nil)
         let events: [NSEvent.EventType] = drag ? [.leftMouseDown,.leftMouseDragged,.leftMouseUp] : [.leftMouseDown,.leftMouseUp]
@@ -2259,9 +2296,9 @@ func auditNotificationClicks() {
         // Buttons consume mouse-up in their tracking loop, so their action also
         // confirms dispatch. Keep the behavior assertions below independent.
         let before = (opens, completions, toggles)
-        let until = Date().addingTimeInterval(5)
+        let until = ProcessInfo.processInfo.systemUptime + 5
         var dispatched = false
-        while !dispatched && Date() < until {
+        while !dispatched && ProcessInfo.processInfo.systemUptime < until {
             if let event = NSApp.nextEvent(matching:.any,until:Date().addingTimeInterval(0.005),inMode:.default,dequeue:true) {
                 NSApp.sendEvent(event)
                 dispatched = event.type == .leftMouseUp && event.windowNumber == window.windowNumber
@@ -2271,6 +2308,7 @@ func auditNotificationClicks() {
         }
         precondition(dispatched, "Native mouse sequence did not finish dispatching")
     }
+    snapshot(nil)
     click(card.body)
     precondition(opens == 1 && completions == 1, "Native body mouse click was swallowed")
     click(card.header)
@@ -2285,9 +2323,11 @@ func auditNotificationClicks() {
     let group = ProjectGroup("Clicks",toggle:{ toggles += 1 },clear:{})
     group.update([card],expanded:false)
     window.contentView!.addSubview(group.view)
+    snapshot(false)
     click(group.summary)
     precondition(toggles == 1, "Group summary must expand on click")
     group.update([card],expanded:true)
+    snapshot(true)
     click(card.body)
     precondition(opens == 4 && toggles == 1, "Nested card click must not collapse its group")
     window.close()
