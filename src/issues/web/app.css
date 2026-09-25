@@ -579,7 +579,7 @@ dialog::backdrop {
   line-height: 1.8;
   color: var(--muted);
 }
-.issue-overflow { position: relative; }
+.issue-overflow { position: relative; margin-left: auto; }
 .issue-overflow summary { list-style: none; cursor: pointer; }
 .issue-overflow summary::-webkit-details-marker { display: none; }
 .issue-overflow summary span { font-size: 15px; letter-spacing: 2px; }
