@@ -13,6 +13,7 @@ let projectSettingsVersion = 0,
   projectSettingsSequence = 0;
 function projectSettingsDraft() {
   return {
+    subtask_scheduling: $("#project-subtask-scheduling").value,
     prompt: $("#project-prompt").value,
     chief_enabled: $("#project-chief").checked,
     chief_prompt: $("#project-chief-prompt").value,
@@ -28,6 +29,9 @@ function projectSettingsChanged() {
     JSON.stringify(projectSettingsDraft()) !==
     JSON.stringify(projectSettingsOriginal);
   updateWorkflowBranches();
+  $("#project-scheduling-help").textContent = $("#project-subtask-scheduling").value === "explicit"
+    ? "Independent siblings can run in parallel. Use Add blocker on an issue to declare dependencies and intentional sequences. Queue order sets priority only."
+    : "Each sibling and its descendants wait for all earlier siblings to finish. Queue order sets the sequence.";
   $("#project-chief-state").textContent = $("#project-chief").checked ? "Enabled" : "Disabled";
   $(".chief-settings").classList.toggle("chief-enabled", $("#project-chief").checked);
   $("#project-settings-state").textContent = changed ? "Unsaved changes" : "";
@@ -63,6 +67,7 @@ $("#project-settings-trigger").onclick = async () => {
     );
     if (sequence !== projectSettingsSequence) return;
     projectSettingsVersion = value.version;
+    $("#project-subtask-scheduling").value = value.subtask_scheduling || "sequential";
     $("#project-prompt").value = value.prompt;
     $("#project-chief").checked = value.chief_enabled;
     $("#project-chief-prompt").value = value.chief_prompt;
@@ -196,6 +201,7 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 }
 
 $("#project-drafts").onchange = projectSettingsChanged;
+$("#project-subtask-scheduling").onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
 $("#project-chief").onchange = projectSettingsChanged;
 $("#project-chief-prompt").oninput = projectSettingsChanged;
@@ -207,7 +213,7 @@ $("#project-chief-reset").onclick = () => {
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;
-  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt], #project-chief-reset")) input.disabled = disabled;
+  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, #project-subtask-scheduling, [data-reset-prompt], #project-chief-reset")) input.disabled = disabled;
   $("#project-preview-workspace").disabled = disabled;
   $("#project-preview-task").disabled = disabled;
 }

@@ -168,6 +168,7 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         // Old capture triggers omit additive fields. An omitted value is not
         // an instruction to reset a setting already known by this replica.
         for (column, default) in [
+            ("subtask_scheduling", json!("sequential")),
             ("drafts_enabled", json!(1)),
             ("plan_template", json!("plans/{timestamp}-{number}.md")),
             ("worktree_enabled", json!(0)),
@@ -3478,6 +3479,81 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_capture_upgrade_republishes_and_preserves_legacy_replays() {
+        let main = Fixture::new();
+        main.db.execute_batch("INSERT INTO project_settings(project_id,prompt,version) VALUES('named:Native fleet','Work',1);
+            DROP VIEW issue_pickup_ready;
+            CREATE VIEW issue_pickup_ready AS SELECT project_id,number FROM issues WHERE state='open';
+            ALTER TABLE project_settings DROP COLUMN subtask_scheduling;").unwrap();
+        main.capture();
+        drop(Store::open(&main.path).unwrap());
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        let initial = snapshot(&main.db, "agent").unwrap();
+        apply_pull(&agent.db, "agent", &initial, &[]).unwrap();
+        main.db
+            .execute(
+                "UPDATE project_settings SET subtask_scheduling='explicit',version=2",
+                [],
+            )
+            .unwrap();
+        let cursor = rows(
+            &main.db,
+            "SELECT coalesce(max(seq),0) AS seq FROM fleet_outbox",
+            &[],
+        )
+        .unwrap()[0]["seq"]
+            .as_i64()
+            .unwrap();
+        main.capture();
+        let next = incremental(&main.db, "agent", cursor).unwrap();
+        assert!(!next["changes"].as_array().unwrap().is_empty());
+        apply_pull(&agent.db, "agent", &next, &[]).unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT subtask_scheduling FROM project_settings",
+                &[]
+            )
+            .unwrap()[0]["subtask_scheduling"],
+            "explicit"
+        );
+        let legacy = json!({"project_id":"named:Native fleet","prompt":"Updated","prs_enabled":0,"version":3,"boss_name":"Boss"});
+        put_row(&agent.db, "project_settings", &legacy).unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT subtask_scheduling FROM project_settings",
+                &[]
+            )
+            .unwrap()[0]["subtask_scheduling"],
+            "explicit"
+        );
+        main.db
+            .execute(
+                "UPDATE project_settings SET subtask_scheduling='sequential',version=4",
+                [],
+            )
+            .unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &incremental(&main.db, "agent", next["cursor"].as_i64().unwrap()).unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rows(
+                &agent.db,
+                "SELECT subtask_scheduling FROM project_settings",
+                &[]
+            )
+            .unwrap()[0]["subtask_scheduling"],
+            "sequential"
+        );
+    }
+
+    #[test]
     fn legacy_settings_replay_preserves_fields_the_sender_does_not_know() {
         let f = Fixture::new();
         f.db.execute("INSERT INTO project_settings(project_id,prompt,version,chief_enabled,chief_prompt,worktree_enabled) VALUES('named:Native fleet','Work',1,1,'Organize',1)", []).unwrap();
@@ -3494,6 +3570,7 @@ mod tests {
         let expected = rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()[0].clone();
         let mut legacy = expected.clone();
         for column in [
+            "subtask_scheduling",
             "drafts_enabled",
             "plan_template",
             "worktree_enabled",

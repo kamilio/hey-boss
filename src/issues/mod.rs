@@ -251,6 +251,8 @@ pub enum Operation {
     },
     ProjectSettings,
     ConfigureProject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtask_scheduling: Option<String>,
         prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chief_enabled: Option<bool>,
@@ -478,6 +480,8 @@ pub enum Operation {
     },
     Reopen {
         number: i64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear_manual_hold: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_version: Option<i64>,
     },

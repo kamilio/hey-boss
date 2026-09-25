@@ -113,6 +113,11 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "project_settings",
+        "subtask_scheduling",
+        "TEXT NOT NULL DEFAULT 'sequential' CHECK(subtask_scheduling IN ('sequential','explicit'))",
+    ),
     ("worker_runs", "retry_at", "INTEGER"),
     ("worker_runs", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
     (
@@ -1022,7 +1027,7 @@ impl Store {
             .is_none_or(|sql| !sql.contains("ready_dependencies"));
         let needs_readiness_refresh = prior_readiness
             .as_ref()
-            .is_none_or(|sql| !sql.contains("ready_dependencies_fast"));
+            .is_none_or(|sql| !sql.contains("explicit_subtask_dependencies"));
         let needs_repair = version >= 10
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
@@ -2490,23 +2495,61 @@ fn mutate(
                 issue.closed_by = None;
             }
         }
-        Operation::Reopen { if_version, .. } => {
-            if super::blockers::has_dependencies(db, &project.id, number)? {
-                return Err(Error::conflict(
-                    "This issue is blocked by unfinished issues. Resolve or unlink its blockers before reopening.",
-                ));
-            }
+        Operation::Reopen {
+            if_version,
+            clear_manual_hold,
+            ..
+        } => {
             if if_version.is_some_and(|v| v != issue.version) {
                 return Err(Error::conflict(format!(
                     "Issue changed; current version is {}",
                     issue.version
                 )));
             }
+            let blockers = super::blockers::reopen_blockers(db, &project.id, number)?;
+            if *clear_manual_hold && issue.state != "blocked" {
+                return Err(Error::invalid(
+                    "--clear-manual-hold requires a blocked issue; use ordinary reopen for ready or closed issues",
+                ));
+            }
+            if !*clear_manual_hold && !blockers.is_empty() {
+                let summary = blockers
+                    .iter()
+                    .map(|b| format!("#{} ({})", b["number"], b["source"].as_str().unwrap()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let hold_help = if issue.manual_blocked {
+                    " To clear a reconciled manual hold while retaining dependency blocking, use --clear-manual-hold."
+                } else {
+                    ""
+                };
+                let mut error = Error::conflict(format!(
+                    "This issue is blocked by unfinished issues: {summary}. Resolve these dependencies before reopening.{hold_help}"
+                ));
+                error.details =
+                    Some(json!({"blocked_by":blockers,"manual_blocked":issue.manual_blocked}));
+                return Err(error);
+            }
+            if *clear_manual_hold && issue.assignee.is_some() {
+                return Err(Error::conflict(
+                    "Cannot clear a manual hold on a claimed issue; its claim is preserved",
+                ));
+            }
             let retry_hold = issue.assignee.is_none() && db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND state!='completed' AND retry_allowed=0) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
                 params![project.id, number], |r| r.get(0),
             )?;
-            if issue.state != "open" || retry_hold {
+            if *clear_manual_hold {
+                if issue.manual_blocked {
+                    action = "manual_hold_cleared";
+                    data = json!({"blocked_by":blockers});
+                    issue.manual_blocked = false;
+                    if blockers.is_empty() {
+                        issue.state = "open".into();
+                    }
+                    db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL", params![project.id,number])?;
+                }
+            } else if issue.state != "open" || retry_hold {
                 if issue.state == "blocked" || retry_hold {
                     // Explicitly reopening a blocker also releases old approval
                     // holds and cooldowns; it must actually resume eligibility.

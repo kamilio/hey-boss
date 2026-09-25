@@ -1179,10 +1179,16 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
     let (mut instructions, goal, objective) = task_prompt(job, config);
     if let Some(context) = job.issue["subtask_context"].as_object() {
         let parent = &context["parent"];
+        let explicit = context.get("scheduling").is_some_and(|v| v == "explicit");
         instructions.push_str(&format!(
-            "\n\nSubtask {} of {} (sequential queue).\nParent: #{} {} [{}]",
+            "\n\nSubtask {} of {} ({}).\nParent: #{} {} [{}]",
             context["position"],
             context["total"],
+            if explicit {
+                "explicit dependencies"
+            } else {
+                "sequential queue"
+            },
             parent["number"],
             parent["title"].as_str().unwrap_or(""),
             parent["state"].as_str().unwrap_or("")
@@ -1204,10 +1210,14 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
             "\nRead the parent requirements: hey-boss issue view {} --project {project}.",
             parent["number"]
         ));
-        if let Some(previous) = context["previous"]["number"].as_i64() {
+        if !explicit && let Some(previous) = context["previous"]["number"].as_i64() {
             instructions.push_str(&format!("\nRead the previous subtask's completion notes and PRs: hey-boss issue view {previous} --project {project}."));
         }
-        instructions.push_str("\nWork on this subtask's scope. Later subtasks wait until this issue and its descendants reach Ready in PR projects, or Closed otherwise. Before closing, record what changed, verification, and any handoff details for the next agent. Completing this subtask does not complete the parent. Re-read the claim response for current sequence context; queue order may have changed since launch.");
+        if explicit {
+            instructions.push_str("\nSibling order is context, not a prerequisite. Only declared dependencies constrain sibling pickup; intentional sequences use blocked-by links. Read the parent and declared prerequisite notes/PRs. Work on this subtask's scope and record verification and handoff details. Completing this subtask does not complete the parent.");
+        } else {
+            instructions.push_str("\nWork on this subtask's scope. Later subtasks wait until this issue and its descendants reach Ready in PR projects, or Closed otherwise. Before closing, record what changed, verification, and any handoff details for the next agent. Completing this subtask does not complete the parent. Re-read the claim response for current sequence context; queue order may have changed since launch.");
+        }
     }
     if let Some(dependencies) = job.issue["dependency_context"]
         .as_array()

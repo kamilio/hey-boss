@@ -85,6 +85,7 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 struct ProjectSettingsRow {
+    subtask_scheduling: String,
     chief_enabled: bool,
     chief_prompt: Option<String>,
     prompt: String,
@@ -97,9 +98,10 @@ struct ProjectSettingsRow {
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt,subtask_scheduling FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
+            subtask_scheduling: r.get(9)?,
             chief_enabled: r.get(7)?, chief_prompt: r.get(8)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
             drafts_enabled: r.get(3)?, plan_template: r.get(4)?,
@@ -107,6 +109,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         }),
     ).optional()?;
     let ProjectSettingsRow {
+        subtask_scheduling,
         chief_enabled,
         chief_prompt,
         prompt,
@@ -117,6 +120,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
+        subtask_scheduling: "sequential".into(),
         chief_enabled: false,
         chief_prompt: None,
         prompt: worker::DEFAULT_PROMPT.into(),
@@ -131,7 +135,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"plan":worker::DEFAULT_PLAN_PROMPT,"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":subtask_scheduling,"chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"plan":worker::DEFAULT_PLAN_PROMPT,"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -676,6 +680,7 @@ pub(super) fn execute(
         }
         Operation::ProjectSettings => project_settings(db, p),
         Operation::ConfigureProject {
+            subtask_scheduling,
             prompt,
             chief_enabled,
             chief_prompt,
@@ -688,6 +693,14 @@ pub(super) fn execute(
             if_version,
         } => {
             let defaults = project_settings(db, p)?;
+            let scheduling = subtask_scheduling
+                .as_deref()
+                .unwrap_or(defaults["subtask_scheduling"].as_str().unwrap());
+            if !["sequential", "explicit"].contains(&scheduling) {
+                return Err(Error::invalid(
+                    "Subtask scheduling must be sequential or explicit",
+                ));
+            }
             let prompt = prompt
                 .clone()
                 .unwrap_or_else(|| defaults["prompt"].as_str().unwrap().into());
@@ -731,13 +744,17 @@ pub(super) fn execute(
                 ));
             }
             db.execute(
-                "UPDATE project_settings SET chief_enabled=?2,chief_prompt=?3 WHERE project_id=?1",
+                "UPDATE project_settings SET chief_enabled=?2,chief_prompt=?3,subtask_scheduling=?4 WHERE project_id=?1",
                 params![
                     p.id,
                     chief_enabled.unwrap_or(defaults["chief_enabled"] == true),
-                    chief_prompt
+                    chief_prompt,
+                    scheduling
                 ],
             )?;
+            if defaults["subtask_scheduling"] != scheduling {
+                super::super::blockers::validate_scheduling_change(db, &p.id)?;
+            }
             project_settings(db, p)
         }
         Operation::PullRequests { number }

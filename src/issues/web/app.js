@@ -948,14 +948,15 @@ function renderReadiness(value) {
 }
 function issueStateActions(issue) {
   const reopen = issue.state !== "open";
-  let buttons = `<button type="button" class="button" data-action="${reopen ? "reopen" : "close"}" ${reopen && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${reopen ? "Reopen issue" : "Close issue"}</button>`;
+  const clearHold = issue.state === "blocked" && issue.manual_blocked;
+  let buttons = `<button type="button" class="button" data-action="${clearHold ? "clear_manual_hold" : reopen ? "reopen" : "close"}" ${reopen && !clearHold && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${clearHold ? "Clear manual hold" : reopen ? "Reopen issue" : "Close issue"}</button>`;
   if (issue.state === "open") buttons += `<button type="button" class="button" data-action="block">${icon("blocked")}Block issue</button>`;
   if (issue.state === "blocked" || issue.state === "ready") buttons += `<button type="button" class="button" data-action="close">${icon("closed")}Close issue</button>`;
   if (issue.state === "open" && !issue.draft && model.detail?.prs_enabled) buttons += `<button type="button" class="button" data-action="ready" ${issue.pull_requests?.some(pr => ["fix", "unspecified"].includes(pr.purpose)) ? "" : 'disabled title="Attach the task’s PR first"'}>${icon("pull-request")}PR ready</button>`;
   return buttons;
 }
 function renderDraftNotice(issue) {
-  if (issue.state === "blocked" && !issue.deleted_at) return `<section class="blocked-notice" aria-label="Blocked issue"><div>${icon("blocked")}</div><div><h2>This issue is blocked</h2><p>Workers won’t pick up this issue. Resolve the issues linked below to resume automatically, or reopen after resolving a manual blocker.</p></div><button type="button" class="button" data-action="reopen" ${issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon("refresh")}Reopen issue</button></section>`;
+  if (issue.state === "blocked" && !issue.deleted_at) return `<section class="blocked-notice" aria-label="Blocked issue"><div>${icon("blocked")}</div><div><h2>${issue.manual_blocked ? "Manual hold" : "Waiting for dependencies"}</h2><p>${issue.manual_blocked ? "Clear this hold once the manual blocker is resolved. Unfinished dependencies will still pause pickup." : "Workers won’t pick up this issue until its dependencies are resolved. It will resume automatically."}</p></div>${issue.manual_blocked ? `<button type="button" class="button" data-action="clear_manual_hold">${icon("refresh")}Clear manual hold</button>` : ""}</section>`;
   if (!issue.draft || issue.deleted_at || issue.state !== "open") return "";
   return `<section class="draft-notice" aria-label="Draft readiness"><div class="draft-notice-icon">${icon("edit")}</div><div><h2>This issue is a draft</h2><p>Agents won’t pick up this issue until you mark it ready.</p>${issue.blocked_by?.length ? "<p>Unfinished blockers are kept. Marking ready will return this issue to Blocked until they’re resolved.</p>" : ""}<p id="draft-error" class="form-error" role="alert" hidden></p></div><button type="button" class="button primary" data-draft-action="ready">${icon("check")}Mark ready</button></section>`;
 }
@@ -1169,7 +1170,8 @@ async function performAction(action, button) {
     );
     if (!force) return;
   }
-  const operation = { action, number: i.number };
+  const operation = { action: action === "clear_manual_hold" ? "reopen" : action, number: i.number };
+  if (action === "clear_manual_hold") { operation.clear_manual_hold = true; operation.if_version = i.version; }
   if (action === "release_allocation") {
     operation.expected_machine = allocation.reserved_machine;
     operation.if_version = i.version;
@@ -1181,7 +1183,7 @@ async function performAction(action, button) {
   if (action === "reopen") operation.if_version = i.version;
   button.disabled = true;
   try {
-    await mutate(operation, project, host);
+    const result = await mutate(operation, project, host);
     if (action === "block" && operation.comment && model.project.id === project && model.detail?.issue.number === i.number) {
       $("#comment-body").value = "";
       storage.remove(draftKey("comment", project, i.number));
@@ -1196,6 +1198,7 @@ async function performAction(action, button) {
         block: "Issue blocked",
         close: "Issue closed",
         reopen: "Issue reopened",
+        clear_manual_hold: result?.issue?.state === "blocked" ? "Manual hold cleared; waiting for dependencies" : "Manual hold cleared; issue reopened",
         delete: "Issue moved to Deleted",
         restore: "Issue restored",
       }[action],
@@ -1283,6 +1286,7 @@ async function historyPage(reset = false) {
       dependency_rework: "notified dependent work of upstream changes",
       closed: "closed this issue",
       reopened: "reopened this issue",
+      manual_hold_cleared: "cleared the manual hold",
       deleted: "deleted this issue",
       restored: "restored this issue",
       reordered: "changed this issue’s order",
