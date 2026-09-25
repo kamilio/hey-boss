@@ -1618,6 +1618,7 @@ mod tests {
             "src/file",
             "skills/hey-boss/file",
             "packages/hey-gh/file",
+            "packages/hey-harvester/file",
             "tools/upgrade_hey_boss.py",
             "tools/drain_github_issues.py",
             "hey_boss_daemon.swift",
