@@ -11,7 +11,7 @@ async page => {
   await page.waitForFunction(number=>model.route.issue===null&&document.querySelector(`[data-issue-number="${number}"].issue-created`),number);checks.push('Creation stays on list and highlights issue '+number);
   await expect(number===3?[3,2,1]:[4,3,2,1],'Form-created issue '+number+' goes to top');
  }
- await page.evaluate(async()=>{await api({action:'create',title:'CLI default append',body:'',labels:[]},model.project.id)});await page.reload();await expect([4,3,2,1,5],'Default creation appends and order persists');
+ await page.evaluate(async()=>{await api({action:'create',title:'Legacy API default append',body:'',labels:[]},model.project.id)});await page.reload();await expect([4,3,2,1,5],'Legacy API creation appends and order persists');
  const records=await page.evaluate(async()=>api({action:'list',state:'open',mine:false,unassigned:false,labels:[],search:null,limit:50,offset:0},model.project.id));
  if(new Set(records.issues.map(i=>i.sort_order)).size!==5)throw Error('Duplicate positions');checks.push('Unique queue positions');
  await page.evaluate(async()=>{for(let n=6;n<=125;n++)await api({action:'create',title:'Bulk issue '+n,body:'',labels:n%2?[]:['ready']},model.project.id)});
