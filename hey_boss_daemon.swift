@@ -3689,7 +3689,6 @@ enum QuickIssueText {
         title += String(chars[start...]); title = title.replacingOccurrences(of: "\\@", with: "@")
         title = title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !title.isEmpty else { throw StorageError(description: "Enter an issue title.") }
-        guard title.utf8.count <= 512 else { throw StorageError(description: "Keep the title within 512 bytes.") }
         guard let project = selected ?? current else { throw StorageError(description: "Choose a project with @project.") }
         return (title, project)
     }
@@ -3746,6 +3745,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     let window = QuickIssuePanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 142), styleMask: [.borderless], backing: .buffered, defer: false)
     let input = NSTextField()
     let context = NSTextField(labelWithString: "Loading projects…")
+    let overflowNote = NSTextField(wrappingLabelWithString: "")
     let error = NSTextField(wrappingLabelWithString: "")
     let bottom = NSButton(title: "Add to bottom", target: nil, action: nil)
     let submit = NSButton(title: "Create", target: nil, action: nil)
@@ -3795,6 +3795,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         closeButton.toolTip = "Close quick add (Esc)"
         context.font = .systemFont(ofSize: 12); context.textColor = .secondaryLabelColor; context.lineBreakMode = .byTruncatingMiddle
         context.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        overflowNote.font = .systemFont(ofSize: 12); overflowNote.textColor = .secondaryLabelColor
         bottom.setButtonType(.pushOnPushOff); bottom.bezelStyle = .rounded; bottom.controlSize = .regular
         bottom.font = .systemFont(ofSize: 12); bottom.toolTip = "Toggle add to bottom (⌘⇧B)"
         bottom.setAccessibilityLabel("Add issue to bottom of queue")
@@ -3813,7 +3814,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(chooseProject)
         table.setAccessibilityLabel("Matching projects"); table.selectionHighlightStyle = .regular
         picker.documentView = table; picker.hasVerticalScroller = true; picker.drawsBackground = false
-        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, footer] { canvas.addSubview(view) }
+        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer] { canvas.addSubview(view) }
         for view in [progress, context, bottom, submitHint, submit] { footer.addSubview(view) }
         window.submitIssue = { [weak self] in self?.create() }
         window.toggleBottom = { [weak self] in guard let self, !self.saving else { return }; self.bottom.state = self.bottom.state == .on ? .off : .on }
@@ -3830,7 +3831,8 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         let rows = min(matches.count, 5)
         let listHeight = expanded ? CGFloat(rows) * 64 : 0
         let errorHeight: CGFloat = error.stringValue.isEmpty ? 0 : 56
-        let height = 142 + (expanded ? listHeight + 68 : 0) + errorHeight
+        let overflowHeight: CGFloat = overflowNote.stringValue.isEmpty || saving || succeeded ? 0 : 36
+        let height = 142 + (expanded ? listHeight + 68 : 0) + errorHeight + overflowHeight
         var frame = window.frame; frame.origin.y += frame.height - height; frame.size.height = height
         window.setFrame(frame, display: present)
         canvas.layoutSubtreeIfNeeded()
@@ -3842,7 +3844,9 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         heading.frame = NSRect(x: 24, y: height - 102, width: width - 48, height: 18)
         picker.frame = NSRect(x: 20, y: height - 110 - listHeight, width: width - 40, height: listHeight)
         table.tableColumns[0].width = width - 40
-        hint.frame = NSRect(x: 24, y: 68 + errorHeight, width: width - 48, height: 18)
+        hint.frame = NSRect(x: 24, y: 68 + errorHeight + overflowHeight, width: width - 48, height: 18)
+        overflowNote.isHidden = overflowHeight == 0
+        overflowNote.frame = NSRect(x: 24, y: 60 + errorHeight, width: width - 48, height: overflowHeight)
         error.isHidden = errorHeight == 0; error.frame = NSRect(x: 24, y: 60, width: width - 48, height: errorHeight)
         footer.frame = NSRect(x: 0, y: 0, width: width, height: 60)
         let busy = saving || (!ready && error.stringValue.isEmpty)
@@ -3860,7 +3864,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             window.makeKeyAndOrderFront(nil); if !saving { window.makeFirstResponder(input) }; return
         }
         generation += 1; let sequence = generation
-        ready = false; succeeded = false; error.stringValue = ""; context.stringValue = "Loading projects…"; matches = []; mention = nil; updateEnabled(); layout()
+        ready = false; succeeded = false; error.stringValue = ""; overflowNote.stringValue = ""; context.stringValue = "Loading projects…"; matches = []; mention = nil; updateEnabled(); layout()
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         if let bounds = screen?.visibleFrame {
             let width = min(680, bounds.width - 48); window.setContentSize(NSSize(width: width, height: window.frame.height)); layout()
@@ -3897,9 +3901,13 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     }
     func changed() {
         succeeded = false
+        overflowNote.stringValue = ""
         error.stringValue = ""; updateEnabled()
         if ready {
-            if let value = try? QuickIssueText.parse(input.stringValue, projects: projects, current: current) { context.stringValue = "Create in \(value.project.name)" }
+            if let value = try? QuickIssueText.parse(input.stringValue, projects: projects, current: current) {
+                context.stringValue = "Create in \(value.project.name)"
+                if value.title.utf8.count > 512 { overflowNote.stringValue = "Long title · Extra text will move to the description." }
+            }
             else { context.stringValue = current.map { "Create in \($0.name) · @project to switch" } ?? "@project to choose a project" }
         }
         updatePicker()

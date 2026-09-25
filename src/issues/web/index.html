@@ -462,9 +462,10 @@
             class="text-input title-input"
             placeholder="What needs to be done?"
             required
-            maxlength="512"
+            aria-describedby="editor-title-help"
             autocomplete="off"
           />
+          <p class="field-help" id="editor-title-help">Long titles automatically continue in the description.</p>
           <div class="field-label description-label">
             <label for="editor-body">Description</label
             ><span>Markdown supported</span>
