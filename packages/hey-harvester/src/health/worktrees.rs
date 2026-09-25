@@ -180,14 +180,29 @@ fn repositories(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut common = BTreeSet::new();
     candidates
         .into_iter()
-        .filter(|p| {
-            git_text(
-                p,
-                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            )
-            .is_ok_and(|dir| common.insert(dir))
-        })
+        .filter(|p| common_directory(p).is_ok_and(|dir| common.insert(dir)))
         .collect()
+}
+
+// A checkout's Git pointer and commondir contain everything discovery needs.
+// Spawning Git for every linked checkout made each scheduled scan take minutes.
+fn common_directory(repo: &Path) -> io::Result<PathBuf> {
+    let pointer = repo.join(".git");
+    let admin = if pointer.is_dir() {
+        pointer
+    } else {
+        let value = std::fs::read_to_string(pointer)?;
+        let target = value
+            .trim()
+            .strip_prefix("gitdir: ")
+            .ok_or_else(|| io::Error::other("Invalid Git pointer"))?;
+        repo.join(target)
+    };
+    match std::fs::read_to_string(admin.join("commondir")) {
+        Ok(relative) => admin.join(relative.trim()).canonicalize(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => admin.canonicalize(),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1240,6 +1255,11 @@ mod aggressive_tests {
         std::fs::write(work.join("file"), "discard stale edit").unwrap();
         std::fs::create_dir(work.join("node_modules")).unwrap();
         std::fs::write(work.join("node_modules/artifact"), "large ignored build").unwrap();
+        assert_eq!(
+            common_directory(&main).unwrap(),
+            common_directory(&work).unwrap()
+        );
+        assert_eq!(repositories(std::slice::from_ref(&root)).len(), 1);
         let w = list(&main).unwrap().remove(1);
         assert!(!expired(&w, now()).unwrap());
         assert!(expired(&w, now() + 172800).unwrap());

@@ -229,7 +229,13 @@ pub(super) fn graceful_idle(
 
 /// Active Codex working directories cannot be retired with their running session.
 pub(super) fn working_paths(table: &Table) -> io::Result<Vec<PathBuf>> {
-    let ids = family(table);
+    // Process ancestry can include root-owned login/session services. They do
+    // not own this user's worktrees and procfs correctly refuses their cwd.
+    let uid = unsafe { libc::geteuid() };
+    let ids: BTreeSet<_> = family(table)
+        .into_iter()
+        .filter(|pid| table.get(pid).is_some_and(|p| p.uid == uid))
+        .collect();
     if ids.is_empty() {
         return Ok(vec![]);
     }
