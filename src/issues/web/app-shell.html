@@ -80,7 +80,7 @@
       <form id="quick-issue-form">
         <div class="quick-issue-entry">
           <span data-icon="issue"></span>
-          <input id="quick-issue-title" aria-label="Issue title" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="quick-issue-projects" aria-describedby="quick-issue-context" placeholder="Issue title… @project to switch" autocomplete="off" maxlength="1024" />
+          <input id="quick-issue-title" aria-label="Issue title" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="quick-issue-projects" aria-describedby="quick-issue-context quick-issue-overflow" placeholder="Issue title… @project to switch" autocomplete="off" />
           <button id="quick-issue-close" type="button" class="icon-button" aria-label="Close quick add"><span data-icon="x"></span></button>
         </div>
         <div id="quick-issue-project-picker" hidden>
@@ -89,6 +89,7 @@
           <p id="quick-issue-project-status" role="status"></p>
         </div>
         <p id="quick-issue-error" role="alert" hidden></p>
+        <p id="quick-issue-overflow" role="status" hidden>Long title · Extra text will move to the description.</p>
         <div class="quick-issue-footer">
           <span id="quick-issue-context" role="status"></span>
           <label class="task-kind-choice" for="quick-issue-kind">Task <select id="quick-issue-kind" title="Plan produces linked artifacts"><option value="implement">Implement</option><option value="plan">Plan</option></select></label>

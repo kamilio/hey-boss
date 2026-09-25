@@ -291,7 +291,8 @@ func auditNativeQuickIssue() {
     precondition(QuickIssueText.suggestions(projects, query: "PO") == [projects[1]])
     precondition(QuickIssueText.suggestions(projects, query: "cafe\u{301}") == [projects[3]])
     precondition((try? QuickIssueText.parse("Fix", projects: projects, current: nil)) == nil)
-    precondition((try? QuickIssueText.parse(String(repeating: "é", count: 513), projects: projects, current: projects[0])) == nil)
+    let longTitle = String(repeating: "é", count: 513)
+    precondition(try! QuickIssueText.parse(longTitle, projects: projects, current: projects[0]).title == longTitle, "Pass all text to the Rust title splitter")
     let suite = "hey-boss-native-quick-issue-\(UUID().uuidString)"; let prefs = UserDefaults(suiteName: suite)!
     defer { prefs.removePersistentDomain(forName: suite) }
     let ui = NativeQuickIssue(present: false, preferences: prefs)
@@ -303,7 +304,17 @@ func auditNativeQuickIssue() {
     }
     ui.open(cli: nil); precondition(ui.ready && ui.current == nil)
     precondition(ui.canvas.bounds.width == ui.window.frame.width && ui.canvas.bounds.height == ui.window.frame.height, "Glass content must fill the quick-add panel")
+    ui.input.stringValue = longTitle + " @poe-code"; ui.changed()
+    precondition(ui.submit.isEnabled && !ui.overflowNote.isHidden && ui.error.stringValue.isEmpty)
+    ui.create()
+    let longRequest = requests.last!
+    precondition(longRequest[longRequest.firstIndex(of: "--title")! + 1] == longTitle, "Do not truncate text before sending it to the CLI")
+    reply?(.failure(StorageError(description: "Disconnected")))
+    ui.create(); precondition(requests.last == longRequest, "Long-title retry must preserve request identity")
+    reply?(.failure(StorageError(description: "Disconnected")))
+    requests.removeLast(2)
     ui.input.stringValue = "Fix @poe-code reconnect"; ui.changed()
+    precondition(ui.overflowNote.isHidden, "Shortening the title hides the note")
     precondition(ui.window.makeFirstResponder(ui.input))
     let editor = ui.input.currentEditor() as! NSTextView
     editor.setSelectedRange(NSRange(location: 13, length: 0)); ui.updatePicker()
@@ -350,11 +361,14 @@ func auditNativeQuickIssue() {
     // caller owns cleanup; normal audits leave no visual artifacts behind.
     if let output = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_SCREENSHOTS"] {
         try! FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
-        ui.window.orderFront(nil)
+        // Other running apps may take focus during capture; keep this synthetic
+        // audit window visible rather than applying production blur dismissal.
+        ui.window.delegate = nil
+        ui.window.makeKeyAndOrderFront(nil)
         for dark in [false, true] {
             ui.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             for state in ["empty", "loading", "projects", "error", "long", "saving", "success"] {
-                ui.error.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
+                ui.error.stringValue = ""; ui.overflowNote.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
                 ui.saving = state == "saving"; ui.succeeded = state == "success"; ui.ready = state != "loading"
                 ui.input.stringValue = state == "empty" ? "" : "Fix reconnect @po"
                 if state == "loading" { ui.input.stringValue = ""; ui.context.stringValue = "Loading projects…" }
@@ -362,7 +376,7 @@ func auditNativeQuickIssue() {
                 if state == "success" { ui.input.stringValue = ""; ui.context.stringValue = "Created #7 in poe-code" }
                 if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.stringValue).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
                 if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.stringValue = "Fix reconnect @missing" }
-                if state == "long" { ui.input.stringValue = String(repeating: "Very long issue title ", count: 30) }
+                if state == "long" { ui.input.stringValue = String(repeating: "Very long issue title ", count: 30); ui.changed() }
                 ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
                 for row in ui.matches.indices { _ = ui.table.view(atColumn: 0, row: row, makeIfNecessary: true) }
                 ui.window.displayIfNeeded()

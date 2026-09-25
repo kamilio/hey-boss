@@ -136,11 +136,13 @@ const HeyBossQuickIssue = (() => {
     const fail = message => { error.textContent = message; error.hidden = false; };
     function preview() {
       error.hidden = true;
+      document.getElementById("quick-issue-overflow").hidden = true;
       submit.disabled = saving || !ready || !input.value.trim();
       if (!ready) return;
       try {
         const value = parse(input.value, projects, current);
         context.textContent = `Create in ${value.project.name}`;
+        document.getElementById("quick-issue-overflow").hidden = new TextEncoder().encode(value.title).length <= 512;
       } catch (e) {
         context.textContent = current ? `Create in ${current.name} · @project to switch` : "@project to choose a project";
       }
