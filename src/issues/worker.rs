@@ -511,9 +511,10 @@ impl Worker {
             }
             for (id, handle) in handles {
                 let _ = handle.join();
-                if let Err(e) =
-                    retry_database_busy(|| finalize_abandoned(&mut store, &machine, &id))
-                {
+                // Finalization already retries and retains its durable result
+                // on contention. Nesting another retry loop here multiplies
+                // the shutdown delay while the same writer remains locked.
+                if let Err(e) = finalize_abandoned(&mut store, &machine, &id) {
                     crate::worker_tui::diagnostics::report(format_args!("Worker recovery: {e}"));
                 }
             }
