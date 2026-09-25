@@ -200,14 +200,14 @@ fn handle(
         return forward(state, &request);
     }
     if matches!(request.command.as_str(), "alert" | "update" | "ask") {
-        if !request
+        if request
             .project
             .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || !request
+            .is_none_or(|value| value.trim().is_empty())
+            || request
                 .title
                 .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
+                .is_none_or(|value| value.trim().is_empty())
             || request.question.is_none()
         {
             return Err("project, title and message are required".into());

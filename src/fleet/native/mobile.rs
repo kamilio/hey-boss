@@ -333,10 +333,10 @@ impl Mobile {
                     operation,
                     Operation::Projects { .. } | Operation::RestoreProject
                 );
-                if !visible.contains(resolved_id)
-                    && !registry
-                    && !(!projects.contains_key(project_id) && creating_project)
-                    && !(writing && self.accepted(resolved_id, key.as_deref().unwrap())?)
+                if !(visible.contains(resolved_id)
+                    || registry
+                    || !projects.contains_key(project_id) && creating_project
+                    || writing && self.accepted(resolved_id, key.as_deref().unwrap())?)
                 {
                     return Ok(
                         json!({"ok":false,"error":{"code":"not_found","message":"Project is hidden; restore it before accessing issues"}}),

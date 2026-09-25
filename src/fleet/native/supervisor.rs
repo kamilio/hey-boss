@@ -947,9 +947,9 @@ impl Supervisor {
         if report["build"] != desired
             || source["build"] != desired
             || source["kind"] != "main"
-            || !source["commit"]
+            || source["commit"]
                 .as_str()
-                .is_some_and(|commit| !commit.is_empty())
+                .is_none_or(|commit| commit.is_empty())
             || target["build"] != desired
             || verified["build"] != desired
             || verified != final_installation
@@ -1154,7 +1154,7 @@ impl Supervisor {
     ) {
         for entry in hosts {
             let host = entry["host"].as_str().unwrap();
-            if !threads.get(host).is_some_and(|t| !t.is_finished()) {
+            if threads.get(host).is_none_or(|t| t.is_finished()) {
                 let app = self.clone();
                 let host = host.to_owned();
                 threads.insert(
