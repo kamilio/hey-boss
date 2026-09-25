@@ -825,6 +825,7 @@ hey-harvester add-root /path/to/workspaces
 hey-harvester remove-root /path/to/workspaces
 hey-harvester configure --worktrees false
 hey-harvester configure --caches false
+hey-harvester configure --aggressive true  # destructive 24-hour expiration; SQLite retained
 hey-harvester remove-worktree /absolute/path/to/checkout
 hey-harvester hosts --json
 hey-harvester --host devbox scan
@@ -857,7 +858,46 @@ systemd timer names are retained to prevent duplicate schedules; they now invoke
 Disabled automatic maintenance stays disabled during installation.
 `tools/machine-health.sh` runs a one-shot cleanup using the harvester release build.
 
-The harvester targets known Wrangler/Miniflare test browsers, workerd test
+With `configure --aggressive true`, linked worktrees expire after 24 hours without
+source or Git activity, including locked, dirty, ignored and detached checkouts.
+Worktrees used by a running Codex process are retained.
+Primary checkouts stay intact. HEADs are pinned under `refs/cleanup/worktrees/`
+before removal; uncommitted files are discarded. Discovery includes nested Codex
+slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
+
+Aggressive cache cleanup expires individual files after 24 hours across OS temp,
+Chrome signing copies and caches, npm/Bun/Yarn/Python caches, `~/.cache`, and
+project dependency/build/output directories. New siblings do not protect old
+files. Directory discovery and file traversal save cursors between bounded runs,
+so large caches make forward progress. Worker diagnostic log rotation is enabled
+with this policy.
+
+Aggressive process cleanup stops orphan developer runtimes after an hour, expired
+developer workloads after a day, and automated browsers after an hour
+(ten minutes under memory pressure). Memory pressure also expires older test and
+developer workers; critical pressure can reclaim old Chrome renderers. Descendants
+are stopped with TERM then KILL, rechecking identity before every signal. The
+harvester ancestry, OS processes, Hables and Hey Boss database/control services
+remain protected. Ordinary GUI browser roots are retained.
+
+Codex, its ancestors/children and its live worktrees are excluded from forced
+cleanup. An interactive CLI can receive one Ctrl-D through its iTerm2/tmux controller only after its open transcript
+proves an hour of idle state and five minutes of unchanged process-tree CPU.
+Working, app-server, ambiguous and recently active sessions are retained. The
+harvester saves `codex-resume-<session>.json` in its health directory before
+requesting exit. It verifies the terminal foreground process group and never uses
+OS signals on Codex. Unmanaged terminals are retained. This lets
+Codex perform its normal shutdown and print the resume command.
+
+**All policies preserve SQLite files and WAL/SHM/journal sidecars**, including
+database headers hidden behind ordinary filenames and all Hables paths. Cleanup
+never recursively deletes a parent around a protected database. Such a worktree
+can remain registered with only database files; Activity reports partial cleanup.
+A process-inventory failure is reported but no longer prevents disk cleanup.
+Status shows the selected policy, phase, last check and duration; `disable` stops
+the scheduler before acquiring the maintenance lock.
+
+The default conservative policy targets known Wrangler/Miniflare test browsers, workerd test
 runtimes, disconnected discovery commands, and hey-boss HTTP test fixtures.
 On Linux it also handles headless Selenium Chrome with temporary WebDriver
 profiles, explicit `poe_proxy.unix_server --test-mode` fixtures and their
@@ -879,18 +919,17 @@ Process checks continue at the configured interval while the worktree scan runs,
 so a large Git inventory cannot postpone harvesting for the entire disk scan.
 The maintenance lock remains held until both finish; process observations and
 cumulative cleanup counts are checkpointed after each check.
-**Codex, Claude, unknown processes, normal services, and personal browsers are
-never automatic targets.** A disconnected or idle agent is not proof of abandonment.
+**In conservative mode, Codex, Claude, unknown processes, normal services, and
+personal browsers are never automatic targets.** A disconnected or idle agent is not proof of abandonment.
 
-The worktree cleaner discovers repositories directly inside `~/Workspace` and
+The conservative worktree cleaner discovers repositories directly inside `~/Workspace` and
 `~/.codex/worktrees` (or `$CODEX_HOME/worktrees`), plus configured roots. It only
 removes linked checkouts that are merged or at least 7 days old with a verified
 named branch retaining their commits. A merged checkout must have been inactive
 for at least an hour. All removals require no active process, agent or
 open file, no modified/untracked/ignored files, no locks, in-progress Git
 operations or populated submodules. Merge status uses the locally recorded remote
-default branch; detached unmerged commits are preserved. It rechecks before `git worktree remove`, never uses `--force`,
-and keeps branches. Missing registrations and primary checkouts are preserved.
+default branch; detached unmerged commits are preserved. It rechecks eligibility before file-by-file removal and keeps branches. Missing registrations and primary checkouts are preserved.
 Ignored files such as `.env` or build directories also prevent automatic removal.
 Empty, uninitialized submodule directories do not block cleanup; submodule
 contents and symlinked submodule paths remain protected.

@@ -65,6 +65,9 @@ pub enum Action {
         /// Limit managed worker diagnostics to 128 MiB, retaining the latest 64 MiB.
         #[arg(long, action = clap::ArgAction::Set)]
         logs: Option<bool>,
+        /// Expire old worktrees (including dirty/locked), caches and developer processes. SQLite is preserved.
+        #[arg(long, action = clap::ArgAction::Set)]
+        aggressive: Option<bool>,
     },
     #[command(hide = true)]
     Run,
@@ -124,6 +127,7 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
             worktrees,
             caches,
             logs,
+            aggressive,
         } => {
             let mut args = vec!["configure".into()];
             if let Some(value) = processes {
@@ -137,6 +141,9 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
             }
             if let Some(value) = logs {
                 args.extend(["--logs".into(), value.to_string()]);
+            }
+            if let Some(value) = aggressive {
+                args.extend(["--aggressive".into(), value.to_string()]);
             }
             args
         }
@@ -180,6 +187,17 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
         s.removed_worktrees,
         s.removed_caches
     );
+    println!(
+        "Policy: {} · phase: {} · last check: {} · duration: {}s",
+        if s.config.aggressive {
+            "aggressive (24 hours)"
+        } else {
+            "conservative"
+        },
+        s.phase,
+        s.observed_at,
+        s.cycle_duration_seconds
+    );
     if let Some(change) = s.disk_available_change_bytes {
         println!(
             "Net free disk-space change: {:+.1} MiB (includes concurrent writes and shared blocks)",
@@ -193,7 +211,7 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
         );
     }
     println!(
-        "{} process groups and {} worktrees inspected. Codex and active work are protected.",
+        "{} process groups and {} worktrees inspected. SQLite databases are protected; see configuration for expiration policy.",
         s.processes.len(),
         s.worktrees.len()
     );
@@ -299,6 +317,7 @@ pub fn run(action: &Action) -> io::Result<()> {
             Ok(())
         }
         Action::Disable => {
+            schedule(&store, false, store.config()?.interval_seconds)?;
             let _lock = store.lock()?;
             // Disabling prevents the next mutation cycle even if launchd is unavailable.
             let mut config = store.config()?;
@@ -331,6 +350,7 @@ pub fn run(action: &Action) -> io::Result<()> {
             worktrees,
             caches,
             logs,
+            aggressive,
         } => {
             let _lock = store.lock()?;
             let mut config = store.config()?;
@@ -345,6 +365,14 @@ pub fn run(action: &Action) -> io::Result<()> {
             }
             if let Some(v) = logs {
                 config.trim_worker_logs = *v;
+            }
+            if let Some(v) = aggressive {
+                config.aggressive = *v;
+                if *v {
+                    config.trim_worker_logs = true;
+                    config.worktree_min_age_days = 1;
+                    config.interval_seconds = 60;
+                }
             }
             store.save("config.json", &config)?;
             store.record_setting(&format!(

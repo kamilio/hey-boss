@@ -41,13 +41,23 @@ fn reads_existing_inventory_and_writes_existing_health_configuration() {
     );
     let output = f
         .command()
-        .args(["configure", "--worktrees", "false", "--logs", "true"])
+        .args([
+            "configure",
+            "--worktrees",
+            "false",
+            "--logs",
+            "true",
+            "--aggressive",
+            "true",
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());
     let store = hey_harvester::health::Store::new(f.0.join("health")).unwrap();
     assert!(!store.config().unwrap().clean_worktrees);
     assert!(store.config().unwrap().trim_worker_logs);
+    assert!(store.config().unwrap().aggressive);
+    assert_eq!(store.config().unwrap().worktree_min_age_days, 1);
     assert!(!store.config().unwrap().automatic);
 }
 

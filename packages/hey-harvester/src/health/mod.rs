@@ -1,4 +1,8 @@
 //! Local machine maintenance. Unknown processes and uncertain worktrees are preserved.
+mod codex;
+mod databases;
+mod sweep;
+
 mod caches;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -31,6 +35,8 @@ pub fn now() -> u64 {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub automatic: bool,
+    /// Expire disposable files/worktrees after 24 hours and reap stale developer workloads.
+    pub aggressive: bool,
     pub harvest_processes: bool,
     pub clean_worktrees: bool,
     pub clean_caches: bool,
@@ -67,6 +73,7 @@ impl Default for Config {
             .collect();
         Self {
             automatic: false,
+            aggressive: false,
             harvest_processes: true,
             clean_worktrees: true,
             clean_caches: true,
@@ -221,6 +228,8 @@ pub struct State {
     pub worktrees: BTreeMap<String, Observation>,
     #[serde(default)]
     pub caches: BTreeMap<String, Observation>,
+    #[serde(default)]
+    pub sweep: sweep::Progress,
     pub snapshot: Snapshot,
 }
 
@@ -433,12 +442,9 @@ impl Store {
                 snapshot.errors.push(format!("Process inventory: {e}"));
                 snapshot.record(
                     "error",
-                    format!("Process inspection failed; no cleanup: {e}"),
+                    format!("Process inspection failed; disk cleanup continues: {e}"),
                 );
-                snapshot.running = false;
-                snapshot.phase = "Check failed".into();
-                self.checkpoint(&mut state, &snapshot)?;
-                return Ok(snapshot);
+                BTreeMap::new()
             }
         };
         inspect_processes(
@@ -451,11 +457,15 @@ impl Store {
         // Caches are cheap to inspect; do not put them behind hundreds of Git checks.
         snapshot.phase = "Inspecting disposable caches".into();
         self.checkpoint(&mut state, &snapshot)?;
-        match caches::clean(
-            &observation_config,
-            &mut state.caches,
-            apply && config.clean_caches,
-        ) {
+        match if config.aggressive {
+            sweep::clean(&config, &mut state.sweep, apply && config.clean_caches)
+        } else {
+            caches::clean(
+                &observation_config,
+                &mut state.caches,
+                apply && config.clean_caches,
+            )
+        } {
             Ok((items, count)) => {
                 snapshot.caches = items;
                 snapshot.removed_caches = count;
@@ -583,19 +593,29 @@ fn inspect_processes(
     snapshot: &mut Snapshot,
     apply: bool,
 ) {
-    match processes::harvest(
-        table,
-        config,
-        observations,
-        apply && config.harvest_processes,
-    ) {
+    match if config.aggressive {
+        processes::aggressive_harvest(
+            table,
+            &snapshot.metrics.memory_pressure,
+            config,
+            observations,
+            apply && config.harvest_processes,
+        )
+    } else {
+        processes::harvest(
+            table,
+            config,
+            observations,
+            apply && config.harvest_processes,
+        )
+    } {
         Ok((items, count)) => {
             snapshot.processes = items;
             snapshot.harvested_processes += count;
             for item in snapshot.processes.clone() {
                 snapshot.record("process", format!("{} — {}", item.name, item.detail));
             }
-            snapshot.record("scan", format!("Inspected {} processes; {} candidate groups; stopped {count} processes. Codex and normal services are protected.", table.len(), snapshot.processes.len()));
+            snapshot.record("scan", format!("Inspected {} processes; {} candidate groups; stopped {count} processes. Database services and maintenance ancestry are protected.", table.len(), snapshot.processes.len()));
         }
         Err(error) => {
             observations.clear();
