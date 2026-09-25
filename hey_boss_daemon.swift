@@ -3261,7 +3261,7 @@ final class MachineHealth: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         logSearch.placeholderString = "Filter activity, processes, worktrees, or caches…"; logSearch.delegate = self
         selectedEvent.font = .systemFont(ofSize: 12); selectedEvent.textColor = .secondaryLabelColor
         selectedEvent.isSelectable = true
-        selectedEvent.maximumNumberOfLines = 3; selectedEvent.lineBreakMode = .byTruncatingTail
+        selectedEvent.maximumNumberOfLines = 3; selectedEvent.lineBreakMode = .byWordWrapping
         for label in [disk, memory, memoryDetail, policy, roots, footer, selectedEvent, currentPhase] { label.isSelectable = true }
         currentPhase.font = .systemFont(ofSize: 12, weight: .medium); currentPhase.textColor = .secondaryLabelColor
         for label in [policy, roots, footer] { label.font = .systemFont(ofSize: 12); label.textColor = .secondaryLabelColor }

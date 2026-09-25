@@ -2021,12 +2021,38 @@ func auditMachineHealth() {
     ui.window.contentView?.layoutSubtreeIfNeeded()
     let frame = ui.table.enclosingScrollView!.frame
     precondition(frame.height > 150 && frame.minY > ui.footer.frame.maxY)
+    // Persistent ownership is visible even when no process currently holds the
+    // checkout open (queued validation or an interrupted agent).
+    var owned = value
+    let ownership = "Locked worktree; preserved — github.com/example/atlas issue 147; owner fixture-session; queued validation"
+    owned["worktrees"] = [["name": "/Users/example/Workspace/atlas-feature", "detail": ownership, "eligible": false, "worktree": ["path": "/Users/example/Workspace/atlas-feature", "age_seconds": 259200, "repository": "example/atlas", "github_url": "https://github.com/example/atlas"]]]
+    ui.kind.selectedSegment = 1; ui.render(try! HealthSnapshot.decode(JSONSerialization.data(withJSONObject: owned)))
+    ui.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+    ui.tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+    precondition(ui.selectedEvent.stringValue.contains(ownership))
+    ui.logSearch.stringValue = "fixture-session"; ui.rebuildItems()
+    precondition(ui.table.numberOfRows == 1)
+    ui.logSearch.stringValue = ""; ui.rebuildItems()
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_HEALTH_SCREENSHOT"] {
         ui.kind.selectedSegment = 1; ui.switchKind()
-        let view = ui.window.contentView!
-        let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+        ui.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        ui.tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+        for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+            ui.window.appearance = NSAppearance(named: appearance)
+            for width in [920, 820] {
+                ui.window.setContentSize(NSSize(width: width, height: 680))
+                let view = ui.window.contentView!
+                view.layoutSubtreeIfNeeded()
+                precondition(ui.selectedEvent.stringValue.contains(ownership))
+                precondition(ui.selectedEvent.lineBreakMode == .byWordWrapping)
+                let required = (ui.selectedEvent.stringValue as NSString).boundingRect(with: NSSize(width: ui.selectedEvent.bounds.width - 4, height: 1000), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: ui.selectedEvent.font!])
+                precondition(ceil(required.height) <= ui.selectedEvent.bounds.height)
+                let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let target = URL(fileURLWithPath: path).deletingPathExtension().path + "-\(theme)-\(width).png"
+                try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: target))
+            }
+        }
     }
     let clipboard = NSPasteboard.withUniqueName()
     defer { clipboard.releaseGlobally() }

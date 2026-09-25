@@ -76,6 +76,7 @@ pub struct Worktree {
     pub path: PathBuf,
     pub head: String,
     pub locked: bool,
+    pub lock_reason: Option<String>,
     pub bare: bool,
 }
 fn git(path: &Path, args: &[&str]) -> Command {
@@ -111,14 +112,18 @@ pub fn parse_list(bytes: &[u8]) -> io::Result<Vec<Worktree>> {
                 path: PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())),
                 head: String::new(),
                 locked: false,
+                lock_reason: None,
                 bare: false,
             });
         } else if let Some(w) = &mut current {
             if let Some(head) = field.strip_prefix(b"HEAD ") {
                 w.head = String::from_utf8(head.to_vec()).map_err(io::Error::other)?;
             }
-            if field.starts_with(b"locked") {
+            if field == b"locked" || field.starts_with(b"locked ") {
                 w.locked = true;
+                w.lock_reason = field
+                    .strip_prefix(b"locked ")
+                    .map(|reason| String::from_utf8_lossy(reason).into_owned());
             }
             if field == b"bare" {
                 w.bare = true;
@@ -132,6 +137,12 @@ pub fn parse_list(bytes: &[u8]) -> io::Result<Vec<Worktree>> {
         return Err(io::Error::other("Git returned a non-absolute worktree"));
     }
     Ok(result)
+}
+fn lock_detail(reason: Option<&str>) -> String {
+    match reason.filter(|s| !s.trim().is_empty()) {
+        Some(reason) => format!("Locked worktree; preserved — {reason}"),
+        None => "Locked worktree; preserved".into(),
+    }
 }
 fn list(repo: &Path) -> io::Result<Vec<Worktree>> {
     let out = output(
@@ -299,8 +310,11 @@ fn eligible(
     if w.path == main {
         return Err("Primary checkout; preserved".into());
     }
-    if w.locked || w.bare {
-        return Err("Locked or bare worktree; preserved".into());
+    if w.locked {
+        return Err(lock_detail(w.lock_reason.as_deref()));
+    }
+    if w.bare {
+        return Err("Bare worktree; preserved".into());
     }
     if !w.path.is_dir() {
         return Err("Missing checkout; metadata preserved".into());
@@ -312,6 +326,11 @@ fn eligible(
     let admin = PathBuf::from(
         git_text(&w.path, &["rev-parse", "--absolute-git-dir"]).map_err(|e| e.to_string())?,
     );
+    // A lock may have been acquired after the registration snapshot. Preserve
+    // its reason too; failed reads still fail closed in the checks below.
+    if let Ok(reason) = std::fs::read_to_string(admin.join("locked")) {
+        return Err(lock_detail(Some(reason.trim_end())));
+    }
     if active_paths
         .iter()
         .any(|p| under(p, &canonical) || under(p, &admin))
@@ -459,6 +478,13 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
         .iter()
         .find(|w| w.path == path)
         .ok_or_else(|| io::Error::other("Not a registered worktree"))?;
+    // Persistent ownership needs no process scan to reject removal. In
+    // particular, a queued/interrupted agent can be outside this directory.
+    if selected.locked {
+        return Err(io::Error::other(lock_detail(
+            selected.lock_reason.as_deref(),
+        )));
+    }
     let policy = Policy {
         min_age: 0,
         manual: true,
@@ -737,6 +763,104 @@ mod tests {
         assert_eq!(values.len(), 2);
         assert_eq!(values[1].path, Path::new("/tmp/a\nb c"));
         assert!(values[1].locked);
+        assert_eq!(values[1].lock_reason.as_deref(), Some("reason"));
+    }
+    #[test]
+    fn ownership_lock_survives_queued_active_and_interrupted_use() {
+        let root = std::env::temp_dir().join(format!("hb-owned-worktree-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main = root.join("main");
+        let work = root.join("owned");
+        std::fs::create_dir(&main).unwrap();
+        git_text(&main, &["init", "-b", "main"]).unwrap();
+        git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+        git_text(&main, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(main.join("file"), "committed").unwrap();
+        git_text(&main, &["add", "file"]).unwrap();
+        git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+        let head = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        git_text(&main, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
+        let reason = "issue 147; owner fixture-session; queued validation";
+        git_text(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--lock",
+                "--reason",
+                reason,
+                "-b",
+                "owned",
+                work.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let admin = PathBuf::from(git_text(&work, &["rev-parse", "--absolute-git-dir"]).unwrap());
+        // Evidence lives outside the removable checkout. Simulate an owner waiting
+        // elsewhere: no open cwd/file or agent inventory is needed for protection.
+        let receipt = root.join("receipt");
+        std::fs::write(&receipt, "validation pending; no completed task graph").unwrap();
+        for active in [vec![], vec![work.join("file")], vec![]] {
+            let w = list(&main)
+                .unwrap()
+                .into_iter()
+                .find(|w| w.path == work)
+                .unwrap();
+            let error = eligible(
+                &w,
+                &main,
+                std::slice::from_ref(&root),
+                &active,
+                &Table::new(),
+                Policy {
+                    min_age: 0,
+                    manual: false,
+                },
+                now() + 86400,
+            )
+            .unwrap_err();
+            assert!(error.contains(reason), "{error}");
+            assert!(remove_one(&work).unwrap_err().to_string().contains(reason));
+            // Exercise the actual Git removal path; a lock protects even if an
+            // unrelated caller bypasses the health eligibility check.
+            assert!(
+                git_text(&main, &["worktree", "remove", "--", work.to_str().unwrap()]).is_err()
+            );
+            assert!(admin.is_dir() && work.join("file").is_file());
+        }
+        // Resuming inspects the same index and branch, never recreates/reset them.
+        std::fs::write(work.join("file"), "staged recovery work").unwrap();
+        git_text(&work, &["add", "file"]).unwrap();
+        let index = std::fs::read(admin.join("index")).unwrap();
+        assert!(remove_one(&work).is_err());
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
+        assert_eq!(
+            git_text(&work, &["show", ":file"]).unwrap(),
+            "staged recovery work"
+        );
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            "validation pending; no completed task graph"
+        );
+        // The fixture owner finishes its work, records completion, and explicitly
+        // releases only its own lock. Ordinary safe removal still retains commits.
+        git_text(&work, &["commit", "-m", "completed fixture work"]).unwrap();
+        let completed = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(&receipt, "completed fixture work").unwrap();
+        git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
+        remove_one(&work).unwrap();
+        assert!(!work.exists() && !admin.exists());
+        assert_eq!(
+            git_text(&main, &["rev-parse", "refs/heads/owned"]).unwrap(),
+            completed
+        );
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            "completed fixture work"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn protects_dirty_unmerged_active_locked_recent_and_primary_real_worktrees() {
