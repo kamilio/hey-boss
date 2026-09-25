@@ -420,6 +420,10 @@ pub enum Operation {
         number: i64,
         force: bool,
     },
+    Ready {
+        number: i64,
+        force: bool,
+    },
     AssignBoss {
         number: i64,
         force: bool,
@@ -569,6 +573,7 @@ impl Operation {
             | Self::BindPlan { number, .. }
             | Self::Undraft { number }
             | Self::Claim { number, .. }
+            | Self::Ready { number, .. }
             | Self::AssignBoss { number, .. }
             | Self::Unassign { number, .. }
             | Self::Comment { number, .. }

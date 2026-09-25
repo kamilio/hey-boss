@@ -292,7 +292,9 @@ impl Graph {
 pub(super) fn worker_issue(db: &Connection, project: &str, number: i64) -> Result<Value> {
     let mut issue = json!(get_issue(db, project, number, false)?);
     Graph::load(db, project)?.attach(&mut issue);
-    Ok(issue)
+    let mut result = json!({"issue":issue});
+    super::super::blockers::enrich(db, project, &mut result)?;
+    Ok(result["issue"].take())
 }
 /// One graph snapshot enriches an entire page; no relationship query per row.
 pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Result<()> {

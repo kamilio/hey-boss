@@ -1206,7 +1206,29 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
         if let Some(previous) = context["previous"]["number"].as_i64() {
             instructions.push_str(&format!("\nRead the previous subtask's completion notes and PRs: hey-boss issue view {previous} --project {project}."));
         }
-        instructions.push_str("\nWork on this subtask's scope. Later subtasks wait until this issue and its descendants are closed. Before closing, record what changed, verification, and any handoff details for the next agent. Completing this subtask does not complete the parent. Re-read the claim response for current sequence context; queue order may have changed since launch.");
+        instructions.push_str("\nWork on this subtask's scope. Later subtasks wait until this issue and its descendants reach Ready in PR projects, or Closed otherwise. Before closing, record what changed, verification, and any handoff details for the next agent. Completing this subtask does not complete the parent. Re-read the claim response for current sequence context; queue order may have changed since launch.");
+    }
+    if let Some(dependencies) = job.issue["dependency_context"]
+        .as_array()
+        .filter(|d| !d.is_empty())
+    {
+        instructions
+            .push_str("\n\nPrerequisite task context (read their latest notes and attached PRs):");
+        for dependency in dependencies {
+            instructions.push_str(&format!(
+                "\n#{} {} [{}] PRs: {}",
+                dependency["number"],
+                dependency["title"].as_str().unwrap_or(""),
+                dependency["state"].as_str().unwrap_or(""),
+                dependency["pull_requests"]
+            ));
+        }
+    }
+    if config.prs_enabled
+        && artifact_task(&job.issue).is_none()
+        && job.issue["dependency_ready_state"] != "closed"
+    {
+        instructions.push_str(&format!("\n\nThis project unblocks dependencies at Ready, before merge. Make stacked PRs when prerequisites have unmerged PRs: start your branch from the preceding/dependency PR branch and use that branch as your PR base, keeping the diff limited to this task. Read all dependency PRs; coordinate multiple prerequisite branches as needed. If upstream changes or merges, update/rebase your stack and adjust the PR base. Before reworking a Ready task, reopen it so new dependent pickups pause. When your PR is ready for Boss, attach it and run `hey-boss issue ready {} --project '{}'`. You decide readiness; the service does not independently check CI. Leave handoff notes for the next worker.", job.number(), job.project.id.replace('\'', "'\\''")));
     }
     if job.resume_session.is_some() {
         instructions.push_str("\n\nResume the saved work. If a previous database mutation had an unknown outcome, first read and reconcile the current issue state or reuse its original request ID for deduplication; never blindly replay it. If an infrastructure outage still prevents progress, report the active outage and retain the continuation state. An automatic retry never bypasses permissions or verification.");
@@ -1763,6 +1785,12 @@ fn run_thread(
 }
 
 fn steering_text(instruction: &Value) -> String {
+    if instruction["scope"] == "dependency" {
+        return format!(
+            "Task dependency update. Preserve your running claim and coordinate the stack.\n\n{}",
+            instruction["text"].as_str().unwrap()
+        );
+    }
     format!(
         "Boss added an instruction for your current task ({} scope). Apply it while preserving your session, progress, workspace and delivery requirements. Verify this instruction before reporting completion.\n\n{}",
         instruction["scope"].as_str().unwrap(),

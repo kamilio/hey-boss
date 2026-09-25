@@ -113,7 +113,7 @@ fn blocked_lifecycle_preserves_history_and_requires_reopening() {
     {
         let db = rusqlite::Connection::open(root.join("issues.db")).unwrap();
         db.execute_batch("PRAGMA writable_schema=ON;
-          UPDATE sqlite_master SET sql=replace(sql,'''open'',''blocked'',''closed''','''open'',''closed''') WHERE name='issues';
+          UPDATE sqlite_master SET sql=replace(sql,'''open'',''blocked'',''ready'',''closed''','''open'',''closed''') WHERE name='issues';
           PRAGMA writable_schema=OFF; PRAGMA user_version=12;
           CREATE TABLE migration_audit(number INTEGER);
           CREATE TRIGGER migration_audit_insert AFTER INSERT ON issues BEGIN INSERT INTO migration_audit VALUES(NEW.number); END;").unwrap();
@@ -132,7 +132,7 @@ fn blocked_lifecycle_preserves_history_and_requires_reopening() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            14
+            15
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
