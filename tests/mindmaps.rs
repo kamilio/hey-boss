@@ -1597,7 +1597,7 @@ fn markdown_export_keeps_relationship_labels_and_descriptions_literal() {
 }
 
 #[test]
-fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
+fn fleet_replicas_require_a_live_authority_route_without_changing_local_maps() {
     let f = Fixture::new();
     f.run("Atlas", &["add", "Preserved local note", "--id", "note"]);
     let before = f.run("Atlas", &["show"]);
@@ -1615,12 +1615,19 @@ fn fleet_replicas_require_the_authoritative_host_without_changing_local_maps() {
         vec!["edit", "note", "--title", "Unsynchronized edit"],
         vec!["remove", "note"],
     ] {
-        let error = f.fail("Atlas", &args, 2);
+        let output = f
+            .cmd("Atlas", "mm", &args)
+            .env("HEY_BOSS_FLEET_STATE", &f.root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "fleet_unavailable");
         assert!(
             error["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("--host SUPERVISOR")
+                .contains("existing supervisor connection")
         );
     }
     // Exercise the actual CLI/RPC transport against a separate authoritative DB.

@@ -135,6 +135,282 @@ impl Drop for Service {
 }
 
 #[test]
+fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream() {
+    use std::os::unix::fs::PermissionsExt;
+    let main = Fixture::new();
+    let peer = Fixture::new();
+    main.cli(&[
+        "mm",
+        "--project",
+        "Authority",
+        "--agent",
+        "human:fixture",
+        "--json",
+        "add",
+        "Authoritative root",
+        "--id",
+        "root",
+    ]);
+    fs::write(
+        main.root.join("inventory.json"),
+        r#"{"ssh_hosts":["fixture.test"]}"#,
+    )
+    .unwrap();
+    let bin = main.root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    fs::write(&ssh, "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$AUTHORITY_PEER/issues.db\" HEY_BOSS_FLEET_STATE=\"$AUTHORITY_PEER\" HEY_BOSS_FLEET_CONFIG=\"$AUTHORITY_PEER/inventory.json\" HEY_BOSS_FLEET_DESIRED=\"$AUTHORITY_PEER/desired.json\"\n\"$HEY_BOSS_TEST_CLI\" fleet companion --stdio\nresult=$?; exit \"$result\"\n").unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut supervisor = Service(
+        main.command(&["fleet", "supervisor"])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("AUTHORITY_PEER", &peer.root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let result = peer.command(&["fleet", "status"]).output().unwrap();
+        if result.status.success() {
+            let status: Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert!(status["supervisor"].is_string());
+            assert!(
+                status["machines"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["host"] == "fixture.test")
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "relay never became ready: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    let mm = |args: &[&str]| {
+        let mut all = vec![
+            "mm",
+            "--project",
+            "Authority",
+            "--agent",
+            "human:fixture",
+            "--json",
+        ];
+        all.extend_from_slice(args);
+        peer.cli(&all)
+    };
+    let initial = mm(&["show"]);
+    assert_eq!(initial["nodes"][0]["title"], "Authoritative root");
+    let added = mm(&[
+        "add",
+        "Companion child",
+        "--id",
+        "child",
+        "--under",
+        "root",
+        "--request-id",
+        "authority-child",
+    ]);
+    let replay = mm(&[
+        "add",
+        "Companion child",
+        "--id",
+        "child",
+        "--under",
+        "root",
+        "--request-id",
+        "authority-child",
+    ]);
+    assert_eq!(added, replay, "the authority owns idempotency receipts");
+    let main_db = rusqlite::Connection::open(main.root.join("issues.db")).unwrap();
+    let receipt_actor: String = main_db
+        .query_row(
+            "SELECT actor FROM requests WHERE request_id='authority-child'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        receipt_actor, "human:fixture",
+        "the relay preserves the caller"
+    );
+    drop(main_db);
+    let graph = mm(&["show"]);
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        graph["version"], 2,
+        "map revision must not become the fleet protocol version"
+    );
+    assert_eq!(
+        main.cli(&["mm", "--project", "Authority", "--json", "show"]),
+        graph
+    );
+    let stale = peer
+        .command(&[
+            "mm",
+            "--project",
+            "Authority",
+            "--agent",
+            "human:fixture",
+            "--json",
+            "--if-version",
+            "0",
+            "edit",
+            "child",
+            "--title",
+            "Stale",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        stale.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&stale.stdout)
+    );
+    let error: Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "conflict");
+    // The viewer's topic inspector uses the same authority for linked documents
+    // and file bytes; a map that loads with broken resource panels is incomplete.
+    let artifact = peer.cli(&[
+        "artifact",
+        "--project",
+        "Authority",
+        "--agent",
+        "human:fixture",
+        "--json",
+        "create",
+        "--title",
+        "Design notes",
+        "--body",
+        "From the companion",
+        "--node",
+        "child",
+    ]);
+    let artifact_id = artifact["artifact"]["id"].as_str().unwrap();
+    assert_eq!(
+        peer.cli(&[
+            "artifact",
+            "--project",
+            "Authority",
+            "--json",
+            "view",
+            artifact_id
+        ])["artifact"]["body"],
+        "From the companion"
+    );
+    let file = peer.root.join("design.txt");
+    fs::write(&file, "Authoritative attachment\n").unwrap();
+    let uploaded = peer.cli(&[
+        "attachment",
+        "--project",
+        "Authority",
+        "--agent",
+        "human:fixture",
+        "--json",
+        "upload",
+        file.to_str().unwrap(),
+        "--node",
+        "child",
+    ]);
+    let attachment_id = uploaded["attachment"]["id"].as_str().unwrap();
+    let listed = peer.cli(&[
+        "attachment",
+        "--project",
+        "Authority",
+        "--json",
+        "list",
+        "--node",
+        "child",
+    ]);
+    assert_eq!(listed["attachments"][0]["id"], attachment_id);
+    let downloaded = peer.root.join("downloaded.txt");
+    peer.cli(&[
+        "attachment",
+        "--project",
+        "Authority",
+        "--json",
+        "download",
+        attachment_id,
+        "--output",
+        downloaded.to_str().unwrap(),
+    ]);
+    assert_eq!(fs::read(&downloaded).unwrap(), fs::read(&file).unwrap());
+    let peer_db = rusqlite::Connection::open(peer.root.join("issues.db")).unwrap();
+    assert_eq!(
+        peer_db
+            .query_row("SELECT count(*) FROM artifacts", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(!peer.root.join("issues.attachments").exists());
+    assert_eq!(
+        peer_db
+            .query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        peer_db
+            .query_row(
+                "SELECT count(*) FROM requests WHERE request_id='authority-child'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    supervisor.terminate();
+    assert_eq!(supervisor.0.try_wait().unwrap().unwrap().code(), Some(0));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while peer.root.join("fleet-authority.sock").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "relay socket survived transport shutdown"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let offline = peer
+        .command(&["mm", "--project", "Authority", "--json", "show"])
+        .output()
+        .unwrap();
+    assert_eq!(offline.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "fleet_unavailable");
+}
+
+#[test]
+fn absent_fleet_status_explains_how_to_restore_the_service() {
+    let f = Fixture::new();
+    let output = f.command(&["fleet", "status"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("hey-boss fleet setup"), "{error}");
+    f.issue();
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    db.execute("UPDATE fleet_meta SET role='agent' WHERE id=1", [])
+        .unwrap();
+    let output = f.command(&["fleet", "status"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("existing supervisor connection"), "{error}");
+    assert!(
+        !error.contains("Run hey-boss fleet setup"),
+        "a companion must not promote itself: {error}"
+    );
+}
+
+#[test]
 fn status_runs_without_python() {
     let f = Fixture::new();
     f.issue();

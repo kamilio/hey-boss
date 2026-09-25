@@ -54,7 +54,7 @@ pub enum Action {
         #[arg(long, hide = true, conflicts_with = "stdio")]
         install: bool,
     },
-    /// Show all machines, workers, connectivity, and pending changes.
+    /// Show machines, workers, and connectivity through the local fleet connection.
     Status,
     /// Queue a durable worker signal, including while its machine is offline.
     Signal {
@@ -115,12 +115,12 @@ pub(crate) fn worker_connection_path(role: &str, database: Option<&str>) -> Valu
 }
 
 pub fn call(value: &Value) -> crate::issues::Result<Value> {
-    let mut stream = UnixStream::connect(socket_path()?).map_err(|e| {
-        crate::issues::Error::new(
-            "fleet_unavailable",
-            format!("Fleet supervisor is unavailable: {e}. Run hey-boss fleet setup."),
-        )
-    })?;
+    // Keep the supervisor's frequently polled path free of database discovery.
+    // Companions have no supervisor socket; resolve their authority route there.
+    let mut stream = match UnixStream::connect(socket_path()?) {
+        Ok(stream) => stream,
+        Err(_) => return native::request(value.clone()),
+    };
     stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
     serde_json::to_writer(&mut stream, value)?;
@@ -135,7 +135,20 @@ pub fn call(value: &Value) -> crate::issues::Result<Value> {
             result["error"].as_str().unwrap_or("Fleet request failed"),
         ));
     }
+    if result["ok"] != true {
+        return Err(crate::issues::Error::new(
+            "fleet_unavailable",
+            "Fleet supervisor returned an incomplete response",
+        ));
+    }
     Ok(result)
+}
+
+pub(crate) fn authoritative_resource(
+    request: &crate::issues::Request,
+    database: &std::path::Path,
+) -> crate::issues::Result<Value> {
+    native::resource(request, database)
 }
 
 pub fn subscribe() -> crate::issues::Result<UnixStream> {

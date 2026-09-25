@@ -1220,6 +1220,26 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        if matches!(
+            r.operation,
+            Operation::Mindmap { .. } | Operation::Artifact { .. } | Operation::Attachment { .. }
+        ) {
+            validate(r)?;
+            let companion: bool = self.db.query_row(
+                "SELECT role='agent' FROM fleet_meta WHERE id=1",
+                [],
+                |row| row.get(0),
+            )?;
+            if companion {
+                // Route before opening a transaction or resolving against the
+                // replica. Only the authority may register projects and cache
+                // mutation receipts for maps and their documents/files.
+                let path = self.db.path().ok_or_else(|| {
+                    Error::invalid("Resource routing requires a persistent issue database")
+                })?;
+                return crate::fleet::authoritative_resource(r, Path::new(path));
+            }
+        }
         let deadline = Instant::now() + CONTENTION_BUDGET;
         if r.operation.writes() {
             self.execute_once(r, deadline)

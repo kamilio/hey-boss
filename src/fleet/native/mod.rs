@@ -1,4 +1,5 @@
 //! Native fleet implementation. Protocol-v1 and durable filenames stay stable.
+mod authority;
 mod auto_workers;
 mod companion;
 mod context;
@@ -13,8 +14,18 @@ mod supervisor;
 mod takeover;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub(super) use authority::resource;
 use context::Context;
 pub(super) use context::read_control_body;
+pub(super) fn request(value: Value) -> crate::issues::Result<Value> {
+    let ctx = Context::new()
+        .map_err(|e| crate::issues::Error::new("fleet_unavailable", e.to_string()))?;
+    local_request(&ctx, value).map_err(|e| {
+        e.downcast_ref::<crate::issues::Error>()
+            .cloned()
+            .unwrap_or_else(|| crate::issues::Error::new("fleet_unavailable", e.to_string()))
+    })
+}
 pub(super) fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
     self::auto_workers::run(apply, config_only).map_err(std::io::Error::other)
 }
@@ -114,7 +125,22 @@ fn run_inner(action: &super::Action) -> Result<()> {
 }
 
 fn local_request(ctx: &Context, value: Value) -> Result<Value> {
-    let mut connection = UnixStream::connect(ctx.state.join("fleet.sock"))?;
+    let companion: bool =
+        ctx.db()?
+            .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
+    if companion {
+        return Ok(authority::call(&ctx.state, &ctx.path, value)?);
+    }
+    let mut connection = UnixStream::connect(ctx.state.join("fleet.sock")).map_err(|e| {
+        crate::issues::Error::new(
+            "fleet_unavailable",
+            format!(
+                "Fleet supervisor is unavailable: {e}. Run hey-boss fleet setup on this supervisor."
+            ),
+        )
+    })?;
     connection.set_read_timeout(Some(Duration::from_secs(15)))?;
     connection.set_write_timeout(Some(Duration::from_secs(15)))?;
     connection.write_all(value.to_string().as_bytes())?;
@@ -124,9 +150,18 @@ fn local_request(ctx: &Context, value: Value) -> Result<Value> {
         .ok_or_else(|| replica::invalid("Supervisor response exceeds limit"))?;
     let result: Value = serde_json::from_slice(&bytes)?;
     if result["ok"] == false {
-        return Err(replica::invalid(
+        return Err(crate::issues::Error::new(
+            "fleet_error",
             result["error"].as_str().unwrap_or("Fleet request failed"),
-        ));
+        )
+        .into());
+    }
+    if result["ok"] != true {
+        return Err(crate::issues::Error::new(
+            "fleet_unavailable",
+            "Fleet supervisor returned an incomplete response",
+        )
+        .into());
     }
     Ok(result)
 }

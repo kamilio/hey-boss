@@ -14,7 +14,7 @@ pub struct Options {
     /// Full project ID or unambiguous name; defaults to this repository.
     #[arg(long, global = true)]
     project: Option<String>,
-    /// Authoritative SSH issue host (also HEY_BOSS_ISSUE_HOST).
+    /// Override automatic fleet routing with an SSH issue host (also HEY_BOSS_ISSUE_HOST).
     #[arg(long, global = true)]
     host: Option<String>,
     /// Stable author identity; follows issue command defaults.

@@ -342,7 +342,7 @@ fn companions_require_authority_and_symlink_stores_are_refused() {
         s.execute(&request(upload.clone()))
             .unwrap_err()
             .message
-            .contains("--host SUPERVISOR")
+            .contains("existing supervisor connection")
     );
     assert!(!f.0.join("issues.attachments").exists());
     db.execute("UPDATE fleet_meta SET role='controller' WHERE id=1", [])
