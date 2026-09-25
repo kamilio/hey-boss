@@ -21,7 +21,8 @@ shows the issue number and destination with a green checkmark, then closes after
 are open; plain Enter still selects a suggestion first. Held keys and input-method
 composition do not submit. Issues go to the top by default; **Add to bottom** or
 **⌘⇧B** appends instead. The CLI exposes the same atomic placement with
-`hey-boss issue create --title TITLE --at-top`; ordinary CLI creation still appends.
+`hey-boss issue create --title TITLE --at-top`. CLI creation also goes to the front
+by default; use `--at-bottom` to append deliberately.
 
 **Escape** dismisses suggestions first, then the panel. The close button and
 switching to another application also dismiss it. Unsent text and placement stay

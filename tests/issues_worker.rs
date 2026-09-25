@@ -2229,9 +2229,23 @@ fn worker_refreshes_order_before_each_reservation_and_preserves_tag_filters() {
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&["--tag", "ready"]);
     f.cli(&["edit", "1", "--label", "ready"]);
-    f.cli(&["create", "--title", "Second ready", "--label", "ready"]);
-    f.cli(&["create", "--title", "Third ready", "--label", "ready"]);
-    f.cli(&["create", "--title", "Unready backlog"]);
+    f.cli(&[
+        "create",
+        "--at-bottom",
+        "--title",
+        "Second ready",
+        "--label",
+        "ready",
+    ]);
+    f.cli(&[
+        "create",
+        "--at-bottom",
+        "--title",
+        "Third ready",
+        "--label",
+        "ready",
+    ]);
+    f.cli(&["create", "--at-bottom", "--title", "Unready backlog"]);
     let mut worker = f.worker();
     let running = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
     let run = running["runs"][0]["id"].as_str().unwrap();
@@ -2278,8 +2292,8 @@ fn worker_starts_with_saved_order_instead_of_creation_order() {
     let f = Fixture::new("order-start");
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
     f.setup(&[]);
-    f.cli(&["create", "--title", "Two"]);
-    f.cli(&["create", "--title", "Three"]);
+    f.cli(&["create", "--at-bottom", "--title", "Two"]);
+    f.cli(&["create", "--at-bottom", "--title", "Three"]);
     f.cli(&["move", "3", "--before", "1"]);
     let mut worker = f.worker();
     f.wait(|s| {

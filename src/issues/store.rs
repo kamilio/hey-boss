@@ -1947,16 +1947,10 @@ fn create_issue(
     )?;
     let labels: BTreeSet<_> = labels.iter().collect();
     let sort_order: i64 = db.query_row(
-        "SELECT CASE WHEN ?2 THEN coalesce(min(sort_order),1) ELSE coalesce(max(sort_order),0)+1 END FROM issues WHERE project_id=?1",
+        "SELECT CASE WHEN ?2 THEN coalesce(min(sort_order),1)-1 ELSE coalesce(max(sort_order),0)+1 END FROM issues WHERE project_id=?1",
         params![project.id,at_top],
         |r| r.get(0),
     )?;
-    if *at_top {
-        db.execute(
-            "UPDATE issues SET sort_order=sort_order+1 WHERE project_id=?1",
-            [&project.id],
-        )?;
-    }
     db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,draft,origin) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8,?9,?10)",
         params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order,draft,provenance::capture(db,actor,now)?])?;
     db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,node FROM fleet_meta WHERE id=1 AND role='agent'", params![project.id,number])?;
