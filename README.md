@@ -383,6 +383,11 @@ crashes are recorded through the supervising worker, which retains results until
 they are saved. Worker reloads recover abandoned passes without losing the saved
 conversation. Chief uses no issue slots and has no pass deadline.
 
+Chief can use `hey-boss issue --supervisor` for authoritative issue inspection and
+guarded metadata edits through a companion's existing fleet connection. This
+requires no work claim or SSH hostname. See [supported operations and retry
+semantics](docs/chief-metadata-routing.md).
+
 ## URL lookup
 
 Issue-store reads, store opening, and transaction acquisition retry transient
