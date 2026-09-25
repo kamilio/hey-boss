@@ -56,6 +56,8 @@ pub enum Action {
     },
     /// Show machines, workers, and connectivity through the local fleet connection.
     Status,
+    /// Inspect the existing supervisor tunnel and supported issue operations.
+    Capabilities,
     /// Queue a durable worker signal, including while its machine is offline.
     Signal {
         host: String,

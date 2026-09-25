@@ -140,28 +140,58 @@ try {
   const edit=['--supervisor','edit','2','--body','## Corrected guidance\n\nFollow the existing dependency graph.','--if-version','4','--request-id','body-correction'];
   assert.match((await issue(peer,edit)).issue.body,/Corrected guidance/);check('Guarded body correction is canonical');
   for(const args of [
-    ['claim','2','--force'],['reopen','1','--if-version','4'],['edit','2','--draft','--if-version','5','--request-id','draft'],
+    ['claim','2','--force'],['reopen','1','--if-version','4'],['edit','2','--draft','--request-id','draft'],
     ['edit','2','--label','unguarded','--request-id','unguarded'],['edit','2','--label','no-key','--if-version','5'],
   ])assert.equal((await issue(peer,['--supervisor',...args],2)).error.code,'invalid_input');
   batch[0].assignment='unassign';writeFileSync(file,JSON.stringify(batch));
   assert.equal((await issue(peer,['--supervisor','batch','--file',file,'--request-id','assignment'],2)).error.code,'invalid_input');
-  check('Lifecycle, claim, draft, assignment and missing guard/key rejected');
+  check('Lifecycle, claim, assignment and missing guard/key rejected');
   assert.equal((await issue(peer,['--supervisor','edit','2','--label','yolo','--if-version','5','--request-id','yolo'],1)).error.code,'forbidden');
   check('Actor authorization retained');
   assert.deepEqual(await sql(main,"SELECT DISTINCT actor FROM requests WHERE request_id IN ('chief-metadata-1','chief-metadata-2','batch-good','body-correction')"),[['codex:chief-fixture']]);
   assert.deepEqual(await sql(peer,"SELECT count(*) FROM requests WHERE request_id IN ('chief-metadata-1','chief-metadata-2','batch-good','body-correction')"),[[0]]);
   check('Only authority stores receipts under the original actor');
   for(let attempt=0;;attempt++) {
-    const local=await issue(peer,['view','2']);
-    if(local.issue?.body.includes('Corrected guidance'))break;
+    const local=(await issue(peer,['list','--state','all','--all'])).issues.find(i=>i.number===2);
+    if(local && (await issue(peer,['view','2'])).issue.body.includes('Corrected guidance'))break;
     assert(attempt<200,'Replica did not converge');await wait(100);
   }
   assert.equal((await issue(peer,['edit','1','--label','offline'],4)).error.code,'fleet_allocation_missing');
   assert.deepEqual(await ownership(),before);check('Replica converges and ordinary offline allocation protection remains');
+  const capabilities=await cli(peer,['fleet','capabilities']);
+  assert.equal(capabilities.route,'supervisor_tunnel');
+  assert.equal(capabilities.capabilities.issue_draft,true);
+  assert.equal(capabilities.capabilities.issue_metadata,true);
+  check('Companion discovers draft and metadata support without reverse SSH');
+  await issue(main,['create','--title','Eligible import — paused as a draft','--body','## Imported task\n\nThe user requested that this eligible issue remain a draft. No worker or claim is needed.']);
+  const draftArgs=['edit','3','--draft','--if-version','1'];
+  const drafted=await issue(peer,draftArgs);
+  assert.equal(drafted.issue.draft,true);assert.equal(drafted.store.host,'supervisor');
+  assert.deepEqual(await issue(peer,draftArgs),drafted);
+  assert.deepEqual((await issue(main,['view','3'])).issue,drafted.issue);
+  check('Ordinary guarded drafting commits at authority and retries idempotently');
+  const denied=await issue(peer,['edit','2','--draft','--if-version','5','--request-id','assigned-draft'],4);
+  assert.equal(denied.error.code,'conflict');assert.match(denied.error.message,/unassigned, unreserved/);
+  assert.equal((await issue(main,['view','2'])).issue.draft,false);
+  check('Drafting assigned work is rejected at the authority');
+  assert.equal((await issue(peer,['edit','3','--draft','--if-version','1','--request-id','stale-draft'],4)).error.code,'conflict');
+  assert.equal((await issue(peer,['edit','3','--draft'],2)).error.code,'invalid_input');
+  check('Draft edits require a current version');
+  assert.deepEqual(await sql(main,"SELECT DISTINCT actor FROM requests WHERE request_id LIKE 'draft-%'"),[['codex:chief-fixture']]);
+  assert.deepEqual(await sql(peer,"SELECT count(*) FROM requests WHERE request_id LIKE 'draft-%'"),[[0]]);
+  assert.deepEqual(await sql(main,'SELECT count(*) FROM fleet_allocations WHERE issue_number=3'),[[0]]);
+  check('Drafting retains actor identity and creates no reservation or replica receipt');
+  await issue(main,['create','--title','Eligible import — browser draft action','--body','## Ready for triage\n\nMove this unassigned import to a draft from the connected companion.']);
+  for(let attempt=0;;attempt++) {
+    const issues=(await issue(peer,['list','--all'])).issues;
+    if(issues.some(i=>i.number===3&&i.draft)&&issues.some(i=>i.number===4))break;
+    assert(attempt<200,'Draft did not replicate');await wait(100);
+  }
+  check('Saved draft converges to the companion viewer');
   for(const path of [main,peer])assert.deepEqual(await sql(path,'PRAGMA integrity_check'),[['ok']]);
   check('Both issue stores pass integrity checks');
-  assert.equal(checks.length,12,'Incomplete qualification graph');
-  console.log(JSON.stringify({status:'passed',completed:checks.length,expected:12,checks}));
+  assert.equal(checks.length,18,'Incomplete qualification graph');
+  console.log(JSON.stringify({status:'passed',completed:checks.length,expected:18,checks}));
   if(serve) {
     const web=start(peer,['issue','--project','Chief metadata QA','--agent','codex:chief-fixture','--json','web','--port','59651','--no-discovery']);web.stdout.resume();
     for(let attempt=0;;attempt++) {

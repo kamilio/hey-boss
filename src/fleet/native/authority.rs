@@ -111,13 +111,33 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true})
+}
+
+pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
+    json!({"ok":true,"route":route,"capabilities":capabilities,"supervisor_build":build,
+        "usage":"Use hey-boss issue view NUMBER --supervisor --json for a current version. Guarded title/body/label edits use --supervisor --if-version VERSION --request-id ID. Ordinary issue edit NUMBER --draft --if-version VERSION uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
+        "recovery":"If a capability is false, run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities again."})
+}
+
+fn unsupported(capability: &str, build: &Value) -> Error {
+    let mut error = Error::new(
+        "fleet_capability_unsupported",
+        format!(
+            "The connected supervisor has not advertised {capability} (build {}). Run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities. Nothing was sent or saved; no SSH hostname or work claim is needed",
+            build.as_str().unwrap_or("unknown")
+        ),
+    );
+    error.details = Some(
+        json!({"route":"supervisor_tunnel","required_capability":capability,"supervisor_build":build,"sent":false}),
+    );
+    error
 }
 
 pub(super) struct Relay {
     supported: Arc<AtomicBool>,
     numbers_supported: Arc<AtomicBool>,
-    metadata_supported: Arc<AtomicBool>,
+    advertised: Arc<Mutex<Value>>,
     stopped: Arc<AtomicBool>,
     replies: mpsc::SyncSender<Value>,
     thread: Option<thread::JoinHandle<()>>,
@@ -142,12 +162,12 @@ impl Relay {
         listener.set_nonblocking(true)?;
         let supported = Arc::new(AtomicBool::new(false));
         let numbers_supported = Arc::new(AtomicBool::new(false));
-        let metadata_supported = Arc::new(AtomicBool::new(false));
+        let advertised = Arc::new(Mutex::new(json!({})));
+        let advertisement = advertised.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let (replies, incoming) = mpsc::sync_channel::<Value>(2);
         let ready = supported.clone();
         let numbers_ready = numbers_supported.clone();
-        let metadata_ready = metadata_supported.clone();
         let stop = stopped.clone();
         let database = ctx.path.canonicalize()?;
         let thread = thread::spawn(move || {
@@ -176,6 +196,40 @@ impl Relay {
                             unavailable("relay belongs to a different issue database").into()
                         );
                     }
+                    if request["request"]["kind"] == "capabilities" {
+                        let message = advertisement.lock().unwrap();
+                        let flags = json!({
+                            "authority_rpc": message["capabilities"]["authority_rpc"] == true,
+                            "issue_numbers": message["capabilities"]["issue_numbers"] == true,
+                            "issue_metadata": message["capabilities"]["issue_metadata"] == true,
+                            "issue_draft": message["capabilities"]["issue_draft"] == true,
+                        });
+                        return Ok(capability_report(
+                            "supervisor_tunnel",
+                            flags,
+                            message["build"].clone(),
+                        ));
+                    }
+                    if request["request"]["kind"] == "issue_metadata" {
+                        let metadata: Request =
+                            serde_json::from_value(request["request"]["request"].clone())?;
+                        crate::issues::authority::validate(&metadata)?;
+                        let message = advertisement.lock().unwrap();
+                        for capability in ["authority_rpc", "issue_metadata"].into_iter().chain(
+                            matches!(
+                                metadata.operation,
+                                crate::issues::Operation::Edit {
+                                    draft: Some(true),
+                                    ..
+                                }
+                            )
+                            .then_some("issue_draft"),
+                        ) {
+                            if message["capabilities"][capability] != true {
+                                return Err(unsupported(capability, &message["build"]).into());
+                            }
+                        }
+                    }
                     if !ready.load(Ordering::Acquire) {
                         return Err(unavailable(
                             "supervisor has not advertised authoritative routing support",
@@ -197,17 +251,6 @@ impl Relay {
                             "supervisor needs an upgrade for on-demand issue numbers",
                         )
                         .into());
-                    }
-                    if request["request"]["kind"] == "issue_metadata" {
-                        if !metadata_ready.load(Ordering::Acquire) {
-                            return Err(unavailable(
-                                "supervisor needs an upgrade for guarded issue metadata",
-                            )
-                            .into());
-                        }
-                        let metadata: Request =
-                            serde_json::from_value(request["request"]["request"].clone())?;
-                        crate::issues::authority::validate(&metadata)?;
                     }
                     serial += 1;
                     let id = format!("{}-{serial}", std::process::id());
@@ -244,7 +287,7 @@ impl Relay {
         Ok(Self {
             supported,
             numbers_supported,
-            metadata_supported,
+            advertised,
             stopped,
             replies,
             thread: Some(thread),
@@ -253,10 +296,8 @@ impl Relay {
         })
     }
     pub fn configure(&self, message: &Value) {
-        self.metadata_supported.store(
-            message["capabilities"]["issue_metadata"] == true,
-            Ordering::Release,
-        );
+        *self.advertised.lock().unwrap() =
+            json!({"capabilities":message["capabilities"],"build":message["build"]});
         self.numbers_supported.store(
             message["capabilities"]["issue_numbers"] == true,
             Ordering::Release,
@@ -332,9 +373,25 @@ mod tests {
         let error = call(&ctx.state, &ctx.path, json!({"kind":"issue_numbers"})).unwrap_err();
         assert_eq!(error.code, "fleet_unavailable");
         assert!(error.message.contains("needs an upgrade"));
-        let error = call(&ctx.state, &ctx.path, json!({"kind":"issue_metadata"})).unwrap_err();
-        assert_eq!(error.code, "fleet_unavailable");
-        assert!(error.message.contains("needs an upgrade"));
+        let read = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"view","number":1}}});
+        let error = call(&ctx.state, &ctx.path, read).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.unwrap()["required_capability"],
+            "issue_metadata"
+        );
+        assert!(error.message.contains("hey-boss upgrade"));
+        let capabilities = call(&ctx.state, &ctx.path, json!({"kind":"capabilities"})).unwrap();
+        assert_eq!(capabilities["route"], "supervisor_tunnel");
+        assert_eq!(capabilities["capabilities"]["issue_metadata"], false);
+        relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
+        let draft = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"draft-old","operation":{"action":"edit","number":1,"draft":true,"if_version":1,"add_labels":[],"remove_labels":[]}}});
+        let error = call(&ctx.state, &ctx.path, draft).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        let details = error.details.unwrap();
+        assert_eq!(details["required_capability"], "issue_draft");
+        assert_eq!(details["supervisor_build"], "old-metadata-build");
+        assert_eq!(details["sent"], false);
         let error = call(
             &ctx.state,
             &root.join("unrelated.db"),

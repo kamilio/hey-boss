@@ -100,10 +100,15 @@ fn run_inner(action: &super::Action) -> Result<()> {
                 companion::daemon(ctx)
             }
         }
-        super::Action::Status => {
+        super::Action::Status | super::Action::Capabilities => {
+            let kind = if matches!(action, super::Action::Capabilities) {
+                "capabilities"
+            } else {
+                "status"
+            };
             println!(
                 "{}",
-                serde_json::to_string_pretty(&local_request(&ctx, json!({"kind":"status"}))?)?
+                serde_json::to_string_pretty(&local_request(&ctx, json!({"kind":kind}))?)?
             );
             Ok(())
         }
@@ -134,6 +139,13 @@ fn local_request(ctx: &Context, value: Value) -> Result<Value> {
             })?;
     if companion {
         return Ok(authority::call(&ctx.state, &ctx.path, value)?);
+    }
+    if value["kind"] == "capabilities" {
+        return Ok(authority::capability_report(
+            "local",
+            authority::capabilities(),
+            json!(Context::running_build()),
+        ));
     }
     let mut connection = UnixStream::connect(ctx.state.join("fleet.sock")).map_err(|e| {
         crate::issues::Error::new(

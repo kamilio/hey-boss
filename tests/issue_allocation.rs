@@ -347,6 +347,10 @@ fn missing_allocation_is_distinct_and_inspection_is_read_only() {
     assert_eq!(info["reason"], "allocation_missing");
     assert_eq!(info["reserved_machine"], Value::Null);
     assert_eq!(info["connection"]["state"], "unknown");
+    let recovery = info["recovery"].as_str().unwrap();
+    assert!(recovery.contains("--supervisor"));
+    assert!(recovery.contains("hey-boss fleet capabilities"));
+    assert!(!recovery.contains("<supervisor-ssh-host>"));
     assert_eq!(f.json(&["view", "1"])["issue"], before["issue"]);
     assert_eq!(
         db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))

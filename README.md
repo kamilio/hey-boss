@@ -140,6 +140,16 @@ transaction journals sync on reconnect. Allocations do not expire when a machine
 disconnects, preventing another machine from starting the same task. Concurrent
 same-field edits are retained as conflicts rather than overwriting work.
 `hey-boss fleet status` shows the fleet without opening a browser.
+`hey-boss fleet capabilities` gives a small report of the existing authenticated
+supervisor tunnel, supported issue operations, and supervisor build. Use
+`issue view NUMBER --supervisor --json` to read the current version, then
+`issue edit NUMBER --draft --if-version VERSION` to draft eligible work from a
+companion. It routes automatically without reverse SSH or a claim; retries derive
+a stable request ID unless supplied explicitly. Other metadata edits use
+`--supervisor --if-version VERSION --request-id ID`. Unsupported supervisors return
+`fleet_capability_unsupported` before sending; run `hey-boss upgrade` on the
+supervisor, reconnect, and inspect capabilities again. See
+[fleet tunnel editing](docs/fleet-tunnel-editing.md).
 
 Use `hey-boss issue allocation NUMBER --json` to inspect a fleet reservation
 without claiming, syncing, or changing workers. Claim denials preserve exit 4

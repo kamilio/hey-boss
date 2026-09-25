@@ -5,6 +5,11 @@ issue and apply guarded metadata changes over its existing authenticated fleet
 connection. No separately reachable SSH hostname or work reservation is needed.
 On the supervisor itself, the same command uses its authoritative store.
 
+`hey-boss fleet capabilities` reports the route, supervisor build and advertised
+`issue_metadata` and `issue_draft` support. `hey-boss fleet status` also exposes
+capabilities. Issue help and allocation recovery messages point to this existing
+connection; no socket inspection or SSH configuration is necessary.
+
 ```sh
 hey-boss issue view 1341 --supervisor --project github.com/poe-platform/poe-code --json
 hey-boss issue edit 1341 --supervisor --remove-label 'rework needed' \
@@ -20,9 +25,10 @@ and can lag until the next pull.
 | Operation | Supported with `--supervisor` |
 | --- | --- |
 | `view`, `allocation` | Authoritative read |
-| `edit` title, body, labels | Requires `--if-version` and `--request-id`; no draft change |
+| `edit` title, body, labels | Requires `--if-version` and `--request-id` |
+| `edit --draft` | Requires `issue_draft`, a current `--if-version`, and an eligible, unassigned, unreserved issue |
 | `batch` label changes | Requires version and expected owner for every entry, `assignment: keep`, and `--request-id` |
-| Lifecycle, drafts, claims, assignment, reservations, worker controls | Rejected before mutation |
+| Other lifecycle operations, claims, assignment, reservations, worker controls | Rejected before mutation |
 | Interactive editing, web server, RPC, migration and other commands | Rejected |
 
 Label edits work for an unassigned closed issue and an issue assigned to a live
@@ -32,20 +38,31 @@ version/owner checks. This route preserves the original actor and normal
 authorization, including the restriction on the `yolo` label; it does not act as
 Boss or acquire/release work.
 
+Ordinary `issue edit NUMBER --draft --if-version VERSION --request-id ID` routes
+through the tunnel automatically on a companion. Without an explicit request ID,
+this automatic route derives a stable ID from the actor, project and guarded
+operation. Explicit `--supervisor` uses the same draft eligibility guards and
+requires an explicit request ID. Read the authoritative issue again after the
+edit to verify its draft state. Assigned and reserved work remains protected.
+
 The companion checks the operation before forwarding, and the supervisor checks
 it again before executing its normal store transaction. Mutation receipts exist
 only at the authority and are scoped to the original actor. Retry an uncertain
 write with the **same request ID and identical operation**. A lost response may
 mean the write completed. There is no local fallback or offline replay. An old
-supervisor without the metadata capability returns an explicit upgrade error.
+supervisor without the required metadata or draft capability returns an explicit
+upgrade error with its build and the missing capability, before forwarding the
+mutation. Upgrade the fleet from the supervisor and recheck capabilities. An
+installed CLI that does not recognize these options must also be upgraded.
 
 `--supervisor` cannot be combined with `--host` or `HEY_BOSS_ISSUE_HOST`. The
-ordinary local/offline path and explicit SSH route retain their existing rules.
+ordinary metadata/offline path and explicit SSH route retain their existing rules.
 Unsupported lifecycle work must use those established paths with their normal
 ownership and allocation checks. Never claim an issue merely to edit its labels.
 
-This extends issue 145's relay without changing issue 150's offline acceptance
-protection or issue 56's general batch semantics.
+This extends issue 145's relay and issue 151's metadata routing with issue 152's
+discovery and guarded drafting, preserving issue 150's offline acceptance
+protection and issue 56's general batch semantics.
 
 Verification uses `cargo test --locked -p hey-boss --lib --test issues --test
 fleet_native --test issue_allocation`, including real supervisor/companion

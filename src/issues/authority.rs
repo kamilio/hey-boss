@@ -5,7 +5,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
     match &request.operation {
         Operation::View { .. } | Operation::Allocation { .. } => return Ok(()),
         Operation::Edit {
-            draft: None,
+            draft: None | Some(true),
             if_version: Some(version),
             ..
         } if *version > 0 => {}
@@ -15,7 +15,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, version-guarded title/body/label edits, and label-only batches with assignment: keep. Lifecycle, draft, claim, assignment and reservation changes are not supported; nothing was saved",
+                "--supervisor supports view, allocation, version-guarded title/body/label edits and drafting eligible issues, and label-only batches with assignment: keep. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }
