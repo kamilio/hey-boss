@@ -993,6 +993,22 @@ function placeIssueWork() {
   target.insertBefore(work, issuePhoneLayout.matches ? $("#issue-attachments") : target.firstChild);
   focused?.focus({preventScroll: true});
 }
+function mountIssueSection(selector, name, mount) {
+  try { mount(); }
+  catch (error) {
+    const root = $(selector);
+    if (root) {
+      root.hidden = false;
+      root.innerHTML = `<p class="form-error" role="alert">${esc(name)} could not load. <button type="button" class="button" data-reload>Try again</button></p>`;
+    }
+    console.error(name + " could not load", error);
+  }
+}
+// Core actions render with the header, before optional detail components mount.
+function renderIssueHeadingActions(issue) {
+  const deleted = !!issue.deleted_at;
+  return `<div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button>${deleted ? "" : `<details class="issue-overflow"><summary class="icon-button" aria-label="More issue actions" title="More issue actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-transfer>${icon("folder")}Move to project…</button><button type="button" class="danger" data-action="delete">${icon("trash")}Delete issue</button></div></details>`}</div>`;
+}
 function renderDetail(value) {
   if (value.moved_to) {
     saveComment();
@@ -1016,8 +1032,8 @@ function renderDetail(value) {
   const description =
     i.body_html || '<p class="muted-text">No description provided.</p>';
   $("#detail-view").innerHTML =
-    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1><div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button></div></div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.state === "ready" ? "Ready" : i.state === "blocked" ? "Blocked" : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
-  mountIssueProgress(i);
+    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1>${renderIssueHeadingActions(i)}</div><div class="detail-meta"><span class="state-pill ${state}">${icon(deleted ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.state === "ready" ? "Ready" : i.state === "blocked" ? "Blocked" : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
+  mountIssueSection(".issue-progress-card", "Progress", () => mountIssueProgress(i));
   placeIssueWork();
   document.title = `${i.title} · Hey Boss`;
   $$('[data-resolve-comment]').forEach((button) => {
@@ -1044,13 +1060,9 @@ function renderDetail(value) {
     $("#comment-write").onclick = () => preview("comment", false);
     $("#comment-preview").onclick = () => preview("comment", true);
   }
-  HeyBossAttachments.mount(document.querySelector("#issue-attachments"), {project:model.project.id,target:{kind:"issue",id:String(i.number)},host:model.route.host,csrf:model.csrf,readonly:deleted}, document.querySelector("#comment-form .markdown-editor"));
-  HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || []});
-  IssueSubtasks.rendered();
-  if (!deleted) {
-    $(".detail-heading-actions").insertAdjacentHTML("beforeend", `<details class="issue-overflow"><summary class="icon-button" aria-label="More issue actions" title="More issue actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-transfer>${icon("folder")}Move to project…</button><button type="button" class="danger" data-action="delete">${icon("trash")}Delete issue</button></div></details>`);
-    $("[data-transfer]").onclick = openTransfer;
-  }
+  mountIssueSection("#issue-attachments", "Attachments", () => HeyBossAttachments.mount(document.querySelector("#issue-attachments"), {project:model.project.id,target:{kind:"issue",id:String(i.number)},host:model.route.host,csrf:model.csrf,readonly:deleted}, document.querySelector("#comment-form .markdown-editor")));
+  mountIssueSection("#issue-artifacts", "Linked documents", () => HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || []}));
+  mountIssueSection(".subtasks-card", "Subtasks", () => IssueSubtasks.rendered());
   $("#history-toggle").onclick = loadHistory;
   if ($("#pr-form"))
     $("#pr-form").onsubmit = (event) => {
@@ -1120,6 +1132,7 @@ $("#detail-view").addEventListener("click", async (e) => {
     button.focus({ preventScroll: true });
     openEditor(model.detail.issue);
   }
+  if (button.hasAttribute("data-transfer")) openTransfer();
   if (button.hasAttribute("data-retry")) renderRoute();
   if (button.hasAttribute("data-reload")) {
     saveComment();
