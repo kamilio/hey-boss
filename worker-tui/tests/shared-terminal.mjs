@@ -61,6 +61,9 @@ try {
   await session.press('ArrowDown'); await wait(session, 'Shared two');
   await open(session, 'p', 'Pause worker?'); await wait(session, 'Shared two');
   await capture(session, 'confirm'); await session.press('Escape');
+  // Wait for Escape to dismiss the modal before sending another key; otherwise
+  // the PTY can combine Escape+h into an Alt+h event on a busy runner.
+  await wait(session, /^(?![\s\S]*Pause worker\?)[\s\S]*Tools task/);
   await session.type('h'); await wait(session, 'Docs task');
   assert.ok(!(await session.screen()).contains('Proxy task'));
   await capture(session, 'history');

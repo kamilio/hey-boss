@@ -1020,6 +1020,9 @@ impl Store {
         let needs_sequence = prior_readiness
             .as_ref()
             .is_none_or(|sql| !sql.contains("ready_dependencies"));
+        let needs_readiness_refresh = prior_readiness
+            .as_ref()
+            .is_none_or(|sql| !sql.contains("ready_dependencies_fast"));
         let needs_repair = version >= 10
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
@@ -1168,9 +1171,11 @@ impl Store {
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
         super::blockers::migrate(&mut db)?;
-        if needs_sequence {
+        if needs_readiness_refresh {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            super::blockers::reconcile_sequence_upgrade(&tx)?;
+            if needs_sequence {
+                super::blockers::reconcile_sequence_upgrade(&tx)?;
+            }
             tx.execute_batch(include_str!("subtask-readiness.sql"))?;
             tx.commit()?;
         }
