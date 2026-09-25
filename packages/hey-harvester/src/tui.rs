@@ -81,6 +81,9 @@ fn request(
 ) {
     let machine = &mut dashboard.machines[index];
     if machine.busy {
+        machine.error = Some(
+            "A request is already running on this machine; wait before starting another.".into(),
+        );
         return;
     }
     machine.busy = true;
@@ -138,9 +141,11 @@ pub fn run(selected: Option<&str>) -> io::Result<()> {
         }
     }
     let _restore = Restore;
+    let mut dirty = true;
     loop {
         while let Ok((index, result)) = receiver.try_recv() {
             dashboard.complete(index, result);
+            dirty = true;
         }
         let index = dashboard.selected;
         let machine = &dashboard.machines[index];
@@ -155,14 +160,24 @@ pub fn run(selected: Option<&str>) -> io::Result<()> {
                 vec!["status".into(), "--json".into()],
                 &sender,
             );
+            dirty = true;
         }
-        terminal.draw(|frame| render(frame, &dashboard))?;
+
+        if dirty {
+            terminal.draw(|frame| render(frame, &dashboard))?;
+            dirty = false;
+        }
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let input = event::read()?;
+        let Event::Key(key) = input else {
+            if matches!(input, Event::Resize(_, _)) {
+                dirty = true;
+            }
             continue;
         };
+        dirty = true;
         if key.kind == KeyEventKind::Release {
             continue;
         }
