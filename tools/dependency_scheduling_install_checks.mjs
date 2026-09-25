@@ -84,6 +84,20 @@ try {
   assert.equal(rework.issue.assignee,'codex:verification');
   assert(rework.comments.some(c=>c.body.startsWith('Dependency rework: upstream tasks [2]')));
   assert.equal(issue(['view','3']).comments.length,0);
+  issue(['pr','add','3','https://github.com/example/connectors/pull/3']);
+  issue(['ready','3']);
+  const handedOff=issue(['view','3']).issue;
+  sql("UPDATE issues SET state='blocked',assignee=NULL,version=version+1,updated_at=123 WHERE project_id='named:Dependency installation QA' AND number=3");
+  sql("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Dependency installation QA',3,'codex:verification','blocked',123,'{\"blocked_by\":[2]}')");
+  assert.deepEqual(issue(['view','3']).issue,handedOff);
+  assert.equal(sql("SELECT count(*) FROM events WHERE action='blocked' AND created_at=123")[0][0],0);
+  sql("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,reservation_expires) VALUES('verification-reservation','named:Dependency installation QA',3,'{}','codex:other-worker','awaiting_claim',1,'synthetic','test',0,0,9999999999999)");
+  const allocation=issue(['allocation','3']).allocation;
+  assert.equal(allocation.worker_reservation.actor_id,'codex:other-worker');
+  assert.equal(allocation.worker_reservation.state,'awaiting_claim');
+  assert(allocation.summary.includes('codex:other-worker'));
+  assert(issue(['ready','3'],4).error.message.includes('reserved for another worker'));
+  assert.equal(sql("SELECT count(*) FROM worker_runs WHERE id='verification-reservation' AND finished_at IS NULL")[0][0],1);
   const web=start(['issue','web','--port','0','--no-discovery','--project','Dependency installation QA','--json']);
   const info=await new Promise((yes,no)=>{
     let text='';const timer=setTimeout(()=>no(Error('Fixture web startup incomplete')),30000);
@@ -96,7 +110,7 @@ try {
   assert(html.includes('id="project-subtask-scheduling"'));
   assert(script.includes('clear_manual_hold') && script.includes('Waiting for dependencies'));
   assert(settings.includes('subtask_scheduling'));
-  result={version,completed:6,expected:6,stages:['CLI discovery','independent siblings and grouping','legacy notice admission and unchanged claims','manual hold and structured blockers','Ready handoff and real rework','embedded UI']};
+  result={version,completed:7,expected:7,stages:['CLI discovery','independent siblings and grouping','legacy notice admission and unchanged claims','manual hold and structured blockers','Ready handoff and real rework','legacy state writes and visible worker reservations','embedded UI']};
 } finally {
   await Promise.all(children.map(child=>new Promise(resolve=>{
     if(child.exitCode!==null||child.signalCode!==null)return resolve();

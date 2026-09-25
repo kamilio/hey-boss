@@ -44,7 +44,7 @@ fn obsolete(project: &str, number: &str, list: &str, entry: &str) -> String {
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=5 FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_mode','dependency_notice_delivery')", [], |r|r.get::<_,bool>(0))? {
+    if db.query_row("SELECT count(*)=6 FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_mode','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
         return Ok(());
     }
     let tx =
@@ -67,6 +67,12 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         "coalesce(json_extract(NEW.data,'$.dependencies'),'[]')",
         "json_extract(dependency.value,'$[0]')",
     );
+    let blocked = obsolete(
+        "NEW.project_id",
+        "NEW.issue_number",
+        "coalesce(json_extract(NEW.data,'$.blocked_by'),'[]')",
+        "dependency.value",
+    );
     let queued = obsolete(
         "r.project_id",
         "r.issue_number",
@@ -85,9 +91,35 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     tx.execute_batch(&format!("
         CREATE TRIGGER IF NOT EXISTS dependency_notice_comment BEFORE INSERT ON comments
         WHEN {comment} BEGIN SELECT RAISE(IGNORE); END;
-        CREATE TRIGGER IF NOT EXISTS dependency_notice_event BEFORE INSERT ON events
-        WHEN CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN {commented} WHEN 'dependency_rework' THEN {event} ELSE 0 END ELSE 0 END
+        DROP TRIGGER IF EXISTS dependency_notice_event;
+        CREATE TRIGGER dependency_notice_event BEFORE INSERT ON events
+        WHEN CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN {commented} WHEN 'dependency_rework' THEN {event} WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
         BEGIN SELECT RAISE(IGNORE); END;
+        -- Old reconcilers continue after ignored notices. Reject an automatic
+        -- transition with no unfinished declared prerequisite or descendant.
+        -- Descendants traverse closed parents, like Graph::descendants; Ready
+        -- dependencies are satisfied only while their own prerequisites are.
+        CREATE TRIGGER IF NOT EXISTS dependency_notice_state BEFORE UPDATE OF state ON issues
+        WHEN NEW.state='blocked' AND OLD.state<>'blocked' AND NEW.manual_blocked=0
+        AND EXISTS(SELECT 1 FROM project_settings WHERE project_id=NEW.project_id AND subtask_scheduling='explicit')
+        AND NOT EXISTS(
+            WITH RECURSIVE dependencies(number,descend) AS (
+                SELECT value,0 FROM json_each(NEW.blockers)
+                UNION
+                SELECT r.child_number,1 FROM issue_subtasks r JOIN issues c ON c.project_id=r.project_id AND c.number=r.child_number
+                WHERE r.project_id=NEW.project_id AND r.parent_number=NEW.number AND c.deleted_at IS NULL
+                UNION
+                SELECT r.child_number,1 FROM dependencies d JOIN issues i ON i.project_id=NEW.project_id AND i.number=d.number
+                JOIN issue_subtasks r ON r.project_id=i.project_id AND r.parent_number=i.number
+                JOIN issues c ON c.project_id=r.project_id AND c.number=r.child_number
+                WHERE i.deleted_at IS NULL AND c.deleted_at IS NULL AND (d.descend=1 OR i.state='ready')
+                UNION
+                SELECT link.value,0 FROM dependencies d JOIN issues i ON i.project_id=NEW.project_id AND i.number=d.number, json_each(i.blockers) link
+                WHERE i.deleted_at IS NULL AND i.state='ready'
+            ) SELECT 1 FROM dependencies d LEFT JOIN issues i ON i.project_id=NEW.project_id AND i.number=d.number
+            WHERE i.number IS NULL OR (i.deleted_at IS NULL AND i.state<>'closed' AND
+                (i.state<>'ready' OR NOT EXISTS(SELECT 1 FROM project_settings WHERE project_id=NEW.project_id AND prs_enabled=1)))
+        ) BEGIN SELECT RAISE(IGNORE); END;
         CREATE VIEW IF NOT EXISTS obsolete_dependency_steering AS
         SELECT q.request_id FROM agent_steering q JOIN worker_runs r ON r.id=q.run_id
         WHERE q.state='queued' AND q.scope='dependency' AND {queued};

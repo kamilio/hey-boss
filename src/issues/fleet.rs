@@ -133,7 +133,16 @@ pub(crate) fn allocation(
         quote(project)
     );
     let claim = format!("hey-boss issue claim {number} --project {}", quote(project));
-    let summary = match reason {
+    let worker_reservation: Option<Value> = db.query_row(
+        "SELECT id,actor_id,machine,claimed_at,reservation_expires FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL",
+        params![project, number], |r| {
+            let claimed: Option<i64> = r.get(3)?;
+            let expires: Option<i64> = r.get(4)?;
+            Ok(json!({"run_id":r.get::<_,String>(0)?,"actor_id":r.get::<_,String>(1)?,"machine":r.get::<_,String>(2)?,"claimed_at":claimed,"expires_at":expires,
+                "state":if claimed.is_some() {"claimed"} else if expires.is_some_and(|v|v<=super::worker::now()) {"expired"} else if expires.is_some() {"awaiting_claim"} else {"active"}}))
+        },
+    ).optional()?;
+    let mut summary = match reason {
         "allocation_expired" => format!(
             "Issue #{number}'s fleet reservation expired before an agent claimed it. Reconnect to the supervisor for a new reservation."
         ),
@@ -151,6 +160,20 @@ pub(crate) fn allocation(
         "allocated_here" => format!("Issue #{number} is allocated to machine {machine}."),
         _ => format!("Issue #{number} has no fleet reservation in this store."),
     };
+    if let Some(worker) = &worker_reservation {
+        let state = worker["state"].as_str().unwrap();
+        summary.push_str(&format!(
+            " Worker attempt {} belongs to {} on {} ({state}).{}",
+            worker["run_id"].as_str().unwrap(),
+            worker["actor_id"].as_str().unwrap(),
+            worker["machine"].as_str().unwrap(),
+            if state == "awaiting_claim" {
+                format!(" Claims and Ready handoff by other agents remain reserved until {}.", worker["expires_at"])
+            } else {
+                " The attempt has not finished; fleet allocation alone does not establish ownership.".into()
+            }
+        ));
+    }
     let mut recovery = match reason {
         "reserved_elsewhere" => format!(
             "{}Resume on the reserved machine: {claim} --agent '<saved-agent-id>'. Unclaimed reservations expire with the worker startup or claim deadline. Claimed work remains protected. To move active work to another machine, ask Boss for a handoff; do not force a claim or change worker controls.",
@@ -178,7 +201,7 @@ pub(crate) fn allocation(
         );
     }
     Ok(
-        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"authoritative":role!="agent","connection":crate::fleet::worker_connection_path(&role, db.path()),"summary":summary,"inspect_command":command,"recovery":recovery}),
+        json!({"reason":reason,"role":role,"store_machine":node,"caller_machine":machine,"reserved_machine":reserved,"reserved_host":reserved_host,"reserved_ssh_host":reserved_ssh_host,"expires_at":expires,"worker_reservation":worker_reservation,"authoritative":role!="agent","connection":crate::fleet::worker_connection_path(&role, db.path()),"summary":summary,"inspect_command":command,"recovery":recovery}),
     )
 }
 
