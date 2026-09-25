@@ -140,6 +140,9 @@ impl Graph {
         if let Some(done) = self.satisfied.borrow().get(&n) {
             return !done;
         }
+        // Legacy links may oppose newly introduced sibling order. Treat cycles
+        // as unfinished so startup can preserve and display the work for repair.
+        self.satisfied.borrow_mut().insert(n, false);
         let unfinished = self.issues.get(&n).is_none_or(|i| {
             i["deleted_at"].is_null()
                 && i["state"] != "closed"
@@ -217,6 +220,14 @@ impl Graph {
         issue.as_object_mut().unwrap().remove("version");
         issue["source"] = json!(source);
         issue
+    }
+    fn validate_edges(&self) -> Result<()> {
+        for (&number, links) in &self.links {
+            for &target in links {
+                self.validate_edge(number, target)?;
+            }
+        }
+        Ok(())
     }
     fn validate_edge(&self, source: i64, target: i64) -> Result<()> {
         if source == target {
@@ -306,6 +317,7 @@ pub(super) fn reconcile_sequence_change(
     now: i64,
 ) -> Result<()> {
     let graph = Graph::load(db, project)?;
+    graph.validate_edges()?;
     for (&n, issue) in &graph.issues {
         if issue["state"] == "open"
             && issue["deleted_at"].is_null()
@@ -340,7 +352,9 @@ pub(super) fn reconcile_subtasks(
     actor: Option<&str>,
     now: i64,
 ) -> Result<()> {
-    validate_subtask_claims(db, project)?;
+    let graph = Graph::load(db, project)?;
+    graph.validate_edges()?;
+    graph.validate_subtask_claims()?;
     reconcile(db, project, actor, now)
 }
 
@@ -353,12 +367,6 @@ fn reconcile_graph(
     rework: bool,
 ) -> Result<()> {
     let graph = Graph::load(db, project)?;
-    // Reordering or linking may introduce a cycle through a closed issue too.
-    for (&number, links) in &graph.links {
-        for &target in links {
-            graph.validate_edge(number, target)?;
-        }
-    }
     for (&number, issue) in &graph.issues {
         if !issue["deleted_at"].is_null() || issue["state"] == "closed" {
             continue;
@@ -419,13 +427,12 @@ fn reconcile_graph(
         {
             // An upgrade lets existing work drain without stealing ownership.
             // The readiness view already excludes later branches from new pickup.
-            if upgrading || rework || graph.prs_enabled {
+            if upgrading
+                || rework
+                || graph.prs_enabled
+                || blockers.values().any(|s| *s == "previous_subtask")
+            {
                 continue;
-            }
-            if state == "blocked" && blockers.values().any(|s| *s == "previous_subtask") {
-                return Err(Error::conflict(format!(
-                    "Cannot change the subtask sequence: issue #{number} is claimed or reserved. Finish or release that work first."
-                )));
             }
         }
         db.execute("UPDATE issues SET state=?3,assignee=NULL,version=version+1,updated_at=?4 WHERE project_id=?1 AND number=?2", params![project,number,state,now])?;

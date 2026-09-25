@@ -223,7 +223,7 @@ fn readiness_uses_project_indexes_and_independent_trees_can_run_together() {
 }
 
 #[test]
-fn migration_preserves_active_claims_and_retries_failed_graph_validation() {
+fn migration_preserves_active_claims_and_keeps_legacy_cycles_available_for_repair() {
     let mut f = Fixture::new("upgrade-claims");
     f.create(None);
     f.create(Some(1));
@@ -232,7 +232,8 @@ fn migration_preserves_active_claims_and_retries_failed_graph_validation() {
         let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
         db.execute_batch("DROP VIEW issue_pickup_ready; CREATE VIEW issue_pickup_ready AS SELECT project_id,number FROM issues WHERE state='open'; UPDATE issues SET state='open',assignee='codex:test' WHERE number=3; UPDATE issues SET blockers='[3]' WHERE number=2;").unwrap();
     }
-    assert!(Store::open(&f.root.join("issues.db")).is_err());
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    assert_eq!(f.view(2)["state"], "blocked");
     {
         let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
         let sql: String = db
@@ -243,8 +244,8 @@ fn migration_preserves_active_claims_and_retries_failed_graph_validation() {
             )
             .unwrap();
         assert!(
-            !sql.contains("sequence_ancestors"),
-            "Failed migration must remain retryable"
+            sql.contains("sequence_ancestors"),
+            "Legacy cycles must not prevent the readiness migration"
         );
         db.execute_batch("UPDATE issues SET blockers='[]' WHERE number=2;")
             .unwrap();
