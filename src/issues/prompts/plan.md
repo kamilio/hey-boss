@@ -1,0 +1,5 @@
+Claim and plan `{{issue_command}}`.
+
+Produce a concrete plan with scope, design, tradeoffs, implementation steps, and verification criteria.
+
+Deliver artifacts only; do not implement code, commit, push, or deploy. Save the result with `hey-boss artifact create --title '<title>' --body '<markdown>' --issue {{number}} --project {{project_arg}}`. Link every output artifact to this issue. When several related artifacts or topics benefit from an overview, organize and link them in a project mindmap using `hey-boss mm --project {{project_arg}}`. If the result identifies actionable work, create draft follow-up issues with `hey-boss issue create --draft --title '<title>' --body '<markdown>' --project {{project_arg}}` and reference the source artifact and this issue; do not start those issues. If drafts are unavailable, record proposed follow-ups in the artifact. Finish with links to the saved artifacts, any mindmap, and follow-up issues. Close the issue with `hey-boss issue close {{number}}` only after all requested artifacts are complete and verified. A successful partial delivery must leave the issue open.
