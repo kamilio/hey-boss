@@ -13,6 +13,7 @@ mod logs;
 pub mod processes;
 pub mod remote;
 mod system;
+mod workload_ownership;
 pub mod worktrees;
 
 use serde::{Deserialize, Serialize};
