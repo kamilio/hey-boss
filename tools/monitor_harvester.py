@@ -50,8 +50,18 @@ print(json.dumps({"snapshot":snapshot,"scheduler":scheduler,
 '''
 
 
+def expected_workload_denial(error):
+    return re.fullmatch(
+        r"Protected workload · PID \d+: Cannot verify workload ownership; preserved: "
+        r"/private/var/db/analyticsd/events\.allowlist: Permission denied \(os error 13\)",
+        error,
+    ) is not None
+
+
 def expected_access_denial(error):
     """Only observed OS privacy boundaries are warnings; other failures still page."""
+    if expected_workload_denial(error):
+        return True
     caches = {"FamilyCircle", "CloudKit", "com.apple.HomeKit", "com.apple.Safari",
               "com.apple.findmy.imagecache", "com.apple.findmy.fmfcore",
               "com.apple.containermanagerd", "com.apple.homed",
@@ -208,10 +218,13 @@ def compact(host, sample, now, completed_after=0):
     if (any(not expected_access_denial(e) for e in result["new_completed_errors"])
             and "cleanup_errors" not in result["problems"]):
         result["problems"].append("cleanup_errors")
-    result["warnings"] = (["protected_os_cache"]
-                          if any(expected_access_denial(e) for e in
-                                 s.get("errors", []) + result["last_completed_errors"] +
-                                 result["new_completed_errors"]) else [])
+    errors = (s.get("errors", []) + result["last_completed_errors"] +
+              result["new_completed_errors"])
+    result["warnings"] = []
+    if any(expected_access_denial(e) and not expected_workload_denial(e) for e in errors):
+        result["warnings"].append("protected_os_cache")
+    if any(expected_workload_denial(e) for e in errors):
+        result["warnings"].append("protected_os_workload")
     for key in ("observed_at", "last_cleanup_at", "metrics", "cache_progress",
                 "harvested_processes", "removed_worktrees", "removed_caches",
                 "errors", "running", "phase"):
