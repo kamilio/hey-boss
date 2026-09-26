@@ -292,6 +292,22 @@ class MonitorTests(unittest.TestCase):
         ]:
             self.assertFalse(monitor.expected_access_denial(unexpected))
 
+    def test_apple_cache_bundle_privacy_denials_remain_visible(self):
+        prefix = "/Users/test/Library/Caches/"
+        for bundle in ["com.apple.Safari.SafeBrowsing", "com.apple.FutureKit"]:
+            error = prefix + bundle + ": Operation not permitted (os error 1)"
+            row = monitor.compact("mac", self.completed_sample([error]), 2000)
+            self.assertEqual(row["problems"], [])
+            self.assertEqual(row["warnings"], ["protected_os_cache"])
+            self.assertEqual(row["last_completed_errors"], [error])
+        for path in [prefix + "com.example.cache", prefix + "com.apple-impostor",
+                     prefix + "com.apple.Safari/project-data",
+                     "/Users/test/Workspace/com.apple.Safari.SafeBrowsing"]:
+            self.assertFalse(monitor.expected_access_denial(path + ": Operation not permitted (os error 1)"))
+        error = prefix + "com.apple.Safari.SafeBrowsing: Operation not permitted (os error 1)"
+        self.assertFalse(monitor.expected_access_denial(error.replace("Operation not permitted (os error 1)", "Input/output error (os error 5)")))
+        self.assertFalse(monitor.expected_access_denial(error + "; /project: Operation not permitted (os error 1)"))
+
     def test_newly_observed_apple_privacy_paths_remain_visible(self):
         paths = [
             "/private/var/folders/dd/test_user/T/com.apple.transparencyd/TemporaryItems",
