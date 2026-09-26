@@ -399,17 +399,24 @@ fn eligible(
         return Err("Recently created or changed; preserved".into());
     }
     check_submodules(&w.path)?;
-    let status = git_text(
-        &w.path,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ],
+    // One status record is enough to preserve the checkout. A clean result
+    // still requires complete output and a successful inspector exit.
+    let clean = super::visit_nul_output(
+        &mut git(
+            &w.path,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
+        ),
+        Duration::from_secs(15),
+        |_| Ok(false),
     )
     .map_err(|e| e.to_string())?;
-    if !status.is_empty() {
+    if !clean {
         return Err("Modified, untracked, or ignored files; preserved".into());
     }
     let head = git_text(&w.path, &["rev-parse", "HEAD"]).map_err(|e| e.to_string())?;
@@ -1330,6 +1337,19 @@ mod aggressive_tests {
             .output()
             .unwrap();
         assert!(result.status.success());
+        let refusal = aggressive_eligible(
+            &w,
+            &main,
+            std::slice::from_ref(&root),
+            &[],
+            &Table::new(),
+            now() + 172800,
+        )
+        .unwrap_err();
+        assert!(
+            refusal.contains("Modified, untracked, or ignored"),
+            "{refusal}"
+        );
         assert!(expired(&w, now() + 172800).unwrap());
         std::fs::write(work.join("recent"), "keep").unwrap();
         std::fs::File::options()
