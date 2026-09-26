@@ -863,6 +863,160 @@ async fn coalesces_even_when_first_caller_is_cancelled_and_queue_is_full() {
 }
 
 #[tokio::test]
+async fn saturated_background_queue_preserves_targeted_ci_admission_and_coalescing() {
+    let h = Harness::new().await;
+    h.phase(2);
+    let mut config = h.config();
+    config.queue_capacity = 32;
+    config.queue_timeout = Duration::from_secs(10);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    let worker = c.clone();
+    let gate = tokio::spawn(async move { worker.get("slow", Freshness::Revalidate).await });
+    until(|| h.calls().len() == 1).await;
+    let mut background = Vec::new();
+    for n in 0..27 {
+        let worker = c.clone();
+        background.push(tokio::spawn(async move {
+            worker
+                .get(&format!("queued/{n}"), Freshness::Revalidate)
+                .await
+        }));
+    }
+    let worker = c.clone();
+    background.push(tokio::spawn(async move {
+        worker
+            .get("repos/acme/demo/pulls/7", Freshness::Revalidate)
+            .await
+    }));
+    until(|| c.status().outstanding_requests == 29).await;
+    assert!(matches!(
+        c.get("overflow", Freshness::Revalidate).await,
+        Err(Error::QueueFull)
+    ));
+
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/v1/prs/acme/demo/7/ci?refresh=true",
+        listener.local_addr().unwrap()
+    );
+    let server = tokio::spawn(axum::serve(listener, api.router()).into_future());
+    let foreground = tokio::spawn(async move {
+        reqwest::get(url)
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    until(|| c.status().coalesced_requests == 1).await;
+    assert_eq!(
+        c.status().outstanding_requests,
+        29,
+        "equivalent metadata must not consume another slot"
+    );
+    h.mock.release.notify_one();
+    assert!(gate.await.unwrap().is_ok());
+    let report = foreground.await.unwrap();
+    assert_eq!(report["complete"], true, "{report}");
+    assert_eq!(report["data"]["summary"]["state"], "success");
+    assert_eq!(
+        h.calls()[1].path,
+        "/repos/acme/demo/pulls/7",
+        "coalesced targeted read must retain priority"
+    );
+    for job in background {
+        assert!(job.await.unwrap().is_ok());
+    }
+    assert_eq!(c.status().outstanding_requests, 0);
+    api.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn saturated_ci_sources_preserve_cached_validations_and_recover_without_false_readiness() {
+    let h = Harness::new().await;
+    h.phase(2);
+    let mut config = h.config();
+    config.queue_capacity = 1;
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    let baseline = c
+        .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(baseline.complete);
+    // The fresh report validates metadata twice. Compare the stored final
+    // validators before/after rejection, not its earlier initial validation.
+    let baseline = c
+        .ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    let cursor = c.bootstrap().await.unwrap().cursor;
+    let calls = h.calls().len();
+    let worker = c.clone();
+    let gate = tokio::spawn(async move { worker.get("slow", Freshness::Revalidate).await });
+    until(|| h.calls().len() == calls + 1).await;
+    let overloaded = c
+        .ci_report("acme/demo", HEAD, None, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(overloaded.summary.state, "unknown");
+    assert_eq!(overloaded.errors.len(), 3);
+    for source in ["check_runs", "commit_statuses", "workflow_runs"] {
+        let error = overloaded
+            .errors
+            .iter()
+            .find(|error| error.source == format!("{source}:{HEAD}"))
+            .unwrap();
+        assert!(error.message.contains("request queue is full"));
+        assert!(error.message.contains("retry after 1 second"));
+    }
+    assert_eq!(
+        c.bootstrap().await.unwrap().cursor,
+        cursor,
+        "failed source reads cannot publish a successful snapshot"
+    );
+    let cached = c
+        .ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(
+        cached.oldest_validation_at_ms,
+        baseline.oldest_validation_at_ms
+    );
+    for validation in &cached.validations {
+        assert!(
+            baseline
+                .validations
+                .iter()
+                .any(|old| old.resource == validation.resource
+                    && old.validated_at_ms == validation.validated_at_ms)
+        );
+    }
+    assert_eq!(
+        h.calls().len(),
+        calls + 1,
+        "cached evidence cannot issue upstream requests"
+    );
+    h.mock.release.notify_one();
+    assert!(gate.await.unwrap().is_ok());
+    let recovered = c
+        .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(recovered.complete);
+    assert!(recovered.data.errors.is_empty());
+    assert_eq!(recovered.data.summary.state, "success");
+    assert!(recovered.cursor.is_some());
+    assert!(
+        c.changes(Some(&cursor), 1000).await.is_ok(),
+        "saved source cursor must remain resumable"
+    );
+}
+
+#[tokio::test]
 async fn primary_bucket_does_not_block_core_and_secondary_retries_are_bounded() {
     let h = Harness::new().await;
     h.mode("primary");

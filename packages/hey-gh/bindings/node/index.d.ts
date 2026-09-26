@@ -235,6 +235,8 @@ export interface Status {
   active_requests: number
   max_active_requests: number
   queue_capacity: number
+  interactive_reserved_slots: number
+  queue_full_rejections: number
   cache_hits: number
   coalesced_requests: number
   network_requests: number

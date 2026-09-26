@@ -37,6 +37,12 @@ pub struct Status {
     #[serde(default)]
     pub max_active_requests: usize,
     pub queue_capacity: usize,
+    /// Slots within queue_capacity unavailable to new background requests.
+    #[serde(default)]
+    pub interactive_reserved_slots: usize,
+    /// Distinct admissions rejected, before any network attempt (not completions).
+    #[serde(default)]
+    pub queue_full_rejections: u64,
     pub cache_hits: u64,
     pub coalesced_requests: u64,
     pub network_requests: u64,
@@ -51,6 +57,7 @@ pub struct Status {
 
 #[derive(Default)]
 pub(crate) struct Metrics {
+    pub queue_full: AtomicU64,
     pub cache_hits: AtomicU64,
     pub coalesced: AtomicU64,
     pub network: AtomicU64,
