@@ -21,13 +21,25 @@ pub(super) fn status_text(v: &Value) -> String {
     let c = &v["counts"];
     let _ = writeln!(
         out,
-        "{} machines · {} unresolved conflicts · {} pending signals / {} total · {} retained events\n",
+        "{} machines · {} unresolved conflicts\nSignals: {} pending / {} total · Events: {} retained\n",
         text(&c["machines"]),
         text(&c["unresolved_conflicts"]),
         text(&c["pending_signals"]),
         text(&c["signals"]),
         text(&c["retained_events"])
     );
+    for (label, key) in [
+        ("Pending changes", "reported_pending_changes"),
+        ("Companion conflicts", "reported_companion_conflicts"),
+    ] {
+        let _ = writeln!(
+            out,
+            "{label}: {} reported · {} machines unknown",
+            text(&c[key]["known"]),
+            text(&c[key]["unknown_machines"])
+        );
+    }
+    out.push('\n');
     for m in v["machines"].as_array().into_iter().flatten() {
         let _ = writeln!(
             out,
@@ -45,7 +57,7 @@ pub(super) fn status_text(v: &Value) -> String {
         );
         let _ = writeln!(
             out,
-            "  Pending: {} · conflicts: {} · last sync: {} · heartbeat: {}",
+            "  Pending: {} · conflicts: {}\n  Last sync: {} · heartbeat: {}",
             text(&m["pending"]),
             text(&m["conflicts"]),
             text(&m["last_sync"]),
@@ -53,7 +65,7 @@ pub(super) fn status_text(v: &Value) -> String {
         );
         let _ = writeln!(
             out,
-            "  Revision: {} → {} (applied → desired)",
+            "  Applied revision: {}\n  Desired revision: {}",
             text(&m["applied_revision"]),
             text(&m["desired_revision"])
         );
@@ -71,7 +83,7 @@ pub(super) fn status_text(v: &Value) -> String {
         for w in m["workers"].as_array().into_iter().flatten() {
             let _ = writeln!(
                 out,
-                "    {} · {} · enabled {} · active {} / slots {} · free {} · build {}",
+                "    {} · {} · enabled {}\n      Active {} / slots {} · free {} · build {}",
                 text(&w["id"]),
                 text(&w["intent"]),
                 text(&w["enabled"]),
