@@ -29,7 +29,10 @@ class MonitorTests(unittest.TestCase):
     def sample(self):
         return {"snapshot": {
             "observed_at": 1900, "last_cleanup_at": 1900,
-            "running": False, "config": {"automatic": True},
+            "running": False, "config": {
+                "automatic": True, "aggressive": True, "harvest_processes": True,
+                "clean_worktrees": True, "clean_caches": True, "trim_worker_logs": True,
+            },
             "metrics": {"disk_available_bytes": 100_000_000_000,
                         "memory_pressure": "Warning"},
             "cache_progress": {}, "errors": [],
@@ -57,6 +60,28 @@ class MonitorTests(unittest.TestCase):
         sample["snapshot"]["metrics"].update(disk_available_bytes=20_000_000_000, memory_pressure="Critical")
         sample["snapshot"]["config"]["automatic"] = False
         self.assertEqual(monitor.problems(sample, 2000), ["cleanup_disabled", "disk_low", "memory_critical"])
+
+    def test_independent_cleaners_cannot_silently_stop(self):
+        for setting, problem in [
+            ("harvest_processes", "process_cleanup_disabled"),
+            ("clean_worktrees", "worktree_cleanup_disabled"),
+            ("clean_caches", "cache_cleanup_disabled"),
+            ("trim_worker_logs", "worker_log_cleanup_disabled"),
+            ("aggressive", "aggressive_cleanup_disabled"),
+        ]:
+            for missing in [False, True]:
+                with self.subTest(setting=setting, missing=missing):
+                    sample = self.sample()
+                    sample["binary_sha256"] = "fixture"
+                    if missing:
+                        del sample["snapshot"]["config"][setting]
+                    else:
+                        sample["snapshot"]["config"][setting] = False
+                    row = monitor.compact("host", sample, 2000)
+                    self.assertEqual(row["problems"], [problem])
+                    self.assertIs(row["cleanup_settings"][setting], None if missing else False)
+                    sample["snapshot"]["config"][setting] = True
+                    self.assertEqual(monitor.problems(sample, 2000), [])
 
     def test_running_cycles_do_not_hide_a_cache_pass_over_a_day(self):
         sample = self.sample()
