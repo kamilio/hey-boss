@@ -100,15 +100,36 @@ fn run_inner(action: &super::Action) -> Result<()> {
                 companion::daemon(ctx)
             }
         }
-        super::Action::Status | super::Action::Capabilities => {
-            let kind = if matches!(action, super::Action::Capabilities) {
-                "capabilities"
+        super::Action::Status {
+            json,
+            records,
+            limit,
+            offset,
+        } => {
+            let view = records.as_deref().unwrap_or("summary");
+            let result = local_request(
+                &ctx,
+                json!({"kind":"status","view":view,"limit":limit,"offset":offset}),
+            )?;
+            if result["view"] != view {
+                return Err(replica::invalid(
+                    "Supervisor does not support bounded fleet status. Run hey-boss upgrade on the supervisor.",
+                ));
+            }
+            if *json || records.is_some() {
+                println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                "status"
-            };
+                print!("{}", super::status_text(&result));
+            }
+            Ok(())
+        }
+        super::Action::Capabilities => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&local_request(&ctx, json!({"kind":kind}))?)?
+                serde_json::to_string_pretty(&local_request(
+                    &ctx,
+                    json!({"kind":"capabilities"})
+                )?)?
             );
             Ok(())
         }

@@ -255,7 +255,10 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let result = peer.command(&["fleet", "status"]).output().unwrap();
+        let result = peer
+            .command(&["fleet", "status", "--json"])
+            .output()
+            .unwrap();
         if result.status.success() {
             let status: Value = serde_json::from_slice(&result.stdout).unwrap();
             assert!(status["supervisor"].is_string());
@@ -708,7 +711,10 @@ fn status_runs_without_python() {
                         .unwrap();
                     let v: Value = serde_json::from_str(&line).unwrap();
                     assert_eq!(v["kind"], "status");
-                    stream.write_all(b"{\"ok\":true,\"machines\":[]}").unwrap();
+                    assert_eq!(v["view"], "summary");
+                    stream
+                        .write_all(b"{\"ok\":true,\"view\":\"summary\",\"machines\":[]}")
+                        .unwrap();
                     return;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -722,7 +728,7 @@ fn status_runs_without_python() {
         }
     });
     let output = f
-        .command(&["fleet", "status"])
+        .command(&["fleet", "status", "--json"])
         .env("PATH", f.root.join("no-python"))
         .output()
         .unwrap();
@@ -880,7 +886,7 @@ fn supervisor_shutdown_preserves_running_worker_and_agent() {
         assert!(Instant::now() < deadline, "supervisor did not start");
         thread::sleep(Duration::from_millis(50));
     }
-    let status = f.cli(&["fleet", "status"]);
+    let status = f.cli(&["fleet", "status", "--json"]);
     assert_eq!(status["machines"][0]["workers"][0]["pid"], worker.0.id());
     supervisor.terminate();
     assert!(
@@ -1345,8 +1351,10 @@ fn large_status_response_is_complete_over_the_local_socket() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(50));
     }
-    let status = f.cli(&["fleet", "status"]);
-    let machine = status["machines"]
+    let summary = f.cli(&["fleet", "status", "--json"]);
+    assert!(summary.to_string().len() < 10000);
+    let status = f.cli(&["fleet", "status", "--records", "machines"]);
+    let machine = status["records"]
         .as_array()
         .unwrap()
         .iter()
