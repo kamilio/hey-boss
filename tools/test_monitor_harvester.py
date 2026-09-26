@@ -18,6 +18,28 @@ spec.loader.exec_module(monitor)
 
 
 class MonitorTests(unittest.TestCase):
+    def test_known_system_workload_denial_keeps_protection_and_diagnostics(self):
+        error = ('Protected workload · PID 68382: Cannot verify workload ownership; '
+                 'preserved: /private/var/db/analyticsd/events.allowlist: '
+                 'Permission denied (os error 13)')
+        sample = self.sample()
+        sample['binary_sha256'] = 'fixture'
+        sample['snapshot']['errors'] = [error]
+        row = monitor.compact('local', sample, 2000)
+        self.assertEqual(row['problems'], [])
+        self.assertEqual(row['errors'], [error])
+        self.assertEqual(row['warnings'], ['protected_os_workload'])
+        sample['snapshot']['errors'] = [error, '/project: Input/output error (os error 5)']
+        self.assertIn('cleanup_errors', monitor.problems(sample, 2000))
+        for unexpected in [
+            error.replace('/private/var/db/analyticsd/events.allowlist', '/project/secret'),
+            error.replace('Permission denied (os error 13)', 'Input/output error (os error 5)'),
+            error.replace('/private/var/db/analyticsd/events.allowlist: ', ''),
+            error + '; /project: Permission denied (os error 13)',
+        ]:
+            sample['snapshot']['errors'] = [unexpected]
+            self.assertIn('cleanup_errors', monitor.problems(sample, 2000))
+
     def test_routine_disconnects_stay_visible_without_paging_and_low_disk_still_alerts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

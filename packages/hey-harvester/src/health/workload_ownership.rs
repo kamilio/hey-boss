@@ -126,6 +126,11 @@ fn checkouts(path: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
 }
 
 fn owned_path(path: &Path, active: &BTreeSet<PathBuf>) -> io::Result<bool> {
+    owned_path_inner(path, active)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
+}
+
+fn owned_path_inner(path: &Path, active: &BTreeSet<PathBuf>) -> io::Result<bool> {
     if !path.is_absolute() {
         return Ok(false);
     }
@@ -472,7 +477,13 @@ mod tests {
         assert!(owned_path(&file, &active).unwrap());
         assert!(!owned_path(&root.join("owned work-other/file"), &active).unwrap());
         fs::write(work.join(".git"), "unreadable ownership format").unwrap();
-        assert!(owned_path(&file, &BTreeSet::new()).is_err());
+        let error = owned_path(&file, &BTreeSet::new()).unwrap_err();
+        assert!(error.to_string().contains(&file.display().to_string()));
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid checkout ownership pointer")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
