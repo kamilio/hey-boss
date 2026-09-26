@@ -50,6 +50,30 @@ class MonitorTests(unittest.TestCase):
         sample["snapshot"]["cache_progress"]["discovery_pending"] = False
         self.assertNotIn("cache_pass_overdue", monitor.problems(sample, 100000))
 
+    def test_known_os_cache_denials_stay_visible_without_paging(self):
+        sample = self.sample()
+        sample["binary_sha256"] = "fixture"
+        errors = ["24-hour cache expiration: /Users/test/Library/Caches/FamilyCircle: Operation not permitted (os error 1); /private/var/folders/dd/test_user/T/com.apple.CloudDocs.iCloudDriveFileProvider/TemporaryItems: Operation not permitted (os error 1)"]
+        sample["snapshot"]["errors"] = errors
+        row = monitor.compact("mac", sample, 2000)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+        self.assertEqual(row["errors"], errors)
+
+    def test_unexpected_and_mixed_failures_still_page(self):
+        known = "24-hour cache expiration: /Users/test/Library/Caches/FamilyCircle: Operation not permitted (os error 1)"
+        for error in [
+            "/Users/test/Workspace/project/.cache: Operation not permitted (os error 1)",
+            "/Users/test/Library/Caches/CustomApp: Operation not permitted (os error 1)",
+            "/private/var/folders/dd/test_user/T/com.apple.unknown/TemporaryItems: Operation not permitted (os error 1)",
+            "/Users/test/Library/Caches/FamilyCircle: Input/output error (os error 5)",
+            known + "; /Users/test/Workspace/project/.cache: Input/output error (os error 5)",
+        ]:
+            with self.subTest(error=error):
+                sample = self.sample()
+                sample["snapshot"]["errors"] = [error]
+                self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
+
 
 if __name__ == "__main__":
     unittest.main()
