@@ -58,6 +58,32 @@ def expected_access_denial(error):
     return True
 
 
+def last_completed_errors(snapshot):
+    """Retain the last result while a new cycle has cleared snapshot.errors."""
+    activity = snapshot.get("activity", [])
+    for index in range(len(activity) - 1, -1, -1):
+        event = activity[index]
+        if event.get("category") != "scan" or not event.get("message", "").startswith("Finished:"):
+            continue
+        count = re.search(r"; (\d+) errors\.$", event["message"])
+        if count and int(count[1]) == 0:
+            return []
+        errors = []
+        for prior in reversed(activity[:index]):
+            message = prior.get("message", "")
+            if prior.get("category") == "scan" and (
+                    message.startswith("Finished:") or message == "Cleanup check started" or
+                    message.startswith("Inspection started;")):
+                break
+            if prior.get("category") == "error":
+                errors.append(message)
+        errors = list(dict.fromkeys(reversed(errors)))
+        if not count or len(errors) < int(count[1]):
+            errors.append("Last completed cleanup has unavailable error details")
+        return errors
+    return []
+
+
 def problems(sample, now):
     if "error" in sample:
         return ["unreachable"]
@@ -81,7 +107,8 @@ def problems(sample, now):
         result.append("disk_low")
     if m.get("memory_pressure", "").lower() == "critical":
         result.append("memory_critical")
-    if any(not expected_access_denial(error) for error in s.get("errors", [])):
+    if any(not expected_access_denial(error)
+           for error in s.get("errors", []) + last_completed_errors(s)):
         result.append("cleanup_errors")
     return result
 
@@ -114,8 +141,10 @@ def compact(host, sample, now):
         result["error"] = sample["error"]
         return result
     s = sample["snapshot"]
+    result["last_completed_errors"] = last_completed_errors(s)
     result["warnings"] = (["protected_os_cache"]
-                          if any(expected_access_denial(e) for e in s.get("errors", [])) else [])
+                          if any(expected_access_denial(e) for e in
+                                 s.get("errors", []) + result["last_completed_errors"]) else [])
     for key in ("observed_at", "last_cleanup_at", "metrics", "cache_progress",
                 "harvested_processes", "removed_worktrees", "removed_caches",
                 "errors", "running", "phase"):
