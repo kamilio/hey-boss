@@ -234,6 +234,23 @@ fn discover() -> VecDeque<PathBuf> {
         .collect()
 }
 
+fn project_cache(path: &std::path::Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some(
+            "node_modules"
+                | "out"
+                | "dist"
+                | "build"
+                | "target"
+                | ".cache"
+                | ".turbo"
+                | ".next"
+                | ".vite"
+        )
+    )
+}
+
 fn discover_projects(p: &mut Progress) {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut visited = 0;
@@ -243,6 +260,17 @@ fn discover_projects(p: &mut Progress) {
                 break;
             };
             p.projects.push(Frame::new(root));
+        }
+        // Older versions descended into project .cache directories without
+        // cleaning them. Promote saved cursors too, including nested frames.
+        if let Some(index) = p
+            .projects
+            .iter()
+            .position(|frame| project_cache(&frame.path))
+        {
+            p.roots.push_back(p.projects[index].path.clone());
+            p.projects.truncate(index);
+            continue;
         }
         let frame = p.projects.last_mut().unwrap();
         if frame.path.canonicalize().ok().as_ref() != Some(&frame.path) {
@@ -256,17 +284,7 @@ fn discover_projects(p: &mut Progress) {
                     continue;
                 }
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if matches!(
-                    name.as_ref(),
-                    "node_modules"
-                        | "out"
-                        | "dist"
-                        | "build"
-                        | "target"
-                        | ".turbo"
-                        | ".next"
-                        | ".vite"
-                ) {
+                if project_cache(&path) {
                     p.roots.push_back(path);
                 } else if !matches!(name.as_ref(), ".git" | ".wrangler") && p.projects.len() < 7 {
                     p.projects.push(Frame::new(path));
@@ -529,6 +547,92 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_local_cache_expires_old_files_but_keeps_sqlite_fresh_files_and_checkouts() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-project-cache-{}", std::process::id()));
+        fs::create_dir_all(root.join("project/.cache/checkout/.git")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let cache = root.join("project/.cache");
+        fs::write(cache.join("expired"), b"old cache").unwrap();
+        fs::write(cache.join("fresh"), b"fresh cache").unwrap();
+        fs::write(cache.join("checkout/.git/HEAD"), b"ref: refs/heads/main").unwrap();
+        fs::write(cache.join("checkout/source"), b"preserved checkout").unwrap();
+        let db = rusqlite::Connection::open(cache.join("History")).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE value(n); INSERT INTO value VALUES (42);",
+        )
+        .unwrap();
+        let at = now() + 90000;
+        fs::File::options()
+            .write(true)
+            .open(cache.join("fresh"))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(at))
+            .unwrap();
+        let mut p = Progress {
+            project_roots: VecDeque::from([root.clone()]),
+            ..Default::default()
+        };
+        discover_projects(&mut p);
+        assert!(
+            p.roots.contains(&cache),
+            "Project-local caches must be scheduled for expiration"
+        );
+        advance(
+            &mut p,
+            at,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+        );
+        assert!(!cache.join("expired").exists());
+        assert!(cache.join("fresh").exists());
+        assert!(cache.join("checkout/source").exists());
+        assert!(cache.join("History-wal").exists());
+        assert_eq!(
+            db.query_row("SELECT n FROM value", [], |r| r.get::<_, i32>(0))
+                .unwrap(),
+            42
+        );
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saved_discovery_inside_project_cache_promotes_the_whole_cache() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-cache-cursor-{}", std::process::id()));
+        fs::create_dir_all(root.join(".cache/nested")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let cache = root.join(".cache");
+        // A prior binary has already walked past this entry; migration must restart cleanup at the cache root.
+        fs::write(cache.join("expired-before-cursor"), b"old cache").unwrap();
+        let mut p = Progress {
+            projects: vec![
+                Frame::new(root.clone()),
+                Frame::new(cache.clone()),
+                Frame::new(cache.join("nested")),
+            ],
+            ..Default::default()
+        };
+        let _ = p.projects[0].next().unwrap();
+        let _ = p.projects[1].next().unwrap();
+        p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        discover_projects(&mut p);
+        assert_eq!(p.roots, VecDeque::from([cache.clone()]));
+        assert!(p.projects.is_empty());
+        advance(
+            &mut p,
+            now() + 90000,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+        );
+        assert!(!cache.join("expired-before-cursor").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn empty_git_marker_does_not_disable_temp_cleanup_but_real_checkouts_stay_protected() {
         let root = std::env::temp_dir().join(format!("harvester-marker-{}", std::process::id()));
