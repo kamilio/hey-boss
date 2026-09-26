@@ -146,6 +146,8 @@ class MonitorTests(unittest.TestCase):
             "/private/var/folders/dd/test_user/T/com.apple.pluginkit/TemporaryItems",
             "/private/var/folders/dd/test_user/T/com.apple.donotdisturbd/TemporaryItems",
             "/private/var/folders/dd/test_user/T/com.apple.securityuploadd/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.appstoreagent/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.imtransferservices.IMTransferAgent/TemporaryItems",
             "/Users/test/Library/Caches/com.apple.homed",
             "/Users/test/Library/Caches/com.apple.findmy.fmipcore",
             "/Users/test/Library/Caches/com.apple.ap.adprivacyd",
