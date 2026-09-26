@@ -1,7 +1,12 @@
 import importlib.util
 import json
 import pathlib
+import os
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -16,15 +21,55 @@ class MonitorTests(unittest.TestCase):
     def test_remote_probe_reuses_only_its_configured_control_socket(self):
         run = mock.Mock(return_value=mock.Mock(returncode=0, stdout='{}'))
         control = pathlib.Path('/tmp/fixture ssh.sock')
-        with mock.patch.object(monitor.subprocess, 'run', run):
+        with mock.patch.object(monitor, 'run_probe', run):
             self.assertEqual(monitor.probe('devbox', control), {})
         args = run.call_args.args[0]
         self.assertEqual(args[args.index('-S') + 1], str(control))
         self.assertEqual(args[-2], 'devbox')
 
+    def test_pinned_probe_never_starts_a_replacement_authentication_proxy(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stdout='{}'))
+        with mock.patch.object(monitor, 'run_probe', run):
+            self.assertEqual(monitor.probe('devbox', pathlib.Path('/tmp/gone.sock')), {})
+        args = run.call_args.args[0]
+        self.assertIn('ProxyCommand=false', args)
+        self.assertIn('ProxyJump=none', args)
+        self.assertIn('ControlMaster=no', args)
+
+    def test_probe_timeout_reaps_a_proxy_that_outlives_its_ssh_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = pathlib.Path(directory) / 'proxy.json'
+            proxy = ('import os,json,time,signal; from pathlib import Path; '
+                     'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+                     f'Path({str(receipt)!r}).write_text(json.dumps([os.getpid(),os.getpgrp()])); '
+                     'time.sleep(30)')
+            launcher = f'import subprocess,sys; subprocess.Popen([sys.executable,"-c",{proxy!r}])'
+            try:
+                started = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    monitor.run_probe([sys.executable, '-c', launcher], timeout=0.5)
+                self.assertLess(time.monotonic()-started, 5)
+                pid, group = json.loads(receipt.read_text())
+                self.assertNotEqual(group, os.getpgrp())
+                for _ in range(50):
+                    status = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                                            capture_output=True, text=True).stdout.strip()
+                    if not status or status.startswith('Z'):
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail('Timed-out authentication proxy is still running')
+            finally:
+                if receipt.exists():
+                    _, group = json.loads(receipt.read_text())
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def test_local_probe_does_not_use_ssh_control(self):
         run = mock.Mock(return_value=mock.Mock(returncode=0, stdout='{}'))
-        with mock.patch.object(monitor.subprocess, 'run', run):
+        with mock.patch.object(monitor, 'run_probe', run):
             self.assertEqual(monitor.probe('local', pathlib.Path('/tmp/unused.sock')), {})
         self.assertEqual(run.call_args.args[0][:2], ['python3', '-c'])
 
