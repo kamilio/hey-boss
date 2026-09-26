@@ -836,7 +836,30 @@ fn stream_output(
             if Instant::now() >= deadline {
                 return Err(io::Error::other("Inspection command timed out"));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            // Wait only when neither pipe is ready. Sleeping after every bounded
+            // read adds avoidable delays to large lsof/Git inventories.
+            let mut ready = [
+                libc::pollfd {
+                    fd: if out_eof { -1 } else { stdout.as_raw_fd() },
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: if err_eof { -1 } else { stderr.as_raw_fd() },
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .clamp(1, 100) as i32;
+            if unsafe { libc::poll(ready.as_mut_ptr(), ready.len() as libc::nfds_t, wait) } < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
         }
     })();
     if !matches!(result, Ok(Some(_))) {
@@ -896,6 +919,27 @@ mod tests {
                 .unwrap();
         assert!(legacy.error.is_none());
     }
+    #[test]
+    fn ready_inspection_output_is_not_artificially_throttled() {
+        let mut bytes = 0;
+        let result = stream_output(
+            Command::new("sh").args([
+                "-c",
+                "dd if=/dev/zero bs=1048576 count=32 2>/dev/null; printf complete >&2",
+            ]),
+            Duration::from_secs(2),
+            |chunk| {
+                bytes += chunk.len();
+                Ok(true)
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(result.status.success());
+        assert_eq!(bytes, 32 * 1024 * 1024);
+        assert_eq!(result.stderr, b"complete");
+    }
+
     #[test]
     fn streamed_records_have_no_total_output_cap_and_reject_incomplete_results() {
         let mut count = 0;
