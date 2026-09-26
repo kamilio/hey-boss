@@ -34,15 +34,15 @@ pub fn now() -> u64 {
 }
 
 #[derive(Debug)]
-struct Preserved(&'static str);
+struct Preserved(String);
 impl std::fmt::Display for Preserved {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 impl std::error::Error for Preserved {}
-fn preserved(reason: &'static str) -> io::Error {
-    io::Error::other(Preserved(reason))
+fn preserved(reason: impl Into<String>) -> io::Error {
+    io::Error::other(Preserved(reason.into()))
 }
 fn is_preserved(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|inner| inner.is::<Preserved>())
