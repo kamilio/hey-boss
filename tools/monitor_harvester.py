@@ -53,7 +53,9 @@ print(json.dumps({"snapshot":snapshot,"scheduler":scheduler,
 def expected_workload_denial(error):
     return re.fullmatch(
         r"Protected workload · PID \d+: Cannot verify workload ownership; preserved: "
-        r"/private/var/db/analyticsd/events\.allowlist: Permission denied \(os error 13\)",
+        r"(?:/private/var/db/analyticsd/events\.allowlist: Permission denied \(os error 13\)"
+        r"|/private/var/folders/[^/]+/[^/]+/0/com\.apple\.LaunchServices\.dv/"
+        r"com\.apple\.LaunchServices-\d+-v2\.csstore: Operation not permitted \(os error 1\))",
         error,
     ) is not None
 
