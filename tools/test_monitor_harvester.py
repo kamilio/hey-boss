@@ -135,6 +135,22 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(row["warnings"], ["protected_os_cache"])
         self.assertEqual(row["last_completed_errors"], [error])
 
+    def test_newly_observed_apple_privacy_paths_remain_visible(self):
+        paths = [
+            "/private/var/folders/dd/test_user/T/com.apple.transparencyd/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.triald/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.ap.promotedcontentd/TemporaryItems",
+            "/Users/test/Library/Caches/com.apple.homed",
+            "/Users/test/Library/Caches/com.apple.findmy.fmipcore",
+            "/Users/test/Library/Caches/com.apple.ap.adprivacyd",
+        ]
+        error = "24-hour cache expiration: " + "; ".join(
+            path + ": Operation not permitted (os error 1)" for path in paths)
+        row = monitor.compact("mac", self.completed_sample([error]), 2000)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+        self.assertEqual(row["last_completed_errors"], [error])
+
     def completed_sample(self, errors, count=None):
         sample = self.sample()
         sample["binary_sha256"] = "fixture"
