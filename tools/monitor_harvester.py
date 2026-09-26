@@ -41,11 +41,25 @@ status=run([str(binary),"status","--json"])
 if status["returncode"]:
     raise RuntimeError(status["stderr"])
 snapshot=json.loads(status["stdout"])
+filesystems=[]
+devices=set()
+for path in [(snapshot.get("metrics") or {}).get("disk_path") or str(pathlib.Path.home()), "/tmp"]:
+    try:
+        device=os.stat(path).st_dev
+        if device in devices:
+            continue
+        capacity=os.statvfs(path)
+        filesystems.append({"path":path,"device":device,
+            "disk_available_bytes":capacity.f_bavail*capacity.f_frsize,
+            "disk_total_bytes":capacity.f_blocks*capacity.f_frsize})
+        devices.add(device)
+    except OSError as error:
+        filesystems.append({"path":path,"error":str(error)})
 if sys.platform=="darwin":
     scheduler=run(["/bin/launchctl","print",f"gui/{os.getuid()}/local.hey-boss.health"])
 else:
     scheduler=run(["systemctl","--user","is-active","hey-boss-health.timer"])
-print(json.dumps({"snapshot":snapshot,"scheduler":scheduler,
+print(json.dumps({"snapshot":snapshot,"scheduler":scheduler,"filesystems":filesystems,
     "binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),"machine_time":int(time.time())}))
 '''
 
@@ -136,7 +150,12 @@ def problems(sample, now):
             (progress.get("roots_pending") or progress.get("discovery_pending"))):
         result.append("cache_pass_overdue")
     m = s.get("metrics", {})
-    if m.get("disk_available_bytes") is not None and m["disk_available_bytes"] < 25_000_000_000:
+    filesystems = sample.get("filesystems") or []
+    if any(volume.get("error") for volume in filesystems):
+        result.append("filesystem_unavailable")
+    if any(volume.get("disk_available_bytes") is not None and
+           volume["disk_available_bytes"] < 25_000_000_000
+           for volume in [m, *filesystems]):
         result.append("disk_low")
     if m.get("memory_pressure", "").lower() == "critical":
         result.append("memory_critical")
@@ -228,7 +247,19 @@ def compact(host, sample, now, completed_after=0):
                 "errors", "running", "phase"):
         result[key] = s.get(key)
     result["binary_sha256"] = sample["binary_sha256"]
+    result["filesystems"] = sample.get("filesystems", [])
     return result
+
+
+def disk_space_text(row):
+    volumes = row.get("filesystems") or []
+    if not volumes:
+        return f"{row.get('metrics', {}).get('disk_available_bytes', 'unknown')} bytes"
+    return "; ".join(
+        f"{volume['path']}: " +
+        (f"unavailable ({volume['error']})" if volume.get('error') else
+         f"{volume['disk_available_bytes']} bytes")
+        for volume in volumes)
 
 
 def main():
@@ -280,7 +311,7 @@ def main():
                 # Require two samples for transient inspection failures; low disk pages immediately.
                 actionable = "disk_low" in issues or (same and now - since >= 240)
                 if options.notify and alert_issues and actionable and now - last_alert >= 21600:
-                    text = f"{host}: {', '.join(alert_issues)}. Disk free: {row.get('metrics', {}).get('disk_available_bytes', 'unknown')} bytes. Evidence: {options.directory}"
+                    text = f"{host}: {', '.join(alert_issues)}. Disk free: {disk_space_text(row)}. Evidence: {options.directory}"
                     try:
                         sent = subprocess.run([str(options.notify), "notif", "alert", "--title",
                                                "Harvester needs attention", text], capture_output=True,

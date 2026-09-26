@@ -18,6 +18,73 @@ spec.loader.exec_module(monitor)
 
 
 class MonitorTests(unittest.TestCase):
+    def test_low_temp_filesystem_pages_even_when_home_has_space(self):
+        sample = self.sample()
+        sample.update(machine_time=2000, binary_sha256='fixture', filesystems=[
+            {'path': '/home/fixture', 'disk_available_bytes': 100_000_000_000},
+            {'path': '/tmp', 'disk_available_bytes': 10_000_000_000},
+        ])
+        self.assertIn('disk_low', monitor.problems(sample, 2000))
+        with tempfile.TemporaryDirectory() as directory:
+            notify = mock.Mock(return_value=mock.Mock(returncode=0))
+            args = ['monitor', '--directory', directory, '--host', 'devbox',
+                    '--notify', '/fixture/hey-boss']
+            with mock.patch('sys.argv', args), mock.patch('builtins.print'), \
+                    mock.patch.object(monitor, 'probe', return_value=sample), \
+                    mock.patch.object(monitor.time, 'time', return_value=30000), \
+                    mock.patch.object(monitor.subprocess, 'run', notify):
+                monitor.main()
+            notify.assert_called_once()
+            self.assertIn('/tmp: 10000000000 bytes', notify.call_args.args[0][-1])
+            row = json.loads((pathlib.Path(directory) / 'latest-summary.json').read_text())[0]
+            self.assertEqual(row['filesystems'], sample['filesystems'])
+        sample['filesystems'][1]['disk_available_bytes'] = 25_000_000_000
+        self.assertNotIn('disk_low', monitor.problems(sample, 2000))
+
+    def test_unavailable_temp_capacity_stays_visible(self):
+        sample = self.sample()
+        sample.update(binary_sha256='fixture', filesystems=[
+            {'path': '/tmp', 'error': 'fixture permission denied'},
+        ])
+        row = monitor.compact('devbox', sample, 2000)
+        self.assertIn('filesystem_unavailable', row['problems'])
+        self.assertEqual(row['filesystems'], sample['filesystems'])
+
+    def test_remote_probe_checks_separate_temp_volume_and_deduplicates_shared_volume(self):
+        for case in ['separate', 'shared', 'unavailable']:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                binary = root / '.local/bin/hey-harvester'
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b'fixture executable')
+                snapshot = self.sample()['snapshot']
+                def stat(path):
+                    return mock.Mock(st_dev=1 if str(path) == str(root) or case == 'shared' else 2)
+                def statvfs(path):
+                    if str(path) == '/tmp' and case == 'unavailable':
+                        raise PermissionError('fixture permission denied')
+                    return mock.Mock(f_frsize=1, f_blocks=200_000_000_000,
+                                     f_bavail=100_000_000_000 if str(path) == str(root) else 10_000_000_000)
+                replies = [mock.Mock(returncode=0, stdout=json.dumps(snapshot), stderr=''),
+                           mock.Mock(returncode=0, stdout='active', stderr='')]
+                with mock.patch.object(pathlib.Path, 'home', return_value=root), \
+                        mock.patch.object(os, 'stat', side_effect=stat), \
+                        mock.patch.object(os, 'statvfs', side_effect=statvfs), \
+                        mock.patch.object(subprocess, 'run', side_effect=replies), \
+                        mock.patch('builtins.print') as output:
+                    exec(monitor.PROBE, {})
+                result = json.loads(output.call_args.args[0])
+                volumes = result['filesystems']
+                self.assertEqual(volumes[0]['path'], str(root))
+                self.assertEqual(volumes[0]['disk_available_bytes'], 100_000_000_000)
+                self.assertEqual(len(volumes), 1 if case == 'shared' else 2)
+                if case == 'separate':
+                    self.assertEqual(volumes[1]['path'], '/tmp')
+                    self.assertEqual(volumes[1]['disk_available_bytes'], 10_000_000_000)
+                elif case == 'unavailable':
+                    self.assertEqual(volumes[1]['path'], '/tmp')
+                    self.assertIn('fixture permission denied', volumes[1]['error'])
+
     def test_launchservices_workload_denial_is_narrow_and_stays_visible(self):
         path = ('/private/var/folders/ab/fixture/0/com.apple.LaunchServices.dv/'
                 'com.apple.LaunchServices-20971544-v2.csstore')
