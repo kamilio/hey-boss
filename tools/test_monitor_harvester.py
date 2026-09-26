@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -191,6 +193,76 @@ class MonitorTests(unittest.TestCase):
             {"at": 1990, "category": "scan", "message": "Cleanup check started"},
         ]
         self.assertEqual(monitor.problems(sample, 2000), [])
+
+    def test_failure_between_samples_is_saved_after_later_success(self):
+        error = "Worktree cleaner: Inspection command timed out"
+        sample = self.completed_sample([error])
+        sample["snapshot"]["activity"].append({
+            "at": 1950, "category": "scan", "message":
+            "Finished: 1 worktrees checked; 0 processes stopped; 0 worktrees removed; 0 caches removed; 0 errors."})
+        row = monitor.compact("host", sample, 2000)
+        self.assertEqual(row["last_completed_errors"], [])
+        self.assertIn("cleanup_errors", row["problems"])
+        self.assertEqual(row["new_completed_errors"], [error])
+        self.assertEqual(row["completed_cycles"][0]["errors"], [error])
+        self.assertEqual(row["completed_through"], 1950)
+        following = monitor.compact("host", sample, 2300,
+                                    completed_after=row["completed_through"])
+        self.assertEqual(following["problems"], [])
+        self.assertEqual(following["new_completed_errors"], [])
+        self.assertEqual(following["completed_cycles"][0]["errors"], [error])
+
+    def test_intervening_protected_denial_is_recorded_as_warning(self):
+        error = "24-hour cache expiration: /Users/test/Library/Caches/FamilyCircle: Operation not permitted (os error 1)"
+        sample = self.completed_sample([error])
+        sample["snapshot"]["activity"].append({
+            "at": 1950, "category": "scan", "message":
+            "Finished: 1 worktrees checked; 0 processes stopped; 0 worktrees removed; 0 caches removed; 0 errors."})
+        row = monitor.compact("host", sample, 2000, completed_after=1800)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+        self.assertEqual(row["new_completed_errors"], [error])
+
+    def test_missing_intervening_details_cannot_masquerade_as_success(self):
+        sample = self.completed_sample([], count=1)
+        sample["snapshot"]["activity"].append({
+            "at": 1950, "category": "scan", "message":
+            "Finished: 1 worktrees checked; 0 processes stopped; 0 worktrees removed; 0 caches removed; 0 errors."})
+        row = monitor.compact("host", sample, 2000, completed_after=1800)
+        self.assertIn("cleanup_errors", row["problems"])
+        self.assertTrue(row["completed_cycles"][0]["errors"])
+
+    def test_first_sample_retains_failures_older_than_ten_cycles(self):
+        sample = self.completed_sample(["Worktree cleaner: failure"])
+        sample["snapshot"]["activity"] += [
+            {"at": at, "category": "scan", "message":
+             "Finished: 1 worktrees checked; 0 processes stopped; 0 worktrees removed; 0 caches removed; 0 errors."}
+            for at in range(1900, 1912)]
+        row = monitor.compact("host", sample, 2000, completed_after=0)
+        self.assertEqual(len(row["completed_cycles"]), 13)
+        self.assertIn("cleanup_errors", row["problems"])
+
+    def test_schedule_persists_failure_cursor_across_unreachable_sample(self):
+        sample = self.completed_sample(["Worktree cleaner: failure"])
+        sample["snapshot"]["activity"].append({
+            "at": 1950, "category": "scan", "message":
+            "Finished: 1 worktrees checked; 0 processes stopped; 0 worktrees removed; 0 caches removed; 0 errors."})
+        with tempfile.TemporaryDirectory() as directory:
+            args = ["monitor", "--directory", directory]
+            with mock.patch("sys.argv", args), mock.patch("builtins.print"), \
+                    mock.patch.object(monitor, "probe", side_effect=[sample, {"error": "offline"}, sample]), \
+                    mock.patch.object(monitor.time, "time", side_effect=[2000, 2300, 2600]):
+                monitor.main()
+                monitor.main()
+                state = json.loads((pathlib.Path(directory) / "monitor-state.json").read_text())
+                self.assertEqual(state["local"]["completed_through"], 1950)
+                monitor.main()
+            history = [json.loads(line) for line in
+                       (pathlib.Path(directory) / "history-19700101.jsonl").read_text().splitlines()]
+            self.assertEqual([row["problems"] for row in history],
+                             [["cleanup_errors"], ["unreachable"], []])
+            self.assertEqual(history[-1]["completed_cycles"][0]["errors"],
+                             ["Worktree cleaner: failure"])
 
 
 if __name__ == "__main__":
