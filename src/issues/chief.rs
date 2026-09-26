@@ -4,6 +4,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Read},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -376,6 +377,29 @@ fn execute(path: PathBuf, job: Job, stop: Arc<AtomicBool>) -> Result<String> {
     run(&path, &mut store, &job, &stop)
 }
 
+fn exited_with_open_stream(pid: u32, output: &OwnedFd) -> std::io::Result<bool> {
+    if !crate::agent_process::exited(pid)? {
+        return Ok(false);
+    }
+    // Exit can race the reader delivering buffered events. A closed pipe must
+    // drain through that reader; only a descendant retaining a writer is an
+    // abandoned stream. Keep our own descriptor so the reader cannot close and
+    // recycle the fd while we inspect it. No extra timeout or readiness delay.
+    let mut poll = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(poll.revents & libc::POLLHUP == 0)
+}
+
 fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<String> {
     let mut session = job.session.clone();
     // A deleted conversation may be replaced once; ordinary failures keep its ID.
@@ -421,6 +445,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
             let start = start.as_ref().map_err(Clone::clone)?;
             store.db.execute("UPDATE project_chiefs SET pid=?3,process_start=?4 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,pid,start])?;
             let stdout = child.stdout.take().unwrap();
+            let output = stdout.as_fd().try_clone_to_owned()?;
             let (send, receive) = mpsc::sync_channel(128);
             let reader = thread::spawn(move || {
                 let mut reader = BufReader::new(stdout);
@@ -513,7 +538,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if crate::agent_process::exited(pid)? {
+                        if exited_with_open_stream(pid, &output)? {
                             return Err(Error::new(
                                 "worker_error",
                                 "Chief exited before closing its event stream",
@@ -574,6 +599,71 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exited_chief_drains_buffered_events_before_reporting_failure() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf '%s\\n' '{\"type\":\"turn.completed\"}'"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child
+            .stdout
+            .as_ref()
+            .unwrap()
+            .as_fd()
+            .try_clone_to_owned()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::agent_process::exited(child.id()).unwrap() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("Fixture did not exit");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The reader has not run yet. A completed process can still have its
+        // final events waiting in the pipe when the receiver's timer fires.
+        let premature_failure = exited_with_open_stream(child.id(), &output).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            !premature_failure,
+            "Buffered Chief events must be drained after exit"
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            "{\"type\":\"turn.completed\"}\n"
+        );
+    }
+
+    #[test]
+    fn exited_chief_with_descendant_holding_stream_is_still_a_failure() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & exit 7"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child
+            .stdout
+            .as_ref()
+            .unwrap()
+            .as_fd()
+            .try_clone_to_owned()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::agent_process::exited(child.id()).unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let failed = exited_with_open_stream(child.id(), &output).unwrap();
+        // The child remains unreaped, so this group cannot have been reused.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        child.wait().unwrap();
+        assert!(failed, "An inherited writer must not hide a crashed Chief");
+    }
 
     fn launch_fixture() -> (PathBuf, Store, Job) {
         let root =
