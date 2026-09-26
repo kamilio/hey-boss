@@ -932,6 +932,11 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_connection_for_test(&mut self, connection: Connection) {
+        self.db = connection;
+    }
+
     /// Staged installers run their own migration code through the existing
     /// owner's writer, before replacing any executable or restarting services.
     pub fn migrate(path: &Path) -> Result<()> {

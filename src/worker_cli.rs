@@ -62,7 +62,7 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Start an independent worker and show its live activity.
+    /// Start an independent worker; wait idle through temporary connection outages.
     Run,
     /// Print one status snapshot without starting workers or opening a dashboard.
     #[command(visible_alias = "list")]
@@ -85,6 +85,13 @@ enum Action {
     },
 }
 pub fn run(o: &Options) -> Result<()> {
+    match run_inner(o) {
+        Err(error) if error.code == "cancelled" => Ok(()),
+        result => result,
+    }
+}
+
+fn run_inner(o: &Options) -> Result<()> {
     // Already-running older workers re-exec with --id during an upgrade.
     // Keep that restore path while requiring an explicit run for new workers.
     if o.action.is_none() && o.id.is_none() {
@@ -156,9 +163,12 @@ pub fn run(o: &Options) -> Result<()> {
     let actor_id = format!("worker-control:{machine}:{}", std::process::id());
     let actor = issues::identity::resolve(Some(&actor_id), &machine, &cwd)?;
     let path = issues::database_path()?;
-    let mut store = if matches!(o.action, None | Some(Action::Run))
-        || matches!(o.action, Some(Action::Watch { .. }))
-    {
+    let startup = matches!(o.action, None | Some(Action::Run))
+        .then(issues::worker::Startup::new)
+        .transpose()?;
+    let mut store = if let Some(startup) = &startup {
+        startup.open(&path)?
+    } else if matches!(o.action, Some(Action::Watch { .. })) {
         issues::worker::retry_database_busy(|| Store::open(&path))?
     } else {
         Store::open(&path)?
@@ -260,14 +270,19 @@ pub fn run(o: &Options) -> Result<()> {
         }
         return Ok(());
     }
+    let startup = startup.expect("One-shot actions returned before worker startup");
     let mut c = if let Some(id) = &o.id {
         serde_json::from_value(
-            store.execute(&request(
-                Operation::Workers {
-                    worker_id: Some(id.clone()),
-                },
-                None,
-            ))?["config"]
+            startup.execute(
+                &mut store,
+                &path,
+                &request(
+                    Operation::Workers {
+                        worker_id: Some(id.clone()),
+                    },
+                    None,
+                ),
+            )?["config"]
                 .clone(),
         )?
     } else {
@@ -281,13 +296,17 @@ pub fn run(o: &Options) -> Result<()> {
             .project
             .iter()
             .map(|p| {
-                store
-                    .execute(&request(
-                        Operation::Projects {
-                            include_hidden: true,
-                        },
-                        Some(p.clone()),
-                    ))
+                startup
+                    .execute(
+                        &mut store,
+                        &path,
+                        &request(
+                            Operation::Projects {
+                                include_hidden: true,
+                            },
+                            Some(p.clone()),
+                        ),
+                    )
                     .map(|v| v["project"]["id"].as_str().unwrap().to_owned())
             })
             .collect::<Result<Vec<_>>>()?;
@@ -330,6 +349,7 @@ pub fn run(o: &Options) -> Result<()> {
         c.reservation_seconds = seconds;
     }
     c.enabled = true;
+    issues::worker::validate_settings(&c)?;
     if o.chief || o.no_chief {
         if c.projects.is_empty() {
             return Err(Error::invalid(
@@ -337,31 +357,29 @@ pub fn run(o: &Options) -> Result<()> {
             ));
         }
         for project in &c.projects {
-            store.execute(&request(
-                Operation::ConfigureProject {
-                    subtask_scheduling: None,
-                    chief_enabled: Some(o.chief),
-                    chief_prompt: None,
-                    prompt: None,
-                    boss_name: None,
-                    prs_enabled: None,
-                    worktree_enabled: None,
-                    prompt_overrides: None,
-                    drafts_enabled: None,
-                    plan_template: None,
-                    if_version: None,
-                },
-                Some(project.clone()),
-            ))?;
+            startup.execute(
+                &mut store,
+                &path,
+                &request(
+                    Operation::ConfigureProject {
+                        subtask_scheduling: None,
+                        chief_enabled: Some(o.chief),
+                        chief_prompt: None,
+                        prompt: None,
+                        boss_name: None,
+                        prs_enabled: None,
+                        worktree_enabled: None,
+                        prompt_overrides: None,
+                        drafts_enabled: None,
+                        plan_template: None,
+                        if_version: None,
+                    },
+                    Some(project.clone()),
+                ),
+            )?;
         }
     }
-    issues::worker::serve_instance_with_history(
-        c,
-        o.id.as_deref(),
-        base,
-        o.json,
-        o.history as usize,
-    )
+    startup.serve_instance(c, o.id.as_deref(), base, o.json, o.history as usize)
 }
 
 fn dashboard_enabled(o: &Options) -> bool {
