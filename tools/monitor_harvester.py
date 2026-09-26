@@ -262,10 +262,12 @@ def main():
                 same = issues == previous.get("problems")
                 since = previous.get("since", now) if same else now
                 last_alert = previous.get("last_alert", 0) if same else 0
-                # Require two samples for transient SSH/permission failures; low disk pages immediately.
+                # Disconnected fleet machines are routine; retain evidence without paging.
+                alert_issues = [issue for issue in issues if issue != "unreachable"]
+                # Require two samples for transient inspection failures; low disk pages immediately.
                 actionable = "disk_low" in issues or (same and now - since >= 240)
-                if options.notify and issues and actionable and now - last_alert >= 21600:
-                    text = f"{host}: {', '.join(issues)}. Disk free: {row.get('metrics', {}).get('disk_available_bytes', 'unknown')} bytes. Evidence: {options.directory}"
+                if options.notify and alert_issues and actionable and now - last_alert >= 21600:
+                    text = f"{host}: {', '.join(alert_issues)}. Disk free: {row.get('metrics', {}).get('disk_available_bytes', 'unknown')} bytes. Evidence: {options.directory}"
                     try:
                         sent = subprocess.run([str(options.notify), "notif", "alert", "--title",
                                                "Harvester needs attention", text], capture_output=True,
