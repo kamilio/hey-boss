@@ -61,7 +61,8 @@ def expected_access_denial(error):
                 "com.apple.CloudDocs.iCloudDriveFileProvider", "com.apple.appleaccountd",
                 "com.apple.syncdefaultsd", "com.apple.amsengagementd",
                 "com.apple.icloud.searchpartyuseragent", "com.apple.transparencyd",
-                "com.apple.triald", "com.apple.ap.promotedcontentd"}
+                "com.apple.triald", "com.apple.ap.promotedcontentd", "homed",
+                "com.apple.pluginkit", "com.apple.donotdisturbd"}
     for part in error.removeprefix("24-hour cache expiration: ").split("; "):
         suffix = ": Operation not permitted (os error 1)"
         if not part.endswith(suffix):
