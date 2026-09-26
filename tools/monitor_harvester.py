@@ -79,7 +79,7 @@ def expected_access_denial(error):
         apple_cache = cache and (apple_bundle(cache[1]) or cache[1] in {"FamilyCircle", "CloudKit"})
         apple_temporary = temporary and (
             apple_bundle(temporary[1]) or
-            temporary[1] in {"homed", "duetexpertd"})
+            temporary[1] in {"homed", "duetexpertd", "icdd"})
         if not (os_temporary or apple_cache or apple_temporary):
             return False
     return True
