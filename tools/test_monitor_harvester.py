@@ -42,6 +42,14 @@ class MonitorTests(unittest.TestCase):
         sample["snapshot"]["config"]["automatic"] = False
         self.assertEqual(monitor.problems(sample, 2000), ["cleanup_disabled", "disk_low", "memory_critical"])
 
+    def test_running_cycles_do_not_hide_a_cache_pass_over_a_day(self):
+        sample = self.sample()
+        sample["snapshot"]["last_cleanup_at"] = 100000
+        sample["snapshot"]["cache_progress"] = {"pass_started_at": 1, "discovery_pending": True}
+        self.assertIn("cache_pass_overdue", monitor.problems(sample, 100000))
+        sample["snapshot"]["cache_progress"]["discovery_pending"] = False
+        self.assertNotIn("cache_pass_overdue", monitor.problems(sample, 100000))
+
 
 if __name__ == "__main__":
     unittest.main()

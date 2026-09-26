@@ -51,6 +51,11 @@ def problems(sample, now):
         result.append("cleanup_stale")
     if "cache_progress" not in s:
         result.append("cache_telemetry_missing")
+    progress = s.get("cache_progress") or {}
+    if (progress.get("pass_started_at") and
+            now - progress["pass_started_at"] > 86400 and
+            (progress.get("roots_pending") or progress.get("discovery_pending"))):
+        result.append("cache_pass_overdue")
     m = s.get("metrics", {})
     if m.get("disk_available_bytes") is not None and m["disk_available_bytes"] < 25_000_000_000:
         result.append("disk_low")
