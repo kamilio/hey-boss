@@ -75,30 +75,31 @@ def expected_access_denial(error):
     return True
 
 
+def completed_cycles(snapshot):
+    """Capture each retained result before later cycles evict its error details."""
+    cycles, errors = [], []
+    for event in snapshot.get("activity", []):
+        category, message = event.get("category"), event.get("message", "")
+        if category == "error":
+            errors.append(message)
+        if category != "scan":
+            continue
+        if message == "Cleanup check started" or message.startswith("Inspection started;"):
+            errors = []
+        elif message.startswith("Finished:"):
+            count = re.search(r"; (\d+) errors\.$", message)
+            details = list(dict.fromkeys(errors)) if not count or int(count[1]) else []
+            if not count or len(details) < int(count[1]):
+                details.append("Completed cleanup has unavailable error details")
+            cycles.append({**event, "errors": details})
+            errors = []
+    return cycles
+
+
 def last_completed_errors(snapshot):
     """Retain the last result while a new cycle has cleared snapshot.errors."""
-    activity = snapshot.get("activity", [])
-    for index in range(len(activity) - 1, -1, -1):
-        event = activity[index]
-        if event.get("category") != "scan" or not event.get("message", "").startswith("Finished:"):
-            continue
-        count = re.search(r"; (\d+) errors\.$", event["message"])
-        if count and int(count[1]) == 0:
-            return []
-        errors = []
-        for prior in reversed(activity[:index]):
-            message = prior.get("message", "")
-            if prior.get("category") == "scan" and (
-                    message.startswith("Finished:") or message == "Cleanup check started" or
-                    message.startswith("Inspection started;")):
-                break
-            if prior.get("category") == "error":
-                errors.append(message)
-        errors = list(dict.fromkeys(reversed(errors)))
-        if not count or len(errors) < int(count[1]):
-            errors.append("Last completed cleanup has unavailable error details")
-        return errors
-    return []
+    cycles = completed_cycles(snapshot)
+    return cycles[-1]["errors"] if cycles else []
 
 
 def problems(sample, now):
@@ -154,7 +155,7 @@ def save(path, data):
     temporary.replace(path)
 
 
-def compact(host, sample, now):
+def compact(host, sample, now, completed_after=0):
     result = {"host": host, "collected_at": now,
               "problems": problems(sample, sample.get("machine_time", now))}
     if "error" in sample:
@@ -165,16 +166,24 @@ def compact(host, sample, now):
         key: (s.get("config") or {}).get(key) for key in ("automatic", *CLEANERS)
     }
     result["last_completed_errors"] = last_completed_errors(s)
+    cycles = completed_cycles(s)
+    result["completed_cycles"] = cycles
+    result["completed_through"] = max([completed_after] + [c["at"] for c in cycles])
+    result["new_completed_errors"] = list(dict.fromkeys(
+        error for cycle in cycles if cycle["at"] > completed_after
+        for error in cycle["errors"]))
+    if (any(not expected_access_denial(e) for e in result["new_completed_errors"])
+            and "cleanup_errors" not in result["problems"]):
+        result["problems"].append("cleanup_errors")
     result["warnings"] = (["protected_os_cache"]
                           if any(expected_access_denial(e) for e in
-                                 s.get("errors", []) + result["last_completed_errors"]) else [])
+                                 s.get("errors", []) + result["last_completed_errors"] +
+                                 result["new_completed_errors"]) else [])
     for key in ("observed_at", "last_cleanup_at", "metrics", "cache_progress",
                 "harvested_processes", "removed_worktrees", "removed_caches",
                 "errors", "running", "phase"):
         result[key] = s.get(key)
     result["binary_sha256"] = sample["binary_sha256"]
-    result["completed_cycles"] = [a for a in s.get("activity", [])
-                                   if a["category"] == "scan" and a["message"].startswith("Finished:")][-10:]
     return result
 
 
@@ -215,9 +224,9 @@ def main():
                 sample["collected_at"] = now
                 # An unreachable machine replaces its latest record, so stale success cannot masquerade as current.
                 save(options.directory / f"{host}-latest.json", sample)
-                row = compact(host, sample, now)
-                rows.append(row)
                 previous = state.get(host, {})
+                row = compact(host, sample, now, previous.get("completed_through", 0))
+                rows.append(row)
                 issues = row["problems"]
                 same = issues == previous.get("problems")
                 since = previous.get("since", now) if same else now
@@ -236,7 +245,9 @@ def main():
                             row["notification_error"] = sent.stderr[-1000:]
                     except (OSError, subprocess.TimeoutExpired) as e:
                         row["notification_error"] = str(e)
-                state[host] = {"problems": issues, "since": since, "last_alert": last_alert}
+                state[host] = {"problems": issues, "since": since, "last_alert": last_alert,
+                               "completed_through": row.get("completed_through",
+                                                             previous.get("completed_through", 0))}
         day = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y%m%d")
         with (options.directory / f"history-{day}.jsonl").open("a") as history:
             for row in rows:
