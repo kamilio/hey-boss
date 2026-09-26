@@ -36,7 +36,11 @@ const cli=(path,args,expected=0)=>new Promise((resolve,reject)=>{
   child.stdout.on('data',chunk=>output+=chunk);
   child.once('error',reject);
   const timer=setTimeout(()=>{reject(Error('CLI timed out: '+args.join(' ')));child.kill('SIGTERM');},30000);
-  child.once('exit',(code,signal)=>{clearTimeout(timer);code===expected&&!signal?resolve(JSON.parse(output)):reject(Error(`CLI incomplete (${path}: ${args.join(' ')}): code=${code}, signal=${signal}: ${output}`));});
+  child.once('exit',(code,signal)=>{
+    clearTimeout(timer);
+    try { code===expected&&!signal?resolve(JSON.parse(output)):reject(Error(`CLI incomplete (${path}: ${args.join(' ')}): code=${code}, signal=${signal}: ${output}`)); }
+    catch(error) { reject(error); }
+  });
 });
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function startSupervisor(){
@@ -192,6 +196,47 @@ try {
   check('Both issue stores pass integrity checks');
   assert.equal(checks.length,18,'Incomplete qualification graph');
   console.log(JSON.stringify({status:'passed',completed:checks.length,expected:18,checks}));
+  if(process.argv.includes('--reopen')) {
+    assert.equal(capabilities.capabilities.issue_reopen,true);
+    for(const title of ['Incomplete delivery — dependency retained','Unfinished prerequisite','Manual hold — dependency retained','Incomplete delivery — reopened'])
+      await issue(main,['create','--title',title]);
+    for(const number of ['5','8'])await issue(main,['close',number]);
+    await issue(main,['blocked-by','5','6']);
+    await issue(main,['close','6']);
+    await issue(main,['blocked-by','7','6']);
+    await issue(main,['block','7','--comment','Investigation required']);
+    await issue(main,['reopen','6']);
+    const reopen=async(number,key,extra=[],code=0)=>{
+      const current=await issue(peer,['view',number,'--supervisor']);
+      return issue(peer,['reopen',number,'--supervisor','--if-version',String(current.issue.version),'--request-id',key,...extra],code);
+    };
+    const opened=await reopen('8','reopen-delivery');
+    assert.equal(opened.issue.state,'open');assert.equal(opened.issue.assignee,null);
+    assert.deepEqual(await issue(peer,['reopen','8','--supervisor','--if-version','2','--request-id','reopen-delivery']),opened);
+    check('Guarded closed reopen and durable retry preserve actor and no assignment');
+    const dependent=await reopen('5','reopen-dependent');
+    assert.equal(dependent.issue.state,'blocked');assert.equal(dependent.issue.manual_blocked,false);
+    check('Closed delivery with unfinished dependency becomes Blocked');
+    assert.equal((await reopen('7','reopen-held',[],4)).error.code,'conflict');
+    assert.equal((await issue(main,['view','7'])).issue.manual_blocked,true);
+    const held=await reopen('7','reopen-clear',['--clear-manual-hold']);
+    assert.equal(held.issue.state,'blocked');assert.equal(held.issue.manual_blocked,false);
+    check('Manual hold requires explicit release while dependency blocking remains');
+    const activeBefore=await ownership();
+    assert.equal((await reopen('2','reopen-active',[],4)).error.code,'conflict');
+    assert.deepEqual(await ownership(),activeBefore);
+    check('Live assignment, worker attempt and reservation survive refused reopen');
+    assert.deepEqual(await sql(main,"SELECT DISTINCT actor FROM requests WHERE request_id LIKE 'reopen-%'"),[['codex:chief-fixture']]);
+    assert.deepEqual(await sql(peer,"SELECT count(*) FROM requests WHERE request_id LIKE 'reopen-%'"),[[0]]);
+    assert.deepEqual(await sql(main,'SELECT count(*) FROM fleet_allocations WHERE issue_number IN (5,7,8)'),[[0]]);
+    for(let attempt=0;;attempt++) {
+      const items=(await issue(peer,['list','--state','all','--all'])).issues;
+      if(items.some(i=>i.number===5&&i.state==='blocked')&&items.some(i=>i.number===8&&i.state==='open'))break;
+      assert(attempt<200,'Reopened issues did not converge');await wait(100);
+    }
+    check('Reopened states replicate without a claim or companion receipt');
+    console.log(JSON.stringify({status:'passed',completed:checks.length,expected:23,checks}));
+  }
   if(serve) {
     const web=start(peer,['issue','--project','Chief metadata QA','--agent','codex:chief-fixture','--json','web','--port','59651','--no-discovery']);web.stdout.resume();
     for(let attempt=0;;attempt++) {
@@ -202,6 +247,6 @@ try {
   } else await close();
 }catch(error){
   console.error(error);
-  try { console.error(JSON.stringify((await cli(main,['fleet','status'])).machines)); } catch {}
+  try { console.error(JSON.stringify((await cli(main,['fleet','status','--json'])).machines)); } catch {}
   process.exitCode=1;await close();
 }

@@ -23,13 +23,19 @@ reservation. It retains the original actor and all normal project and label
 authorization. It never claims work or takes over a reservation. Undrafting,
 assignment and other lifecycle operations are not added to the metadata route.
 
+Guarded `issue reopen NUMBER --supervisor --if-version VERSION --request-id ID`
+uses the same tunnel when `issue_reopen` is advertised. It requires unassigned,
+unreserved work with no unfinished attempt. Unresolved dependencies remain
+blocked; see [Chief reopen guards](chief-metadata-routing.md) for manual holds
+and retry behavior.
+
 Title, body and label edits use the explicit `--supervisor` route described in
 [Chief metadata routing](chief-metadata-routing.md). That route also supports
 drafting with an explicit request ID and version. Ordinary reads remain local
 replica snapshots, which can lag behind the authoritative store.
 
 `fleet capabilities` reports the negotiated `authority_rpc`, `issue_metadata`
-and `issue_draft` flags, route and supervisor build without fetching fleet
+and `issue_draft`/`issue_reopen` flags, route and supervisor build without fetching fleet
 history. It also works when the supervisor predates metadata or draft support.
 Missing support produces `fleet_capability_unsupported`, with the missing flag,
 known build and `sent: false`. Run `hey-boss upgrade` on the supervisor to update
