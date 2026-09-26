@@ -1226,7 +1226,7 @@ impl Store {
         Ok(project)
     }
 
-    /// Explicit online metadata path. Never falls back to replica mutation.
+    /// Explicit online issue path. Never falls back to replica mutation.
     pub fn execute_supervisor(&mut self, r: &Request) -> Result<Value> {
         validate(r)?;
         super::authority::validate(r)?;
@@ -1242,7 +1242,11 @@ impl Store {
             })?;
             return crate::fleet::authoritative_metadata(r, Path::new(path));
         }
-        self.execute(r)
+        if matches!(r.operation, Operation::Reopen { .. }) {
+            self.execute_once(r, Instant::now() + CONTENTION_BUDGET, true)
+        } else {
+            self.execute(r)
+        }
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
@@ -1310,11 +1314,11 @@ impl Store {
         }
         let deadline = Instant::now() + CONTENTION_BUDGET;
         if r.operation.writes() {
-            self.execute_once(r, deadline)
+            self.execute_once(r, deadline, false)
         } else {
             // Failed read transactions are rolled back before retrying with a
             // fresh WAL snapshot. Never replay mutation or attachment effects.
-            retry_contention(deadline, || self.execute_once(r, deadline))
+            retry_contention(deadline, || self.execute_once(r, deadline, false))
         }
     }
 
@@ -1378,7 +1382,12 @@ impl Store {
         Ok(())
     }
 
-    fn execute_once(&mut self, r: &Request, deadline: Instant) -> Result<Value> {
+    fn execute_once(
+        &mut self,
+        r: &Request,
+        deadline: Instant,
+        supervisor_reopen: bool,
+    ) -> Result<Value> {
         validate(r)?;
         if let Operation::ReadPlan { plan } = &r.operation {
             return super::planning::read_plan(&self.db, plan);
@@ -1472,6 +1481,9 @@ impl Store {
         // only after acquiring the mutation lock to preserve exactly-once writes.
         if let Some(response) = cached_response(&tx, &project, r, &payload)? {
             return self.finish_replay(r, response);
+        }
+        if supervisor_reopen {
+            super::authority::guard_reopen(&tx, &project.id, r.operation.number().unwrap())?;
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

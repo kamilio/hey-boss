@@ -1734,7 +1734,7 @@ mod tests {
         );
         for operation in [
             json!({"action":"claim","number":1,"force":true}),
-            json!({"action":"reopen","number":1,"if_version":3}),
+            json!({"action":"reopen","number":1}),
             json!({"action":"edit","number":2,"draft":false,"if_version":3}),
             json!({"action":"edit","number":2,"add_labels":["unguarded"]}),
             json!({"action":"batch","edits":[{"number":2,"if_version":3,"expected_assignee":"codex:worker","assignment":"unassign"}]}),

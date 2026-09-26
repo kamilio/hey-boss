@@ -184,7 +184,7 @@ impl Drop for Fleet {
 }
 
 #[test]
-fn connected_tunnel_discovers_and_drafts_without_reverse_ssh() {
+fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
     let mut f = Fleet::new();
     f.start();
     // Two fixture processes share a physical UUID; real fleet devices do not.
@@ -308,6 +308,150 @@ fn connected_tunnel_discovers_and_drafts_without_reverse_ssh() {
         ),
         json!([[0]])
     );
+    // Chief may expose unfinished work without acquiring or releasing ownership.
+    for title in [
+        "Incomplete delivery",
+        "Dependency",
+        "Dependent delivery",
+        "Held",
+        "Reserved delivery",
+        "Unknown owner",
+    ] {
+        f.issue("main", &["create", "--title", title], 0);
+    }
+    for number in ["6", "8", "10", "11"] {
+        f.issue("main", &["close", number], 0);
+    }
+    f.issue("main", &["blocked-by", "8", "7"], 0);
+    f.issue("main", &["close", "7"], 0);
+    f.issue("main", &["blocked-by", "9", "7"], 0);
+    f.issue(
+        "main",
+        &["block", "9", "--comment", "Manual investigation hold"],
+        0,
+    );
+    f.issue("main", &["reopen", "7"], 0);
+    f.sql(
+        "main",
+        "INSERT INTO fleet_allocations VALUES('named:Tunnel QA',10,'offline-device')",
+    );
+    f.sql("main", "INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,job,owner_pid,owner_start,machine) VALUES('uncertain','named:Tunnel QA',11,'codex:unknown','unknown',1,1,'{}',123,'test','offline')");
+    let reopen = |number: &str, key: &str, hold: bool, expected| {
+        let current = f.issue("peer", &["view", number, "--supervisor"], 0);
+        let version = current["issue"]["version"].to_string();
+        let mut args = vec![
+            "reopen",
+            number,
+            "--supervisor",
+            "--if-version",
+            &version,
+            "--request-id",
+            key,
+        ];
+        if hold {
+            args.push("--clear-manual-hold");
+        }
+        f.issue("peer", &args, expected)
+    };
+    let saved = reopen("6", "chief-reopen", false, 0);
+    assert_eq!(saved["issue"]["state"], "open");
+    assert_eq!(saved["issue"]["assignee"], Value::Null);
+    assert_eq!(saved["store"]["host"], "supervisor");
+    let args = [
+        "reopen",
+        "6",
+        "--supervisor",
+        "--if-version",
+        "2",
+        "--request-id",
+        "chief-reopen",
+    ];
+    assert_eq!(f.issue("peer", &args, 0), saved);
+    let mut stale = args;
+    stale[6] = "stale-reopen";
+    assert_eq!(f.issue("peer", &stale, 4)["error"]["code"], "conflict");
+    let mut changed = args;
+    changed[4] = "3";
+    assert_eq!(f.issue("peer", &changed, 4)["error"]["code"], "conflict");
+    let dependent = reopen("8", "chief-dependent", false, 0);
+    assert_eq!(dependent["issue"]["state"], "blocked");
+    assert_eq!(dependent["issue"]["assignee"], Value::Null);
+    let held = f.issue("main", &["view", "9"], 0);
+    assert_eq!(held["issue"]["manual_blocked"], true);
+    assert_eq!(
+        reopen("9", "chief-held", false, 4)["error"]["code"],
+        "conflict"
+    );
+    assert_eq!(f.issue("main", &["view", "9"], 0)["issue"], held["issue"]);
+    let cleared = reopen("9", "chief-clear-hold", true, 0);
+    assert_eq!(cleared["issue"]["state"], "blocked");
+    assert_eq!(cleared["issue"]["manual_blocked"], false);
+    for number in ["2", "3", "10", "11"] {
+        let before = f.issue("main", &["view", number], 0);
+        assert_eq!(
+            reopen(number, &format!("refused-{number}"), false, 4)["error"]["code"],
+            "conflict"
+        );
+        assert_eq!(
+            f.issue("main", &["view", number], 0)["issue"],
+            before["issue"]
+        );
+    }
+    for args in [
+        vec!["reopen", "6", "--if-version", "3"],
+        vec!["reopen", "6", "--request-id", "no-version"],
+        vec![
+            "reopen",
+            "6",
+            "--if-version",
+            "0",
+            "--request-id",
+            "zero-version",
+        ],
+    ] {
+        let mut args = args;
+        args.push("--supervisor");
+        assert_eq!(f.issue("peer", &args, 2)["error"]["code"], "invalid_input");
+    }
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT DISTINCT actor FROM requests WHERE request_id LIKE 'chief-%'"
+        ),
+        json!([["codex:tunnel-test"]])
+    );
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id LIKE 'chief-%'"
+        ),
+        json!([[0]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT count(*) FROM fleet_allocations WHERE issue_number IN (6,8,9)"
+        ),
+        json!([[0]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT node FROM fleet_allocations WHERE issue_number=10"
+        ),
+        json!([["offline-device"]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT finished_at FROM worker_runs WHERE id='uncertain'"
+        ),
+        json!([[null]])
+    );
+    assert_eq!(
+        f.cli("peer", &["fleet", "capabilities"], 0)["capabilities"]["issue_reopen"],
+        true
+    );
     let supervisor = f.services.last_mut().unwrap();
     unsafe {
         libc::kill(supervisor.id() as i32, libc::SIGTERM);
@@ -336,6 +480,22 @@ fn connected_tunnel_discovers_and_drafts_without_reverse_ssh() {
         1,
     );
     assert_eq!(offline["error"]["code"], "fleet_unavailable");
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "reopen",
+                "6",
+                "--supervisor",
+                "--if-version",
+                "3",
+                "--request-id",
+                "offline-reopen"
+            ],
+            1
+        )["error"]["code"],
+        "fleet_unavailable"
+    );
     assert_eq!(f.issue("main", &["view", "4"], 0)["issue"]["draft"], false);
     assert_eq!(
         f.sql(

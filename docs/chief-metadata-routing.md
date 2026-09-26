@@ -6,7 +6,7 @@ connection. No separately reachable SSH hostname or work reservation is needed.
 On the supervisor itself, the same command uses its authoritative store.
 
 `hey-boss fleet capabilities` reports the route, supervisor build and advertised
-`issue_metadata` and `issue_draft` support. `hey-boss fleet status` also exposes
+`issue_metadata`, `issue_draft` and `issue_reopen` support. `hey-boss fleet status` also exposes
 capabilities. Issue help and allocation recovery messages point to this existing
 connection; no socket inspection or SSH configuration is necessary.
 
@@ -28,6 +28,7 @@ and can lag until the next pull.
 | `edit` title, body, labels | Requires `--if-version` and `--request-id` |
 | `edit --draft` | Requires `issue_draft`, a current `--if-version`, and an eligible, unassigned, unreserved issue |
 | `batch` label changes | Requires version and expected owner for every entry, `assignment: keep`, and `--request-id` |
+| `reopen` | Requires `issue_reopen`, current `--if-version`, `--request-id`, and unassigned, unreserved work with no unfinished worker attempt |
 | Other lifecycle operations, claims, assignment, reservations, worker controls | Rejected before mutation |
 | Interactive editing, web server, RPC, migration and other commands | Rejected |
 
@@ -60,6 +61,25 @@ ordinary metadata/offline path and explicit SSH route retain their existing rule
 Unsupported lifecycle work must use those established paths with their normal
 ownership and allocation checks. Never claim an issue merely to edit its labels.
 
+To expose incomplete delivery, read the authoritative version, then use:
+
+```sh
+hey-boss issue reopen NUMBER --supervisor --if-version VERSION --request-id ID --project FULL_ID --json
+```
+
+Reopen retains the original actor and existing history. Closed issues with
+unfinished dependencies become Blocked; they cannot be picked up until those
+dependencies satisfy the project's readiness rule. Ordinary reopen of a blocked
+issue still refuses unfinished dependencies. `--clear-manual-hold` explicitly
+clears a blocked issue's manual hold while retaining dependency blocking.
+No claim, allocation or unfinished attempt may be present, including an expired
+reservation or an owner whose liveness is unknown. Checks and mutation share
+one transaction. This route never releases ownership or changes worker controls.
+Retries use the same ID and identical operation; a changed payload or stale
+version fails. Disconnection has no local fallback or deferred replay. Supervisors
+without `issue_reopen` reject the request before forwarding it; upgrade the fleet
+and recheck capabilities.
+
 This extends issue 145's relay and issue 151's metadata routing with issue 152's
 discovery and guarded drafting, preserving issue 150's offline acceptance
 protection and issue 56's general batch semantics.
@@ -74,3 +94,10 @@ normal exits and removes its services and temporary stores. Add `--serve` for th
 the fixture and require its cleanup completion message. The 75-assertion
 `tools/fleet_tunnel_browser_checks.js` session additionally covers guarded drafts,
 tunnel recovery, phone layouts, and the committed draft response before replica sync.
+
+Reopen qualification adds `--reopen` to the private-fleet command (23 stages).
+With `--serve`, run `tools/reopen_tunnel_browser_checks.js` through Playwright CLI:
+161 checks cover reopened, dependency-blocked and actively owned issues at
+1440, 768, 390 and 320 pixels in light/dark themes. The Rust `fleet_tunnel`
+integration test also checks uncertain ownership, reservations, stale versions,
+request-ID misuse and disconnected failure; authority tests cover older peers.

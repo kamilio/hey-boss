@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 #[command(
-    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions already have an authenticated supervisor tunnel: inspect `hey-boss fleet capabilities`.\nUse `issue view NUMBER --supervisor --json` for the current version, then guarded edits with\n--supervisor --if-version VERSION --request-id ID. Ordinary `issue edit NUMBER --draft\n--if-version VERSION` uses that tunnel automatically. No SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
+    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions already have an authenticated supervisor tunnel: inspect `hey-boss fleet capabilities`.\nUse `issue view NUMBER --supervisor --json` for the current version, then guarded edits or reopen with\n--supervisor --if-version VERSION --request-id ID. Ordinary `issue edit NUMBER --draft\n--if-version VERSION` uses that tunnel automatically. No SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
 )]
 pub struct Options {
     /// Full project ID or an unambiguous short name; defaults to this checkout.
@@ -18,7 +18,7 @@ pub struct Options {
     /// Authoritative SSH host (also HEY_BOSS_ISSUE_HOST); never falls back locally.
     #[arg(long, global = true)]
     host: Option<String>,
-    /// Use the connected supervisor for guarded metadata (no SSH or work claim).
+    /// Use the connected supervisor for guarded metadata or reopen (no SSH or work claim).
     #[arg(long, global = true, conflicts_with = "host")]
     supervisor: bool,
     /// Print structured results and operational errors.
@@ -951,6 +951,7 @@ pub fn run(options: &Options) -> Result<()> {
             options.action,
             Action::View { .. }
                 | Action::Allocation { .. }
+                | Action::Reopen { .. }
                 | Action::Batch { .. }
                 | Action::Edit {
                     interactive: false,
@@ -958,7 +959,7 @@ pub fn run(options: &Options) -> Result<()> {
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, guarded metadata edits and label-only batches; this command is not supported",
+                "--supervisor supports view, allocation, guarded metadata edits, guarded reopen and label-only batches; this command is not supported",
             ));
         }
     }

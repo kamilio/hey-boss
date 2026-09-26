@@ -132,12 +132,12 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
     json!({"ok":true,"route":route,"capabilities":capabilities,"supervisor_build":build,
-        "usage":"Use hey-boss issue view NUMBER --supervisor --json for a current version. Guarded title/body/label edits use --supervisor --if-version VERSION --request-id ID. Ordinary issue edit NUMBER --draft --if-version VERSION uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
+        "usage":"Use hey-boss issue view NUMBER --supervisor --json for a current version. Guarded title/body/label edits and reopen use --supervisor --if-version VERSION --request-id ID. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft --if-version VERSION uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
         "recovery":"If a capability is false, run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities again."})
 }
 
@@ -224,6 +224,7 @@ impl Relay {
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
+                            "issue_reopen": message["capabilities"]["issue_reopen"] == true,
                         });
                         return Ok(capability_report(
                             "supervisor_tunnel",
@@ -236,16 +237,26 @@ impl Relay {
                             serde_json::from_value(request["request"]["request"].clone())?;
                         crate::issues::authority::validate(&metadata)?;
                         let message = advertisement.lock().unwrap();
-                        for capability in ["authority_rpc", "issue_metadata"].into_iter().chain(
-                            matches!(
-                                metadata.operation,
-                                crate::issues::Operation::Edit {
-                                    draft: Some(true),
-                                    ..
-                                }
+                        for capability in ["authority_rpc", "issue_metadata"]
+                            .into_iter()
+                            .chain(
+                                matches!(
+                                    metadata.operation,
+                                    crate::issues::Operation::Edit {
+                                        draft: Some(true),
+                                        ..
+                                    }
+                                )
+                                .then_some("issue_draft"),
                             )
-                            .then_some("issue_draft"),
-                        ) {
+                            .chain(
+                                matches!(
+                                    metadata.operation,
+                                    crate::issues::Operation::Reopen { .. }
+                                )
+                                .then_some("issue_reopen"),
+                            )
+                        {
                             if message["capabilities"][capability] != true {
                                 return Err(unsupported(capability, &message["build"]).into());
                             }
@@ -445,6 +456,12 @@ mod tests {
         let details = error.details.unwrap();
         assert_eq!(details["required_capability"], "issue_draft");
         assert_eq!(details["supervisor_build"], "old-metadata-build");
+        assert_eq!(details["sent"], false);
+        let reopen = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"reopen-old","operation":{"action":"reopen","number":1,"if_version":1}}});
+        let error = call(&ctx.state, &ctx.path, reopen).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        let details = error.details.unwrap();
+        assert_eq!(details["required_capability"], "issue_reopen");
         assert_eq!(details["sent"], false);
         let error = call(
             &ctx.state,
