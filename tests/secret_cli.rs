@@ -31,6 +31,15 @@ impl Fixture {
         Self { root, binary }
     }
     fn reply(&self, values: Option<Vec<String>>) -> std::thread::JoinHandle<()> {
+        let reply = match values {
+            Some(values) => {
+                serde_json::json!({"status":"ok","result":serde_json::to_string(&values).unwrap()})
+            }
+            None => serde_json::json!({"status":"cancelled"}),
+        };
+        self.raw_reply(serde_json::to_vec(&reply).unwrap())
+    }
+    fn raw_reply(&self, reply: Vec<u8>) -> std::thread::JoinHandle<()> {
         let listener = UnixListener::bind(self.root.join("daemon.sock")).unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -39,15 +48,7 @@ impl Fixture {
             let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
             assert_eq!(request["command"], "secret");
             assert_eq!(request["sync"], true);
-            let reply = match values {
-                Some(values) => {
-                    serde_json::json!({"status":"ok","result":serde_json::to_string(&values).unwrap()})
-                }
-                None => serde_json::json!({"status":"cancelled"}),
-            };
-            stream
-                .write_all(&serde_json::to_vec(&reply).unwrap())
-                .unwrap();
+            stream.write_all(&reply).unwrap();
         })
     }
     fn command(&self) -> Command {
@@ -63,7 +64,7 @@ impl Drop for Fixture {
     }
 }
 #[test]
-fn file_sink_and_long_pair_have_no_agent_output() {
+fn file_sink_and_long_pair_report_delivery_without_secret_output() {
     let fixture = Fixture::new();
     let long = "synthetic_api_".repeat(2000);
     let server = fixture.reply(Some(vec!["synthetic-login".into(), long.clone()]));
@@ -81,7 +82,11 @@ fn file_sink_and_long_pair_have_no_agent_output() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Secret delivery=delivered: credentials saved.\n"
+    );
     server.join().unwrap();
     let saved = fs::read_to_string(fixture.root.join(".env")).unwrap();
     assert!(saved.contains(&long));
@@ -101,7 +106,11 @@ fn stdout_refuses_pipes_and_child_output_is_suppressed() {
     let server = fixture.reply(Some(vec!["synthetic_must_not_reach_output".into()]));
     let output=fixture.command().args(["--field","KEY","--","sh","-c","printf '%s' \"$KEY\"; printf '%s' \"$KEY\" >&2; test \"$KEY\" = synthetic_must_not_reach_output"]).output().unwrap();
     assert!(output.status.success());
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Secret delivery=delivered: child process succeeded (output suppressed).\n"
+    );
     server.join().unwrap();
 }
 #[test]
@@ -118,7 +127,10 @@ fn redirected_private_file_and_cancellation() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Secret delivery=delivered: credentials saved.\n"
+    );
     server.join().unwrap();
     assert!(
         fs::read_to_string(fixture.root.join(".env.direct"))
@@ -136,4 +148,108 @@ fn redirected_private_file_and_cancellation() {
     assert!(output.stdout.is_empty());
     server.join().unwrap();
     assert!(!fixture.root.join(".env.cancelled").exists());
+}
+
+#[test]
+fn response_failures_report_no_delivery_without_reading_the_destination() {
+    for (response, reason) in [
+        ("", "response_empty"),
+        ("synthetic_must_not_reach_output", "response_malformed"),
+        (
+            r#"{"status":"ok","result":"synthetic_must_not_reach_output"}"#,
+            "response_malformed",
+        ),
+        (r#"{"status":"ok"}"#, "response_missing"),
+        (
+            r#"{"status":"cancelled","result":{"private":"synthetic_must_not_reach_output"}}"#,
+            "cancelled",
+        ),
+        (r#"{"status":"expired"}"#, "expired"),
+        (r#"{"status":"rejected"}"#, "rejected"),
+        (r#"{"status":"busy"}"#, "busy"),
+        (
+            r#"{"status":"error","error":"synthetic_must_not_reach_output"}"#,
+            "unavailable",
+        ),
+        (
+            r#"{"status":"synthetic_must_not_reach_output"}"#,
+            "response_malformed",
+        ),
+        (r#"{"status":"ok","result":"[]"}"#, "values_invalid"),
+    ] {
+        let fixture = Fixture::new();
+        let server = fixture.raw_reply(response.as_bytes().to_vec());
+        let output = fixture
+            .command()
+            .args(["--field", "KEY", "--env-file", ".env"])
+            .output()
+            .unwrap();
+        server.join().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let message = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            message.contains(&format!("Secret delivery=not_delivered reason={reason}:")),
+            "{reason}: {message}"
+        );
+        assert!(!message.contains("synthetic_must_not_reach_output"));
+        assert!(!fixture.root.join(".env").exists());
+        assert!(!fixture.root.join("history.db").exists());
+    }
+}
+
+#[test]
+fn child_failure_is_not_reported_as_failed_credential_delivery() {
+    for (child, delivery, reason) in [
+        (
+            vec!["sh", "-c", "printf '%s' \"$KEY\" >&2; exit 7"],
+            "delivered",
+            "child_failed",
+        ),
+        (
+            vec!["./nonexistent-child"],
+            "not_delivered",
+            "child_start_failed",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let server = fixture.reply(Some(vec!["synthetic_must_not_reach_output".into()]));
+        let output = fixture
+            .command()
+            .args(["--field", "KEY", "--"])
+            .args(child)
+            .output()
+            .unwrap();
+        server.join().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let message = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            message.contains(&format!("Secret delivery={delivery} reason={reason}:")),
+            "{message}"
+        );
+        assert!(!message.contains("synthetic_must_not_reach_output"));
+    }
+}
+
+#[test]
+fn failed_redirected_output_has_unknown_delivery_and_no_secret_in_diagnostics() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join(".env.redirected");
+    let file = fs::File::create(&path).unwrap();
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .unwrap();
+    drop(file);
+    let server = fixture.reply(Some(vec!["synthetic_must_not_reach_output".into()]));
+    let output = fixture
+        .command()
+        .args(["--field", "KEY", "--stdout"])
+        .stdout(Stdio::from(fs::File::open(path).unwrap()))
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(!output.status.success());
+    let message = String::from_utf8(output.stderr).unwrap();
+    assert!(message.contains("Secret delivery=unknown reason=destination_failed:"));
+    assert!(!message.contains("synthetic_must_not_reach_output"));
 }

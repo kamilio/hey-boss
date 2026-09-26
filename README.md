@@ -1028,6 +1028,9 @@ Use `--field API_KEY -- python3 app.py` to set the child's environment instead;
 child output is suppressed. A destination is required. Secrets are never ordinary
 questions and are not stored in Hey Boss history, mobile sync, or offline queues.
 The same command works over a connected, updated SSH companion.
+Non-secret stderr status distinguishes `delivery=delivered`, `not_delivered`, and
+`unknown`, including child failure after credentials were delivered. See
+[delivery outcomes and recovery](docs/secret-delivery.md) before retrying a failure.
 
 Long normal answers wrap and grow, then scroll. Secret fields support long pastes;
 Show reveals the full wrapping editor locally. ⌘Return submits. See the

@@ -3398,14 +3398,17 @@ final class SecretEntry: NSObject, NSTextFieldDelegate {
 
 final class SecretFormStack: NSStackView { override var isFlipped: Bool { true } }
 final class SecretFormClip: NSClipView { override var isFlipped: Bool { true } }
+enum SecretOutcome: Equatable {
+    case submitted([String]), cancelled, expired
+}
 final class SecretPrompt: NSObject, NSWindowDelegate {
     let window = CopyableWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     let entries: [SecretEntry]
     let submit = NSButton(title: "Use credentials", target: nil, action: nil)
     let message = NSTextField(wrappingLabelWithString: "")
-    var completion: (([String]?) -> Void)?
+    var completion: ((SecretOutcome) -> Void)?
     var timer: Timer?
-    init(request: Request, form: SecretForm, completion: @escaping ([String]?) -> Void) {
+    init(request: Request, form: SecretForm, completion: @escaping (SecretOutcome) -> Void) {
         entries = form.fields.enumerated().map { SecretEntry(name: $0.element, secret: !(form.login && $0.offset == 0)) }
         self.completion = completion
         super.init()
@@ -3436,12 +3439,12 @@ final class SecretPrompt: NSObject, NSWindowDelegate {
         message.stringValue = entries.contains { $0.value.utf8.count > 65536 || $0.value.contains("\0") } ? "Each value must be at most 64 KiB and cannot contain NUL." : "⌘Return submits. Cancel or closing discards all values."
     }
     func show() { NSApp.setActivationPolicy(.regular); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); if let first = entries.first { window.makeFirstResponder(first.maskedMode ? first.masked : first.revealed.text) } }
-    @objc func finish() { validate(); guard submit.isEnabled else { return }; complete(entries.map(\.value)) }
-    @objc func cancel() { complete(nil) }
-    func windowWillClose(_ notification: Notification) { complete(nil) }
-    func complete(_ values: [String]?) {
+    @objc func finish() { validate(); guard submit.isEnabled else { return }; complete(.submitted(entries.map(\.value))) }
+    @objc func cancel() { complete(.cancelled) }
+    func windowWillClose(_ notification: Notification) { complete(.cancelled) }
+    func complete(_ outcome: SecretOutcome) {
         guard let done = completion else { return }; completion = nil; timer?.invalidate(); timer = nil
-        window.makeFirstResponder(nil); entries.forEach { $0.clear() }; window.orderOut(nil); done(values)
+        window.makeFirstResponder(nil); entries.forEach { $0.clear() }; window.orderOut(nil); done(outcome)
         if !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) { NSApp.setActivationPolicy(.accessory) }
     }
 }
@@ -3450,18 +3453,24 @@ final class SecretPrompts {
     let present: Bool
     init(present: Bool = true) { self.present = present }
     func handle(_ request: Request, _ reply: Reply) {
-        guard let form = SecretForm.decode(request), active.count < 4 else { reply.send(["status":"error", "error":"Invalid secret request or too many open prompts"]); return }
+        guard let form = SecretForm.decode(request) else { reply.send(["task_id":"secret", "status":"rejected"]); return }
+        guard active.count < 4 else { reply.send(["task_id":"secret", "status":"busy"]); return }
         let id = UUID()
-        let prompt = SecretPrompt(request: request, form: form) { [weak self] values in
+        let prompt = SecretPrompt(request: request, form: form) { [weak self] outcome in
             self?.active.removeValue(forKey: id)
-            if let values, let data = try? JSONSerialization.data(withJSONObject: values) {
+            switch outcome {
+            case .submitted(let values):
+                guard let data = try? JSONSerialization.data(withJSONObject: values) else { reply.send(["task_id":"secret", "status":"error"]); return }
                 reply.send(["task_id":"secret", "status":"ok", "result":String(decoding:data,as:UTF8.self)])
-            } else { reply.send(["task_id":"secret", "status":"cancelled"]) }
+            case .cancelled: reply.send(["task_id":"secret", "status":"cancelled"])
+            case .expired: reply.send(["task_id":"secret", "status":"expired"])
+            }
         }
         active[id] = prompt
         let expires = Date().addingTimeInterval(900)
         prompt.timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak prompt] _ in
-            if !reply.isConnected || Date() >= expires { prompt?.cancel() }
+            if !reply.isConnected { prompt?.cancel() }
+            else if Date() >= expires { prompt?.complete(.expired) }
         }
         if present { prompt.show() }
     }
