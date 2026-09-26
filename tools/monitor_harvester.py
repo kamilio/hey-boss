@@ -3,6 +3,7 @@
 
 Example: monitor_harvester.py --host local --host devbox --directory REPORT_DIR
 Optional --until is a Unix timestamp; --notify pages only on persistent problems.
+Use --ssh-control HOST=/absolute/socket to reuse an existing fleet connection.
 The harvester remains responsible for every cleanup and process action.
 """
 import argparse
@@ -113,12 +114,12 @@ def problems(sample, now):
     return result
 
 
-def probe(host):
+def probe(host, control=None):
     args = ["python3", "-c", PROBE]
     if host != "local":
         args = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                 "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
-                host, shlex.join(args)]
+                *(["-S", str(control)] if control else []), host, shlex.join(args)]
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=100)
         if p.returncode:
@@ -161,10 +162,18 @@ def main():
     parser.add_argument("--directory", type=pathlib.Path, required=True)
     parser.add_argument("--until", type=int)
     parser.add_argument("--notify", type=pathlib.Path)
+    parser.add_argument("--ssh-control", action="append", default=[], metavar="HOST=PATH")
     options = parser.parse_args()
     hosts = options.host or ["local"]
     if any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@._-]*", h) for h in hosts):
         parser.error("Invalid host name")
+    controls = {}
+    for item in options.ssh_control:
+        host, separator, path = item.partition("=")
+        if (not separator or host not in hosts or host == "local" or host in controls or
+                not pathlib.Path(path).is_absolute()):
+            parser.error("Each --ssh-control needs a selected remote host and an absolute socket path")
+        controls[host] = pathlib.Path(path)
     os.umask(0o077)
     options.directory.mkdir(parents=True, exist_ok=True)
     with (options.directory / "monitor.lock").open("a") as lock:
@@ -180,7 +189,7 @@ def main():
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         rows = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(hosts))) as pool:
-            for host, sample in zip(hosts, pool.map(probe, hosts)):
+            for host, sample in zip(hosts, pool.map(probe, hosts, (controls.get(h) for h in hosts))):
                 sample["collected_at"] = now
                 # An unreachable machine replaces its latest record, so stale success cannot masquerade as current.
                 save(options.directory / f"{host}-latest.json", sample)

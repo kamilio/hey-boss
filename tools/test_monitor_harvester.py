@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "monitor", pathlib.Path(__file__).with_name("monitor_harvester.py")
@@ -10,6 +11,21 @@ spec.loader.exec_module(monitor)
 
 
 class MonitorTests(unittest.TestCase):
+    def test_remote_probe_reuses_only_its_configured_control_socket(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stdout='{}'))
+        control = pathlib.Path('/tmp/fixture ssh.sock')
+        with mock.patch.object(monitor.subprocess, 'run', run):
+            self.assertEqual(monitor.probe('devbox', control), {})
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index('-S') + 1], str(control))
+        self.assertEqual(args[-2], 'devbox')
+
+    def test_local_probe_does_not_use_ssh_control(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stdout='{}'))
+        with mock.patch.object(monitor.subprocess, 'run', run):
+            self.assertEqual(monitor.probe('local', pathlib.Path('/tmp/unused.sock')), {})
+        self.assertEqual(run.call_args.args[0][:2], ['python3', '-c'])
+
     def sample(self):
         return {"snapshot": {
             "observed_at": 1900, "last_cleanup_at": 1900,
