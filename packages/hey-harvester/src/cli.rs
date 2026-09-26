@@ -437,7 +437,7 @@ fn schedule_binary(
 <key>ProgramArguments</key><array><string>{}</string><string>run</string></array>
 <key>EnvironmentVariables</key><dict><key>HEY_BOSS_HEALTH_DIR</key><string>{}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
 <key>RunAtLoad</key><true/><key>StartInterval</key><integer>{interval}</integer>
-<key>ProcessType</key><string>Standard</string><key>Nice</key><integer>10</integer>
+<key>ProcessType</key><string>Interactive</string>
 <key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string>
 </dict></plist>
 "#,
