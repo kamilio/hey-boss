@@ -535,14 +535,23 @@ fn terminate(
             return Ok(0);
         }
     }
+    if !super::workload_ownership::protected(&fresh, ids).is_empty() {
+        return Ok(0);
+    }
     signal(current, libc::SIGTERM)?;
     std::thread::sleep(Duration::from_millis(500));
+    let owned = super::workload_ownership::protected(&fresh, ids);
     for pid in ids {
-        signal(&old[pid], libc::SIGTERM)?;
+        if !owned.contains_key(pid) {
+            signal(&old[pid], libc::SIGTERM)?;
+        }
     }
     std::thread::sleep(Duration::from_millis(1000));
+    let owned = super::workload_ownership::protected(&fresh, ids);
     for pid in ids {
-        signal(&old[pid], libc::SIGKILL)?;
+        if !owned.contains_key(pid) {
+            signal(&old[pid], libc::SIGKILL)?;
+        }
     }
     std::thread::sleep(Duration::from_millis(100));
     Ok(ids
@@ -943,6 +952,7 @@ int main(int argc, char **argv) {
         }
         let launch = |owned: bool| {
             let mut child = Command::new(&bin)
+                .current_dir(&root)
                 .args([
                     "serve",
                     "--control-fd=3",
@@ -1177,6 +1187,16 @@ pub(super) fn aggressive_harvest(
         }
     }
     let mut items = Vec::new();
+    for (pid, protection) in super::workload_ownership::protected(table, &selected) {
+        selected.remove(&pid);
+        items.push(Item {
+            name: format!("Protected workload · PID {pid}"),
+            error: protection.uncertain.then(|| protection.reason.clone()),
+            detail: protection.reason,
+            eligible: false,
+            worktree: None,
+        });
+    }
     let mut signaled = Vec::new();
     for pid in selected {
         let p = &table[&pid];
@@ -1203,8 +1223,12 @@ pub(super) fn aggressive_harvest(
     if !signaled.is_empty() {
         std::thread::sleep(Duration::from_secs(1));
     }
+    let pending: BTreeSet<_> = signaled.iter().map(|p| p.pid).collect();
+    let newly_owned = super::workload_ownership::protected(table, &pending);
     for p in &signaled {
-        signal(p, libc::SIGKILL)?;
+        if !newly_owned.contains_key(&p.pid) {
+            signal(p, libc::SIGKILL)?;
+        }
     }
     if !signaled.is_empty() {
         std::thread::sleep(Duration::from_millis(100));
@@ -1215,9 +1239,18 @@ pub(super) fn aggressive_harvest(
         .count();
     for item in &mut items {
         if apply && item.detail.starts_with("Sent TERM") {
-            item.detail = format!(
-                "TERM/KILL completed with identity checks; {killed} processes confirmed gone in this batch"
-            );
+            if let Some((_, protection)) = newly_owned
+                .iter()
+                .find(|(pid, _)| item.name.ends_with(&format!("PID {pid}")))
+            {
+                item.detail = format!("TERM was sent; no KILL sent: {}", protection.reason);
+                item.eligible = false;
+                item.error = protection.uncertain.then(|| protection.reason.clone());
+            } else {
+                item.detail = format!(
+                    "TERM/KILL completed with identity checks; {killed} processes confirmed gone in this batch"
+                );
+            }
         }
     }
     let (idle_items, exited) = super::codex::graceful_idle(table, config, observations, apply)?;
@@ -1228,6 +1261,123 @@ pub(super) fn aggressive_harvest(
 #[cfg(test)]
 mod aggressive_tests {
     use super::*;
+    use std::path::PathBuf;
+    #[test]
+    fn detached_controller_and_owned_descendant_survive_aggressive_cleanup() {
+        use std::io::Read;
+        struct Fixture {
+            root: PathBuf,
+            children: Vec<std::process::Child>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                for child in &mut self.children {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("harvester-detached-owner-{}", std::process::id()));
+        let mut fixture = Fixture {
+            root: root.clone(),
+            children: Vec::new(),
+        };
+        for directory in [
+            root.join("free"),
+            root.join("work/nested"),
+            root.join("admin"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(root.join("work/.git"), "gitdir: ../admin\n").unwrap();
+        std::fs::write(root.join("admin/locked"), "queued Codex owner").unwrap();
+        let open_file = root.join("work/open file\nwith newline");
+        std::fs::write(&open_file, "fixture").unwrap();
+        let mut table = Table::new();
+        for (index, directory) in [
+            root.join("free"),
+            root.join("work/nested"),
+            root.join("free"),
+            root.join("free"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let child = if index == 3 {
+                let mut child = Command::new("sh")
+                    .args(["-c", "exec 3< \"$1\"; printf x; exec sleep 60", "fixture"])
+                    .arg(&open_file)
+                    .current_dir(directory)
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child.stdout.as_mut().unwrap().read_exact(&mut [0]).unwrap();
+                child
+            } else {
+                Command::new("sleep")
+                    .arg("60")
+                    .current_dir(directory)
+                    .spawn()
+                    .unwrap()
+            };
+            let pid = child.id();
+            let parent = if index == 1 {
+                fixture.children[0].id()
+            } else {
+                1
+            };
+            fixture.children.push(child);
+            table.insert(
+                pid,
+                Process {
+                    pid,
+                    parent,
+                    uid: unsafe { libc::geteuid() },
+                    age_seconds: 4000,
+                    cpu_seconds: 0.0,
+                    executable: "/bin/node".into(),
+                    identity: identity(pid).unwrap(),
+                    arguments: "node vitest".into(),
+                },
+            );
+        }
+        let inspect = || {
+            aggressive_harvest(
+                &table,
+                "Warning",
+                &Config::default(),
+                &mut BTreeMap::new(),
+                false,
+            )
+            .unwrap()
+            .0
+        };
+        let items = inspect();
+        for (index, child) in fixture
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+        {
+            assert!(
+                !items.iter().any(
+                    |item| item.eligible && item.name.ends_with(&format!("PID {}", child.id()))
+                ),
+                "Owned process {index} selected: {items:?}"
+            );
+        }
+        let free = fixture.children[2].id();
+        assert!(
+            items
+                .iter()
+                .any(|item| item.eligible && item.name.ends_with(&format!("PID {free}"))),
+            "Unowned orphan should remain eligible: {items:?}"
+        );
+        std::fs::remove_file(root.join("admin/locked")).unwrap();
+        assert_eq!(inspect().iter().filter(|item| item.eligible).count(), 4);
+    }
     #[test]
     fn expires_realistic_leaks_and_preserves_young_work_and_database_services() {
         let mut p = Process {
