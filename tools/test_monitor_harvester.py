@@ -232,6 +232,7 @@ class MonitorTests(unittest.TestCase):
     def test_completed_full_pass_apple_denials_remain_visible_as_warnings(self):
         paths = [
             "/private/var/folders/dd/test_user/T/com.apple.appleaccountd/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.replayd/TemporaryItems",
             "/Users/test/Library/Caches/com.apple.HomeKit",
             "/Users/test/Library/Caches/CloudKit",
             "/Users/test/Library/Caches/com.apple.Safari",
