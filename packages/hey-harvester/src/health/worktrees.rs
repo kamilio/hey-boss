@@ -1014,55 +1014,69 @@ mod tests {
     }
 }
 
-/// Preserve the .git pointer until all non-database content is gone. Never give
-/// `git worktree remove` a directory that could contain an SQLite database.
+/// Recheck Git state and inspect databases before any deletion. Git itself enforces
+/// ownership locks and refuses newly dirty work at the final removal boundary.
 fn remove_checkout(path: &Path) -> io::Result<()> {
     if path.canonicalize()? != path {
         return Err(io::Error::other("Noncanonical checkout preserved"));
     }
-    let pointer = std::fs::read(path.join(".git"))?;
-    let admin = PathBuf::from(git_text(path, &["rev-parse", "--absolute-git-dir"])?);
-    let common = PathBuf::from(git_text(
-        path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?);
-    if admin.parent() != Some(common.join("worktrees").as_path())
-        || std::fs::read_to_string(admin.join("gitdir"))?.trim()
-            != path.join(".git").to_string_lossy()
-    {
-        return Err(io::Error::other("Linked checkout registration changed"));
-    }
+    let trees = list(path)?;
+    let main = trees
+        .first()
+        .ok_or_else(|| io::Error::other("No registered worktrees"))?;
+    let selected = trees
+        .iter()
+        .find(|w| w.path == path)
+        .ok_or_else(|| io::Error::other("Worktree registration changed; preserved"))?;
+    eligible(
+        selected,
+        &main.path,
+        &[],
+        &[],
+        &Table::new(),
+        Policy {
+            min_age: 0,
+            manual: true,
+        },
+        now(),
+    )
+    .map_err(io::Error::other)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut error = None;
-    for entry in std::fs::read_dir(path)? {
-        if std::time::Instant::now() >= deadline {
-            return Err(io::Error::other("Partial cleanup; retry next cycle"));
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(entry) = pending.pop() {
+        if std::time::Instant::now() >= deadline || pending.len() > 100000 {
+            return Err(io::Error::other(
+                "Database inspection limit reached; preserved",
+            ));
         }
-        let entry = entry?;
-        if entry.file_name() == ".git" {
-            continue;
+        if super::databases::protected(&entry)? {
+            return Err(super::preserved("SQLite database or sidecar preserved"));
         }
-        if let Err(e) = super::databases::remove_tree(&entry.path())
-            && error.as_ref().is_none_or(super::is_preserved)
-        {
-            error = Some(e);
+        if std::fs::symlink_metadata(&entry)?.is_dir() {
+            for child in std::fs::read_dir(&entry)? {
+                let child = child?;
+                if child.file_name() != ".git" {
+                    pending.push(child.path());
+                }
+                if pending.len() > 100000 || std::time::Instant::now() >= deadline {
+                    return Err(io::Error::other(
+                        "Database inspection limit reached; preserved",
+                    ));
+                }
+            }
         }
     }
-    if let Some(e) = error {
-        return Err(e);
-    }
-    std::fs::remove_file(path.join(".git"))?;
-    if let Err(e) = std::fs::remove_dir(path) {
-        // A new file appeared: retain the registration and database in place.
-        use std::io::Write;
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path.join(".git"))
-            .and_then(|mut f| f.write_all(&pointer));
-        return Err(e);
-    }
-    super::databases::remove_tree(&admin)
+    git_text(
+        &main.path,
+        &[
+            "worktree",
+            "remove",
+            "--",
+            path.to_str()
+                .ok_or_else(|| io::Error::other("Non-UTF-8 checkout preserved"))?,
+        ],
+    )?;
+    Ok(())
 }
 
 fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
@@ -1115,60 +1129,31 @@ fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
     )
 }
 
-/// Retire only the exact, old registration of a checkout already removed by
-/// another agent. Never run a repository-wide prune or follow a symlink.
-fn retire_missing(repo: &Path, w: &Worktree, at: u64, apply: bool) -> io::Result<bool> {
-    if std::fs::symlink_metadata(&w.path).is_ok() {
-        return Err(super::preserved(
-            "Checkout reappeared; registration preserved",
-        ));
+/// The aggressive age policy does not waive ownership or recovery protection.
+fn aggressive_eligible(
+    w: &Worktree,
+    main: &Path,
+    allowed: &[PathBuf],
+    active: &[PathBuf],
+    table: &Table,
+    at: u64,
+) -> Result<String, String> {
+    let head = eligible(
+        w,
+        main,
+        allowed,
+        active,
+        table,
+        Policy {
+            min_age: 86400,
+            manual: false,
+        },
+        at,
+    )?;
+    if !expired(w, at).map_err(|e| e.to_string())? {
+        return Err("Source or Git activity within 24 hours; preserved".into());
     }
-    let common = common_directory(repo)?;
-    for entry in std::fs::read_dir(common.join("worktrees"))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let admin = entry.path();
-        let pointer = std::fs::read_to_string(admin.join("gitdir"))?;
-        if Path::new(pointer.trim()) != w.path.join(".git") {
-            continue;
-        }
-        for name in ["", "gitdir", "HEAD", "index", "logs/HEAD"] {
-            let path = admin.join(name);
-            match modified(&path) {
-                Ok(time) if time > at.saturating_sub(86400) => return Ok(false),
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
-        if apply {
-            // A missing checkout may have held a detached, unpushed commit.
-            git_text(
-                repo,
-                &[
-                    "update-ref",
-                    &format!("refs/cleanup/worktrees/{}", w.head),
-                    &w.head,
-                ],
-            )?;
-            match std::fs::symlink_metadata(&w.path) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                _ => {
-                    return Err(super::preserved(
-                        "Checkout reappeared; registration preserved",
-                    ));
-                }
-            }
-            if std::fs::read_to_string(admin.join("gitdir"))? != pointer {
-                return Err(io::Error::other("Worktree registration changed"));
-            }
-            super::databases::remove_tree(&admin)?;
-        }
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(head)
 }
 
 fn aggressive_clean(
@@ -1182,7 +1167,7 @@ fn aggressive_clean(
             "Process inventory unavailable; cannot protect running Codex worktrees",
         ));
     }
-    let active_codex_paths = super::codex::working_paths(table)?;
+    let (fresh_table, active_paths) = activity()?;
     let mut allowed = roots(config);
     for p in ["/private/tmp", "/tmp", "/Users/Shared"] {
         if let Ok(p) = PathBuf::from(p).canonicalize()
@@ -1208,7 +1193,11 @@ fn aggressive_clean(
     let mut items = Vec::new();
     for repo in repositories(&search) {
         match list(&repo) {
-            Ok(trees) => candidates.extend(trees.into_iter().skip(1).map(|w| (w, repo.clone()))),
+            Ok(trees) => {
+                if let Some(main) = trees.first().map(|w| w.path.clone()) {
+                    candidates.extend(trees.into_iter().skip(1).map(|w| (w, main.clone())));
+                }
+            }
             Err(e) => items.push(Item {
                 name: repo.display().to_string(),
                 detail: format!("Inspection failed: {e}"),
@@ -1229,7 +1218,7 @@ fn aggressive_clean(
     candidates.rotate_left(split);
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut removed = 0;
-    for (w, repo) in candidates {
+    for (w, main) in candidates {
         if std::time::Instant::now() >= deadline {
             break;
         }
@@ -1246,52 +1235,23 @@ fn aggressive_clean(
         if !allowed.iter().any(|r| under(&w.path, r)) || w.bare {
             continue;
         }
-        if matches!(std::fs::symlink_metadata(&w.path), Err(e) if e.kind() == io::ErrorKind::NotFound)
-            && !active_codex_paths.iter().any(|p| p.starts_with(&w.path))
+        if let Err(detail) =
+            aggressive_eligible(&w, &main, &allowed, &active_paths, &fresh_table, now())
         {
-            let result = retire_missing(&repo, &w, now(), apply);
-            let error = result
-                .as_ref()
-                .err()
-                .filter(|e| !super::is_preserved(e))
-                .map(ToString::to_string);
-            let detail = match result {
-                Ok(true) if apply => {
-                    "Removed stale registration; HEAD retained in recovery ref".into()
-                }
-                Ok(true) => "Old missing checkout; stale registration eligible for removal".into(),
-                Ok(false) => "Missing checkout; recent or already retired registration".into(),
-                Err(e) => e.to_string(),
-            };
             items.push(Item {
                 name,
                 detail,
-                error,
                 eligible: false,
                 worktree: Some(details(&w, "", &None, now())),
+                error: None,
             });
             continue;
         }
         let result = (|| -> io::Result<bool> {
-            if active_codex_paths.iter().any(|p| p.starts_with(&w.path)) {
-                return Err(super::preserved(
-                    "Running Codex session uses this worktree; preserved",
-                ));
-            }
-            if !expired(&w, now())? {
-                return Ok(false);
-            }
             if apply {
-                // Pin detached and unpushed HEADs before discarding stale working files.
-                git_text(
-                    &w.path,
-                    &[
-                        "update-ref",
-                        &format!("refs/cleanup/worktrees/{}", w.head),
-                        &w.head,
-                    ],
-                )?;
-                remove_checkout(&w.path)?;
+                // Recheck all activity, registration and Git state, then use
+                // ordinary Git removal. Missing checkout indexes stay in place.
+                remove_one(&w.path)?;
                 removed += 1;
             }
             Ok(true)
@@ -1305,9 +1265,9 @@ fn aggressive_clean(
             Ok(true) => (
                 true,
                 if apply {
-                    "Removed expired checkout; HEAD retained in recovery ref"
+                    "Removed clean expired checkout; branch retained"
                 } else {
-                    "Older than 24 hours; locks and dirty files do not exempt this checkout"
+                    "Clean and unused for 24 hours; ownership and recovery checks passed"
                 }
                 .into(),
             ),
@@ -1337,7 +1297,7 @@ mod aggressive_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn large_git_index_streams_and_missing_registration_is_retired_exactly() {
+    fn large_git_index_streams_and_missing_registration_preserves_recovery() {
         use std::io::Write;
         let root =
             std::env::temp_dir().join(format!("harvester-large-index-{}", std::process::id()));
@@ -1379,23 +1339,28 @@ mod aggressive_tests {
             .set_modified(UNIX_EPOCH + Duration::from_secs(now() + 172800))
             .unwrap();
         assert!(!expired(&w, now() + 172800).unwrap());
-        assert!(retire_missing(&main, &w, now() + 172800, true).is_err());
-        std::fs::remove_dir_all(&work).unwrap();
-        assert!(retire_missing(&main, &w, now() + 172800, true).unwrap());
-        assert_eq!(list(&main).unwrap().len(), 1);
-        assert_eq!(
-            git_text(
-                &main,
-                &["rev-parse", &format!("refs/cleanup/worktrees/{}", w.head)]
-            )
-            .unwrap(),
-            w.head
-        );
+        let admin = PathBuf::from(git_text(&work, &["rev-parse", "--absolute-git-dir"]).unwrap());
+        let index = std::fs::read(admin.join("index")).unwrap();
+        // Move only this fixture's checkout aside to simulate loss; keep its data.
+        std::fs::rename(&work, root.join("saved-work")).unwrap();
+        let refusal = aggressive_eligible(
+            &w,
+            &main,
+            std::slice::from_ref(&root),
+            &[],
+            &Table::new(),
+            now() + 172800,
+        )
+        .unwrap_err();
+        assert!(refusal.contains("Missing checkout; metadata preserved"));
+        assert_eq!(list(&main).unwrap().len(), 2);
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
+        assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).unwrap(), w.head);
         assert!(main.join("seed").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn old_locked_dirty_worktree_is_removable_but_live_sqlite_stays_in_place() {
+    fn aggressive_cleanup_preserves_ownership_edits_receipts_and_databases() {
         let root =
             std::env::temp_dir().join(format!("harvester-old-worktree-{}", std::process::id()));
         std::fs::create_dir_all(root.join("main")).unwrap();
@@ -1414,13 +1379,14 @@ mod aggressive_tests {
             &[
                 "worktree",
                 "add",
-                "--detach",
+                "-b",
+                "owned",
                 "--lock",
                 work.to_str().unwrap(),
             ],
         )
         .unwrap();
-        std::fs::write(work.join("file"), "discard stale edit").unwrap();
+        std::fs::write(work.join("file"), "staged recovery work").unwrap();
         std::fs::create_dir(work.join("node_modules")).unwrap();
         std::fs::write(work.join("node_modules/artifact"), "large ignored build").unwrap();
         assert_eq!(
@@ -1428,18 +1394,63 @@ mod aggressive_tests {
             common_directory(&work).unwrap()
         );
         assert_eq!(repositories(std::slice::from_ref(&root)).len(), 1);
+        git_text(&work, &["add", "file"]).unwrap();
+        let receipt = root.join("receipt");
+        std::fs::write(&receipt, "validation pending").unwrap();
         let w = list(&main).unwrap().remove(1);
+        for active in [vec![], vec![work.join("file")], vec![]] {
+            assert!(
+                aggressive_eligible(
+                    &w,
+                    &main,
+                    std::slice::from_ref(&root),
+                    &active,
+                    &Table::new(),
+                    now() + 172800
+                )
+                .unwrap_err()
+                .contains("Locked")
+            );
+        }
         assert!(!expired(&w, now()).unwrap());
         assert!(expired(&w, now() + 172800).unwrap());
+        let admin = PathBuf::from(git_text(&work, &["rev-parse", "--absolute-git-dir"]).unwrap());
+        let index = std::fs::read(admin.join("index")).unwrap();
+        let refusal =
+            remove_checkout(&work).expect_err("expired ownership locks must survive cleanup");
+        assert!(refusal.to_string().contains("Locked"));
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
+        assert_eq!(
+            std::fs::read_to_string(work.join("file")).unwrap(),
+            "staged recovery work"
+        );
+        git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
+        assert!(
+            remove_checkout(&work).is_err(),
+            "uncommitted edits must survive cleanup"
+        );
+        let unlocked = list(&main).unwrap().remove(1);
+        assert!(
+            aggressive_eligible(
+                &unlocked,
+                &main,
+                std::slice::from_ref(&root),
+                &[],
+                &Table::new(),
+                now() + 172800
+            )
+            .unwrap_err()
+            .contains("Modified")
+        );
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            "validation pending"
+        );
         let db = rusqlite::Connection::open(work.join("node_modules/History")).unwrap();
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE valuable(value); INSERT INTO valuable VALUES (42);").unwrap();
-        assert!(
-            remove_checkout(&work)
-                .unwrap_err()
-                .to_string()
-                .contains("SQLite")
-        );
-        assert!(!work.join("node_modules/artifact").exists());
+        assert!(remove_checkout(&work).is_err());
+        assert!(work.join("node_modules/artifact").exists());
         assert!(work.join(".git").exists() && work.join("node_modules/History-wal").exists());
         assert_eq!(
             db.query_row("SELECT value FROM valuable", [], |r| r.get::<_, i32>(0))
@@ -1449,7 +1460,53 @@ mod aggressive_tests {
         drop(db);
         // Simulate the owner explicitly relocating its database before retrying.
         std::fs::rename(work.join("node_modules/History"), root.join("saved.sqlite")).unwrap();
+        std::fs::remove_file(work.join("node_modules/artifact")).unwrap();
+        std::fs::remove_dir(work.join("node_modules")).unwrap();
+        git_text(&work, &["commit", "-m", "completed fixture"]).unwrap();
+        let completed = list(&main).unwrap().remove(1);
+        assert!(
+            aggressive_eligible(
+                &completed,
+                &main,
+                std::slice::from_ref(&root),
+                &[work.join("file")],
+                &Table::new(),
+                now() + 172800
+            )
+            .unwrap_err()
+            .contains("Open")
+        );
+        assert!(
+            aggressive_eligible(
+                &completed,
+                &main,
+                std::slice::from_ref(&root),
+                &[],
+                &Table::new(),
+                now() + 172800
+            )
+            .is_ok()
+        );
+        // Even a clean tracked SQLite file prevents partial checkout deletion.
+        std::fs::write(work.join("History"), b"SQLite format 3\0fixture").unwrap();
+        git_text(&work, &["add", "History"]).unwrap();
+        git_text(&work, &["commit", "-m", "database fixture"]).unwrap();
+        assert!(
+            remove_checkout(&work)
+                .unwrap_err()
+                .to_string()
+                .contains("SQLite")
+        );
+        assert!(work.join("file").exists());
+        git_text(&work, &["rm", "History"]).unwrap();
+        git_text(&work, &["commit", "-m", "owner completed"]).unwrap();
+        let head = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
         remove_checkout(&work).unwrap();
+        assert_eq!(git_text(&main, &["rev-parse", "owned"]).unwrap(), head);
+        assert_eq!(
+            std::fs::read_to_string(receipt).unwrap(),
+            "validation pending"
+        );
         assert!(!work.exists());
         assert_eq!(list(&main).unwrap().len(), 1);
         assert!(main.join("file").exists());

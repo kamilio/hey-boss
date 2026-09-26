@@ -1,5 +1,28 @@
 # Worktree ownership and recovery
 
+## Reopened investigation — September 25, 2026
+
+The new poe-code reports describe missing checkouts and validation evidence around
+11:32–11:36 CDT, including `poe-code-overnight-2` and `poe-code-fleet-3`. Both paths
+were still absent on this Mac during the follow-up; `poe-code` was present.
+Existence now does not establish recovery of the original index or uncommitted
+work. Recovery refs, surviving checkouts and other owners were left untouched.
+
+The later aggressive harvester implementation (`3f47521`, committed at 12:34 CDT)
+introduced a separate removal path that ignored Git ownership locks and dirty
+files after 24 hours. It recursively deleted checkout contents and administrative
+metadata, retaining only HEAD in a recovery ref. `retire_missing` could also delete
+the surviving index of a missing checkout. This is a reproducible protection gap,
+but its commit timestamp is later than the new reports; it does not attribute
+those earlier losses to this implementation. The retained local health activity
+covered only recent cycles, with no receipt identifying those deletions.
+
+Aggressive cleanup must preserve the same ownership, active-process, index and
+uncommitted-state boundaries as ordinary cleanup. A missing directory is never
+permission to discard its Git metadata. Age and a saved HEAD cannot replace the
+index, untracked implementation, or validation receipts. The regression fixtures
+use private repositories only; they do not reproduce deletion on production paths.
+
 ## Issue 147 investigation — September 24, 2026
 
 Two owners reported losing both a temporary checkout and its Git registration:

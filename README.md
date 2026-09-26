@@ -895,18 +895,19 @@ systemd timer names are retained to prevent duplicate schedules; they now invoke
 Disabled automatic maintenance stays disabled during installation.
 `tools/machine-health.sh` runs a one-shot cleanup using the harvester release build.
 
-With `configure --aggressive true`, linked worktrees expire after 24 hours without
-source or Git activity, including locked, dirty, ignored and detached checkouts.
-Worktrees used by a running Codex process are retained.
-Primary checkouts stay intact. HEADs are pinned under `refs/cleanup/worktrees/`
-before removal; uncommitted files are discarded. Discovery includes nested Codex
+With `configure --aggressive true`, clean linked worktrees become eligible after
+24 hours without source or Git activity. Locks, active processes, staged changes,
+untracked and ignored files remain protected. Primary checkouts stay intact, and
+missing-checkout metadata is retained for recovery. Removal uses ordinary Git
+checks and retains the branch. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
-Git paths stream without a total listing-size cap; old missing checkouts retire only their exact registration, retaining HEAD.
+See [ownership and recovery](docs/worktree-ownership.md).
 
 Aggressive cache cleanup expires individual files after 24 hours across OS temp,
 Chrome signing copies and caches, npm/Bun/Yarn/Python caches, `~/.cache`, and
 project dependency/build/output directories. New siblings do not protect old
-files. Directory discovery and file traversal save cursors between bounded runs,
+files. Locked worktrees also protect their cached output and validation receipts.
+Directory discovery and file traversal save cursors between bounded runs,
 so large caches make forward progress. Worker diagnostic log rotation is enabled
 with this policy.
 Sweeps rotate bounded traversal cursors so a large temp directory cannot monopolize every later root.
