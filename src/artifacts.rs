@@ -1,10 +1,15 @@
 //! Persistent project Markdown documents, independent of their referring resources.
 use crate::issues::{BODY_LIMIT, Error, Result, identifier};
 use serde::{Deserialize, Serialize};
+pub mod import;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Import {
+        operation: Box<Operation>,
+        files: Vec<import::File>,
+    },
     Preview {
         body: String,
     },
@@ -83,6 +88,53 @@ impl Operation {
             }
         };
         match self {
+            Self::Import { operation, files } => {
+                if !matches!(
+                    operation.as_ref(),
+                    Self::Create { .. } | Self::Edit { body: Some(_), .. }
+                ) {
+                    return Err(Error::invalid(
+                        "Import requires an artifact create or body edit",
+                    ));
+                }
+                operation.validate()?;
+                let body = match operation.as_ref() {
+                    Self::Create { body, .. } => body,
+                    Self::Edit {
+                        body: Some(body), ..
+                    } => body,
+                    _ => unreachable!(),
+                };
+                let destinations = import::destinations(body);
+                let mut seen = std::collections::BTreeSet::new();
+                let mut total = 0;
+                if files.len() > 1000 {
+                    return Err(Error::invalid("Too many Markdown attachments"));
+                }
+                for file in files {
+                    crate::attachments::validate_name(&file.name)?;
+                    if !seen.insert(&file.destination)
+                        || !destinations
+                            .iter()
+                            .any(|(_, dest)| dest == &file.destination)
+                    {
+                        return Err(Error::invalid(
+                            "Import attachment must match a unique Markdown destination",
+                        ));
+                    }
+                    if file.data.len() > crate::attachments::FILE_LIMIT.div_ceil(3) * 4 {
+                        return Err(Error::invalid(
+                            "Markdown attachments must total at most 10 MiB per import",
+                        ));
+                    }
+                    total += crate::attachments::decode(&file.data)?.len();
+                    if total > crate::attachments::FILE_LIMIT {
+                        return Err(Error::invalid(
+                            "Markdown attachments must total at most 10 MiB per import",
+                        ));
+                    }
+                }
+            }
             Self::Preview { body } => text(body)?,
             Self::List { query, offset, .. } => {
                 if let Some(q) = query {

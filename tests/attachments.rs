@@ -392,3 +392,98 @@ fn transferring_an_issue_moves_file_access_to_the_destination_project() {
     download.project_override = Some("Destination".into());
     assert_eq!(s.execute(&download).unwrap()["data"], "aGVsbG8=");
 }
+
+#[test]
+fn markdown_import_is_atomic_replayable_and_hosts_referenced_files() {
+    let f = Fixture::new("markdown-import");
+    let mut s = f.store();
+    let mut req = request(
+        json!({"action":"artifact","operation":{"command":"import","operation":{"command":"create","title":"Imported","body":"![Chart](chart.png)\n[Download][data]\n\n[data]: data.csv\n"},"files":[{"destination":"chart.png","name":"chart.png","data":"AQID"},{"destination":"data.csv","name":"data.csv","data":"YSxiCg=="}]}}),
+    );
+    req.request_id = Some("import-once".into());
+    let created = s.execute(&req).unwrap();
+    assert_eq!(s.execute(&req).unwrap(), created);
+    let id = created["artifact"]["id"].as_str().unwrap();
+    let listed = files(
+        &mut s,
+        json!({"command":"list","target":{"kind":"artifact","id":id}}),
+    );
+    assert_eq!(listed["attachments"].as_array().unwrap().len(), 2);
+    let body = created["artifact"]["body"].as_str().unwrap();
+    assert!(body.contains("/attachments/f-"));
+    assert!(!body.contains("](chart.png)"));
+    assert!(!body.contains("]: data.csv"));
+    for file in listed["attachments"].as_array().unwrap() {
+        assert!(body.contains(file["id"].as_str().unwrap()));
+        files(&mut s, json!({"command":"download","id":file["id"]}));
+    }
+    let mut stale = req.clone();
+    stale.request_id = None;
+    stale.operation = serde_json::from_value(json!({"action":"artifact","operation":{"command":"import","operation":{"command":"edit","id":id,"if_version":9,"body":"![Chart](chart.png)"},"files":[{"destination":"chart.png","name":"chart.png","data":"AQID"}]}})).unwrap();
+    assert!(s.execute(&stale).is_err());
+    assert_eq!(
+        files(
+            &mut s,
+            json!({"command":"list","target":{"kind":"artifact","id":id}})
+        )["attachments"],
+        listed["attachments"]
+    );
+}
+
+#[test]
+fn failed_import_rolls_back_document_metadata_and_disk_files() {
+    let f = Fixture::new("markdown-rollback");
+    let mut s = f.store();
+    // A rendered response can exceed the wire budget after creation. A linked
+    // missing issue must also leave neither document nor uploaded file behind.
+    let req = request(
+        json!({"action":"artifact","operation":{"command":"import","operation":{"command":"create","title":"Invalid target","body":"![a](a.png)","issue":999},"files":[{"destination":"a.png","name":"a.png","data":"AQID"}]}}),
+    );
+    assert!(s.execute(&req).is_err());
+    let list = call(
+        &mut s,
+        json!({"action":"artifact","operation":{"command":"list"}}),
+    );
+    assert!(list["artifacts"].as_array().unwrap().is_empty());
+    assert!(!f.0.join("issues.attachments").exists());
+    let malformed = request(
+        json!({"action":"artifact","operation":{"command":"import","operation":{"command":"create","title":"Unused","body":"No link"},"files":[{"destination":"a.png","name":"a.png","data":"AQID"}]}}),
+    );
+    assert!(s.execute(&malformed).is_err());
+}
+
+#[test]
+fn a_later_failed_upload_removes_earlier_files_and_rolls_back_the_edit() {
+    let f = Fixture::new("import-disk-rollback");
+    let mut s = f.store();
+    let doc = call(
+        &mut s,
+        json!({"action":"artifact","operation":{"command":"create","title":"Original","body":"Keep this"}}),
+    );
+    let id = doc["artifact"]["id"].as_str().unwrap();
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    for n in 0..999 {
+        db.execute("INSERT INTO file_attachments VALUES(?1,'named:Files','artifact',?2,'existing',0,'digest','human:boss',0)",rusqlite::params![format!("f-{n:032x}"),id]).unwrap();
+    }
+    let req = request(
+        json!({"action":"artifact","operation":{"command":"import","operation":{"command":"edit","id":id,"if_version":1,"body":"[a](a.csv) [b](b.csv)"},"files":[{"destination":"a.csv","name":"a.csv","data":"YQ=="},{"destination":"b.csv","name":"b.csv","data":"Yg=="}]}}),
+    );
+    assert!(
+        s.execute(&req)
+            .unwrap_err()
+            .to_string()
+            .contains("1000 attachments")
+    );
+    let after = call(
+        &mut s,
+        json!({"action":"artifact","operation":{"command":"view","id":id}}),
+    );
+    assert_eq!(after["artifact"]["body"], "Keep this");
+    assert_eq!(after["artifact"]["version"], 1);
+    assert_eq!(
+        std::fs::read_dir(f.0.join("issues.attachments"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
