@@ -229,6 +229,23 @@ class MonitorTests(unittest.TestCase):
                 sample["snapshot"]["errors"] = [error]
                 self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
 
+    def test_verified_whatsapp_extension_temp_denial_is_narrow_and_visible(self):
+        path = "/private/var/folders/dd/test_user/T/net.whatsapp.WhatsApp.ServiceExtension/TemporaryItems"
+        error = "24-hour cache expiration: " + path + ": Operation not permitted (os error 1)"
+        row = monitor.compact("mac", self.completed_sample([error]), 2000)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+        self.assertEqual(row["last_completed_errors"], [error])
+        for unexpected in [
+            error.replace("WhatsApp.ServiceExtension", "OtherExtension"),
+            error.replace("TemporaryItems", "TemporaryItems/project"),
+            error.replace(path, "/Users/test/Workspace/net.whatsapp.WhatsApp.ServiceExtension/TemporaryItems"),
+            error.replace("Operation not permitted (os error 1)", "Input/output error (os error 5)"),
+            error + "; /Users/test/Workspace/project: Operation not permitted (os error 1)",
+        ]:
+            with self.subTest(error=unexpected):
+                self.assertIn("cleanup_errors", monitor.problems(self.completed_sample([unexpected]), 2000))
+
     def test_completed_full_pass_apple_denials_remain_visible_as_warnings(self):
         paths = [
             "/private/var/folders/dd/test_user/T/com.apple.appleaccountd/TemporaryItems",
