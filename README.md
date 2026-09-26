@@ -139,7 +139,20 @@ keep local replicas and continue allocated work offline; their
 transaction journals sync on reconnect. Allocations do not expire when a machine
 disconnects, preventing another machine from starting the same task. Concurrent
 same-field edits are retained as conflicts rather than overwriting work.
-`hey-boss fleet status` shows the fleet without opening a browser.
+`hey-boss fleet status` shows bounded, read-only fleet health without opening a
+browser; `--json` returns the same summary as structured data. Counts include all
+unresolved supervisor conflicts, all signals and pending signals. Unknown values
+stay unknown, and disconnected machines show their last reported state.
+Use `--records conflicts|events|signals|machines --limit 1 --offset 0` for full
+diagnostic records, including saved conflict changes and worker histories.
+Both summary machines and diagnostic records support `--limit` (default 20,
+maximum 100) and `--offset`; JSON pages report totals and the next offset.
+Summary machines show at most 20 workers with explicit omitted counts and cap
+text at 240 characters. Events cover retained supervisor memory only, not complete
+history. Pages are live and can shift between reads; conflict and signal ordering
+uses timestamp and ID, newest first. Diagnostic records are not text-truncated;
+reduce the page size if the 16 MiB transport limit rejects a response. Status
+requires an upgraded supervisor and never claims, releases, syncs or controls work.
 `hey-boss fleet capabilities` gives a small report of the existing authenticated
 supervisor tunnel, supported issue operations, and supervisor build. Use
 `issue view NUMBER --supervisor --json` to read the current version, then

@@ -7,6 +7,8 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 mod native;
+mod status;
+use status::status_text;
 
 /// Apply or inspect this machine's saved workers, retaining their stable IDs.
 pub fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
@@ -54,8 +56,21 @@ pub enum Action {
         #[arg(long, hide = true, conflicts_with = "stdio")]
         install: bool,
     },
-    /// Show machines, workers, and connectivity through the local fleet connection.
-    Status,
+    /// Show bounded fleet health; read-only, with explicit history coverage.
+    Status {
+        /// Emit the summary as JSON (diagnostic pages always use JSON).
+        #[arg(long)]
+        json: bool,
+        /// Read full diagnostic records instead of the summary.
+        #[arg(long, value_parser = ["machines", "conflicts", "events", "signals"])]
+        records: Option<String>,
+        /// Maximum machines or diagnostic records in this page (1–100).
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        /// Skip this many machines or diagnostic records; pages are live, not frozen.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
     /// Inspect the existing supervisor tunnel and supported issue operations.
     Capabilities,
     /// Queue a durable worker signal, including while its machine is offline.

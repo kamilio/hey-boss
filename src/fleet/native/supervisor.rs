@@ -6,6 +6,7 @@ use super::{
     takeover,
 };
 use serde_json::{Value, json};
+mod status;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::{BufRead, BufReader, Read, Write},
@@ -1260,7 +1261,7 @@ impl Supervisor {
                 crate::issues::Store::open(&self.ctx.path)?.execute(&request)
             }
             Some("status") => self
-                .status()
+                .status_request(value)
                 .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
             Some("overview") => self
                 .overview()
@@ -1306,7 +1307,7 @@ impl Supervisor {
             return Ok(());
         }
         let result = match request["kind"].as_str() {
-            Some("status") => self.status(),
+            Some("status") => self.status_request(&request),
             Some("overview") => self.overview(),
             Some("conversation" | "takeover" | "steer") => self.conversation(&request),
             Some("signal") => self.signal(&request),
@@ -1478,6 +1479,67 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_status_counts_all_conflicts_without_loading_history_or_mutating() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        for n in 0..125 {
+            replica::execute(&db, "INSERT INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at) VALUES(?1,'peer',?2,'issues',?3,'Conflict',1)", &[json!(format!("c{n:03}")), json!(n), json!("history".repeat(2000))]).unwrap();
+        }
+        db.execute_batch(
+            "INSERT INTO fleet_signals VALUES('s','peer','w','pause','pending',NULL,1)",
+        )
+        .unwrap();
+        {
+            let mut state = app.state.lock().unwrap();
+            state.machines.insert("peer".into(), json!({"host":"peer","state":"disconnected","pending":7,"configuration_error":"failed","workers":null}));
+            state.local = vec![
+                json!({"id":"w","active":1,"runs":[{"events":["history".repeat(100000)]}]});
+                30
+            ];
+            state
+                .events
+                .push_back(json!({"id":1,"detail":"last event"}));
+        }
+        let before = replica::rows(&db, "SELECT * FROM fleet_signals", &[]).unwrap();
+        let result = app.status_request(&json!({"view":"summary"})).unwrap();
+        assert_eq!(result["counts"]["unresolved_conflicts"], 125);
+        assert_eq!(result["counts"]["pending_signals"], 1);
+        assert_eq!(result["counts"]["retained_events"], 1);
+        assert_eq!(result["machines"][0]["worker_count"], 30);
+        assert_eq!(
+            result["machines"][0]["workers"].as_array().unwrap().len(),
+            20
+        );
+        assert_eq!(result["machines"][1]["worker_count"], Value::Null);
+        assert_eq!(result["machines"][1]["pending"], 7);
+        assert_eq!(result["machines"][1]["configuration_error"], "failed");
+        assert!(serde_json::to_vec(&result).unwrap().len() < 30000);
+        assert!(!result.to_string().contains("historyhistory"));
+        let page = app
+            .status_request(&json!({"view":"conflicts","limit":1,"offset":124}))
+            .unwrap();
+        assert_eq!(page["records"][0]["id"], "c000");
+        assert_eq!(
+            page["records"][0]["saved_change"].as_str().unwrap().len(),
+            14000
+        );
+        assert_eq!(page["page"]["total"], 125);
+        assert_eq!(page["page"]["next_offset"], Value::Null);
+        assert_eq!(
+            replica::rows(&db, "SELECT * FROM fleet_signals", &[]).unwrap(),
+            before
+        );
+        assert_eq!(app.machine("peer")["state"], "disconnected");
+        for request in [
+            json!({"view":"unknown"}),
+            json!({"view":"summary","limit":101}),
+            json!({"view":"signals","offset":-1}),
+        ] {
+            assert!(app.status_request(&request).is_err());
+        }
+    }
 
     struct TestDirectory(std::path::PathBuf);
     impl Drop for TestDirectory {

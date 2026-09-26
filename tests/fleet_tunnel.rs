@@ -202,8 +202,17 @@ fn connected_tunnel_discovers_and_drafts_without_reverse_ssh() {
     assert_eq!(caps["capabilities"]["issue_draft"], true);
     assert_eq!(caps["capabilities"]["issue_metadata"], true);
     assert!(caps["usage"].as_str().unwrap().contains("--supervisor"));
-    let status = f.cli("peer", &["fleet", "status"], 0);
+    let status = f.cli("peer", &["fleet", "status", "--json"], 0);
     assert_eq!(status["capabilities"]["issue_draft"], true);
+    assert_eq!(status["view"], "summary");
+    assert_eq!(status["authoritative"], true);
+    let details = f.cli(
+        "peer",
+        &["fleet", "status", "--records", "signals", "--limit", "1"],
+        0,
+    );
+    assert_eq!(details["view"], "signals");
+    assert!(details["records"].is_array());
     let before = f.issue("peer", &["view", "1", "--supervisor"], 0);
     assert_eq!(before["issue"]["version"], 1);
     // The original reported command works, including stable automatic replay.
