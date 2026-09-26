@@ -100,6 +100,8 @@ class MonitorTests(unittest.TestCase):
             "/Users/test/Library/Caches/com.apple.findmy.fmfcore",
             "/Users/test/Library/Caches/com.apple.containermanagerd",
             "/private/var/folders/dd/test_user/T/com.apple.syncdefaultsd/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.amsengagementd/TemporaryItems",
+            "/private/var/folders/dd/test_user/T/com.apple.icloud.searchpartyuseragent/TemporaryItems",
         ]
         error = "24-hour cache expiration: " + "; ".join(
             path + ": Operation not permitted (os error 1)" for path in paths)
