@@ -1514,6 +1514,11 @@ mod tests {
         );
         assert_eq!(result["machines"][1]["worker_count"], Value::Null);
         assert_eq!(result["machines"][1]["pending"], 7);
+        assert_eq!(result["counts"]["reported_pending_changes"]["known"], 7);
+        assert_eq!(
+            result["counts"]["reported_companion_conflicts"]["unknown_machines"],
+            1
+        );
         assert_eq!(result["machines"][1]["configuration_error"], "failed");
         assert!(serde_json::to_vec(&result).unwrap().len() < 30000);
         assert!(!result.to_string().contains("historyhistory"));
@@ -1539,6 +1544,46 @@ mod tests {
         ] {
             assert!(app.status_request(&request).is_err());
         }
+    }
+
+    #[test]
+    fn bounded_status_includes_omitted_machine_conflicts_and_pages_deterministically() {
+        let (_directory, app) = test_supervisor();
+        {
+            let mut state = app.state.lock().unwrap();
+            for n in 0..150 {
+                let host = format!("peer{n:03}");
+                state.machines.insert(host.clone(), json!({"host":host,"pending":3,"conflicts":2,"error":"💥".repeat(1000),"workers":null}));
+            }
+        }
+        let summary = app.status_request(&json!({"view":"summary"})).unwrap();
+        assert_eq!(summary["counts"]["reported_pending_changes"]["known"], 450);
+        assert_eq!(
+            summary["counts"]["reported_companion_conflicts"]["known"],
+            300
+        );
+        assert_eq!(summary["page"]["total"], 151);
+        assert_eq!(summary["page"]["next_offset"], 20);
+        assert_eq!(
+            summary["machines"][1]["error"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            240
+        );
+        assert!(summary.to_string().len() < 40000);
+        let last = app
+            .status_request(&json!({"view":"summary","offset":150}))
+            .unwrap();
+        assert_eq!(last["machines"][0]["host"], "peer149");
+        assert_eq!(last["page"]["returned"], 1);
+        assert_eq!(last["page"]["next_offset"], Value::Null);
+        let empty = app
+            .status_request(&json!({"view":"events","offset":100}))
+            .unwrap();
+        assert_eq!(empty["page"]["returned"], 0);
+        assert_eq!(empty["page"]["next_offset"], Value::Null);
     }
 
     struct TestDirectory(std::path::PathBuf);

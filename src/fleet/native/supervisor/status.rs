@@ -164,6 +164,23 @@ impl Supervisor {
         result["desired_build"] =
             fields(&json!({"build":state.desired_build}), &["build"])["build"].clone();
         result["counts"] = json!({"machines":total,"unresolved_conflicts":conflicts,"signals":signals,"pending_signals":pending_signals,"retained_events":state.events.len()});
+        // Omitted/disconnected machines must not hide pending changes or conflicts.
+        // Report known sums with unknown-machine counts; never silently add null as zero.
+        for (source, target) in [
+            ("pending", "reported_pending_changes"),
+            ("conflicts", "reported_companion_conflicts"),
+        ] {
+            let mut known = 0u64;
+            let mut unknown = 0usize;
+            for (_, m) in state.machines.iter().filter(|(h, _)| h.as_str() != "local") {
+                if let Some(n) = m[source].as_u64() {
+                    known = known.saturating_add(n);
+                } else {
+                    unknown += 1;
+                }
+            }
+            result["counts"][target] = json!({"known":known,"unknown_machines":unknown});
+        }
         if view == "events" {
             let records: Vec<_> = state
                 .events
