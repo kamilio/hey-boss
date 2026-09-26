@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""One bounded, read-only health sample. Schedule every five minutes if desired.
+
+Example: monitor_harvester.py --host local --host devbox --directory REPORT_DIR
+Optional --until is a Unix timestamp; --notify pages only on persistent problems.
+The harvester remains responsible for every cleanup and process action.
+"""
+import argparse
+import concurrent.futures
+import datetime
+import fcntl
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import time
+
+
+# Runs on the observed machine; only reads health, executable and scheduler state.
+PROBE = r'''
+import hashlib,json,os,pathlib,subprocess,sys,time
+binary=pathlib.Path.home()/".local/bin/hey-harvester"
+def run(args):
+    p=subprocess.run(args,capture_output=True,text=True,timeout=35)
+    return {"returncode":p.returncode,"stdout":p.stdout,"stderr":p.stderr[-2000:]}
+status=run([str(binary),"status","--json"])
+if status["returncode"]:
+    raise RuntimeError(status["stderr"])
+snapshot=json.loads(status["stdout"])
+if sys.platform=="darwin":
+    scheduler=run(["/bin/launchctl","print",f"gui/{os.getuid()}/local.hey-boss.health"])
+else:
+    scheduler=run(["systemctl","--user","is-active","hey-boss-health.timer"])
+print(json.dumps({"snapshot":snapshot,"scheduler":scheduler,
+    "binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),"machine_time":int(time.time())}))
+'''
+
+
+def problems(sample, now):
+    if "error" in sample:
+        return ["unreachable"]
+    s = sample["snapshot"]
+    result = []
+    if sample["scheduler"]["returncode"]:
+        result.append("scheduler_unavailable")
+    if not s.get("config", {}).get("automatic"):
+        result.append("cleanup_disabled")
+    if now - (s.get("last_cleanup_at") or 0) > 900:
+        result.append("cleanup_stale")
+    if "cache_progress" not in s:
+        result.append("cache_telemetry_missing")
+    m = s.get("metrics", {})
+    if m.get("disk_available_bytes") is not None and m["disk_available_bytes"] < 25_000_000_000:
+        result.append("disk_low")
+    if m.get("memory_pressure", "").lower() == "critical":
+        result.append("memory_critical")
+    if s.get("errors"):
+        result.append("cleanup_errors")
+    return result
+
+
+def probe(host):
+    args = ["python3", "-c", PROBE]
+    if host != "local":
+        args = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
+                host, shlex.join(args)]
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=100)
+        if p.returncode:
+            return {"error": p.stderr[-2000:] or f"probe exited {p.returncode}"}
+        return json.loads(p.stdout)
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        return {"error": str(e)}
+
+
+def save(path, data):
+    temporary = path.with_suffix(".next")
+    temporary.write_text(json.dumps(data, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def compact(host, sample, now):
+    result = {"host": host, "collected_at": now,
+              "problems": problems(sample, sample.get("machine_time", now))}
+    if "error" in sample:
+        result["error"] = sample["error"]
+        return result
+    s = sample["snapshot"]
+    for key in ("observed_at", "last_cleanup_at", "metrics", "cache_progress",
+                "harvested_processes", "removed_worktrees", "removed_caches",
+                "errors", "running", "phase"):
+        result[key] = s.get(key)
+    result["binary_sha256"] = sample["binary_sha256"]
+    result["completed_cycles"] = [a for a in s.get("activity", [])
+                                   if a["category"] == "scan" and a["message"].startswith("Finished:")][-10:]
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", action="append", default=[])
+    parser.add_argument("--directory", type=pathlib.Path, required=True)
+    parser.add_argument("--until", type=int)
+    parser.add_argument("--notify", type=pathlib.Path)
+    options = parser.parse_args()
+    hosts = options.host or ["local"]
+    if any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@._-]*", h) for h in hosts):
+        parser.error("Invalid host name")
+    os.umask(0o077)
+    options.directory.mkdir(parents=True, exist_ok=True)
+    with (options.directory / "monitor.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        now = int(time.time())
+        if options.until and now >= options.until:
+            save(options.directory / "ended.json", {"ended_at": now})
+            return
+        state_path = options.directory / "monitor-state.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        rows = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(hosts))) as pool:
+            for host, sample in zip(hosts, pool.map(probe, hosts)):
+                sample["collected_at"] = now
+                # An unreachable machine replaces its latest record, so stale success cannot masquerade as current.
+                save(options.directory / f"{host}-latest.json", sample)
+                row = compact(host, sample, now)
+                rows.append(row)
+                previous = state.get(host, {})
+                issues = row["problems"]
+                same = issues == previous.get("problems")
+                since = previous.get("since", now) if same else now
+                last_alert = previous.get("last_alert", 0) if same else 0
+                # Require two samples for transient SSH/permission failures; low disk pages immediately.
+                actionable = "disk_low" in issues or (same and now - since >= 240)
+                if options.notify and issues and actionable and now - last_alert >= 21600:
+                    text = f"{host}: {', '.join(issues)}. Disk free: {row.get('metrics', {}).get('disk_available_bytes', 'unknown')} bytes. Evidence: {options.directory}"
+                    try:
+                        sent = subprocess.run([str(options.notify), "notif", "alert", "--title",
+                                               "Harvester needs attention", text], capture_output=True,
+                                              text=True, timeout=20)
+                        if sent.returncode == 0:
+                            last_alert = now
+                        else:
+                            row["notification_error"] = sent.stderr[-1000:]
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        row["notification_error"] = str(e)
+                state[host] = {"problems": issues, "since": since, "last_alert": last_alert}
+        day = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y%m%d")
+        with (options.directory / f"history-{day}.jsonl").open("a") as history:
+            for row in rows:
+                history.write(json.dumps(row) + "\n")
+        save(options.directory / "latest-summary.json", rows)
+        save(state_path, state)
+        for row in rows:
+            m = row.get("metrics") or {}
+            print(json.dumps({"host": row["host"], "problems": row["problems"],
+                              "disk_available_bytes": m.get("disk_available_bytes"),
+                              "memory_pressure": m.get("memory_pressure")}))
+
+
+if __name__ == "__main__":
+    main()
