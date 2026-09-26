@@ -1387,6 +1387,15 @@ impl Store {
             serde_json::to_string(
                 &json!({"action":"attachment","operation":operation.fingerprint()?}),
             )?
+        } else if let Operation::Artifact {
+            operation: crate::artifacts::Operation::Import { operation, files },
+        } = &r.operation
+        {
+            use sha2::{Digest, Sha256};
+            let files = files.iter().map(|file| Ok(json!({"destination":file.destination,"name":file.name,"sha256":format!("{:x}",Sha256::digest(crate::attachments::decode(&file.data)?))}))).collect::<Result<Vec<_>>>()?;
+            serde_json::to_string(
+                &json!({"action":"artifact","operation":{"command":"import","operation":operation,"files":files}}),
+            )?
         } else {
             serde_json::to_string(&r.operation)?
         };
@@ -1488,9 +1497,15 @@ impl Store {
                 &mut attachment_files,
             )?,
             Operation::Batch { edits } => batch::execute(&tx, &project, actor, edits, now)?,
-            Operation::Artifact { operation } => {
-                artifacts::execute(&tx, &project, operation, actor, now)?
-            }
+            Operation::Artifact { operation } => artifacts::execute_import(
+                &tx,
+                &self.attachment_root,
+                &project,
+                operation,
+                actor,
+                now,
+                &mut attachment_files,
+            )?,
             Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
@@ -1984,7 +1999,7 @@ impl Store {
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
         }
         tx.commit()?;
-        attachment_files.new = None;
+        attachment_files.new.clear();
         if let Some(path) = attachment_files.removed.take() {
             crate::attachments::delete_file(&path)?;
         }

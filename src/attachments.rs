@@ -175,12 +175,12 @@ fn get(db: &Connection, p: &Project, id: &str) -> Result<Value> {
 /// The caller owns the transaction and cleans a new file if committing fails.
 #[derive(Default)]
 pub(crate) struct DiskChange {
-    pub new: Option<PathBuf>,
+    pub new: Vec<PathBuf>,
     pub removed: Option<PathBuf>,
 }
 impl Drop for DiskChange {
     fn drop(&mut self) {
-        if let Some(path) = &self.new {
+        for path in &self.new {
             let _ = fs::remove_file(path);
         }
     }
@@ -250,7 +250,7 @@ pub(crate) fn execute(
                 .create_new(true)
                 .mode(0o600)
                 .open(&path)?;
-            files.new = Some(path);
+            files.new.push(path);
             file.write_all(&bytes)?;
             file.sync_all()?;
             // Sync the directory before committing metadata so power loss cannot

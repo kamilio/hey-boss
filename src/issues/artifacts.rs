@@ -105,7 +105,10 @@ pub(super) fn enrich_nodes(db: &Connection, nodes: &mut [Value]) -> Result<()> {
 fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     let mut artifact = get(db, &p.id, id)?;
     let source = artifact["body"].as_str().unwrap();
-    let rendered = crate::markdown::render_fragment(source);
+    let rendered = crate::markdown::render_fragment(source).replace(
+        "src=\"/attachments/f-",
+        "data-attachment-src=\"/attachments/f-",
+    );
     let mut stmt=db.prepare("SELECT id,parent,author,body,quote,prefix,suffix,resolved,created_at FROM artifact_comments WHERE project_id=?1 AND artifact_id=?2 ORDER BY id LIMIT 1001")?;
     let mut comments=stmt.query_map(params![p.id,id],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"parent":r.get::<_,Option<i64>>(1)?,"author":r.get::<_,String>(2)?,"body":r.get::<_,String>(3)?,"quote":r.get::<_,Option<String>>(4)?,"prefix":r.get::<_,Option<String>>(5)?,"suffix":r.get::<_,Option<String>>(6)?,"resolved":r.get::<_,bool>(7)?,"created_at":r.get::<_,i64>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let plain = rendered_text(&rendered);
@@ -182,7 +185,9 @@ pub(super) fn execute(
     let author = actor.map(|a| a.id.as_str()).unwrap_or("");
     match op {
         Operation::Preview { body } => {
-            return Ok(json!({"ok":true,"html":crate::markdown::render_fragment(body)}));
+            return Ok(
+                json!({"ok":true,"html":crate::markdown::render_fragment(body).replace("src=\"/attachments/f-", "data-attachment-src=\"/attachments/f-"),"local_files":crate::artifacts::import::local_destinations(body)?}),
+            );
         }
         Operation::List {
             query,
@@ -351,5 +356,75 @@ pub(super) fn execute(
         }
         _ => {}
     }
+    view(db, p, id)
+}
+
+pub(super) fn execute_import(
+    db: &Connection,
+    root: &std::path::Path,
+    p: &Project,
+    op: &Operation,
+    actor: Option<&crate::issues::Actor>,
+    now: i64,
+    disk: &mut crate::attachments::DiskChange,
+) -> Result<Value> {
+    let Operation::Import { operation, files } = op else {
+        return execute(db, p, op, actor, now);
+    };
+    // Validate the document and revision first. The surrounding transaction owns
+    // both document writes and attachment metadata; DiskChange rolls files back.
+    let value = execute(db, p, operation, actor, now)?;
+    let id = value["artifact"]["id"].as_str().unwrap();
+    let mut replacements = std::collections::BTreeMap::new();
+    let mut uploaded: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    for file in files {
+        use sha2::{Digest, Sha256};
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(crate::attachments::decode(&file.data)?)
+        );
+        let key = (file.name.clone(), digest);
+        let file_id = if let Some(id) = uploaded.get(&key) {
+            id.clone()
+        } else {
+            let result = crate::attachments::execute(
+                db,
+                root,
+                p,
+                &crate::attachments::Operation::Upload {
+                    target: crate::attachments::Target {
+                        kind: crate::attachments::Kind::Artifact,
+                        id: id.into(),
+                    },
+                    name: file.name.clone(),
+                    data: file.data.clone(),
+                },
+                actor.map(|a| a.id.as_str()).unwrap_or(""),
+                now,
+                disk,
+            )?;
+            let id = result["attachment"]["id"].as_str().unwrap().to_owned();
+            uploaded.insert(key, id.clone());
+            id
+        };
+        let suffix = file
+            .destination
+            .find(['#', '?'])
+            .map(|i| &file.destination[i..])
+            .unwrap_or("");
+        replacements.insert(
+            file.destination.clone(),
+            format!("/attachments/{file_id}{suffix}"),
+        );
+    }
+    let body = crate::artifacts::import::rewrite(
+        value["artifact"]["body"].as_str().unwrap(),
+        &replacements,
+    );
+    db.execute(
+        "UPDATE artifacts SET body=?3 WHERE project_id=?1 AND id=?2",
+        params![p.id, id, body],
+    )?;
     view(db, p, id)
 }

@@ -26,7 +26,7 @@ struct Text {
     /// Markdown text, or '-' for stdin.
     #[arg(long, conflicts_with = "file")]
     body: Option<String>,
-    /// Import a UTF-8 Markdown file, or '-' for stdin.
+    /// Import Markdown and rehost local linked files (relative to this file); '-' reads stdin.
     #[arg(long, conflicts_with = "body")]
     file: Option<PathBuf>,
 }
@@ -232,6 +232,37 @@ pub fn run(options: &Options) -> Result<()> {
             node: target.node.clone(),
         },
     };
+    let text = match &options.action {
+        Action::Create { text, .. } | Action::Edit { text, .. } => Some(text),
+        _ => None,
+    };
+    let source = match &op {
+        Operation::Create { body, .. }
+        | Operation::Edit {
+            body: Some(body), ..
+        } => Some(body),
+        _ => None,
+    };
+    let files = if let Some(source) = source {
+        let cwd = std::env::current_dir()?;
+        let base = text
+            .and_then(|text| text.file.as_deref())
+            .filter(|path| *path != std::path::Path::new("-"))
+            .and_then(|path| path.parent())
+            .unwrap_or(&cwd);
+        hey_boss::artifacts::import::collect(source, base)?
+    } else {
+        Vec::new()
+    };
+    let creating = matches!(op, Operation::Create { .. });
+    let op = if files.is_empty() {
+        op
+    } else {
+        Operation::Import {
+            operation: Box::new(op),
+            files,
+        }
+    };
     op.validate()?;
     let cwd = std::env::current_dir()?.canonicalize()?;
     let machine = issues::identity::machine()?;
@@ -244,9 +275,7 @@ pub fn run(options: &Options) -> Result<()> {
     } else {
         None
     };
-    if matches!(op, Operation::Create { .. })
-        && let Some(actor) = actor.as_mut()
-    {
+    if creating && let Some(actor) = actor.as_mut() {
         issues::identity::creation_context(actor);
     }
     let request = issues::Request {
