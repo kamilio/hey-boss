@@ -37,17 +37,32 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('ControlMaster=no', args)
 
     def test_probe_timeout_reaps_a_proxy_that_outlives_its_ssh_parent(self):
+        self.check_proxy_cleanup(timeout=True)
+
+    def test_failed_probe_reaps_a_proxy_with_closed_output_pipes(self):
+        self.check_proxy_cleanup(timeout=False)
+
+    def check_proxy_cleanup(self, timeout):
         with tempfile.TemporaryDirectory() as directory:
             receipt = pathlib.Path(directory) / 'proxy.json'
             proxy = ('import os,json,time,signal; from pathlib import Path; '
                      'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
                      f'Path({str(receipt)!r}).write_text(json.dumps([os.getpid(),os.getpgrp()])); '
                      'time.sleep(30)')
-            launcher = f'import subprocess,sys; subprocess.Popen([sys.executable,"-c",{proxy!r}])'
+            launcher = (f'import subprocess,sys,time; from pathlib import Path; '
+                        f'subprocess.Popen([sys.executable,"-c",{proxy!r}]'
+                        + (')' if timeout else ',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)'))
+            if not timeout:
+                launcher += (f'\nfor _ in range(200):\n'
+                             f' if Path({str(receipt)!r}).exists(): break\n'
+                             ' time.sleep(0.01)\nsys.exit(1)')
             try:
                 started = time.monotonic()
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    monitor.run_probe([sys.executable, '-c', launcher], timeout=0.5)
+                if timeout:
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        monitor.run_probe([sys.executable, '-c', launcher], timeout=0.5)
+                else:
+                    self.assertEqual(monitor.run_probe([sys.executable, '-c', launcher]).returncode, 1)
                 self.assertLess(time.monotonic()-started, 5)
                 pid, group = json.loads(receipt.read_text())
                 self.assertNotEqual(group, os.getpgrp())

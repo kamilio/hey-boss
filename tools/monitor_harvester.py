@@ -136,6 +136,16 @@ def problems(sample, now):
     return result
 
 
+def stop_probe_group(process):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            break
+        if sig == signal.SIGTERM:
+            time.sleep(0.1)
+
+
 def run_probe(args, timeout=100):
     # SSH may exit while its authentication proxy still holds the output pipes.
     # Own a separate process group so timeout cleanup cannot reach other jobs.
@@ -144,15 +154,12 @@ def run_probe(args, timeout=100):
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(process.pid, sig)
-                except ProcessLookupError:
-                    break
-                if sig == signal.SIGTERM:
-                    time.sleep(0.1)
+            stop_probe_group(process)
             process.communicate(timeout=2)
             raise
+        if process.returncode:
+            # Failed SSH can close its pipes before its proxy notices the exit.
+            stop_probe_group(process)
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
