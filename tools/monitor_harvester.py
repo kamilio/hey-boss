@@ -72,7 +72,9 @@ def expected_access_denial(error):
         path = part[:-len(suffix)]
         cache = re.fullmatch(r"/Users/[^/]+/Library/Caches/([^/]+)", path)
         temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/([^/]+)/TemporaryItems", path)
-        if not ((cache and cache[1] in caches) or (temporary and temporary[1] in services)):
+        os_temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/TemporaryItems", path)
+        if not (os_temporary or (cache and cache[1] in caches) or
+                (temporary and temporary[1] in services)):
             return False
     return True
 
