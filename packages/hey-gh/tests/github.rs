@@ -2528,6 +2528,21 @@ async fn independent_detail_watch_reuses_ci_without_clearing_ci_failure_health()
             .any(|comment| comment["id"] == 2)
     );
     assert_eq!(
+        combined.data["comments"], latest["comments"],
+        "a successful detail watch must publish the same conversation in both feeds"
+    );
+    let sources = c.changes(None, 1000).await.unwrap();
+    let combined_change = sources
+        .changes
+        .iter()
+        .rev()
+        .find(|change| change.resource == combined.resource)
+        .unwrap();
+    assert_eq!(
+        combined_change.data["comments"], combined.data["comments"],
+        "source subscribers must receive the conversation persisted in bootstrap"
+    );
+    assert_eq!(
         h.calls()[before..]
             .iter()
             .filter(|call| call.path.contains("/check-runs"))
