@@ -326,6 +326,103 @@ pub struct Worker {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+/// Cancellable startup, before a scheduler or any agent has been launched.
+pub struct Startup {
+    stop: Arc<AtomicBool>,
+    reload: Arc<AtomicBool>,
+}
+impl Startup {
+    pub fn new() -> Result<Self> {
+        let startup = Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            reload: Arc::new(AtomicBool::new(false)),
+        };
+        install_signals_for_upgrade(startup.stop.clone(), Some(startup.reload.clone()))?;
+        Ok(startup)
+    }
+
+    // Callers must reconcile uncertain writes or supply a stable request ID.
+    fn retry<T>(&self, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+        let mut delay = Duration::from_secs(1);
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return Err(Error::new(
+                    "cancelled",
+                    "Worker stopped while waiting for connection",
+                ));
+            }
+            match operation() {
+                Err(error) if startup_unavailable(&error) => {
+                    eprintln!(
+                        "Worker idle: {error}; waiting for connection, retrying in {}s. Ctrl+C stops this worker.",
+                        delay.as_secs()
+                    );
+                    let deadline = Instant::now() + delay;
+                    while !self.stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    pub fn open(&self, path: &Path) -> Result<Store> {
+        self.retry(|| Store::open(path))
+    }
+
+    pub fn execute(
+        &self,
+        store: &mut Store,
+        path: &Path,
+        request: &super::Request,
+    ) -> Result<Value> {
+        let mut request = request.clone();
+        if request.operation.writes() && request.request_id.is_none() {
+            request.request_id = Some(format!("worker-startup-{}", random_id()?));
+        }
+        let mut reconnect = false;
+        self.retry(|| {
+            if reconnect {
+                *store = Store::open(path)?;
+            }
+            let result = store.execute(&request);
+            reconnect = result.as_ref().is_err_and(startup_unavailable);
+            result
+        })
+    }
+
+    fn register(
+        &self,
+        store: &mut Store,
+        path: &Path,
+        id: &str,
+        settings: &Settings,
+        machine: &str,
+    ) -> Result<()> {
+        let mut reconcile = false;
+        self.retry(|| {
+            if reconcile {
+                *store = Store::open(path)?;
+                if store.worker_registered_here(id, settings, machine)? {
+                    return Ok(());
+                }
+            }
+            let result = store
+                .register_worker(Some(id), settings, machine)
+                .map(|_| ());
+            reconcile = result.as_ref().is_err_and(startup_unavailable);
+            result
+        })
+    }
+}
+
+fn startup_unavailable(error: &Error) -> bool {
+    error.code == "database_busy"
+        || super::worker_infrastructure::database_unavailable(&error.message)
+}
+
 /// Bound local contention retries so an outage cannot prevent worker shutdown.
 /// The scheduler reconciles saved results later with its own backoff.
 pub fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
@@ -359,14 +456,25 @@ impl Worker {
         Self::start_for(path, None)
     }
     pub fn start_for(path: PathBuf, worker_id: Option<String>) -> Result<Self> {
+        Self::start_for_control(
+            path,
+            worker_id,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+    fn start_for_control(
+        path: PathBuf,
+        worker_id: Option<String>,
+        stop: Arc<AtomicBool>,
+        reload: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let machine = identity::machine()?;
         let mut store = retry_database_busy(|| Store::open(&path))?;
         // Never free a slot until the old owned process has actually stopped.
         retry_database_busy(|| recover(&mut store, &machine))?;
         retry_database_busy(|| store.recover_chiefs(&machine, worker_id.as_deref()))?;
-        let stop = Arc::new(AtomicBool::new(false));
         let upgrading = Arc::new(AtomicBool::new(false));
-        let reload = Arc::new(AtomicBool::new(false));
         let executable = std::env::current_exe()?;
         let original_executable = executable_identity(&executable);
         let upgrade_requested = upgrading.clone();
@@ -2006,156 +2114,307 @@ pub fn serve_instance_with_history(
     json_output: bool,
     history_limit: usize,
 ) -> Result<()> {
-    use std::io::IsTerminal;
-    // Linux current_exe() gains " (deleted)" after an atomic replacement.
-    // Retain the installed path while it still names the running executable.
-    let reload_executable = std::env::current_exe()?.canonicalize()?;
-    let path = super::database_path()?;
-    let machine = identity::machine()?;
-    let mut store = retry_database_busy(|| Store::open(&path))?;
-    // Ensure the caller's project exists before registration/selection.
-    retry_database_busy(|| {
-        store.execute(&super::Request {
-            version: 1,
-            project: project.clone(),
-            project_override: None,
-            actor: None,
-            operation: super::Operation::Projects {
-                include_hidden: true,
-            },
-            request_id: None,
-        })
-    })?;
-    let id = retry_database_busy(|| store.register_worker(id, &settings, &machine))?;
-    crate::fleet::record_local_worker(&id, Some(&settings), "running")?;
-    struct Registration {
-        path: PathBuf,
-        id: String,
+    let result = Startup::new()?.serve_instance(settings, id, project, json_output, history_limit);
+    match result {
+        Err(error) if error.code == "cancelled" => Ok(()),
+        result => result,
     }
-    impl Drop for Registration {
-        fn drop(&mut self) {
-            if let Ok(store) = retry_database_busy(|| Store::open(&self.path)) {
-                let _ = retry_database_busy(|| store.unregister_worker(&self.id));
-            }
-        }
-    }
-    let _registration = Registration {
-        path: path.clone(),
-        id: id.clone(),
-    };
-    let worker = Worker::start_for(path.clone(), Some(id.clone()))?;
-    install_signals_for_upgrade(worker.stop.clone(), Some(worker.reload.clone()))?;
-    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output;
-    if tty {
-        use crate::worker_tui::{backend::Client, runtime};
-        let exit = runtime::run(
-            runtime::Options {
-                client: Client {
-                    binary: reload_executable.clone(),
-                    host: None,
-                    directory: Some(std::env::current_dir()?),
-                    timeout: Duration::from_secs(10),
+}
+
+impl Startup {
+    pub fn serve_instance(
+        &self,
+        settings: Settings,
+        id: Option<&str>,
+        project: Project,
+        json_output: bool,
+        history_limit: usize,
+    ) -> Result<()> {
+        use std::io::IsTerminal;
+        validate_settings(&settings)?;
+        // Linux current_exe() gains " (deleted)" after an atomic replacement.
+        // Retain the installed path while it still names the running executable.
+        let reload_executable = std::env::current_exe()?.canonicalize()?;
+        let path = super::database_path()?;
+        let machine = identity::machine()?;
+        let mut store = self.open(&path)?;
+        // Ensure the caller's project exists before registration/selection.
+        self.execute(
+            &mut store,
+            &path,
+            &super::Request {
+                version: 1,
+                project: project.clone(),
+                project_override: None,
+                actor: None,
+                operation: super::Operation::Projects {
+                    include_hidden: true,
                 },
-                id: Some(id.clone()),
-                history: history_limit > 0,
-                owned_worker: true,
-                project_tabs: false,
+                request_id: None,
             },
-            worker.stop.clone(),
-        )
-        .map_err(|e| Error::new("worker_error", e.to_string()))?;
-        if exit == runtime::Exit::Quit {
-            worker.reload.store(false, Ordering::Relaxed);
+        )?;
+        // Keep the same ID if registration committed but its acknowledgment was lost.
+        let id = id.map(str::to_owned).map(Ok).unwrap_or_else(random_id)?;
+        self.register(&mut store, &path, &id, &settings, &machine)?;
+        struct Registration {
+            path: PathBuf,
+            id: String,
         }
-    }
-    let mut last = String::new();
-    let mut heartbeat = Instant::now() - Duration::from_secs(30);
-    while !tty && !worker.stop.load(Ordering::Relaxed) {
-        let value = store.execute(&super::Request {
-            version: 1,
-            project: project.clone(),
-            project_override: None,
-            actor: None,
-            operation: super::Operation::Workers {
-                worker_id: Some(id.clone()),
-            },
-            request_id: None,
-        });
-        let mut value = match value {
-            Ok(value) => value,
-            Err(error)
-                if error.code == "database_busy"
-                    || super::worker_infrastructure::database_unavailable(&error.message) =>
-            {
-                reconnect_store(&mut store, &path, &error);
-                eprintln!(
-                    "Worker status temporarily unavailable: {error}; retrying without stopping sessions"
-                );
-                thread::sleep(Duration::from_millis(200));
-                continue;
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                if let Ok(store) = retry_database_busy(|| Store::open(&self.path)) {
+                    let _ = retry_database_busy(|| store.unregister_worker(&self.id));
+                }
             }
-            Err(error) => return Err(error),
+        }
+        let _registration = Registration {
+            path: path.clone(),
+            id: id.clone(),
         };
-        value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
-        value["upgrading"] =
-            json!(worker.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
-        limit_status_history(&mut value, history_limit);
-        let signature = serde_json::to_string(&value)?;
-        if signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
+        crate::fleet::record_local_worker(&id, Some(&settings), "running")?;
+        let worker = self.retry(|| {
+            Worker::start_for_control(
+                path.clone(),
+                Some(id.clone()),
+                self.stop.clone(),
+                self.reload.clone(),
+            )
+        });
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                // Cancelling startup must not leave intent that restarts it later.
+                let _ = crate::fleet::record_local_worker(&id, None, "stop");
+                return Err(error);
+            }
+        };
+        let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output;
+        if tty {
+            use crate::worker_tui::{backend::Client, runtime};
+            let exit = runtime::run(
+                runtime::Options {
+                    client: Client {
+                        binary: reload_executable.clone(),
+                        host: None,
+                        directory: Some(std::env::current_dir()?),
+                        timeout: Duration::from_secs(10),
+                    },
+                    id: Some(id.clone()),
+                    history: history_limit > 0,
+                    owned_worker: true,
+                    project_tabs: false,
+                },
+                worker.stop.clone(),
+            )
+            .map_err(|e| Error::new("worker_error", e.to_string()))?;
+            if exit == runtime::Exit::Quit {
+                worker.reload.store(false, Ordering::Relaxed);
+            }
+        }
+        let mut last = String::new();
+        let mut heartbeat = Instant::now() - Duration::from_secs(30);
+        while !tty && !worker.stop.load(Ordering::Relaxed) {
+            let value = store.execute(&super::Request {
+                version: 1,
+                project: project.clone(),
+                project_override: None,
+                actor: None,
+                operation: super::Operation::Workers {
+                    worker_id: Some(id.clone()),
+                },
+                request_id: None,
+            });
+            let mut value = match value {
+                Ok(value) => value,
+                Err(error)
+                    if error.code == "database_busy"
+                        || super::worker_infrastructure::database_unavailable(&error.message) =>
+                {
+                    reconnect_store(&mut store, &path, &error);
+                    eprintln!(
+                        "Worker status temporarily unavailable: {error}; retrying without stopping sessions"
+                    );
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            value["store"] = json!({"host":identity::host(), "database":super::database_path()?});
+            value["upgrading"] =
+                json!(worker.upgrading.load(Ordering::Relaxed) || value["upgrading"] == true);
+            limit_status_history(&mut value, history_limit);
+            let signature = serde_json::to_string(&value)?;
+            if signature != last || heartbeat.elapsed() > Duration::from_secs(15) {
+                if json_output {
+                    println!("{value}");
+                } else {
+                    print_status_with_history(&value, false, history_limit);
+                    println!("Ctrl+C stops this worker's Codex sessions.");
+                }
+                std::io::stdout().flush()?;
+                last = signature;
+                heartbeat = Instant::now();
+            }
+            for _ in 0..5 {
+                if worker.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+        let reload =
+            worker.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
+        drop(worker);
+        if !reload && !store.worker_shutdown_requested(&id)? {
+            crate::fleet::record_local_worker(&id, None, "stop")?;
+        }
+        if let Err(error) = retry_database_busy(|| store.unregister_worker(&id)) {
+            if error.code != "database_busy"
+                && !super::worker_infrastructure::database_unavailable(&error.message)
+            {
+                return Err(error);
+            }
+            crate::worker_tui::diagnostics::report(format_args!(
+                "Worker stopped; database registration cleanup will be reconciled after recovery: {error}"
+            ));
+        }
+        if reload {
+            drop(_registration);
+            let mut command = Command::new(reload_executable);
+            command.args([
+                "worker",
+                "run",
+                "--id",
+                &id,
+                "--history",
+                &history_limit.to_string(),
+            ]);
             if json_output {
-                println!("{value}");
-            } else {
-                print_status_with_history(&value, false, history_limit);
-                println!("Ctrl+C stops this worker's Codex sessions.");
+                command.arg("--json");
             }
-            std::io::stdout().flush()?;
-            last = signature;
-            heartbeat = Instant::now();
+            return Err(command.exec().into());
         }
-        for _ in 0..5 {
-            if worker.stop.load(Ordering::Relaxed) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(200));
-        }
+        Ok(())
     }
-    let reload = worker.reload.load(Ordering::Relaxed) && !store.worker_shutdown_requested(&id)?;
-    drop(worker);
-    if !reload && !store.worker_shutdown_requested(&id)? {
-        crate::fleet::record_local_worker(&id, None, "stop")?;
-    }
-    if let Err(error) = retry_database_busy(|| store.unregister_worker(&id)) {
-        if error.code != "database_busy"
-            && !super::worker_infrastructure::database_unavailable(&error.message)
-        {
-            return Err(error);
-        }
-        crate::worker_tui::diagnostics::report(format_args!(
-            "Worker stopped; database registration cleanup will be reconciled after recovery: {error}"
-        ));
-    }
-    if reload {
-        drop(_registration);
-        let mut command = Command::new(reload_executable);
-        command.args([
-            "worker",
-            "run",
-            "--id",
-            &id,
-            "--history",
-            &history_limit.to_string(),
-        ]);
-        if json_output {
-            command.arg("--json");
-        }
-        return Err(command.exec().into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_registration_reconciles_lost_commit_acknowledgments() {
+        for committed in [false, true] {
+            let root = crate::admin::Temporary::new().unwrap();
+            let path = root.0.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (connection, transport) =
+                crate::database::tests::lose_commit_response(&path, committed);
+            store.replace_connection_for_test(connection);
+            let startup = Startup {
+                stop: Arc::new(AtomicBool::new(false)),
+                reload: Arc::new(AtomicBool::new(false)),
+            };
+            let settings = Settings::default();
+            startup
+                .register(&mut store, &path, "retry-worker", &settings, "fixture")
+                .unwrap();
+            transport.join().unwrap();
+            let (count, version): (i64, i64) = crate::database::Connection::open(&path)
+                .unwrap()
+                .query_row("SELECT count(*),version FROM issue_workers", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!((count, version), (1, 1));
+            assert!(
+                store
+                    .worker_registered_here("retry-worker", &settings, "fixture")
+                    .unwrap()
+            );
+            assert_eq!(
+                startup
+                    .register(&mut store, &path, "retry-worker", &settings, "fixture")
+                    .unwrap_err()
+                    .code,
+                "conflict"
+            );
+            owner.stop();
+        }
+    }
+
+    #[test]
+    fn startup_metadata_retries_reuse_the_actor_and_request_id() {
+        for committed in [false, true] {
+            let root = crate::admin::Temporary::new().unwrap();
+            let path = root.0.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            let actor = identity::resolve(Some("test:startup"), "fixture", &root.0).unwrap();
+            let mut request = super::super::Request {
+                version: 1,
+                project: Project {
+                    id: "named:Startup".into(),
+                    name: "Startup".into(),
+                },
+                project_override: None,
+                actor: Some(actor),
+                operation: super::super::Operation::Projects {
+                    include_hidden: true,
+                },
+                request_id: None,
+            };
+            store.execute(&request).unwrap();
+            request.operation = super::super::Operation::ConfigureWorker {
+                worker_id: None,
+                config: Settings::default(),
+                if_version: None,
+            };
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (connection, transport) =
+                crate::database::tests::lose_commit_response(&path, committed);
+            store.replace_connection_for_test(connection);
+            let startup = Startup {
+                stop: Arc::new(AtomicBool::new(false)),
+                reload: Arc::new(AtomicBool::new(false)),
+            };
+            let response = startup.execute(&mut store, &path, &request).unwrap();
+            transport.join().unwrap();
+            assert!(response["worker_id"].is_string());
+            assert_eq!(
+                crate::database::Connection::open(&path)
+                    .unwrap()
+                    .query_row("SELECT count(*) FROM issue_workers", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            owner.stop();
+        }
+    }
+
+    #[test]
+    fn startup_never_retries_invalid_settings_or_permission_denials() {
+        let startup = Startup {
+            stop: Arc::new(AtomicBool::new(false)),
+            reload: Arc::new(AtomicBool::new(false)),
+        };
+        for error in [
+            Error::invalid("Choose an existing absolute checkout directory"),
+            Error::new(
+                "database_error",
+                "Database service unavailable: Permission denied",
+            ),
+        ] {
+            let mut attempts = 0;
+            let result: Result<()> = startup.retry(|| {
+                attempts += 1;
+                Err(error.clone())
+            });
+            assert_eq!(result.unwrap_err().code, error.code);
+            assert_eq!(attempts, 1);
+        }
+    }
 
     #[test]
     fn local_checkout_identity_survives_adding_a_remote() {

@@ -1035,6 +1035,20 @@ impl Store {
         tx.commit()?;
         Ok(id)
     }
+    pub(crate) fn worker_registered_here(
+        &self,
+        id: &str,
+        settings: &Settings,
+        machine: &str,
+    ) -> Result<bool> {
+        let start = crate::agents::process_identity(std::process::id())
+            .ok_or_else(|| Error::new("worker_error", "Cannot identify worker process"))?;
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_workers WHERE id=?1 AND owner_pid=?2 AND owner_start=?3 AND machine=?4 AND config=?5 AND stop_requested=0)",
+            params![id, std::process::id(), start, machine, serde_json::to_string(settings)?],
+            |row| row.get(0),
+        )?)
+    }
     pub fn unregister_worker(&self, id: &str) -> Result<()> {
         self.db.execute("UPDATE issue_workers SET owner_pid=NULL,owner_start=NULL,config=json_set(config,'$.enabled',json('false')),version=version+1,updated_at=?2 WHERE id=?1 AND owner_pid=?3",params![id,now(),std::process::id()])?;
         Ok(())

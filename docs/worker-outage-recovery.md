@@ -1,5 +1,13 @@
 # Worker outage recovery
 
+`hey-boss worker run` stays idle through temporary local database-service
+disconnects during startup, retrying after 1, 2, 4, 8, 16, then 30 seconds until
+the service returns. Ctrl+C cancels the wait. Invalid settings and permission
+denials still fail with an actionable error. Registration retries reconcile the
+same worker ID after an uncertain commit; project-setting retries reuse their
+request ID. No scheduler starts before startup succeeds, and disconnected
+companions retain the normal allocation and reservation checks.
+
 Database transport disconnects and model-proxy recovery-budget exhaustion are
 infrastructure failures. An unfinished attempt retains its session, checkout,
 history, and the specific outage explanation. It releases its claim and worker
