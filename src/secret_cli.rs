@@ -47,6 +47,32 @@ fn field_name(s: &str) -> Result<String, String> {
 fn error(message: &str) -> io::Error {
     io::Error::other(message)
 }
+#[derive(Debug)]
+struct DeliveryError {
+    delivery: &'static str,
+    reason: &'static str,
+    message: String,
+}
+impl std::fmt::Display for DeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Secret delivery={} reason={}: {}",
+            self.delivery, self.reason, self.message
+        )
+    }
+}
+impl std::error::Error for DeliveryError {}
+fn outcome(delivery: &'static str, reason: &'static str, message: &str) -> io::Error {
+    io::Error::other(DeliveryError {
+        delivery,
+        reason,
+        message: message.into(),
+    })
+}
+fn not_delivered(reason: &'static str, message: &str) -> io::Error {
+    outcome("not_delivered", reason, message)
+}
 fn private_regular(file: &File) -> io::Result<()> {
     let m = file.metadata()?;
     if !m.is_file()
@@ -186,7 +212,7 @@ impl EnvFile {
             } else {
                 // Atomic no-clobber publication when the destination did not exist.
                 fs::hard_link(&temporary, &self.path)?;
-                fs::remove_file(&temporary)?;
+                // Publication succeeded. Cleanup must not turn delivery into a failure.
             }
             Ok(())
         })();
@@ -207,15 +233,24 @@ impl SystemNonce {
 #[derive(Deserialize)]
 struct SecretResponse {
     status: String,
-    result: Option<String>,
+    // Decode the result only for success. Cancellation/rejection must not depend
+    // on the shape of an unused (and potentially credential-bearing) payload.
+    result: Option<Box<serde_json::value::RawValue>>,
 }
 fn receive(socket: &Path, request: &serde_json::Value) -> io::Result<Vec<String>> {
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|_| error("Secret prompt requires a connected, updated desktop companion"))?;
+    let mut stream = UnixStream::connect(socket).map_err(|_| {
+        not_delivered(
+            "unavailable",
+            "Connect an updated desktop companion; no request was sent.",
+        )
+    })?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_read_timeout(Some(Duration::from_secs(900)))?;
-    stream.write_all(&serde_json::to_vec(request).map_err(|_| error("Invalid secret request"))?)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    // Let the desktop's 900-second expiry and bounded reply write finish first.
+    stream.set_read_timeout(Some(Duration::from_secs(915)))?;
+    let payload = serde_json::to_vec(request)
+        .map_err(|_| not_delivered("request_invalid", "Invalid secret request."))?;
+    stream.write_all(&payload).and_then(|()| stream.shutdown(std::net::Shutdown::Write))
+        .map_err(|_| not_delivered("transport_failed", "Request transport failed; dismiss any remaining prompt and reconnect before an explicit retry."))?;
     read_response(&mut stream)
 }
 
@@ -224,27 +259,68 @@ fn read_response(stream: &mut UnixStream) -> io::Result<Vec<String>> {
     stream
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| error("Secret prompt disconnected or timed out; nothing saved"))?;
+        .map_err(|_| not_delivered("transport_failed", "Disconnected or timed out; dismiss any remaining prompt and reconnect before an explicit retry."))?;
     if bytes.len() > 1024 * 1024 {
-        return Err(error("Secret response exceeded limit"));
-    }
-    let reply: SecretResponse =
-        serde_json::from_slice(&bytes).map_err(|_| error("Invalid secret response"))?;
-    if reply.status == "cancelled" {
-        return Err(error("Secret entry cancelled; nothing saved"));
-    }
-    if reply.status != "ok" {
-        return Err(error(
-            "Secret prompt unavailable; update/reconnect the desktop companion",
+        return Err(not_delivered(
+            "response_too_large",
+            "Response exceeded limit; update the desktop companion before an explicit retry.",
         ));
     }
-    serde_json::from_str(
-        reply
-            .result
-            .as_deref()
-            .ok_or_else(|| error("Missing secret response"))?,
-    )
-    .map_err(|_| error("Invalid secret response"))
+    if bytes.is_empty() {
+        return Err(not_delivered(
+            "response_empty",
+            "Connection closed without a reply; dismiss any remaining prompt and reconnect before an explicit retry.",
+        ));
+    }
+    let malformed = || {
+        not_delivered(
+            "response_malformed",
+            "Invalid response data; dismiss any remaining prompt and update the desktop companion before an explicit retry.",
+        )
+    };
+    let reply: SecretResponse = serde_json::from_slice(&bytes).map_err(|_| malformed())?;
+    match reply.status.as_str() {
+        "ok" => {}
+        "cancelled" => {
+            return Err(not_delivered(
+                "cancelled",
+                "Entry cancelled; do not request again without user authorization.",
+            ));
+        }
+        "expired" => {
+            return Err(not_delivered(
+                "expired",
+                "Entry expired; request again only with explicit authorization.",
+            ));
+        }
+        "rejected" => {
+            return Err(not_delivered(
+                "rejected",
+                "Request rejected; check field names and request metadata before retrying.",
+            ));
+        }
+        "busy" => {
+            return Err(not_delivered(
+                "busy",
+                "Desktop private-prompt limit reached; resolve existing prompts before retrying.",
+            ));
+        }
+        "error" => {
+            return Err(not_delivered(
+                "unavailable",
+                "Prompt unavailable; dismiss any remaining prompt and update/reconnect the desktop companion before an explicit retry.",
+            ));
+        }
+        _ => return Err(malformed()),
+    }
+    let raw = reply.result.ok_or_else(|| {
+        not_delivered(
+            "response_missing",
+            "Reply has no result; update the desktop companion before an explicit retry.",
+        )
+    })?;
+    let result: String = serde_json::from_str(raw.get()).map_err(|_| malformed())?;
+    serde_json::from_str(&result).map_err(|_| malformed())
 }
 // POSIX shell-compatible environment assignments; values are always literal.
 fn assignments(fields: &[String], values: &[String]) -> Vec<u8> {
@@ -256,6 +332,18 @@ fn assignments(fields: &[String], values: &[String]) -> Vec<u8> {
         .into_bytes()
 }
 pub fn run(options: &Options) -> io::Result<()> {
+    run_inner(options).map_err(|err| {
+        if err
+            .get_ref()
+            .is_some_and(|cause| cause.is::<DeliveryError>())
+        {
+            err
+        } else {
+            not_delivered("request_failed", &err.to_string())
+        }
+    })
+}
+fn run_inner(options: &Options) -> io::Result<()> {
     if !(1..=2).contains(&options.fields.len())
         || options.fields.len() == 2 && options.fields[0] == options.fields[1]
         || options.login && options.fields.len() != 2
@@ -310,29 +398,55 @@ pub fn run(options: &Options) -> io::Result<()> {
             .iter()
             .any(|v| v.is_empty() || v.len() > 65536 || v.contains('\0'))
     {
-        return Err(error(
+        return Err(not_delivered(
+            "values_invalid",
             "Secret values must be nonempty, without NUL, and at most 64 KiB each",
         ));
     }
     if let Some(file) = env_file {
-        file.write(&assignments(&options.fields, &values))?;
+        file.write(&assignments(&options.fields, &values)).map_err(|_| not_delivered("destination_failed", "Could not safely save credentials; check destination permissions or concurrent changes before an explicit retry."))?;
     } else if let Some(file) = &mut stdout {
         file.write_all(&assignments(&options.fields, &values))
-            .map_err(|_| error("Could not write secret destination"))?;
-        file.sync_all()?;
+            .and_then(|()| file.sync_all())
+            .map_err(|_| {
+                outcome(
+                    "unknown",
+                    "destination_failed",
+                    "Redirected output may be partial; do not repeat automatically.",
+                )
+            })?;
     } else {
-        let status = Command::new(&options.command[0])
+        let mut child = Command::new(&options.command[0])
             .args(&options.command[1..])
             .envs(options.fields.iter().zip(&values))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .map_err(|_| error("Could not start child process"))?;
+            .spawn()
+            .map_err(|_| {
+                not_delivered(
+                    "child_start_failed",
+                    "Could not start child process; check the executable before an explicit retry.",
+                )
+            })?;
+        let status = child.wait().map_err(|_| {
+            outcome(
+                "delivered",
+                "child_wait_failed",
+                "Child started but completion is unknown; do not repeat automatically.",
+            )
+        })?;
         if !status.success() {
-            return Err(error("Child process failed (output suppressed)"));
+            return Err(outcome(
+                "delivered",
+                "child_failed",
+                "Child process failed (output suppressed); do not repeat credential delivery automatically.",
+            ));
         }
+        eprintln!("Secret delivery=delivered: child process succeeded (output suppressed).");
+        return Ok(());
     }
+    eprintln!("Secret delivery=delivered: credentials saved.");
     Ok(())
 }
 
@@ -372,18 +486,16 @@ mod tests {
         for (response, expected) in [
             (
                 r#"{"status":"ok","result":"synthetic-secret-that-must-not-appear"}"#,
-                "Invalid secret response",
+                "response_malformed",
             ),
-            (
-                r#"{"status":"synthetic-secret"}"#,
-                "Secret prompt unavailable; update/reconnect the desktop companion",
-            ),
+            (r#"{"status":"synthetic-secret"}"#, "response_malformed"),
             (
                 r#"{"status":"cancelled","result":"synthetic-secret"}"#,
-                "Secret entry cancelled; nothing saved",
+                "cancelled",
             ),
-            (r#"{"status":"ok"}"#, "Missing secret response"),
-            ("synthetic-secret", "Invalid secret response"),
+            (r#"{"status":"ok"}"#, "response_missing"),
+            ("synthetic-secret", "response_malformed"),
+            ("", "response_empty"),
         ] {
             let (mut client, mut server) = UnixStream::pair().unwrap();
             client
@@ -393,10 +505,11 @@ mod tests {
             // redaction test needs neither a request reader nor a human deadline.
             server.write_all(response.as_bytes()).unwrap();
             drop(server);
-            assert_eq!(
-                read_response(&mut client).unwrap_err().to_string(),
-                expected
+            let message = read_response(&mut client).unwrap_err().to_string();
+            assert!(
+                message.starts_with(&format!("Secret delivery=not_delivered reason={expected}:"))
             );
+            assert!(!message.contains("synthetic-secret"));
         }
     }
 
@@ -420,9 +533,22 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         server.write_all(b"synthetic-secret").unwrap();
-        assert_eq!(
-            read_response(&mut client).unwrap_err().to_string(),
-            "Secret prompt disconnected or timed out; nothing saved"
-        );
+        let message = read_response(&mut client).unwrap_err().to_string();
+        assert!(message.starts_with("Secret delivery=not_delivered reason=transport_failed:"));
+        assert!(!message.contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn oversized_secret_response_is_bounded_and_redacted() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let sender = std::thread::spawn(move || {
+            let _ = server.write_all(&vec![b'x'; 1024 * 1024 + 1]);
+        });
+        let message = read_response(&mut client).unwrap_err().to_string();
+        assert!(message.starts_with("Secret delivery=not_delivered reason=response_too_large:"));
+        sender.join().unwrap();
     }
 }

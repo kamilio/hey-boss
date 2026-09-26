@@ -2051,30 +2051,75 @@ func auditSecretInput() {
     let requestData = try! JSONSerialization.data(withJSONObject: ["command":"secret", "sync":true, "project":"Synthetic test", "title":"Credentials", "question":"{\"fields\":[\"LOGIN\",\"PASSWORD\"],\"login\":true,\"destination\":\"Synthetic private file\"}"])
     let request = try! JSONDecoder().decode(Request.self, from: requestData)
     let form = SecretForm.decode(request)!
-    var result: [String]?
+    var result: SecretOutcome?
     let prompt = SecretPrompt(request: request, form: form) { result = $0 }
+    func capture(_ prompt: SecretPrompt, _ name: String) {
+        guard let path = ProcessInfo.processInfo.environment["HEY_BOSS_SECRET_SCREENSHOT"] else { return }
+        // Render this in-memory synthetic view only, never the desktop or an
+        // installed credential prompt. Print rendering omits compositor-hosted
+        // controls; review those interactively when screen capture is available.
+        prompt.window.contentView?.layoutSubtreeIfNeeded()
+        let view = prompt.window.contentView!
+        precondition(view.bounds.contains(prompt.submit.frame), "Submit must remain visible at every size")
+        let base = URL(fileURLWithPath: path)
+        let url = name.isEmpty ? base : base.deletingPathExtension().appendingPathExtension(name + ".png")
+        prompt.window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            let pdf = NSImage(data: view.dataWithPDF(inside: view.bounds))!
+            let rendered = NSImage(size: view.bounds.size)
+            rendered.lockFocus()
+            NSColor.windowBackgroundColor.setFill(); view.bounds.fill()
+            pdf.draw(in: view.bounds)
+            rendered.unlockFocus()
+            let bitmap = NSBitmapImageRep(data: rendered.tiffRepresentation!)!
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: url)
+        }
+    }
     precondition(!prompt.entries[0].maskedMode && prompt.entries[1].maskedMode && prompt.window.sharingType == .none)
+    precondition(!prompt.submit.isEnabled)
+    prompt.window.appearance = NSAppearance(named: .aqua)
+    capture(prompt, "empty")
     prompt.entries[0].revealed.stringValue = "synthetic-login"
     prompt.entries[1].masked.stringValue = long
-    prompt.validate(); precondition(prompt.submit.isEnabled)
+    prompt.entries.forEach { $0.updateCount() }; precondition(prompt.submit.isEnabled)
     prompt.entries[1].toggle.state = .on; prompt.entries[1].toggleVisibility()
     precondition(prompt.entries[1].revealed.stringValue == long && prompt.entries[1].masked.stringValue.isEmpty)
     prompt.window.contentView?.layoutSubtreeIfNeeded()
+    capture(prompt, "revealed")
+    prompt.window.setContentSize(NSSize(width: 600, height: 420))
+    capture(prompt, "compact-revealed")
     prompt.entries[1].toggle.state = .off; prompt.entries[1].toggleVisibility()
     precondition(prompt.entries[1].masked.stringValue == long && prompt.entries[1].revealed.stringValue.isEmpty)
-    if let path = ProcessInfo.processInfo.environment["HEY_BOSS_SECRET_SCREENSHOT"] {
-        prompt.window.contentView?.layoutSubtreeIfNeeded()
-        let view = prompt.window.contentView!
-        let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
-    }
-    prompt.finish(); precondition(result == ["synthetic-login",long])
+    capture(prompt, "compact-masked")
+    prompt.window.setContentSize(NSSize(width: 680, height: 560))
+    capture(prompt, "")
+    prompt.window.appearance = NSAppearance(named: .darkAqua)
+    capture(prompt, "dark")
+    prompt.entries[1].masked.stringValue = String(repeating: "x", count: 65537)
+    prompt.entries[1].updateCount(); precondition(!prompt.submit.isEnabled)
+    capture(prompt, "invalid")
+    prompt.finish(); precondition(result == nil, "Invalid input must not deliver")
+    prompt.entries[1].masked.stringValue = long; prompt.entries[1].updateCount()
+    prompt.finish(); precondition(result == .submitted(["synthetic-login",long]))
     precondition(prompt.entries.allSatisfy { $0.value.isEmpty } && prompt.completion == nil)
+    let singleForm = SecretForm(fields: ["API_KEY"], login: false, destination: "Synthetic private file")
+    let single = SecretPrompt(request: request, form: singleForm) { result = $0 }
+    single.window.appearance = NSAppearance(named: .aqua)
+    precondition(single.entries[0].maskedMode && !single.submit.isEnabled)
+    capture(single, "single-empty")
+    single.entries[0].masked.stringValue = long; single.entries[0].updateCount()
+    precondition(single.submit.isEnabled)
+    capture(single, "single-masked")
+    single.entries[0].toggle.state = .on; single.entries[0].toggleVisibility()
+    capture(single, "single-revealed")
+    single.cancel(); precondition(single.entries[0].value.isEmpty && result == .cancelled)
     var cancelled = false
-    let discard = SecretPrompt(request: request, form: form) { cancelled = $0 == nil }
+    let discard = SecretPrompt(request: request, form: form) { cancelled = $0 == .cancelled }
     discard.entries[1].masked.stringValue = long; discard.cancel()
     precondition(cancelled && discard.entries.allSatisfy { $0.value.isEmpty })
+    var expired = false
+    let timeout = SecretPrompt(request: request, form: form) { expired = $0 == .expired }
+    timeout.entries[1].masked.stringValue = long; timeout.complete(.expired)
+    precondition(expired && timeout.entries.allSatisfy { $0.value.isEmpty })
     let prompts = SecretPrompts(present: false)
     var peers: [Int32] = [0,0]; precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
     let reply = Reply(peers[1]); shutdown(peers[0], SHUT_WR)
@@ -2101,6 +2146,29 @@ func auditSecretInput() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
     precondition(prompts.active.isEmpty && pending.entries.allSatisfy { $0.value.isEmpty }, "Disconnected secret requests must be removed and their fields cleared")
+    for expected in ["cancelled", "expired", "rejected", "busy"] {
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
+        let statusReply = Reply(peers[1]); shutdown(peers[0], SHUT_WR)
+        if expected == "rejected" {
+            var raw = try! JSONSerialization.jsonObject(with: requestData) as! [String: Any]
+            raw["sync"] = false
+            let invalid = try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: raw))
+            prompts.handle(invalid, statusReply)
+        } else if expected == "busy" {
+            // In-memory fixtures only; no extra requests or real secret windows.
+            for _ in 0..<4 { prompts.active[UUID()] = SecretPrompt(request: request, form: form) { _ in } }
+            prompts.handle(request, statusReply)
+            prompts.active.removeAll()
+        } else {
+            prompts.handle(request, statusReply)
+            prompts.active.values.first!.complete(expected == "expired" ? .expired : .cancelled)
+        }
+        let reader = FileHandle(fileDescriptor: peers[0], closeOnDealloc: true)
+        let response = try! JSONSerialization.jsonObject(with: reader.readDataToEndOfFile()) as! [String: Any]
+        precondition(response["status"] as? String == expected && response["task_id"] as? String == "secret")
+        precondition(response["result"] == nil && prompts.active.isEmpty)
+        try! reader.close()
+    }
     let ui = Interface(present: false)
     let item = Record(taskID: UUID().uuidString, kind: "prompt", question: "Enter a long answer", project: "Synthetic test", title: "Long text", description: "", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
     ui.add(item); let oldHeight = ui.question.frame.height

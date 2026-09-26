@@ -125,7 +125,8 @@ fn forward_live(
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     if let Some(caller) = caller {
-        let deadline = std::time::Instant::now() + Duration::from_secs(900);
+        // Allow the desktop's 900-second expiry reply to reach the caller.
+        let deadline = std::time::Instant::now() + Duration::from_secs(910);
         let mut buffer = [0u8; 8192];
         loop {
             if client_disconnected(caller) || std::time::Instant::now() >= deadline {
@@ -728,6 +729,47 @@ mod tests {
         assert!(!client_disconnected(&reader));
         drop(writer);
         assert!(client_disconnected(&reader));
+    }
+    #[test]
+    fn secret_terminal_statuses_cross_the_bridge_without_queueing() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-secret-status-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("bridge-protocol"), "1").unwrap();
+        for status in ["cancelled", "expired", "rejected", "busy"] {
+            let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).unwrap();
+                stream
+                    .write_all(
+                        &serde_json::to_vec(
+                            &serde_json::json!({"task_id":"secret", "status":status}),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            });
+            let (caller, peer) = UnixStream::pair().unwrap();
+            peer.shutdown(Shutdown::Write).unwrap();
+            let request: Request =
+                serde_json::from_value(serde_json::json!({"command":"secret", "sync":true}))
+                    .unwrap();
+            let reply = handle(&root, &Mutex::new(()), request, &caller).unwrap();
+            assert_eq!(reply.status.as_deref(), Some(status));
+            assert!(reply.result.is_none());
+            server.join().unwrap();
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+            std::fs::remove_file(root.join("bridge.sock")).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn client_limit_releases_capacity_after_failure() {
