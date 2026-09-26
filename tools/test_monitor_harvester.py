@@ -18,6 +18,33 @@ spec.loader.exec_module(monitor)
 
 
 class MonitorTests(unittest.TestCase):
+    def test_launchservices_workload_denial_is_narrow_and_stays_visible(self):
+        path = ('/private/var/folders/ab/fixture/0/com.apple.LaunchServices.dv/'
+                'com.apple.LaunchServices-20971544-v2.csstore')
+        error = ('Protected workload · PID 44532: Cannot verify workload ownership; '
+                 f'preserved: {path}: Operation not permitted (os error 1)')
+        sample = self.sample()
+        sample['binary_sha256'] = 'fixture'
+        sample['snapshot']['errors'] = [error]
+        row = monitor.compact('local', sample, 2000)
+        self.assertEqual(row['problems'], [])
+        self.assertEqual(row['errors'], [error])
+        self.assertEqual(row['warnings'], ['protected_os_workload'])
+        for unexpected in [
+            error.replace('/0/com.apple.LaunchServices.dv/', '/T/com.apple.LaunchServices.dv/'),
+            error.replace('com.apple.LaunchServices.dv/', 'project/'),
+            error.replace('-20971544-v2.csstore', '-project-v2.csstore'),
+            error.replace('-v2.csstore', '-v2.sqlite'),
+            error.replace(path, '/project/private-file'),
+            error.replace('Operation not permitted (os error 1)', 'Input/output error (os error 5)'),
+            error + '; /project: Operation not permitted (os error 1)',
+        ]:
+            with self.subTest(error=unexpected):
+                sample['snapshot']['errors'] = [unexpected]
+                self.assertIn('cleanup_errors', monitor.problems(sample, 2000))
+        sample['snapshot']['errors'] = [error, '/project: Input/output error (os error 5)']
+        self.assertIn('cleanup_errors', monitor.problems(sample, 2000))
+
     def test_known_system_workload_denial_keeps_protection_and_diagnostics(self):
         error = ('Protected workload · PID 68382: Cannot verify workload ownership; '
                  'preserved: /private/var/db/analyticsd/events.allowlist: '
