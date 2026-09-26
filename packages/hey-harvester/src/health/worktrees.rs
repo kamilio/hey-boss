@@ -485,6 +485,7 @@ fn eligible(
 fn activity() -> io::Result<(Table, Vec<PathBuf>)> {
     let table = super::processes::inventory()?;
     let mut paths = open_paths()?;
+    paths.extend(super::workload_ownership::declared_roots()?);
     let agents = crate::agents::scan();
     if !agents.warnings.is_empty() {
         return Err(io::Error::other(
@@ -562,6 +563,7 @@ pub fn clean(
         return Ok((vec![], 0));
     }
     let mut active_paths = open_paths()?;
+    active_paths.extend(super::workload_ownership::declared_roots()?);
     let agents = crate::agents::scan();
     if !agents.warnings.is_empty() {
         return Err(io::Error::other(

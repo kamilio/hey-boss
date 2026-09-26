@@ -338,13 +338,19 @@ pub(super) fn clean(
         observations.clear();
         return Ok((vec![], 0));
     }
-    let paths = || {
-        super::worktrees::open_paths().map(|paths| {
-            paths
-                .into_iter()
-                .map(|p| p.canonicalize().unwrap_or(p))
-                .collect::<Vec<_>>()
-        })
+    let paths = || -> io::Result<Vec<PathBuf>> {
+        let owned = super::workload_ownership::declared_roots()?;
+        let mut paths = super::worktrees::open_paths()?;
+        paths.extend(
+            candidates
+                .iter()
+                .filter(|candidate| owned.iter().any(|root| candidate.path.starts_with(root)))
+                .map(|candidate| candidate.path.clone()),
+        );
+        Ok(paths
+            .into_iter()
+            .map(|p| p.canonicalize().unwrap_or(p))
+            .collect::<Vec<_>>())
     };
     let active = paths()?;
     let mut refreshed: Option<(Instant, Vec<PathBuf>)> = None;

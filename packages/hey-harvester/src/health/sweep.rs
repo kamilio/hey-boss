@@ -389,6 +389,26 @@ fn advance(
     deadline: Instant,
     maximum: usize,
 ) -> (usize, usize, Vec<String>) {
+    match super::workload_ownership::declared_roots() {
+        Ok(owned) => advance_with_owners(progress, at, apply, deadline, maximum, &owned),
+        Err(error) => (
+            0,
+            0,
+            vec![format!(
+                "Cannot verify declared issue ownership; caches preserved: {error}"
+            )],
+        ),
+    }
+}
+
+fn advance_with_owners(
+    progress: &mut Progress,
+    at: u64,
+    apply: bool,
+    deadline: Instant,
+    maximum: usize,
+    owned: &BTreeSet<PathBuf>,
+) -> (usize, usize, Vec<String>) {
     let mut removed = 0;
     let mut protected = 0;
     let mut errors = Vec::new();
@@ -396,6 +416,7 @@ fn advance(
     let mut root_visits = 0;
     let mut owner_root = PathBuf::new();
     let mut owner_admin = None;
+    let mut owner_declared = false;
     while visited < maximum && Instant::now() < deadline {
         if root_visits >= 256 && !progress.stack.is_empty() {
             progress
@@ -436,8 +457,16 @@ fn advance(
         let root = &progress.stack[0].path;
         let ownership = (|| -> io::Result<bool> {
             if *root != owner_root {
-                owner_admin = checkout_admin(root)?;
+                owner_declared = owned.iter().any(|path| root.starts_with(path));
+                owner_admin = if owner_declared {
+                    None
+                } else {
+                    checkout_admin(root)?
+                };
                 owner_root = root.clone();
+            }
+            if owner_declared {
+                return Ok(true);
             }
             if let Some(admin) = &owner_admin {
                 match fs::symlink_metadata(admin.join("locked")) {
@@ -632,6 +661,53 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resumed_cache_sweep_preserves_declared_issue_work_and_expires_unowned_output() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-declared-cache-{}", std::process::id()));
+        let work = root.join("work");
+        let cache = work.join("out");
+        let other = root.join("unowned-out");
+        fs::create_dir_all(work.join(".git")).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(cache.join("receipt"), "active validation").unwrap();
+        fs::write(other.join("expired"), "disposable").unwrap();
+        let mut p = Progress::default();
+        p.stack.push(Frame::new(cache.canonicalize().unwrap()));
+        p.roots.push_back(other.canonicalize().unwrap());
+        let owned = BTreeSet::from([work.canonicalize().unwrap()]);
+        let (removed, preserved, errors) = advance_with_owners(
+            &mut p,
+            now() + 172800,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+            &owned,
+        );
+        assert!(errors.is_empty());
+        assert_eq!(removed, 1);
+        assert_eq!(preserved, 1);
+        assert_eq!(
+            fs::read_to_string(cache.join("receipt")).unwrap(),
+            "active validation"
+        );
+        assert!(!other.join("expired").exists());
+        p.stack.push(Frame::new(cache.canonicalize().unwrap()));
+        assert_eq!(
+            advance_with_owners(
+                &mut p,
+                now() + 172800,
+                true,
+                Instant::now() + Duration::from_secs(5),
+                100,
+                &BTreeSet::new()
+            )
+            .0,
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn resumed_cache_sweep_preserves_locked_worktree_receipts() {
         let root =
