@@ -49,6 +49,9 @@ const PAYLOAD: &[&str] = &[
 ];
 const UPSTREAM: &str = "https://github.com/kamilio/hey-boss.git";
 const MANIFEST: &str = ".hey-boss-source.json";
+// Archives can have older mtimes than artifacts from another snapshot in the
+// shared Cargo target. Refresh every packaged source, including companion crates.
+const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; find \"$upgrade_stage/src\" \"$upgrade_stage/packages/hey-harvester/src\" \"$upgrade_stage/packages/hey-gh/src\" -type f -exec touch {} +";
 
 #[derive(Args)]
 pub struct Options {
@@ -481,7 +484,7 @@ fn remote_apply(
     // Compile the staged implementation on the target, so old installed CLIs also
     // enter the new guard on their very first upgrade. No downloaded executable.
     let script = format!(
-        "set -eu; export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:$PATH\"; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; tar -xzf - -C \"$stage\"; export CARGO_TARGET_DIR=\"$HOME/.cache/hey-boss/bootstrap\"; cargo build --quiet --locked --release --manifest-path \"$stage/Cargo.toml\"; cp \"$CARGO_TARGET_DIR/release/hey-boss\" \"$stage/guard\"; \"$stage/guard\" upgrade --apply-snapshot \"$stage\" --binary \"$HOME/.local/bin/hey-boss\" --json{}{}",
+        "set -eu; export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:$PATH\"; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; tar -xzf - -C \"$stage\"; upgrade_stage=\"$stage\"; {REFRESH_BUILD_INPUTS}; export CARGO_TARGET_DIR=\"$HOME/.cache/hey-boss/bootstrap\"; cargo build --quiet --locked --release --manifest-path \"$stage/Cargo.toml\"; cp \"$CARGO_TARGET_DIR/release/hey-boss\" \"$stage/guard\"; \"$stage/guard\" upgrade --apply-snapshot \"$stage\" --binary \"$HOME/.local/bin/hey-boss\" --json{}{}",
         observed
             .map(|n| format!(" --observed-generation {n}"))
             .unwrap_or_default(),
@@ -507,9 +510,11 @@ fn remote_apply(
 }
 
 fn build(snapshot: &Path, target: &Path) -> io::Result<PathBuf> {
-    // Git archives retain commit mtimes, which can predate a cached build of a
-    // different snapshot. Refresh the script so Cargo recomputes this build ID.
-    fs::File::open(snapshot.join("build.rs"))?.set_modified(SystemTime::now())?;
+    output(
+        Command::new("sh")
+            .args(["-ec", REFRESH_BUILD_INPUTS])
+            .env("upgrade_stage", snapshot),
+    )?;
     let path = format!(
         "{}:/opt/homebrew/bin:{}",
         home()?.join(".cargo/bin").display(),
@@ -804,7 +809,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn archived_snapshots_refresh_the_cached_build_stamp() {
+    fn archived_snapshots_rebuild_companion_libraries_and_executables() {
         let temp = Temp::new().unwrap();
         let target = temp.0.join("target");
         let old = SystemTime::now() - std::time::Duration::from_secs(3600);
@@ -816,35 +821,68 @@ mod tests {
             fs::create_dir_all(root.join("src")).unwrap();
             fs::write(
                 root.join("Cargo.toml"),
-                "[package]\nname='hey-boss'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
+                "[package]\nname='hey-boss'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n\
+                 [workspace]\nmembers=['packages/hey-harvester','packages/hey-gh']\n\
+                 default-members=['.','packages/hey-harvester','packages/hey-gh']\n\
+                 [dependencies]\nhey-harvester={path='packages/hey-harvester'}\nhey-gh={path='packages/hey-gh'}\n",
             )
             .unwrap();
             fs::write(
                 root.join("Cargo.lock"),
-                "version = 4\n[[package]]\nname = 'hey-boss'\nversion = '0.1.0'\n",
+                "version = 4\n[[package]]\nname = 'hey-boss'\nversion = '0.1.0'\n\
+                 dependencies=['hey-harvester','hey-gh']\n\
+                 [[package]]\nname='hey-harvester'\nversion='0.1.0'\n\
+                 [[package]]\nname='hey-gh'\nversion='0.1.0'\n",
             )
             .unwrap();
             fs::write(root.join("build.rs"), "fn main(){println!(\"cargo:rerun-if-changed=src\");let stamp=std::fs::read_to_string(\"src/stamp\").unwrap();println!(\"cargo:rustc-env=STAMP={stamp}\");}").unwrap();
             fs::write(
                 root.join("src/main.rs"),
-                "fn main(){println!(\"hey-boss 0.1.0 (build {})\",env!(\"STAMP\"));}",
+                "fn main(){assert_eq!(hey_harvester::stamp(),env!(\"STAMP\"));assert_eq!(hey_gh::stamp(),env!(\"STAMP\"));println!(\"hey-boss 0.1.0 (build {})\",env!(\"STAMP\"));}",
             )
             .unwrap();
             fs::write(root.join("src/stamp"), stamp).unwrap();
-            for path in [
-                "Cargo.toml",
-                "Cargo.lock",
-                "build.rs",
-                "src/main.rs",
-                "src/stamp",
-                "src",
-            ] {
+            for package in ["hey-harvester", "hey-gh"] {
+                let dir = root.join("packages").join(package);
+                fs::create_dir_all(dir.join("src")).unwrap();
+                fs::write(
+                    dir.join("Cargo.toml"),
+                    format!("[package]\nname='{package}'\nversion='0.1.0'\nedition='2024'\n"),
+                )
+                .unwrap();
+                fs::write(dir.join("src/lib.rs"), "mod stamp;pub use stamp::stamp;").unwrap();
+                fs::write(
+                    dir.join("src/stamp.rs"),
+                    format!("pub fn stamp()-> &'static str {{\"{stamp}\"}}"),
+                )
+                .unwrap();
+                fs::write(
+                    dir.join("src/main.rs"),
+                    format!(
+                        "fn main(){{println!(\"{{}}\",{}::stamp());}}",
+                        package.replace('-', "_")
+                    ),
+                )
+                .unwrap();
+            }
+            let mut files = Vec::new();
+            collect(&root, &root, &mut files).unwrap();
+            for path in files {
                 fs::File::open(root.join(path))
                     .unwrap()
                     .set_modified(old)
                     .unwrap();
             }
             let binary = build(&root, &target).unwrap();
+            for package in ["hey-harvester", "hey-gh"] {
+                let bytes =
+                    output(&mut Command::new(target.join("release").join(package))).unwrap();
+                assert_eq!(
+                    String::from_utf8(bytes).unwrap().trim(),
+                    stamp,
+                    "{package} must come from the new snapshot"
+                );
+            }
             assert_eq!(
                 installed_id(&binary).as_deref(),
                 Some(stamp),
