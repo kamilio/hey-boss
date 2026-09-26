@@ -90,6 +90,24 @@ class MonitorTests(unittest.TestCase):
                 sample["snapshot"]["errors"] = [error]
                 self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
 
+    def test_completed_full_pass_apple_denials_remain_visible_as_warnings(self):
+        paths = [
+            "/private/var/folders/dd/test_user/T/com.apple.appleaccountd/TemporaryItems",
+            "/Users/test/Library/Caches/com.apple.HomeKit",
+            "/Users/test/Library/Caches/CloudKit",
+            "/Users/test/Library/Caches/com.apple.Safari",
+            "/Users/test/Library/Caches/com.apple.findmy.imagecache",
+            "/Users/test/Library/Caches/com.apple.findmy.fmfcore",
+            "/Users/test/Library/Caches/com.apple.containermanagerd",
+            "/private/var/folders/dd/test_user/T/com.apple.syncdefaultsd/TemporaryItems",
+        ]
+        error = "24-hour cache expiration: " + "; ".join(
+            path + ": Operation not permitted (os error 1)" for path in paths)
+        row = monitor.compact("mac", self.completed_sample([error]), 2000)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+        self.assertEqual(row["last_completed_errors"], [error])
+
     def completed_sample(self, errors, count=None):
         sample = self.sample()
         sample["binary_sha256"] = "fixture"
