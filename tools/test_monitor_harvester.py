@@ -74,6 +74,43 @@ class MonitorTests(unittest.TestCase):
                 sample["snapshot"]["errors"] = [error]
                 self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
 
+    def completed_sample(self, errors, count=None):
+        sample = self.sample()
+        sample["binary_sha256"] = "fixture"
+        sample["snapshot"].update(running=True, errors=[], activity=[
+            {"at": 1800, "category": "scan", "message": "Cleanup check started"},
+            *[{"at": 1850, "category": "error", "message": e} for e in errors],
+            {"at": 1850, "category": "scan", "message":
+             f"Finished: 0 worktrees checked; 0 processes stopped; 0 worktrees removed; 1 caches removed; {len(errors) if count is None else count} errors."},
+            {"at": 1900, "category": "scan", "message": "Cleanup check started"},
+        ])
+        return sample
+
+    def test_running_cycle_retains_previous_completed_failure(self):
+        sample = self.completed_sample(["Worktree cleaner: Inspection command timed out"])
+        row = monitor.compact("mac", sample, 2000)
+        self.assertIn("cleanup_errors", row["problems"])
+        self.assertEqual(row["last_completed_errors"], ["Worktree cleaner: Inspection command timed out"])
+
+    def test_completed_os_denials_remain_warnings(self):
+        sample = self.completed_sample([
+            "24-hour cache expiration: /Users/test/Library/Caches/FamilyCircle: Operation not permitted (os error 1)"])
+        row = monitor.compact("mac", sample, 2000)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+
+    def test_missing_completed_error_detail_is_not_success(self):
+        sample = self.completed_sample([], count=1)
+        self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
+
+    def test_successful_completed_cycle_clears_historical_failure(self):
+        sample = self.completed_sample(["Worktree cleaner: old failure"])
+        sample["snapshot"]["activity"] += [
+            {"at": 1950, "category": "scan", "message": "Finished: 1 worktrees checked; 0 processes stopped; 0 worktrees removed; 0 caches removed; 0 errors."},
+            {"at": 1990, "category": "scan", "message": "Cleanup check started"},
+        ]
+        self.assertEqual(monitor.problems(sample, 2000), [])
+
 
 if __name__ == "__main__":
     unittest.main()
