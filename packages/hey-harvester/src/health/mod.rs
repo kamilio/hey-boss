@@ -52,7 +52,7 @@ fn is_preserved(error: &io::Error) -> bool {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub automatic: bool,
-    /// Expire disposable files/worktrees after 24 hours and reap stale developer workloads.
+    /// Expire disposable files after 24 hours, worktrees after 4, and reap stale developer workloads.
     pub aggressive: bool,
     pub harvest_processes: bool,
     pub clean_worktrees: bool,

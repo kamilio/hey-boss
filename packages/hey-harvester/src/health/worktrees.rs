@@ -21,6 +21,8 @@ struct Policy {
     discard_ignored: bool,
 }
 
+const AGGRESSIVE_WORKTREE_IDLE_SECONDS: u64 = 4 * 3600;
+
 fn ineligible_item(name: String, refusal: io::Error, metadata: Details) -> Item {
     let detail = refusal.to_string();
     let error = (!super::is_preserved(&refusal)).then(|| detail.clone());
@@ -1268,7 +1270,7 @@ fn remove_checkout_with_policy(path: &Path, discard_ignored: bool) -> io::Result
 }
 
 fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
-    let cutoff = at.saturating_sub(86400);
+    let cutoff = at.saturating_sub(AGGRESSIVE_WORKTREE_IDLE_SECONDS);
     let admin = PathBuf::from(git_text(&w.path, &["rev-parse", "--absolute-git-dir"])?);
     for p in [
         w.path.join(".git"),
@@ -1333,7 +1335,7 @@ fn aggressive_eligible(
         active,
         table,
         Policy {
-            min_age: 86400,
+            min_age: AGGRESSIVE_WORKTREE_IDLE_SECONDS,
             manual: false,
             discard_ignored: true,
         },
@@ -1341,7 +1343,7 @@ fn aggressive_eligible(
     )?;
     if !expired(w, at)? {
         return Err(super::preserved(
-            "Source or Git activity within 24 hours; preserved",
+            "Source or Git activity within 4 hours; preserved",
         ));
     }
     Ok(head)
@@ -1452,11 +1454,11 @@ fn aggressive_clean(
                 if apply {
                     "Removed clean expired checkout; branch retained"
                 } else {
-                    "Clean and unused for 24 hours; ownership and recovery checks passed"
+                    "Clean and unused for 4 hours; ownership and recovery checks passed"
                 }
                 .into(),
             ),
-            Ok(false) => (false, "Source or Git activity within 24 hours".into()),
+            Ok(false) => (false, "Source or Git activity within 4 hours".into()),
             Err(e) if super::is_preserved(&e) => (false, e.to_string()),
             Err(e) => (false, format!("Cleanup failed: {e}")),
         };
@@ -1498,6 +1500,12 @@ mod aggressive_tests {
         std::fs::create_dir(work.join(".claude")).unwrap();
         std::fs::write(work.join(".claude/settings.local.json"), "{}").unwrap();
         let checkout = list(&main).unwrap().remove(1);
+        git_text(
+            &main,
+            &["update-ref", "refs/remotes/origin/main", &checkout.head],
+        )
+        .unwrap();
+        let observed = now();
         assert!(
             aggressive_eligible(
                 &checkout,
@@ -1505,11 +1513,43 @@ mod aggressive_tests {
                 std::slice::from_ref(&root),
                 &[],
                 &Table::new(),
-                now() + 172800,
+                observed + 4 * 3600 - 60,
+            )
+            .is_err(),
+            "even published work must remain until four quiet hours have elapsed"
+        );
+        assert!(
+            aggressive_eligible(
+                &checkout,
+                &main,
+                std::slice::from_ref(&root),
+                &[],
+                &Table::new(),
+                observed + 4 * 3600 + 60,
             )
             .is_ok(),
-            "ignored settings alone must not retain an otherwise eligible checkout"
+            "published work with ignored settings must be eligible after four quiet hours"
         );
+        let admin = PathBuf::from(git_text(&work, &["rev-parse", "--absolute-git-dir"]).unwrap());
+        for path in [work.join("file"), admin.join("logs/HEAD")] {
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            let original = file.metadata().unwrap().modified().unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(observed + 120))
+                .unwrap();
+            assert!(
+                aggressive_eligible(
+                    &checkout,
+                    &main,
+                    std::slice::from_ref(&root),
+                    &[],
+                    &Table::new(),
+                    observed + 4 * 3600 + 60,
+                )
+                .is_err(),
+                "new source or Git activity must restart the four-hour idle window"
+            );
+            file.set_modified(original).unwrap();
+        }
         assert!(
             remove_checkout(&work).is_err(),
             "ordinary removal stays conservative"

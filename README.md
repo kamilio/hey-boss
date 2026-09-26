@@ -862,7 +862,7 @@ hey-harvester add-root /path/to/workspaces
 hey-harvester remove-root /path/to/workspaces
 hey-harvester configure --worktrees false
 hey-harvester configure --caches false
-hey-harvester configure --aggressive true  # destructive 24-hour expiration; SQLite retained
+hey-harvester configure --aggressive true  # worktrees: 4 hours; caches: 24 hours; SQLite retained
 hey-harvester remove-worktree /absolute/path/to/checkout
 hey-harvester hosts --json
 hey-harvester --host devbox scan
@@ -896,9 +896,11 @@ Disabled automatic maintenance stays disabled during installation.
 `tools/machine-health.sh` runs a one-shot cleanup using the harvester release build.
 
 With `configure --aggressive true`, clean linked worktrees become eligible after
-24 hours without source or Git activity. Locks, active processes, staged changes,
-untracked and ignored files remain protected. Primary checkouts stay intact, and
-missing-checkout metadata is retained for recovery. Removal uses ordinary Git
+4 hours without source or Git activity. Locks, active processes, source changes,
+and untracked files remain protected. Ignored artifacts alone do not retain a
+checkout; SQLite databases and filesystem protections still prevent removal.
+Primary checkouts stay intact, and missing-checkout metadata is retained for
+recovery. Removal uses ordinary Git
 checks and retains the branch. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
 See [ownership and recovery](docs/worktree-ownership.md).
