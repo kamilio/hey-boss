@@ -51,7 +51,9 @@ pub enum Error {
         message: String,
         access_denied: bool,
     },
-    #[error("request queue is full")]
+    #[error(
+        "request queue is full; retry after 1 second within a bounded deadline; inspect hey-gh status and hey-gh watches if saturation persists"
+    )]
     QueueFull,
     #[error("request deadline exceeded")]
     Deadline,

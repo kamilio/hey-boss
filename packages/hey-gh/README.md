@@ -526,6 +526,28 @@ Authenticated REST conditional requests with validators may bypass soft quota pa
 
 The daemon owns one bounded queue: active, waiting, and retrying distinct requests share its 256-request capacity. Identical in-flight requests share one operation, even when callers cancel. Eligible ready requests retain FIFO order within each bucket; an exhausted resource bucket does not block a ready request from another bucket. REST core, search, and GraphQL use separate budgets, refined from GitHub's `x-ratelimit-resource` header.
 
+Three of those slots are reserved for interactive PR/CI/policy reads, so polling
+cannot fill every admission slot. Embedded queues reserve `min(3, capacity / 4)`
+slots (none below four). New background requests are rejected at that boundary;
+interactive requests are rejected only at total capacity. Equivalent requests
+coalesce before either check and interactive waiters promote existing work.
+The reserve adds neither sockets nor waiting tasks and does not bypass quotas,
+deadlines, or the scheduler's background fairness rule. It is admission headroom,
+not a guarantee that every concurrent report will finish.
+
+`status` reports `interactive_reserved_slots` and process-lifetime
+`queue_full_rejections`; rejected admissions made no network attempt and are not
+completed requests in `logs --summary`. `queue_full` means local backpressure,
+not invalid authentication or passing CI. Source-level failures remain explicit
+in incomplete reports; cached validation times and existing cursor semantics
+are preserved.
+After one second, retry only the affected `pr checks` or `pr view` with
+`--timeout 15`; if still saturated, inspect `status`, `watches`, and
+`logs --summary --since 900` before retrying. Avoid account-wide refresh loops.
+Retain saved feed cursors on failure; a later complete targeted read can publish
+recovery without clearing unrelated source failures. A cached read does not
+establish freshness, and even complete CI does not establish merge readiness.
+
 At most three network attempts are active: two ordinary quota buckets and one
 REST comment/review lane. The detail lane shares core quota and minimum spacing
 with lifecycle and CI reads, but a stalled review request or body cannot hold

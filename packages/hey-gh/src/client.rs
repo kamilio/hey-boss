@@ -107,6 +107,17 @@ struct Inner {
 }
 
 impl Client {
+    // Leave room for one interactive CI batch without expanding total work.
+    // Tiny embedded queues keep at least three quarters for ordinary reads.
+    fn interactive_reserved_slots(&self) -> usize {
+        3.min(self.0.config.queue_capacity / 4)
+    }
+
+    fn queue_full(&self) -> Error {
+        self.0.metrics.queue_full.fetch_add(1, Ordering::Relaxed);
+        Error::QueueFull
+    }
+
     /// Obtain the effective token through gh, without printing or storing it.
     /// gh selects its existing login and respects its token environment overrides.
     pub async fn from_gh(config: Config) -> Result<Self> {
@@ -491,12 +502,20 @@ impl Client {
                 self.0.metrics.coalesced.fetch_add(1, Ordering::Relaxed);
                 receiver.clone()
             } else {
+                // Coalescing above must remain possible at either admission
+                // boundary. Serialize this check with all distinct admissions;
+                // scheduler completions can only release more capacity.
+                if !interactive_read()
+                    && self.0.permits.available_permits() <= self.interactive_reserved_slots()
+                {
+                    return Err(self.queue_full());
+                }
                 let permit = self
                     .0
                     .permits
                     .clone()
                     .try_acquire_owned()
-                    .map_err(|_| Error::QueueFull)?;
+                    .map_err(|_| self.queue_full())?;
                 let (notify, receiver) = watch::channel(None);
                 let now = tokio::time::Instant::now();
                 let resource = if body.is_some() {
@@ -539,7 +558,7 @@ impl Client {
                 };
                 self.0.queue.try_send(job).map_err(|e| match e {
                     mpsc::error::TrySendError::Closed(_) => Error::Stopped,
-                    mpsc::error::TrySendError::Full(_) => Error::QueueFull,
+                    mpsc::error::TrySendError::Full(_) => self.queue_full(),
                 })?;
                 inflight.insert(key, (receiver.clone(), interactive));
                 receiver
@@ -996,6 +1015,8 @@ impl Client {
                 .queue_capacity
                 .min(crate::scheduler::MAX_ACTIVE_BUCKETS),
             queue_capacity: self.0.config.queue_capacity,
+            interactive_reserved_slots: self.interactive_reserved_slots(),
+            queue_full_rejections: self.0.metrics.queue_full.load(Ordering::Relaxed),
             cache_hits: self.0.metrics.cache_hits.load(Ordering::Relaxed),
             coalesced_requests: self.0.metrics.coalesced.load(Ordering::Relaxed),
             network_requests: self.0.metrics.network.load(Ordering::Relaxed),
@@ -1187,6 +1208,117 @@ fn validate_query(query: &str) -> Result<()> {
 #[cfg(test)]
 mod priority_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn interactive_reserve_is_bounded_and_full_queue_still_coalesces() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = axum::Router::new().fallback({
+            let release = release.clone();
+            move || {
+                let release = release.clone();
+                async move {
+                    release.notified().await;
+                    axum::Json(serde_json::json!({"ok": true}))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                queue_capacity: 8,
+                min_spacing: Duration::ZERO,
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move {
+                let path = format!("request/{index}");
+                let read = c.get(&path, Freshness::Revalidate);
+                INTERACTIVE_READ
+                    .scope(Arc::new(AtomicBool::new(index >= 6)), read)
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while client.status().outstanding_requests != index + 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if index == 5 {
+                assert!(matches!(
+                    client
+                        .get("background-overflow", Freshness::Revalidate)
+                        .await,
+                    Err(Error::QueueFull)
+                ));
+            }
+        }
+        assert!(matches!(
+            INTERACTIVE_READ
+                .scope(
+                    foreground_priority(),
+                    client.get("foreground-overflow", Freshness::Revalidate)
+                )
+                .await,
+            Err(Error::QueueFull)
+        ));
+        let status = client.status();
+        assert_eq!(status.interactive_reserved_slots, 2);
+        assert_eq!(status.outstanding_requests, status.queue_capacity);
+        assert_eq!(status.queue_full_rejections, 2);
+        tasks[0].abort();
+        let c = client.clone();
+        let coalesced = tokio::spawn(async move {
+            INTERACTIVE_READ
+                .scope(
+                    foreground_priority(),
+                    c.get("request/0", Freshness::Revalidate),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.status().coalesced_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(client.status().outstanding_requests, 8);
+        assert!(
+            client
+                .0
+                .inflight
+                .lock()
+                .unwrap()
+                .values()
+                .any(|(_, priority)| priority.load(Ordering::Relaxed))
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.status().outstanding_requests != 0 {
+                release.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(coalesced.await.unwrap().is_ok());
+        for task in tasks.into_iter().skip(1) {
+            assert!(task.await.unwrap().is_ok());
+        }
+        assert!(client.get("request/0", Freshness::CachedOnly).await.is_ok());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn foreground_waiter_promotes_locked_background_policy_and_releases_registry() {
