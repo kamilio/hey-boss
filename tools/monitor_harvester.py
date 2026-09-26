@@ -74,13 +74,13 @@ def expected_access_denial(error):
         cache = re.fullmatch(r"/Users/[^/]+/Library/Caches/([^/]+)", path)
         temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/([^/]+)/TemporaryItems", path)
         os_temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/TemporaryItems", path)
-        # Apple bundles share these protected OS cache boundaries. Keep each
-        # location and EPERM exact; this never relaxes cleaner access.
+        # Apple bundles and the verified WhatsApp service extension share these
+        # privacy boundaries. Keep location and EPERM exact; cleaner access stays unchanged.
         apple_cache = cache and (apple_bundle(cache[1]) or cache[1] in {"FamilyCircle", "CloudKit"})
-        apple_temporary = temporary and (
+        protected_temporary = temporary and (
             apple_bundle(temporary[1]) or
-            temporary[1] in {"homed", "duetexpertd", "icdd"})
-        if not (os_temporary or apple_cache or apple_temporary):
+            temporary[1] in {"homed", "duetexpertd", "icdd", "net.whatsapp.WhatsApp.ServiceExtension"})
+        if not (os_temporary or apple_cache or protected_temporary):
             return False
     return True
 
