@@ -20,6 +20,10 @@ try {
     detail:'Locked worktree; preserved — issue 147; owner fixture-session; queued validation; retain staged changes and receipts',
     eligible:false,worktree:{path:'/fixture/owned',age_seconds:100,repository:'example/project',github_url:null},
   }],harvested_processes:0,removed_worktrees:0,errors:[]};
+  for (const detail of ['Missing checkout; metadata preserved', 'Modified, untracked, or ignored files; preserved']) {
+    snapshot.worktrees.push({name:'/Users/example/Workspace/recovery-'+snapshot.worktrees.length,
+      detail,eligible:false,worktree:{path:'/fixture/recovery',repository:'example/project',github_url:null}});
+  }
   await writeFile(join(root,'snapshot.json'),JSON.stringify(snapshot));
   await writeFile(join(root,'bin/ssh'),`#!/bin/sh\nset -eu\nprintf '%s\\n' "$*" >> '${root}/calls'\ncat '${root}/snapshot.json'\n`,{mode:0o700});
   pilot=await TerminalPilot.launch();
@@ -60,12 +64,20 @@ try {
   assert(confirmation.includes('any other key')&&confirmation.includes('cancels'));
   await session.type('n');await wait('Enter Details');
   checks.push('Details return to the list and removal can be cancelled');
+  for (const message of ['Missing checkout; metadata preserved', 'Modified, untracked, or ignored files; preserved']) {
+    await session.press('ArrowDown');await session.press('Enter');
+    await wait(message);await session.type('x');
+    await wait('Selected entry');
+    await capture(message.startsWith('Missing')?'missing-metadata':'uncommitted-work');
+    checks.push(message+' remains readable and details do not dispatch cleanup');
+    await session.press('Escape');await wait('Enter Details');
+  }
   await session.type('q');assert.equal(await session.waitForExit({timeout:5000}),0);
   const calls=await readFile(join(root,'calls'),'utf8');
   assert(!calls.includes('remove-worktree')&&!calls.includes("'clean'"),'Viewing details must never mutate maintenance state');
   checks.push('Normal exit with no maintenance mutations');
-  assert.equal(checks.length,6);
-  console.log(JSON.stringify({normalCompletion:true,completed:6,expected:6,checks}));
+  assert.equal(checks.length,8);
+  console.log(JSON.stringify({normalCompletion:true,completed:8,expected:8,checks}));
 } finally {
   if(pilot)await pilot.close();
   await rm(root,{recursive:true,force:true});

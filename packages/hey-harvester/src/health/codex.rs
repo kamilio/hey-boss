@@ -234,49 +234,6 @@ pub(super) fn graceful_idle(
     Ok((items, stopped))
 }
 
-/// Active Codex working directories cannot be retired with their running session.
-pub(super) fn working_paths(table: &Table) -> io::Result<Vec<PathBuf>> {
-    // Process ancestry can include login/session services (even owned ones). They do
-    // not own this user's worktrees and procfs correctly refuses their cwd.
-    let uid = unsafe { libc::geteuid() };
-    let ids: BTreeSet<_> = session_processes(table)
-        .into_iter()
-        .filter(|pid| table.get(pid).is_some_and(|p| p.uid == uid))
-        .collect();
-    if ids.is_empty() {
-        return Ok(vec![]);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut paths = Vec::new();
-        for pid in ids {
-            match std::fs::read_link(format!("/proc/{pid}/cwd")) {
-                Ok(p) => paths.push(p),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(paths)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let list = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let out = super::output(
-            std::process::Command::new("/usr/sbin/lsof")
-                .args(["-nP", "-a", "-p", &list, "-d", "cwd", "-Fn"]),
-            Duration::from_secs(20),
-        )?;
-        if !out.status.success() && !out.stderr.is_empty() {
-            return Err(io::Error::other("Cannot verify Codex working directories"));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.strip_prefix('n'))
-            .map(PathBuf::from)
-            .collect())
-    }
-}
-
 fn terminal_exit(p: &Process) -> io::Result<bool> {
     use std::{
         fs::OpenOptions,

@@ -331,6 +331,33 @@ fn checkout_marker(path: &std::path::Path) -> io::Result<bool> {
     }
 }
 
+// Project cache roots and saved cursors start below .git. Resolve ownership once
+// per root visit, then cheaply recheck the lock before each entry is unlinked.
+fn checkout_admin(path: &std::path::Path) -> io::Result<Option<PathBuf>> {
+    for parent in path.ancestors() {
+        let marker = parent.join(".git");
+        match fs::symlink_metadata(&marker) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+            Ok(m) if m.is_dir() => return Ok(Some(marker)),
+            Ok(m) if m.is_file() => {
+                let value = fs::read_to_string(marker)?;
+                let target = value
+                    .trim()
+                    .strip_prefix("gitdir: ")
+                    .ok_or_else(|| io::Error::other("Unknown checkout ownership; preserved"))?;
+                let admin = parent.join(target);
+                if !fs::metadata(&admin)?.is_dir() {
+                    return Err(io::Error::other("Missing checkout ownership; preserved"));
+                }
+                return Ok(Some(admin));
+            }
+            Ok(_) => return Err(io::Error::other("Symlinked checkout ownership; preserved")),
+        }
+    }
+    Ok(None)
+}
+
 fn advance(
     progress: &mut Progress,
     at: u64,
@@ -343,6 +370,8 @@ fn advance(
     let mut errors = Vec::new();
     let mut visited = 0;
     let mut root_visits = 0;
+    let mut owner_root = PathBuf::new();
+    let mut owner_admin = None;
     while visited < maximum && Instant::now() < deadline {
         if root_visits >= 256 && !progress.stack.is_empty() {
             progress
@@ -378,6 +407,35 @@ fn advance(
                 progress.stack = stack;
             } else {
                 break;
+            }
+        }
+        let root = &progress.stack[0].path;
+        let ownership = (|| -> io::Result<bool> {
+            if *root != owner_root {
+                owner_admin = checkout_admin(root)?;
+                owner_root = root.clone();
+            }
+            if let Some(admin) = &owner_admin {
+                match fs::symlink_metadata(admin.join("locked")) {
+                    Ok(_) => return Ok(true),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(false)
+        })();
+        match ownership {
+            Ok(false) => {}
+            other => {
+                if let Err(e) = other {
+                    if errors.len() < 8 {
+                        errors.push(format!("{}: {e}", root.display()));
+                    }
+                } else {
+                    protected += 1;
+                }
+                progress.stack.clear();
+                continue;
             }
         }
         let frame = progress.stack.last_mut().unwrap();
@@ -520,7 +578,7 @@ pub(super) fn clean(
             Some(now().saturating_sub(progress.stats.pass_started_at));
     }
     let detail = format!(
-        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths; {} roots pending; {}; pass age {}s. {}",
+        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths or owned worktrees; {} roots pending; {}; pass age {}s. {}",
         progress.stats.visited_this_cycle,
         progress.stats.slice_millis,
         progress.stats.roots_pending,
@@ -547,6 +605,55 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resumed_cache_sweep_preserves_locked_worktree_receipts() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-owned-cache-{}", std::process::id()));
+        let cache = root.join("work/out");
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(root.join("admin")).unwrap();
+        fs::write(
+            root.join("work/.git"),
+            format!("gitdir: {}\n", root.join("admin").display()),
+        )
+        .unwrap();
+        fs::write(root.join("admin/locked"), "issue 147; queued owner").unwrap();
+        fs::write(cache.join("receipt"), "validation pending").unwrap();
+        let mut p = Progress::default();
+        p.stack.push(Frame::new(cache.canonicalize().unwrap()));
+        let at = now() + 172800;
+        let (removed, _, errors) = advance(
+            &mut p,
+            at,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+        );
+        assert!(errors.is_empty());
+        assert_eq!(
+            removed, 0,
+            "a saved cache cursor must honor its checkout owner"
+        );
+        assert_eq!(
+            fs::read_to_string(cache.join("receipt")).unwrap(),
+            "validation pending"
+        );
+        // Completion is explicit; a later sweep may reclaim this fixture's output.
+        fs::remove_file(root.join("admin/locked")).unwrap();
+        p.stack.push(Frame::new(cache.canonicalize().unwrap()));
+        assert_eq!(
+            advance(
+                &mut p,
+                at,
+                true,
+                Instant::now() + Duration::from_secs(5),
+                100
+            )
+            .0,
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn project_local_cache_expires_old_files_but_keeps_sqlite_fresh_files_and_checkouts() {
         let root =
