@@ -38,6 +38,26 @@ print(json.dumps({"snapshot":snapshot,"scheduler":scheduler,
 '''
 
 
+def expected_access_denial(error):
+    """Only observed OS privacy boundaries are warnings; other failures still page."""
+    caches = {"FamilyCircle", "CloudKit", "com.apple.HomeKit", "com.apple.Safari",
+              "com.apple.findmy.imagecache"}
+    services = {"com.apple.passd", "com.apple.chrono", "duetexpertd",
+                "com.apple.studentd", "com.apple.parsecd", "com.apple.identityservicesd",
+                "com.apple.bluetoothuserd", "com.apple.imdpersistence.IMDPersistenceAgent",
+                "com.apple.CloudDocs.iCloudDriveFileProvider"}
+    for part in error.removeprefix("24-hour cache expiration: ").split("; "):
+        suffix = ": Operation not permitted (os error 1)"
+        if not part.endswith(suffix):
+            return False
+        path = part[:-len(suffix)]
+        cache = re.fullmatch(r"/Users/[^/]+/Library/Caches/([^/]+)", path)
+        temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/([^/]+)/TemporaryItems", path)
+        if not ((cache and cache[1] in caches) or (temporary and temporary[1] in services)):
+            return False
+    return True
+
+
 def problems(sample, now):
     if "error" in sample:
         return ["unreachable"]
@@ -61,7 +81,7 @@ def problems(sample, now):
         result.append("disk_low")
     if m.get("memory_pressure", "").lower() == "critical":
         result.append("memory_critical")
-    if s.get("errors"):
+    if any(not expected_access_denial(error) for error in s.get("errors", [])):
         result.append("cleanup_errors")
     return result
 
@@ -94,6 +114,8 @@ def compact(host, sample, now):
         result["error"] = sample["error"]
         return result
     s = sample["snapshot"]
+    result["warnings"] = (["protected_os_cache"]
+                          if any(expected_access_denial(e) for e in s.get("errors", [])) else [])
     for key in ("observed_at", "last_cleanup_at", "metrics", "cache_progress",
                 "harvested_processes", "removed_worktrees", "removed_caches",
                 "errors", "running", "phase"):
@@ -164,6 +186,7 @@ def main():
         for row in rows:
             m = row.get("metrics") or {}
             print(json.dumps({"host": row["host"], "problems": row["problems"],
+                              "warnings": row.get("warnings", []),
                               "disk_available_bytes": m.get("disk_available_bytes"),
                               "memory_pressure": m.get("memory_pressure")}))
 
