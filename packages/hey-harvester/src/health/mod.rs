@@ -369,15 +369,26 @@ impl Store {
     }
     pub fn status(&self) -> io::Result<Snapshot> {
         let mut s = self.state()?.snapshot;
+        self.reconcile_running_snapshot(&mut s)?;
         s.config = self.config()?;
         s.metrics = system::metrics();
         s.refresh_process_inventory();
-        if s.running && self.lock().is_ok() {
-            s.running = false;
-            s.phase = "Previous check was interrupted".into();
-            s.errors.push("Previous maintenance process exited before finishing; the next scheduled check will retry".into());
-        }
         Ok(s)
+    }
+    fn reconcile_running_snapshot(&self, s: &mut Snapshot) -> io::Result<()> {
+        if s.running
+            && let Ok(_lock) = self.lock()
+        {
+            // The worker may have finished since the first read. Keep the lock
+            // through the re-read and classification, before collecting live metrics.
+            *s = self.state()?.snapshot;
+            if s.running {
+                s.running = false;
+                s.phase = "Previous check was interrupted".into();
+                s.errors.push("Previous maintenance process exited before finishing; the next scheduled check will retry".into());
+            }
+        }
+        Ok(())
     }
     fn checkpoint(&self, state: &mut State, snapshot: &Snapshot) -> io::Result<()> {
         state.snapshot = snapshot.clone();
@@ -1083,6 +1094,8 @@ mod tests {
         let lock = store.lock().unwrap();
         let live = store.status().unwrap();
         assert!(live.running);
+        assert_eq!(live.phase, "Inspecting processes");
+        assert!(live.errors.is_empty());
         assert!(live.processes.is_empty());
         assert!(
             live.process_inventory
@@ -1094,6 +1107,50 @@ mod tests {
         drop(lock);
         let status = store.status().unwrap();
         assert!(!status.running && status.phase.contains("interrupted"));
+        assert_eq!(status.errors.len(), 1);
+        // Status is a read-only projection, including interruption detection.
+        assert!(store.state().unwrap().snapshot.running);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn status_reloads_a_worker_that_finished_after_the_initial_read() {
+        let root = std::env::temp_dir().join(format!("hb-health-finished-{}", std::process::id()));
+        let store = Store::new(root.clone()).unwrap();
+        let lock = store.lock().unwrap();
+        let mut state = State::default();
+        state.snapshot.running = true;
+        state.snapshot.phase = "Inspecting processes".into();
+        store.save("state.json", &state).unwrap();
+        let mut stale = store.state().unwrap().snapshot;
+
+        // Complete between status's first read and lock attempt, even within
+        // the same timestamp. The entire completed snapshot must be returned.
+        state.snapshot.running = false;
+        state.snapshot.phase = "Finished".into();
+        state.snapshot.removed_caches = 7;
+        state.snapshot.errors.push("Existing cleanup error".into());
+        state.snapshot.record("scan", "Finished: removed 7 caches");
+        store.save("state.json", &state).unwrap();
+        drop(lock);
+
+        store.reconcile_running_snapshot(&mut stale).unwrap();
+        assert_eq!(
+            serde_json::to_value(&stale).unwrap(),
+            serde_json::to_value(&state.snapshot).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn status_does_not_hide_an_unreadable_state_after_the_initial_read() {
+        let root =
+            std::env::temp_dir().join(format!("hb-health-status-corrupt-{}", std::process::id()));
+        let store = Store::new(root.clone()).unwrap();
+        let mut stale = Snapshot {
+            running: true,
+            ..Snapshot::default()
+        };
+        fs::write(root.join("state.json"), "broken").unwrap();
+        assert!(store.reconcile_running_snapshot(&mut stale).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
