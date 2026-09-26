@@ -93,7 +93,8 @@ impl Frame {
         let stat = unsafe { stat.assume_init() };
         let metadata = file.metadata()?;
         let volume = (metadata.dev(), stat.f_flag & libc::ST_RDONLY != 0);
-        self.protected_directory = filesystem_protected(&metadata);
+        self.protected_directory =
+            filesystem_protected(&metadata) || repository_metadata(&self.path)?;
         self.volume = Some(volume);
         Ok(volume)
     }
@@ -345,6 +346,7 @@ fn discover_projects(p: &mut Progress) {
 }
 
 fn discover_projects_until(p: &mut Progress, deadline: Instant) {
+    let mut checked_root = PathBuf::new();
     // Large source forests must use the time slice, not spend days waiting
     // between short 10,000-entry batches. The queue still bounds saved state.
     while Instant::now() < deadline && p.roots.len() < 4096 {
@@ -353,6 +355,21 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
                 break;
             };
             p.projects.push(Frame::new(root));
+        }
+        let root = &p.projects[0].path;
+        if *root != checked_root {
+            // A saved cursor can start inside bare Git refs named build or out.
+            match checkout_admin(root) {
+                Ok(Some(admin)) if root.starts_with(&admin) => {
+                    p.projects.clear();
+                    continue;
+                }
+                Err(_) => {
+                    p.projects.clear();
+                    continue;
+                }
+                _ => checked_root = root.clone(),
+            }
         }
         // Check before promoting legacy cache cursors into cleanup roots.
         let Ok(Some(device)) = traversal_device(&mut p.projects) else {
@@ -423,6 +440,20 @@ fn old_enough(path: &std::path::Path, m: &fs::Metadata, at: u64, clone_file: boo
     at.saturating_sub(newest.max(0) as u64) >= 86400
 }
 
+fn repository_metadata(path: &std::path::Path) -> io::Result<bool> {
+    // Bare repositories have no enclosing .git marker. Use their layout, not a
+    // directory suffix; cache expiration must never erase worktree registries.
+    for (name, directory) in [("HEAD", false), ("objects", true), ("refs", true)] {
+        match fs::symlink_metadata(path.join(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+            Ok(m) if m.is_dir() == directory || m.file_type().is_symlink() => {}
+            Ok(_) => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 fn checkout_marker(path: &std::path::Path) -> io::Result<bool> {
     let marker = path.join(".git");
     match fs::symlink_metadata(&marker) {
@@ -441,6 +472,9 @@ fn checkout_marker(path: &std::path::Path) -> io::Result<bool> {
 // per root visit, then cheaply recheck the lock before each entry is unlinked.
 fn checkout_admin(path: &std::path::Path) -> io::Result<Option<PathBuf>> {
     for parent in path.ancestors() {
+        if repository_metadata(parent)? {
+            return Ok(Some(parent.to_path_buf()));
+        }
         let marker = parent.join(".git");
         match fs::symlink_metadata(&marker) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
@@ -551,6 +585,9 @@ fn advance_with_owners(
                 return Ok(true);
             }
             if let Some(admin) = &owner_admin {
+                if root.starts_with(admin) {
+                    return Ok(true);
+                }
                 match fs::symlink_metadata(admin.join("locked")) {
                     Ok(_) => return Ok(true),
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -757,6 +794,112 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bare_git_expiration(resumed: bool, discovery: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "harvester-bare-{resumed}-{discovery}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "seed"]);
+        git(&["-C", "seed", "commit", "--allow-empty", "-m", "fixture"]);
+        git(&["clone", "--bare", "seed", "repository.git"]);
+        let work = root.join("held");
+        git(&[
+            "-C",
+            "repository.git",
+            "worktree",
+            "add",
+            "--detach",
+            work.to_str().unwrap(),
+            "HEAD",
+        ]);
+        git(&[
+            "-C",
+            "repository.git",
+            "worktree",
+            "lock",
+            work.to_str().unwrap(),
+        ]);
+        let registry = root.join("repository.git/worktrees/held");
+        assert!(registry.join("locked").exists());
+        fs::write(root.join("expired"), "disposable").unwrap();
+        let mut p = Progress {
+            roots: VecDeque::from([root.clone()]),
+            ..Progress::default()
+        };
+        if discovery {
+            git(&["-C", "repository.git", "branch", "build/held", "HEAD"]);
+            p.roots.clear();
+            p.projects
+                .push(Frame::new(root.join("repository.git/refs/heads/build")));
+            discover_projects_until(&mut p, Instant::now() + Duration::from_secs(5));
+            fs::remove_dir_all(root).unwrap();
+            assert!(
+                p.roots.is_empty(),
+                "Git branch refs must not become disposable build caches"
+            );
+            return;
+        }
+        if resumed {
+            let mut saved = Frame::new(registry.clone());
+            saved.refill().unwrap();
+            p.stack.push(saved);
+            p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        }
+        let (_, _, errors) = advance_with_owners(
+            &mut p,
+            now() + 172800,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            1000,
+            &BTreeSet::new(),
+        );
+        let retained = registry.join("locked").exists()
+            && registry.join("gitdir").exists()
+            && root.join("repository.git/HEAD").exists();
+        let expired = !root.join("expired").exists();
+        fs::remove_dir_all(root).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(retained, "Git metadata was expired (resumed={resumed})");
+        assert!(expired, "ordinary temporary files should still expire");
+    }
+
+    #[test]
+    fn temp_expiration_preserves_bare_git_metadata() {
+        bare_git_expiration(false, false);
+    }
+
+    #[test]
+    fn temp_expiration_preserves_saved_worktree_registry() {
+        bare_git_expiration(true, false);
+    }
+
+    #[test]
+    fn bare_git_refs_are_not_promoted_from_saved_cache_discovery() {
+        bare_git_expiration(false, true);
+    }
 
     #[cfg(target_os = "macos")]
     struct FileFlags(PathBuf);
