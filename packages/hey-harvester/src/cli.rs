@@ -190,7 +190,7 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
     println!(
         "Policy: {} · phase: {} · last check: {} · duration: {}s",
         if s.config.aggressive {
-            "aggressive (24 hours)"
+            "aggressive (worktrees: 4 hours; caches: 24 hours)"
         } else {
             "conservative"
         },
