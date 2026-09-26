@@ -59,23 +59,13 @@ def expected_workload_denial(error):
 
 
 def expected_access_denial(error):
-    """Only observed OS privacy boundaries are warnings; other failures still page."""
+    """OS privacy boundaries are warnings; project, I/O and mixed failures still page."""
     if expected_workload_denial(error):
         return True
     caches = {"FamilyCircle", "CloudKit", "com.apple.HomeKit", "com.apple.Safari",
               "com.apple.findmy.imagecache", "com.apple.findmy.fmfcore",
               "com.apple.containermanagerd", "com.apple.homed",
               "com.apple.findmy.fmipcore", "com.apple.ap.adprivacyd"}
-    services = {"com.apple.passd", "com.apple.chrono", "duetexpertd",
-                "com.apple.studentd", "com.apple.parsecd", "com.apple.identityservicesd",
-                "com.apple.bluetoothuserd", "com.apple.imdpersistence.IMDPersistenceAgent",
-                "com.apple.CloudDocs.iCloudDriveFileProvider", "com.apple.appleaccountd",
-                "com.apple.syncdefaultsd", "com.apple.amsengagementd",
-                "com.apple.icloud.searchpartyuseragent", "com.apple.transparencyd",
-                "com.apple.triald", "com.apple.ap.promotedcontentd", "homed",
-                "com.apple.pluginkit", "com.apple.donotdisturbd", "com.apple.securityuploadd",
-                "com.apple.appstoreagent", "com.apple.imtransferservices.IMTransferAgent",
-                "com.apple.replayd"}
     for part in error.removeprefix("24-hour cache expiration: ").split("; "):
         suffix = ": Operation not permitted (os error 1)"
         if not part.endswith(suffix):
@@ -84,8 +74,13 @@ def expected_access_denial(error):
         cache = re.fullmatch(r"/Users/[^/]+/Library/Caches/([^/]+)", path)
         temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/([^/]+)/TemporaryItems", path)
         os_temporary = re.fullmatch(r"/private/var/folders/[^/]+/[^/]+/T/TemporaryItems", path)
+        # New Apple services use the same protected TemporaryItems boundary.
+        # Keep its location and EPERM exact; this never relaxes cleaner access.
+        apple_temporary = temporary and (
+            re.fullmatch(r"com\.apple\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", temporary[1]) or
+            temporary[1] in {"homed", "duetexpertd"})
         if not (os_temporary or (cache and cache[1] in caches) or
-                (temporary and temporary[1] in services)):
+                apple_temporary):
             return False
     return True
 

@@ -220,7 +220,7 @@ class MonitorTests(unittest.TestCase):
         for error in [
             "/Users/test/Workspace/project/.cache: Operation not permitted (os error 1)",
             "/Users/test/Library/Caches/CustomApp: Operation not permitted (os error 1)",
-            "/private/var/folders/dd/test_user/T/com.apple.unknown/TemporaryItems: Operation not permitted (os error 1)",
+            "/private/var/folders/dd/test_user/T/com.example.unknown/TemporaryItems: Operation not permitted (os error 1)",
             "/Users/test/Library/Caches/FamilyCircle: Input/output error (os error 5)",
             known + "; /Users/test/Workspace/project/.cache: Input/output error (os error 5)",
         ]:
@@ -266,6 +266,31 @@ class MonitorTests(unittest.TestCase):
             with self.subTest(error=unexpected):
                 sample = self.completed_sample([unexpected])
                 self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
+
+    def test_apple_temporary_items_namespace_handles_new_services_without_hiding_other_failures(self):
+        prefix = "/private/var/folders/dd/test_user/T/"
+        for service in ["com.apple.quicklook.qlmanage", "com.apple.future-service", "homed", "duetexpertd"]:
+            error = prefix + service + "/TemporaryItems: Operation not permitted (os error 1)"
+            row = monitor.compact("mac", self.completed_sample([error]), 2000)
+            self.assertEqual(row["problems"], [])
+            self.assertEqual(row["warnings"], ["protected_os_cache"])
+            self.assertEqual(row["last_completed_errors"], [error])
+        for path in [
+            prefix + "com.example.service/TemporaryItems",
+            prefix + "com.apple-impostor/TemporaryItems",
+            prefix + "com.apple./TemporaryItems",
+            prefix + "com.apple.service/project-data",
+            "/private/tmp/com.apple.service/TemporaryItems",
+            "/Users/test/Workspace/com.apple.service/TemporaryItems",
+        ]:
+            self.assertFalse(monitor.expected_access_denial(path + ": Operation not permitted (os error 1)"))
+        error = prefix + "com.apple.quicklook.qlmanage/TemporaryItems: Operation not permitted (os error 1)"
+        for unexpected in [
+            error.replace("Operation not permitted (os error 1)", "Permission denied (os error 13)"),
+            error.replace("Operation not permitted (os error 1)", "Input/output error (os error 5)"),
+            error + "; /project: Operation not permitted (os error 1)",
+        ]:
+            self.assertFalse(monitor.expected_access_denial(unexpected))
 
     def test_newly_observed_apple_privacy_paths_remain_visible(self):
         paths = [
