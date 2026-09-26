@@ -11,6 +11,7 @@ hey-boss issue whoami
 hey-boss issue list
 hey-boss issue list --mine
 hey-boss issue list --unassigned --label bug
+hey-boss issue search 'reconnect'
 hey-boss issue create --title 'Fix reconnect' --body 'Reconnect after waking from sleep.'
 hey-boss issue view 1
 hey-boss issue claim 1
@@ -24,6 +25,13 @@ hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 
 Bodies and comments are Markdown text stored directly in SQLite. No Markdown
 file is required. `create` allows an empty body; comments must contain text.
+
+`issue search QUERY` matches a literal substring in titles and descriptions,
+ignoring ASCII case. It defaults to open, ready, and blocked issues (`--state active`);
+closed and deleted issues are excluded. Use `--state all` to include closed issues,
+or `--state deleted` to search the trash. Filters, queue order, pagination, and
+`--json` match `issue list`; `--all` retrieves every matching result without changing
+the state filter. `issue list --search QUERY` keeps its open-only default.
 
 New CLI issues go to the front of the queue. Use `create --at-bottom` to append
 work deliberately; `--at-top` remains supported. Connected companions refresh

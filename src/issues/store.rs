@@ -334,7 +334,7 @@ fn list_query(search: bool) -> String {
         ""
     };
     format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) AS comment_count FROM issues WHERE project_id=?1
-        AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2)))
+        AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2 OR (?2='active' AND state IN ('open','ready','blocked')))))
         AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
         AND (?5 IS NULL OR instr(lower(title),lower(?5))>0{body_search})
         AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
@@ -676,9 +676,13 @@ fn validate(r: &Request) -> Result<()> {
             search,
             ..
         } => {
-            if !["open", "blocked", "ready", "closed", "all", "deleted"].contains(&state.as_str()) {
+            if ![
+                "active", "open", "blocked", "ready", "closed", "all", "deleted",
+            ]
+            .contains(&state.as_str())
+            {
                 return Err(Error::invalid(
-                    "State must be open, blocked, ready, closed, all, or deleted",
+                    "State must be active, open, blocked, ready, closed, all, or deleted",
                 ));
             }
             if assignee.is_some() && (*mine || *unassigned) {
