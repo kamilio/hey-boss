@@ -19,6 +19,16 @@ import subprocess
 import time
 
 
+# Automatic scheduling alone does not prove the requested cleaners are enabled.
+CLEANERS = {
+    "harvest_processes": "process_cleanup_disabled",
+    "clean_worktrees": "worktree_cleanup_disabled",
+    "clean_caches": "cache_cleanup_disabled",
+    "trim_worker_logs": "worker_log_cleanup_disabled",
+    "aggressive": "aggressive_cleanup_disabled",
+}
+
+
 # Runs on the observed machine; only reads health, executable and scheduler state.
 PROBE = r'''
 import hashlib,json,os,pathlib,subprocess,sys,time
@@ -95,8 +105,11 @@ def problems(sample, now):
     result = []
     if sample["scheduler"]["returncode"]:
         result.append("scheduler_unavailable")
-    if not s.get("config", {}).get("automatic"):
+    config = s.get("config") or {}
+    if config.get("automatic") is not True:
         result.append("cleanup_disabled")
+    result.extend(problem for setting, problem in CLEANERS.items()
+                  if config.get(setting) is not True)
     if now - (s.get("last_cleanup_at") or 0) > 900:
         result.append("cleanup_stale")
     if "cache_progress" not in s:
@@ -145,6 +158,9 @@ def compact(host, sample, now):
         result["error"] = sample["error"]
         return result
     s = sample["snapshot"]
+    result["cleanup_settings"] = {
+        key: (s.get("config") or {}).get(key) for key in ("automatic", *CLEANERS)
+    }
     result["last_completed_errors"] = last_completed_errors(s)
     result["warnings"] = (["protected_os_cache"]
                           if any(expected_access_denial(e) for e in
