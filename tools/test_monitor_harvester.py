@@ -269,7 +269,7 @@ class MonitorTests(unittest.TestCase):
 
     def test_apple_temporary_items_namespace_handles_new_services_without_hiding_other_failures(self):
         prefix = "/private/var/folders/dd/test_user/T/"
-        for service in ["com.apple.quicklook.qlmanage", "com.apple.future-service", "homed", "duetexpertd"]:
+        for service in ["com.apple.quicklook.qlmanage", "com.apple.future-service", "homed", "duetexpertd", "icdd"]:
             error = prefix + service + "/TemporaryItems: Operation not permitted (os error 1)"
             row = monitor.compact("mac", self.completed_sample([error]), 2000)
             self.assertEqual(row["problems"], [])
@@ -282,6 +282,9 @@ class MonitorTests(unittest.TestCase):
             prefix + "com.apple.service/project-data",
             "/private/tmp/com.apple.service/TemporaryItems",
             "/Users/test/Workspace/com.apple.service/TemporaryItems",
+            prefix + "icdd-copy/TemporaryItems",
+            prefix + "icdd/TemporaryItems/project",
+            "/Users/test/Workspace/icdd/TemporaryItems",
         ]:
             self.assertFalse(monitor.expected_access_denial(path + ": Operation not permitted (os error 1)"))
         error = prefix + "com.apple.quicklook.qlmanage/TemporaryItems: Operation not permitted (os error 1)"
