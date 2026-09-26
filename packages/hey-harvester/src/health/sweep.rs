@@ -234,6 +234,18 @@ fn discover() -> VecDeque<PathBuf> {
         .collect()
 }
 
+fn cargo_registry_source(path: &std::path::Path) -> bool {
+    // Cargo assumes an extracted crate is complete. Nested build/target folders
+    // can contain source; pruning individual files silently corrupts that cache.
+    path.ancestors().any(|dir| {
+        dir.file_name().is_some_and(|name| name == "src")
+            && dir
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .is_some_and(|name| name == "registry")
+    })
+}
+
 fn project_cache(path: &std::path::Path) -> bool {
     matches!(
         path.file_name().and_then(|n| n.to_str()),
@@ -260,6 +272,14 @@ fn discover_projects(p: &mut Progress) {
                 break;
             };
             p.projects.push(Frame::new(root));
+        }
+        if let Some(index) = p
+            .projects
+            .iter()
+            .position(|frame| cargo_registry_source(&frame.path))
+        {
+            p.projects.truncate(index);
+            continue;
         }
         // Older versions descended into project .cache directories without
         // cleaning them. Promote saved cursors too, including nested frames.
@@ -441,7 +461,8 @@ fn advance(
         let frame = progress.stack.last_mut().unwrap();
         // Never follow a changed ancestor or walk into a repository from /tmp.
         let permitted = (|| -> io::Result<bool> {
-            Ok(frame.path.canonicalize()? == frame.path
+            Ok(!cargo_registry_source(&frame.path)
+                && frame.path.canonicalize()? == frame.path
                 && !checkout_marker(&frame.path)?
                 && !databases::protected(&frame.path)?)
         })();
@@ -476,7 +497,9 @@ fn advance(
                     if !m.is_dir() && !old_enough(&path, &m, at, clone_file) {
                         return Ok(());
                     }
-                    if path.file_name().is_some_and(|n| n == ".git") || databases::protected(&path)?
+                    if path.file_name().is_some_and(|n| n == ".git")
+                        || cargo_registry_source(&path)
+                        || databases::protected(&path)?
                     {
                         protected += 1;
                         return Ok(());
@@ -703,6 +726,71 @@ mod tests {
             42
         );
         drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_registry_sources_survive_discovery_and_saved_sweeps() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-registry-sources-{}", std::process::id()));
+        let sources = [
+            "registry/src/index/cc/src/target/apple.rs",
+            "registry/src/index/rustversion/build/build.rs",
+        ];
+        for path in sources.into_iter().chain(["project/target/output"]) {
+            let file = root.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"fixture").unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let at = now() + 90000;
+        let mut p = Progress {
+            project_roots: VecDeque::from([root.clone()]),
+            ..Default::default()
+        };
+        discover_projects(&mut p);
+        advance(
+            &mut p,
+            at,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+        );
+        assert!(!root.join("project/target/output").exists());
+        for path in sources {
+            assert!(
+                root.join(path).exists(),
+                "Downloaded source was removed: {path}"
+            );
+        }
+
+        let target = root.join("registry/src/index/cc/src/target");
+        let build = root.join("registry/src/index/rustversion/build");
+        let mut saved = Frame::new(target.clone());
+        saved.refill().unwrap();
+        let mut p = Progress {
+            roots: VecDeque::from([target]),
+            stack: vec![saved],
+            deferred: VecDeque::from([vec![Frame::new(build.clone())]]),
+            projects: vec![Frame::new(build)],
+            ..Default::default()
+        };
+        p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        discover_projects(&mut p);
+        advance(
+            &mut p,
+            at,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+        );
+        for path in sources {
+            assert!(
+                root.join(path).exists(),
+                "Saved cursor removed source: {path}"
+            );
+        }
+        assert!(p.roots.is_empty() && p.stack.is_empty() && p.deferred.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
