@@ -89,9 +89,11 @@ fn companion_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for name in ["hey-gh", "hey-harvester"] {
         paths.push(binary.with_file_name(name));
-        let cargo = home.join(".cargo/bin").join(name);
-        if cargo.exists() && !paths.contains(&cargo) {
-            paths.push(cargo);
+        for directory in [".cargo/bin", ".local/bin"] {
+            let existing = home.join(directory).join(name);
+            if existing.exists() && !paths.contains(&existing) {
+                paths.push(existing);
+            }
         }
     }
     paths
@@ -312,6 +314,33 @@ fn publish_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_standalone_companions_follow_package_upgrades_without_duplicates() {
+        let temp = Temp::new().unwrap();
+        let home = temp.0.join("home");
+        let standalone = home.join(".local/bin/hey-harvester");
+        script(&standalone, "echo standalone");
+        let homebrew = temp.0.join("homebrew/bin/hey-boss");
+        let destinations = companion_bins(&homebrew, &home);
+        assert!(destinations.contains(&homebrew.with_file_name("hey-harvester")));
+        assert!(
+            destinations.contains(&standalone),
+            "scheduled standalone binary must be upgraded"
+        );
+        assert!(
+            !destinations.contains(&home.join(".local/bin/hey-gh")),
+            "do not create previously absent alternate installations"
+        );
+        let local_installation = companion_bins(&home.join(".local/bin/hey-boss"), &home);
+        assert_eq!(
+            local_installation
+                .iter()
+                .filter(|p| *p == &standalone)
+                .count(),
+            1
+        );
+    }
+
     fn script(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
