@@ -268,9 +268,13 @@ fn project_cache(path: &std::path::Path) -> bool {
 }
 
 fn discover_projects(p: &mut Progress) {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut visited = 0;
-    while Instant::now() < deadline && visited < 10000 && p.roots.len() < 4096 {
+    discover_projects_until(p, Instant::now() + Duration::from_secs(3));
+}
+
+fn discover_projects_until(p: &mut Progress, deadline: Instant) {
+    // Large source forests must use the time slice, not spend days waiting
+    // between short 10,000-entry batches. The queue still bounds saved state.
+    while Instant::now() < deadline && p.roots.len() < 4096 {
         if p.projects.is_empty() {
             let Some(root) = p.project_roots.pop_front() else {
                 break;
@@ -301,7 +305,6 @@ fn discover_projects(p: &mut Progress) {
             p.projects.pop();
             continue;
         }
-        visited += 1;
         match frame.next() {
             Ok(Some(path)) => {
                 if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
@@ -757,6 +760,36 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn discovery_uses_available_time_and_resumes_large_source_trees() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-large-discovery-{}", std::process::id()));
+        fs::create_dir_all(root.join("project/src")).unwrap();
+        fs::create_dir_all(root.join("project/.cache")).unwrap();
+        let root = root.canonicalize().unwrap();
+        for index in 0..12_000 {
+            fs::write(root.join(format!("project/src/{index}.ts")), b"source").unwrap();
+        }
+        let mut p = Progress {
+            project_roots: VecDeque::from([root.clone()]),
+            ..Default::default()
+        };
+        discover_projects_until(&mut p, Instant::now());
+        assert_eq!(p.project_roots, VecDeque::from([root.clone()]));
+        p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        discover_projects_until(&mut p, Instant::now() + Duration::from_secs(30));
+        let complete = p.projects.is_empty() && p.project_roots.is_empty();
+        let scheduled = p.roots.contains(&root.join("project/.cache"));
+        let sources = fs::read_dir(root.join("project/src")).unwrap().count();
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            complete,
+            "Unused discovery time must reach caches beyond large source trees"
+        );
+        assert!(scheduled);
+        assert_eq!(sources, 12_000);
+    }
+
     #[test]
     fn project_local_cache_expires_old_files_but_keeps_sqlite_fresh_files_and_checkouts() {
         let root =
