@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import shlex
+import signal
 import subprocess
 import time
 
@@ -135,14 +136,36 @@ def problems(sample, now):
     return result
 
 
+def run_probe(args, timeout=100):
+    # SSH may exit while its authentication proxy still holds the output pipes.
+    # Own a separate process group so timeout cleanup cannot reach other jobs.
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, start_new_session=True) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(process.pid, sig)
+                except ProcessLookupError:
+                    break
+                if sig == signal.SIGTERM:
+                    time.sleep(0.1)
+            process.communicate(timeout=2)
+            raise
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
 def probe(host, control=None):
     args = ["python3", "-c", PROBE]
     if host != "local":
         args = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                 "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
-                *(["-S", str(control)] if control else []), host, shlex.join(args)]
+                "-o", "ControlMaster=no",
+                *(["-S", str(control), "-o", "ProxyCommand=false", "-o", "ProxyJump=none"]
+                  if control else []), host, shlex.join(args)]
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=100)
+        p = run_probe(args)
         if p.returncode:
             return {"error": p.stderr[-2000:] or f"probe exited {p.returncode}"}
         return json.loads(p.stdout)
