@@ -55,6 +55,8 @@ impl Statistics {
 #[derive(Serialize, Deserialize)]
 struct Frame {
     path: PathBuf,
+    #[serde(skip)]
+    volume: Option<(u64, bool)>,
     #[serde(default)]
     offset: i64,
     #[serde(default)]
@@ -66,12 +68,35 @@ impl Frame {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
+            volume: None,
             offset: 0,
             identity: None,
             batch: VecDeque::new(),
         }
     }
+    fn volume(&mut self) -> io::Result<(u64, bool)> {
+        if let Some(volume) = self.volume {
+            return Ok(volume);
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.path)?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // The descriptor pins the directory while inspecting its volume.
+        if unsafe { libc::fstatvfs(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let stat = unsafe { stat.assume_init() };
+        let volume = (file.metadata()?.dev(), stat.f_flag & libc::ST_RDONLY != 0);
+        self.volume = Some(volume);
+        Ok(volume)
+    }
     fn next(&mut self) -> io::Result<Option<PathBuf>> {
+        // Saved batches must obey the same volume policy as fresh reads.
+        if self.volume()?.1 {
+            return Ok(None);
+        }
         if self.batch.is_empty() {
             self.refill()?;
         }
@@ -160,6 +185,31 @@ impl Frame {
         self.batch = batch;
         Ok(())
     }
+}
+// Deserialized frames recheck the kernel once per slice. Validate ancestors too:
+// a saved cursor may already be several levels below a newly mounted directory.
+fn traversal_device(frames: &mut Vec<Frame>) -> io::Result<Option<u64>> {
+    let mut device = None;
+    for index in 0..frames.len() {
+        match frames[index].volume() {
+            Ok((current, readonly)) => {
+                if readonly || device.is_some_and(|root| root != current) {
+                    frames.truncate(index);
+                    return Ok(None);
+                }
+                device = Some(current);
+            }
+            Err(error) => {
+                let error = io::Error::new(
+                    error.kind(),
+                    format!("{}: {error}", frames[index].path.display()),
+                );
+                frames.truncate(index);
+                return Err(error);
+            }
+        }
+    }
+    Ok(device)
 }
 fn add(roots: &mut BTreeSet<PathBuf>, path: PathBuf) {
     if let Ok(p) = path.canonicalize() {
@@ -281,6 +331,10 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
             };
             p.projects.push(Frame::new(root));
         }
+        // Check before promoting legacy cache cursors into cleanup roots.
+        let Ok(Some(device)) = traversal_device(&mut p.projects) else {
+            continue;
+        };
         if let Some(index) = p
             .projects
             .iter()
@@ -307,7 +361,7 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
         }
         match frame.next() {
             Ok(Some(path)) => {
-                if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && m.dev() == device) {
                     continue;
                 }
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -494,6 +548,16 @@ fn advance_with_owners(
                 continue;
             }
         }
+        let device = match traversal_device(&mut progress.stack) {
+            Ok(Some(device)) => device,
+            Ok(None) => continue,
+            Err(error) => {
+                if error.kind() != io::ErrorKind::NotFound && errors.len() < 8 {
+                    errors.push(error.to_string());
+                }
+                continue;
+            }
+        };
         let frame = progress.stack.last_mut().unwrap();
         // Never follow a changed ancestor or walk into a repository from /tmp.
         let permitted = (|| -> io::Result<bool> {
@@ -519,6 +583,9 @@ fn advance_with_owners(
             Ok(Some(path)) => {
                 let result = (|| -> io::Result<()> {
                     let m = fs::symlink_metadata(&path)?;
+                    if m.dev() != device {
+                        return Ok(());
+                    }
                     let clone_file = m.is_file()
                         && path.components().any(|c| {
                             c.as_os_str()
@@ -664,6 +731,98 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mount_boundaries_revalidate_saved_volume_and_reject_symlinks() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-volume-stat-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        fs::write(root.join("keep"), "saved batch").unwrap();
+        let mut frame = Frame::new(root.clone());
+        frame.refill().unwrap();
+        let device = fs::metadata(&root).unwrap().dev();
+        assert_eq!(frame.volume().unwrap(), (device, false));
+        frame.volume = Some((device + 1, true));
+        assert!(frame.next().unwrap().is_none());
+        assert!(!frame.batch.is_empty());
+        let saved = serde_json::to_string(&frame).unwrap();
+        let mut restored: Frame = serde_json::from_str(&saved).unwrap();
+        assert!(restored.volume.is_none());
+        assert_eq!(restored.volume().unwrap(), (device, false));
+        assert_eq!(restored.next().unwrap(), Some(root.join("keep")));
+        std::os::unix::fs::symlink(&root, root.join("link")).unwrap();
+        assert!(Frame::new(root.join("link")).volume().is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mount_boundaries_preserve_readonly_roots_and_resumed_mounts() {
+        for readonly in [true, false] {
+            let root = std::env::temp_dir()
+                .join(format!("harvester-mount-{readonly}-{}", std::process::id()));
+            fs::create_dir_all(root.join("mounted")).unwrap();
+            let root = root.canonicalize().unwrap();
+            fs::write(root.join("mounted/keep"), "mounted data").unwrap();
+            fs::write(root.join("expired"), "disposable").unwrap();
+            let device = fs::metadata(&root).unwrap().dev();
+            let mut parent = Frame::new(root.clone());
+            parent.refill().unwrap();
+            parent.batch.retain(|name| name != b"mounted");
+            parent.volume = Some((device, false));
+            let mut mounted = Frame::new(root.join("mounted"));
+            // Simulate the kernel's volume metadata, without mounting a real disk.
+            mounted.volume = Some((if readonly { device } else { device + 1 }, readonly));
+            let mut p = Progress::default();
+            if readonly {
+                p.stack.push(mounted);
+                p.deferred.push_back(vec![parent]);
+            } else {
+                p.stack = vec![parent, mounted];
+            }
+            let (removed, _, errors) = advance_with_owners(
+                &mut p,
+                now() + 172800,
+                true,
+                Instant::now() + Duration::from_secs(5),
+                100,
+                &BTreeSet::new(),
+            );
+            assert!(errors.is_empty());
+            assert_eq!(removed, 1, "only the unmounted sibling may expire");
+            assert_eq!(
+                fs::read_to_string(root.join("mounted/keep")).unwrap(),
+                "mounted data"
+            );
+            assert!(!root.join("expired").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn mount_boundaries_stop_saved_discovery_before_cache_promotion() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-mount-discovery-{}", std::process::id()));
+        fs::create_dir_all(root.join("mounted/out")).unwrap();
+        fs::create_dir_all(root.join("normal/out")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let device = fs::metadata(&root).unwrap().dev();
+        for readonly in [false, true] {
+            let mut parent = Frame::new(root.clone());
+            parent.refill().unwrap();
+            parent.batch.retain(|name| name != b"mounted");
+            parent.volume = Some((device, false));
+            let mut mounted = Frame::new(root.join("mounted/out"));
+            mounted.volume = Some((if readonly { device } else { device + 1 }, readonly));
+            let mut p = Progress {
+                projects: vec![parent, mounted],
+                ..Progress::default()
+            };
+            discover_projects_until(&mut p, Instant::now() + Duration::from_secs(5));
+            assert_eq!(p.roots, VecDeque::from([root.join("normal/out")]));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn resumed_cache_sweep_preserves_declared_issue_work_and_expires_unowned_output() {
         let root =
