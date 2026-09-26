@@ -18,6 +18,35 @@ spec.loader.exec_module(monitor)
 
 
 class MonitorTests(unittest.TestCase):
+    def test_routine_disconnects_stay_visible_without_paging_and_low_disk_still_alerts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'monitor-state.json').write_text(json.dumps({'devbox': {
+                'problems': ['unreachable'], 'since': 1, 'last_alert': 1,
+                'completed_through': 1950}}))
+            disk = self.sample()
+            disk['machine_time'] = 2000
+            disk['binary_sha256'] = 'fixture'
+            disk['snapshot']['metrics']['disk_available_bytes'] = 10_000_000_000
+            notify = mock.Mock(return_value=mock.Mock(returncode=0))
+            args = ['monitor', '--directory', directory, '--host', 'devbox',
+                    '--notify', '/fixture/hey-boss']
+            with mock.patch('sys.argv', args), mock.patch('builtins.print'), \
+                    mock.patch.object(monitor, 'probe', side_effect=[{'error': 'offline'}] * 3 + [disk]), \
+                    mock.patch.object(monitor.time, 'time', side_effect=[30000, 30300, 60000, 60300]), \
+                    mock.patch.object(monitor.subprocess, 'run', notify):
+                for _ in range(3):
+                    monitor.main()
+                notify.assert_not_called()
+                latest = json.loads((root / 'latest-summary.json').read_text())[0]
+                self.assertEqual(latest['problems'], ['unreachable'])
+                self.assertNotIn('metrics', latest)
+                self.assertEqual(json.loads((root / 'monitor-state.json').read_text())['devbox']['completed_through'], 1950)
+                monitor.main()
+                notify.assert_called_once()
+                self.assertIn('disk_low', notify.call_args.args[0][-1])
+                self.assertNotIn('unreachable', notify.call_args.args[0][-1])
+
     def test_remote_probe_reuses_only_its_configured_control_socket(self):
         run = mock.Mock(return_value=mock.Mock(returncode=0, stdout='{}'))
         control = pathlib.Path('/tmp/fixture ssh.sock')
@@ -49,7 +78,8 @@ class MonitorTests(unittest.TestCase):
                      'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
                      f'Path({str(receipt)!r}).write_text(json.dumps([os.getpid(),os.getpgrp()])); '
                      'time.sleep(30)')
-            launcher = (f'import subprocess,sys,time; from pathlib import Path; '
+            launcher = (f'import subprocess,sys,time,signal; from pathlib import Path; '
+                        'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
                         f'subprocess.Popen([sys.executable,"-c",{proxy!r}]'
                         + (')' if timeout else ',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)'))
             if not timeout:
@@ -60,7 +90,7 @@ class MonitorTests(unittest.TestCase):
                 started = time.monotonic()
                 if timeout:
                     with self.assertRaises(subprocess.TimeoutExpired):
-                        monitor.run_probe([sys.executable, '-c', launcher], timeout=0.5)
+                        monitor.run_probe([sys.executable, '-c', launcher], timeout=2)
                 else:
                     self.assertEqual(monitor.run_probe([sys.executable, '-c', launcher]).returncode, 1)
                 self.assertLess(time.monotonic()-started, 5)
