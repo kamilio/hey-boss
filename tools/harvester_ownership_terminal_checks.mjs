@@ -66,7 +66,11 @@ try {
   checks.push('Details return to the list and removal can be cancelled');
   for (const message of ['Missing checkout; metadata preserved', 'Modified, untracked, or ignored files; preserved']) {
     await session.press('ArrowDown');await session.press('Enter');
-    await wait(message);await session.type('x');
+    await wait('Selected entry');
+    await wait(message.startsWith('Missing')?'Missing checkout;':'Modified, untracked,');
+    const detail=(await session.screen()).text.replace(/[│\n]/g,' ').replace(/\s+/g,' ');
+    assert(detail.includes(message),`Full reason must remain readable: ${message}\n${detail}`);
+    await session.type('x');
     await wait('Selected entry');
     await capture(message.startsWith('Missing')?'missing-metadata':'uncommitted-work');
     checks.push(message+' remains readable and details do not dispatch cleanup');
