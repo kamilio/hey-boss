@@ -1,6 +1,11 @@
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -38,31 +43,124 @@ impl Fixture {
             .unwrap();
         assert!(
             out.status.success(),
-            "{}",
+            "Chief CLI {args:?} exited {}\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
         serde_json::from_slice(&out.stdout).unwrap()
     }
 }
 
-struct Worker(std::process::Child);
+struct Worker(std::process::Child, Option<PathBuf>);
+impl Worker {
+    fn stop_chief(&self) {
+        let Some(root) = &self.1 else { return };
+        let owned = || -> rusqlite::Result<(u32, String)> {
+            let db = rusqlite::Connection::open(root.join("issues.db"))?;
+            db.busy_timeout(std::time::Duration::from_millis(100))?;
+            db.query_row("SELECT pid,process_start FROM project_chiefs WHERE owner_pid=?1 AND pid IS NOT NULL", [self.0.id()], |r| Ok((r.get(0)?, r.get(1)?)))
+        };
+        if let Ok((pid, start)) = owned()
+            && hey_harvester::agents::process_identity(pid).as_deref() == Some(&start)
+        {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
 impl Drop for Worker {
     fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_some() {
+            self.stop_chief();
+            return;
+        }
         unsafe {
             libc::kill(self.0.id() as i32, libc::SIGTERM);
         }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if self.0.try_wait().ok().flatten().is_some() {
+                self.stop_chief();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        self.stop_chief();
+        let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
-fn wait_for(mut condition: impl FnMut() -> bool) {
+#[track_caller]
+fn wait_for(f: &Fixture, worker: &mut Worker, stage: &str, mut condition: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !condition() {
+        if let Some(status) = worker.0.try_wait().unwrap() {
+            panic!(
+                "Chief worker exited {status} during {stage}\n{}",
+                f.diagnostics()
+            );
+        }
         assert!(
             std::time::Instant::now() < deadline,
-            "Timed out waiting for Chief"
+            "Timed out waiting for Chief: {stage}\n{}",
+            f.diagnostics()
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+impl Fixture {
+    fn diagnostics(&self) -> String {
+        let state = rusqlite::Connection::open(self.0.join("issues.db")).and_then(|db| {
+            db.busy_timeout(std::time::Duration::from_millis(100))?;
+            db.query_row("SELECT json_object('state',state,'session_id',session_id,'owner_pid',owner_pid,'pid',pid,'next_at',next_at,'started_at',started_at,'finished_at',finished_at,'last_event',last_event,'summary',summary) FROM project_chiefs", [], |r| r.get::<_, String>(0))
+        });
+        format!(
+            "Chief state: {state:?}\nlaunches: {}\nworker output: {}",
+            log_tail(&self.0.join("launches.txt")),
+            log_tail(&self.0.join("worker.log"))
+        )
+    }
+}
+
+fn log_tail(path: &Path) -> String {
+    let read = || -> std::io::Result<String> {
+        let mut file = fs::File::open(path)?;
+        let start = file.metadata()?.len().saturating_sub(8192);
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.take(8192).read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    read().unwrap_or_else(|error| format!("{error}"))
+}
+
+#[test]
+fn chief_wait_reports_worker_exit_with_stage_and_output() {
+    let f = Fixture::new();
+    let log = fs::File::create(f.0.join("worker.log")).unwrap();
+    let mut worker = Worker(
+        Command::new("/bin/sh")
+            .args(["-c", "echo synthetic-startup-error >&2; exit 23"])
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+        None,
+    );
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(&f, &mut worker, "startup probe", || false);
+    }))
+    .unwrap_err();
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("worker exited exit status: 23"),
+        "{message}"
+    );
+    assert!(message.contains("startup probe"), "{message}");
+    assert!(message.contains("synthetic-startup-error"), "{message}");
+    assert!(message.contains("Chief state:"), "{message}");
 }
 
 #[test]
@@ -96,6 +194,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     f.cli(&["settings", "set", "--no-chief"]);
     let start = |enable: bool| {
         let mut command = f.command();
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(f.0.join("worker.log"))
+            .unwrap();
         command.args(["worker", "run"]);
         if enable {
             command.arg("--chief");
@@ -110,10 +213,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
                     f.0.to_str().unwrap(),
                     "--json",
                 ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::inherit())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
                 .spawn()
                 .unwrap(),
+            Some(f.0.clone()),
         )
     };
     let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
@@ -121,8 +225,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     let finished = || {
         db.query_row("SELECT count(*) FROM project_chiefs WHERE state='idle' AND session_id='chief-saved-thread' AND owner_pid IS NULL",[],|r|r.get::<_,i64>(0)).unwrap() == 1
     };
-    let worker = start(true);
-    wait_for(finished);
+    let mut worker = start(true);
+    wait_for(&f, &mut worker, "initial pass", finished);
     assert_eq!(
         f.cli(&["settings", "show"])["chief_enabled"],
         true,
@@ -148,8 +252,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     drop(worker);
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
-    let worker = start(false);
-    wait_for(|| {
+    let mut worker = start(false);
+    wait_for(&f, &mut worker, "saved thread resume", || {
         finished()
             && fs::read_to_string(f.0.join("launches.txt"))
                 .unwrap_or_default()
@@ -161,8 +265,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
         [],
     )
     .unwrap();
-    let worker = start(false);
-    wait_for(finished);
+    let mut worker = start(false);
+    wait_for(&f, &mut worker, "missing thread replacement", finished);
     assert!(
         fs::read_to_string(f.0.join("launches.txt"))
             .unwrap()
@@ -182,8 +286,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     }
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
-    let worker = start(false);
-    wait_for(|| {
+    let mut worker = start(false);
+    wait_for(&f, &mut worker, "failed turn", || {
         db.query_row("SELECT state FROM project_chiefs", [], |r| {
             r.get::<_, String>(0)
         })
@@ -205,8 +309,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
         fs::write(f.0.join(mode), "").unwrap();
         db.execute("UPDATE project_chiefs SET next_at=0", [])
             .unwrap();
-        let worker = start(false);
-        wait_for(|| {
+        let mut worker = start(false);
+        wait_for(&f, &mut worker, mode, || {
             db.query_row(
                 "SELECT state='blocked' AND finished_at>?1 FROM project_chiefs",
                 [previous],
@@ -221,8 +325,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     fs::write(f.0.join("hold"), "").unwrap();
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
-    let worker = start(false);
-    wait_for(|| f.0.join("chief.pid").exists());
+    let mut worker = start(false);
+    wait_for(&f, &mut worker, "held Chief startup", || {
+        f.0.join("chief.pid").exists()
+    });
     let pid: u32 = fs::read_to_string(f.0.join("chief.pid"))
         .unwrap()
         .trim()
@@ -240,11 +346,12 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     assert_eq!(status["chiefs"][0]["pid"], pid);
     assert_eq!(status["chiefs"][0]["session_id"], "chief-saved-thread");
     assert_eq!(status["chiefs"][0]["kind"], "chief");
-    let second = start(false);
-    wait_for(|| {
+    let mut second = start(false);
+    let second_pid = second.0.id();
+    wait_for(&f, &mut second, "second worker startup", || {
         db.query_row(
             "SELECT count(*) FROM issue_workers WHERE owner_pid=?1",
-            [second.0.id()],
+            [second_pid],
             |r| r.get::<_, i64>(0),
         )
         .unwrap()
@@ -276,7 +383,12 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     );
     drop(second);
     f.cli(&["settings", "set", "--no-chief"]);
-    wait_for(|| unsafe { libc::kill(pid as i32, 0) } != 0);
+    wait_for(
+        &f,
+        &mut worker,
+        "disabled Chief cleanup",
+        || unsafe { libc::kill(pid as i32, 0) } != 0,
+    );
     drop(worker);
     assert!(
         db.query_row(
