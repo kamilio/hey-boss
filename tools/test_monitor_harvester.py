@@ -227,6 +227,23 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(row["warnings"], ["protected_os_cache"])
         self.assertEqual(row["last_completed_errors"], [error])
 
+    def test_os_temporary_items_privacy_denial_is_narrow_and_visible(self):
+        path = "/private/var/folders/dd/test_user/T/TemporaryItems"
+        error = "24-hour cache expiration: " + path + ": Operation not permitted (os error 1)"
+        row = monitor.compact("mac", self.completed_sample([error]), 2000)
+        self.assertEqual(row["problems"], [])
+        self.assertEqual(row["warnings"], ["protected_os_cache"])
+        self.assertEqual(row["last_completed_errors"], [error])
+        for unexpected in [
+            error.replace("T/TemporaryItems", "T/project/TemporaryItems"),
+            error.replace(path, "/private/tmp/TemporaryItems"),
+            error.replace("Operation not permitted (os error 1)", "Input/output error (os error 5)"),
+            error + "; /Users/test/Workspace/project: Permission denied (os error 13)",
+        ]:
+            with self.subTest(error=unexpected):
+                sample = self.completed_sample([unexpected])
+                self.assertIn("cleanup_errors", monitor.problems(sample, 2000))
+
     def test_newly_observed_apple_privacy_paths_remain_visible(self):
         paths = [
             "/private/var/folders/dd/test_user/T/com.apple.transparencyd/TemporaryItems",
