@@ -93,7 +93,16 @@ const HeyBossArtifacts = (() => {
     }
     return flush();
   }
-  async function renderMarkdown(root,html) {
+  async function renderMarkdown(root,html,context=null,files=[]) {
+    if(files.length){
+      const template=document.createElement("template");template.innerHTML=html;
+      for(const img of template.content.querySelectorAll("img[src]")){
+        const decode=value=>{try{return decodeURI(value);}catch{return value;}};
+        const file=files.find(file=>decode(file.destination)===decode(img.getAttribute("src")));
+        if(file){img.dataset.importSrc=file.destination;img.removeAttribute("src");}
+      }
+      html=template.innerHTML;
+    }
     root.classList.toggle("artifact-large",html.length>=32000);
     if(html.length<32000){root.innerHTML=html;externalLinks(root);}
     else{
@@ -101,6 +110,7 @@ const HeyBossArtifacts = (() => {
       if(!await appendMarkdown(root,html))return;
       root.removeAttribute("aria-busy");
     }
+    if(context)HeyBossAttachments.hydrate(root,context,files);
     if(!root.querySelector("pre > code.language-mermaid"))return;
     try{await loadDiagrams();if(root.isConnected)window.HeyBossArtifactDiagrams.mount(root);}
     catch(e){
@@ -254,6 +264,7 @@ const HeyBossArtifacts = (() => {
       clearTimeout(draftTimer);
       if(!editing)return;
       const key=draftKey(doc?.id),value={title:$("#artifact-title").value,body:editorBody(),version:Number($("#artifact-editor").dataset.version),requestID:$("#artifact-editor").dataset.requestId,pending:$("#artifact-editor").dataset.pending?JSON.parse($("#artifact-editor").dataset.pending):null};
+      value.files=JSON.parse($("#artifact-editor").dataset.importFiles||"[]");
       resizeEditor?.(value.body.length);
       const saved=drafts.set(key,value);status(saved?"Draft saved in this browser":"Draft is only in this tab · browser storage unavailable");
     }
@@ -263,9 +274,10 @@ const HeyBossArtifacts = (() => {
       mode("editor");
       document.title=`${doc?"Edit "+doc.title:"New artifact"} · Hey Boss`;
       $("#artifact-document").innerHTML=`<form id="artifact-editor" class="artifact-editor" data-version="${draft?.version||doc?.version||1}" data-request-id="${esc(draft?.requestID||HeyBossUI.requestId())}">
-        <header class="artifact-editor-toolbar"><button class="artifact-text-button" type="button" id="artifact-cancel">${icon("arrow-left")}Back</button><h1>${doc?"Edit artifact":"New artifact"}</h1><div class="artifact-editor-tools"><button class="button" type="button" id="artifact-preview" aria-pressed="false">Preview</button><button class="button artifact-import" type="button" id="artifact-import-open">Import</button><input id="artifact-import" type="file" accept=".md,.markdown,text/markdown,text/plain" hidden><button class="button primary" type="submit">Save</button></div></header>
+        <header class="artifact-editor-toolbar"><button class="artifact-text-button" type="button" id="artifact-cancel">${icon("arrow-left")}Back</button><h1>${doc?"Edit artifact":"New artifact"}</h1><div class="artifact-editor-tools"><button class="button" type="button" id="artifact-preview" aria-pressed="false">Preview</button><button class="button artifact-import" type="button" id="artifact-import-open" title="Choose Markdown and its linked files together">Import</button><input id="artifact-import" type="file" multiple hidden><button class="button primary" type="submit">Save</button></div></header>
         <div class="artifact-editor-paper"><label class="artifact-title-label" for="artifact-title">Title</label><input id="artifact-title" aria-label="Title" required maxlength="512" placeholder="Untitled artifact" value="${esc(draft?.title??doc?.title??"")}"><div id="artifact-write"><label class="artifact-body-label" for="artifact-body">Markdown</label><textarea id="artifact-body" placeholder="Start writing in Markdown…" spellcheck="true">${esc(draft?.body??doc?.body??"")}</textarea></div><div class="markdown artifact-reading" id="artifact-edit-preview" hidden></div></div><div id="artifact-conflict" class="artifact-conflict"></div></form>`;
       let saving=false,pending=draft?.pending||null;
+      $("#artifact-editor").dataset.importFiles=JSON.stringify(draft?.files||[]);
       if(pending){$("#artifact-editor").dataset.pending=JSON.stringify(pending);$("#artifact-title").disabled=true;$("#artifact-body").disabled=true;$("#artifact-import").disabled=true;$("#artifact-import-open").disabled=true;}
       const autosize=length=>{
         const body=$("#artifact-body");if(!body||body.closest('[hidden]'))return;
@@ -300,22 +312,58 @@ const HeyBossArtifacts = (() => {
         if(issue||node)location.href=resourceURL(context,issue?"issue":"node",issue||node);
         else location.href=libraryURL();
       })();};
-      $("#artifact-import").onchange=async e=>{const file=e.target.files[0];if(!file)return;if(file.size>1048576){error(Error("Markdown must be at most 1 MiB"));return;}const body=await file.text();if(writingEditor)writingEditor.replace(body);else{$("#artifact-body").value=body;changed();}};
+      $("#artifact-import").onchange=async e=>{
+        const selected=[...e.target.files],form=$("#artifact-editor");e.target.value="";
+        if(!selected.length)return;
+        const markdown=selected.filter(file=>/\.(md|markdown)$/i.test(file.name));
+        if(markdown.length!==1){error(Error("Choose one Markdown document and its linked files together."));return;}
+        const file=markdown[0];if(file.size>1048576){error(Error("Markdown must be at most 1 MiB"));return;}
+        saving=true;form.querySelectorAll("button,input,textarea").forEach(el=>el.disabled=true);
+        try {
+          const body=new TextDecoder("utf-8",{fatal:true}).decode(await file.arrayBuffer()),preview=await api(context,{command:"preview",body}),files=[];
+          let total=0;
+          for(const destination of preview.local_files||[]) {
+            const name=decodeURIComponent(destination.split(/[?#]/)[0]).split("/").pop();
+            const matches=selected.filter(file=>file.name===name);
+            if(matches.length!==1)throw Error("Select the linked file “"+name+"” with your Markdown document, then import again.");
+            const attachment=matches[0];total+=attachment.size;
+            if(total>10*1024*1024)throw Error("Markdown attachments must total at most 10 MB.");
+            const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(",")[1]);reader.onerror=()=>reject(Error("Could not read "+name));reader.readAsDataURL(attachment);});
+            files.push({destination,name,data});
+          }
+          if(!form.isConnected)return;
+          $("#artifact-error").hidden=true;
+          form.dataset.importFiles=JSON.stringify(files);
+          if(writingEditor)writingEditor.replace(body);else $("#artifact-body").value=body;
+          changed();keepDraft();status(files.length?"Imported Markdown and "+files.length+" linked files. Save to upload.":"Markdown imported. Save when ready.");
+        } catch(e){error(e);} finally {saving=false;if(form.isConnected)form.querySelectorAll("button,input,textarea").forEach(el=>el.disabled=false);}
+      };
       $("#artifact-import-open").onclick=()=>$("#artifact-import").click();
       let previewing=false,previewGeneration=0;
       $("#artifact-preview").onclick=async()=>{
         const button=$("#artifact-preview"),panel=$("#artifact-edit-preview"),write=$("#artifact-write");
         if(previewing){previewGeneration++;previewing=false;panel.hidden=true;write.hidden=false;button.textContent="Preview";button.setAttribute("aria-pressed","false");autosize();writingEditor?writingEditor.focus():$("#artifact-body").focus();return;}
         const seq=++previewGeneration;button.disabled=true;
-        try{const v=await api(context,{command:"preview",body:editorBody()});if(!panel.isConnected||seq!==previewGeneration)return;previewing=true;panel.hidden=false;write.hidden=true;renderMarkdown(panel,v.html||'<p class="artifact-muted">Your document preview will appear here.</p>');button.textContent="Write";button.setAttribute("aria-pressed","true");}
+        try{const v=await api(context,{command:"preview",body:editorBody()});if(!panel.isConnected||seq!==previewGeneration)return;previewing=true;panel.hidden=false;write.hidden=true;renderMarkdown(panel,v.html||'<p class="artifact-muted">Your document preview will appear here.</p>',context,JSON.parse($("#artifact-editor").dataset.importFiles||"[]"));button.textContent="Write";button.setAttribute("aria-pressed","true");}
         catch(e){error(e);}finally{if(button.isConnected)button.disabled=false;}
       };
       $("#artifact-editor").onsubmit=async e=>{
         e.preventDefault();if(saving)return;keepDraft();const form=e.currentTarget,key=draftKey(doc?.id),title=$("#artifact-title").value,body=editorBody();
         const target=route().get("issue")?{issue:Number(route().get("issue"))}:route().get("node")?{node:route().get("node")}:{};
-        pending ||= doc?{command:"edit",id:doc.id,title,body,if_version:Number(form.dataset.version)}:{command:"create",title,body,...target};
-        form.dataset.pending=JSON.stringify(pending);keepDraft();saving=true;writingEditor?.readOnly(true);form.querySelectorAll("input,textarea,button").forEach(el=>el.disabled=true);status("Saving…");$("#artifact-error").hidden=true;
-        try {const v=await api(context,pending,form.dataset.requestId);drafts.remove(key);if(!form.isConnected)return;doc=v.artifact;doc.result=v;editing=false;status("Saved");location.hash=new URLSearchParams({project:context.project,artifact:doc.id,...(context.host?{host:context.host}:{})});reading();}
+        saving=true;writingEditor?.readOnly(true);form.querySelectorAll("input,textarea,button").forEach(el=>el.disabled=true);status("Saving…");$("#artifact-error").hidden=true;
+        try {
+          if(!pending){
+            const candidates=JSON.parse(form.dataset.importFiles||"[]"),preview=await api(context,{command:"preview",body}),files=[];
+            for(const destination of preview.local_files||[]){
+              const file=candidates.find(file=>file.destination===destination);
+              if(!file)throw Error("Import your Markdown with its linked files before saving: "+destination);
+              files.push(file);
+            }
+            const operation=doc?{command:"edit",id:doc.id,title,body,if_version:Number(form.dataset.version)}:{command:"create",title,body,...target};
+            pending=files.length?{command:"import",operation,files}:operation;
+            form.dataset.pending=JSON.stringify(pending);keepDraft();
+          }
+          const v=await api(context,pending,form.dataset.requestId);drafts.remove(key);if(!form.isConnected)return;doc=v.artifact;doc.result=v;editing=false;status("Saved");location.hash=new URLSearchParams({project:context.project,artifact:doc.id,...(context.host?{host:context.host}:{})});reading();}
         catch(err){if(!form.isConnected)return;error(err);if(!err.uncertain){pending=null;form.dataset.pending="";form.dataset.requestId=HeyBossUI.requestId();keepDraft();}else{status("Save pending · retry with the same content to avoid duplicate documents");}if(doc&&err.code==="conflict"){ $("#artifact-conflict").innerHTML='<button class="button" id="artifact-load-latest" type="button">Load latest for comparison</button>';$("#artifact-load-latest").onclick=async()=>{try{const latest=await api(context,{command:"view",id:doc.id});if(!form.isConnected)return;const panel=$("#artifact-conflict");panel.innerHTML=`<h3>Latest saved revision ${latest.artifact.version}</h3><strong>${esc(latest.artifact.title)}</strong><pre>${esc(latest.artifact.body)}</pre><p>Merge the saved changes into your draft above, then use this revision to save.</p><button type="button" class="button" id="artifact-use-revision">Use revision ${latest.artifact.version} for merged draft</button>`;$("#artifact-use-revision").onclick=()=>{form.dataset.version=latest.artifact.version;form.dataset.requestId=HeyBossUI.requestId();pending=null;keepDraft();panel.innerHTML="<p>Latest revision selected. Review your merged draft and Save.</p>";};}catch(e){error(e);}};}}
         finally {saving=false;if(form.isConnected){writingEditor?.readOnly(!!pending);form.querySelectorAll("input,textarea,button").forEach(el=>el.disabled=false);if(pending){$("#artifact-title").disabled=true;$("#artifact-body").disabled=true;$("#artifact-import").disabled=true;$("#artifact-import-open").disabled=true;}}}
       };
@@ -342,7 +390,7 @@ const HeyBossArtifacts = (() => {
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
       if(reuse)$("#artifact-reading").replaceWith(previous);
-      else{const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content);}
+      else{const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content,context);}
       externalLinks($("#artifact-threads"));
       HeyBossAttachments.mount($("#artifact-attachments"), {...context,target:{kind:"artifact",id:doc.id}});
       readingHTML=content;

@@ -114,5 +114,58 @@ const HeyBossAttachments = (() => {
     });
     refresh();
   }
-  return {mount};
+  // Hosted Markdown uses the same authenticated RPC as ordinary attachments,
+  // including paired phones and remote project stores. Never fetch local paths.
+  function hydrate(root,context,files=[]) {
+    const identifier = value => /^\/attachments\/(f-[a-f0-9]{32})(?:[?#].*)?$/.exec(value||"")?.[1];
+    const bytes = value => Uint8Array.from(atob(value.data),c=>c.charCodeAt(0));
+    const imageType = data => {
+      if(data[0]===137&&data[1]===80&&data[2]===78&&data[3]===71)return "image/png";
+      if(data[0]===255&&data[1]===216&&data[2]===255)return "image/jpeg";
+      if(String.fromCharCode(...data.slice(0,6)).match(/^GIF8[79]a$/))return "image/gif";
+      if(String.fromCharCode(...data.slice(0,4))==="RIFF"&&String.fromCharCode(...data.slice(8,12))==="WEBP")return "image/webp";
+      if(/^\s*(?:<\?xml[^>]*>\s*)?<svg[\s>]/i.test(new TextDecoder().decode(data.slice(0,1024))))return "image/svg+xml";
+      return null;
+    };
+    const queue=[...root.querySelectorAll("img[data-attachment-src],img[data-import-src]")];
+    const pending=new Map();
+    const read=id=>{if(!pending.has(id))pending.set(id,api(context,{command:"download",id}));return pending.get(id);};
+    async function load(img) {
+      const id=identifier(img.dataset.attachmentSrc),local=files.find(file=>file.destination===img.dataset.importSrc);if(!id&&!local)return;
+      img.setAttribute("aria-busy","true");
+      try {
+        const value=local||await read(id),data=bytes(value),type=imageType(data);
+        if(!type)throw Error("This attachment is available as a download.");
+        if(!img.isConnected)return;
+        const url=URL.createObjectURL(new Blob([data],{type}));
+        try{await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(Error("The image could not be decoded."));img.src=url;});}
+        finally{URL.revokeObjectURL(url);img.onload=img.onerror=null;img.removeAttribute("aria-busy");}
+      } catch(e) {
+        pending.delete(id);img.removeAttribute("aria-busy");
+        if(!img.isConnected)return;
+        const retry=document.createElement("button");retry.type="button";retry.className="button attachment-image-retry";
+        retry.textContent=(img.alt||"Image")+" — retry loading";retry.title=e.message;
+        img.hidden=true;img.after(retry);retry.onclick=()=>{retry.remove();img.hidden=false;load(img);};
+      }
+    }
+    // Keep large illustrated documents from flooding the companion tunnel.
+    async function worker(){while(queue.length&&root.isConnected)await load(queue.shift());}
+    Promise.all(Array.from({length:Math.min(3,queue.length)},worker)).finally(()=>pending.clear());
+    root.addEventListener("click",async event=>{
+      const link=event.target.closest("a[href]");if(!link||!root.contains(link))return;
+      const id=identifier(link.getAttribute("href"));if(!id)return;
+      event.preventDefault();if(link.getAttribute("aria-busy")==="true")return;
+      link.setAttribute("aria-busy","true");
+      let note=link.nextElementSibling;
+      if(!note?.classList.contains("attachment-inline-status")){note=document.createElement("span");note.className="attachment-inline-status";note.setAttribute("role","status");link.after(note);}
+      note.textContent=" Preparing download…";
+      try {
+        const value=await api(context,{command:"download",id});
+        const url=URL.createObjectURL(new Blob([bytes(value)],{type:"application/octet-stream"}));
+        const download=document.createElement("a");download.href=url;download.download=value.attachment.name;download.click();
+        setTimeout(()=>URL.revokeObjectURL(url),1000);note.textContent=" Download ready.";
+      }catch(e){note.textContent=" "+e.message;}finally{link.removeAttribute("aria-busy");}
+    });
+  }
+  return {mount,hydrate};
 })();

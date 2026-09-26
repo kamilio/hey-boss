@@ -50,3 +50,13 @@ test('paired HTTP uploads accept full-size files and reject unauthenticated or c
  assert.equal(response.status,202);assert.equal((await response.json()).request.status,'pending');
  assert.equal(store.pendingArtifacts().length,1);
 });
+
+test('paired Markdown imports carry files and preserve request identity',()=>{
+ const store=new HubStore(':memory:');
+ store.setIssueProjects([project]);
+ const value={project:project.id,request_id:'markdown-import',operation:{action:'artifact',operation:{command:'import',operation:{command:'create',title:'Report',body:'![Chart](chart.png)'},files:[{destination:'chart.png',name:'chart.png',data:'AQID'}]}}};
+ const first=store.artifactRequest('phone',value);
+ assert.deepEqual(store.artifactRequest('phone',value),first);
+ assert.throws(()=>store.artifactRequest('other',value),/another request/);
+ store.close();
+});
