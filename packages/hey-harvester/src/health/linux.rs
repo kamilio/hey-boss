@@ -21,48 +21,147 @@ pub(super) fn descriptors(pid: u32) -> io::Result<Vec<(u32, PathBuf)>> {
     Ok(result)
 }
 
-// Linux deliberately hides descriptors of credential daemons even from their owner.
+fn status_field<'a>(status: &'a str, name: &str) -> Option<&'a str> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(name))
+        .map(str::trim)
+}
+
+fn process_uid_is(status: &str, uid: u32) -> bool {
+    status_field(status, "Uid:").is_some_and(|value| {
+        let mut ids = value.split_whitespace();
+        (0..4).all(|_| ids.next().and_then(|id| id.parse::<u32>().ok()) == Some(uid))
+            && ids.next().is_none()
+    })
+}
+
+fn systemd_user_manager(args: &[String], status: &str, cgroup: &str, uid: u32) -> bool {
+    if !matches!(args, [binary, flag]
+        if matches!(binary.as_str(), "/usr/lib/systemd/systemd" | "/lib/systemd/systemd")
+            && flag == "--user")
+    {
+        return false;
+    }
+    let manager_scope = format!("0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope");
+    status_field(status, "Name:") == Some("systemd")
+        && status_field(status, "PPid:") == Some("1")
+        && process_uid_is(status, uid)
+        && cgroup.lines().any(|line| line == manager_scope)
+}
+
+fn process_arguments(proc: &Path) -> Option<Vec<String>> {
+    fs::read(proc.join("cmdline")).ok().map(|args| {
+        args.split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect()
+    })
+}
+
+fn verified_user_manager(proc: &Path, args: &[String]) -> bool {
+    let Ok(status) = fs::read_to_string(proc.join("status")) else {
+        return false;
+    };
+    let Ok(cgroup) = fs::read_to_string(proc.join("cgroup")) else {
+        return false;
+    };
+    if !systemd_user_manager(args, &status, &cgroup, unsafe { libc::geteuid() }) {
+        return false;
+    }
+    fs::metadata(&args[0]).is_ok_and(|m| {
+        m.is_file() && m.uid() == 0 && m.mode() & 0o022 == 0 && m.mode() & 0o111 != 0
+    })
+}
+
+fn ssh_transport_without_channel(proc: &Path, user: &str) -> bool {
+    if user.is_empty() || user.chars().any(|c| c.is_whitespace() || c == '@') {
+        return false;
+    }
+    let Ok(status) = fs::read_to_string(proc.join("status")) else {
+        return false;
+    };
+    let uid = unsafe { libc::geteuid() };
+    if status_field(&status, "Name:") != Some("sshd") || !process_uid_is(&status, uid) {
+        return false;
+    }
+    let Some(parent) = status_field(&status, "PPid:")
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .filter(|pid| *pid > 1)
+        .and_then(|pid| proc.parent().map(|root| root.join(pid.to_string())))
+    else {
+        return false;
+    };
+    let Ok(parent_status) = fs::read_to_string(parent.join("status")) else {
+        return false;
+    };
+    if status_field(&parent_status, "Name:") != Some("sshd")
+        || !process_uid_is(&parent_status, 0)
+        || !process_arguments(&parent).is_some_and(|args| args == [format!("sshd: {user} [priv]")])
+    {
+        return false;
+    }
+    let Ok(cgroup) = fs::read_to_string(proc.join("cgroup")) else {
+        return false;
+    };
+    let Ok(parent_cgroup) = fs::read_to_string(parent.join("cgroup")) else {
+        return false;
+    };
+    let scope = cgroup.trim();
+    scope
+        .strip_prefix(&format!("0::/user.slice/user-{uid}.slice/session-"))
+        .and_then(|s| s.strip_suffix(".scope"))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        && scope == parent_cgroup.trim()
+}
+
+// Linux can hide credential daemons and the user service manager from their owner.
 // These services do not run checkout workloads; inspect their child jobs separately.
 // Unknown non-dumpable processes still stop cleanup.
 pub(super) fn authentication_service(proc: &Path) -> bool {
     let Ok(comm) = fs::read_to_string(proc.join("comm")) else {
         return false;
     };
-    let Ok(args) = fs::read(proc.join("cmdline")) else {
+    let Some(args) = process_arguments(proc) else {
         return false;
     };
-    let args: Vec<_> = args
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect();
+    if comm.trim() == "systemd" {
+        // Only the fixed user manager occupies init.scope; unit jobs remain
+        // independently inspected, including unknown non-dumpable children.
+        return verified_user_manager(proc, &args);
+    }
     if comm.trim() == "(sd-pam)" {
+        if !matches!(args.as_slice(), [name] if name == "(sd-pam)") {
+            return false;
+        }
         let parent = fs::read_to_string(proc.join("status")).ok().and_then(|s| {
             s.lines()
                 .find_map(|l| l.strip_prefix("PPid:").map(|v| v.trim().to_owned()))
         });
         return parent.is_some_and(|pid| {
             let parent = PathBuf::from(format!("/proc/{pid}"));
-            fs::read_link(parent.join("exe")).is_ok_and(|p| {
-                p == Path::new("/usr/lib/systemd/systemd") || p == Path::new("/lib/systemd/systemd")
-            }) && fs::read_to_string(proc.join("cgroup"))
-                .ok()
-                .zip(fs::read_to_string(parent.join("cgroup")).ok())
-                .is_some_and(|(a, b)| a == b && a.contains("/init.scope"))
+            process_arguments(&parent).is_some_and(|args| verified_user_manager(&parent, &args))
+                && fs::read_to_string(proc.join("cgroup"))
+                    .ok()
+                    .zip(fs::read_to_string(parent.join("cgroup")).ok())
+                    .is_some_and(|(a, b)| a == b && a.contains("/init.scope"))
         });
     }
     if comm.trim() == "sshd" && args.len() == 1 {
         // SSH transport parents use this title. SFTP and unknown SSH jobs are not exempt.
-        return args[0]
-            .strip_prefix("sshd: ")
-            .and_then(|s| s.trim_end().split_once('@'))
-            .is_some_and(|(user, channel)| {
-                !user.is_empty()
-                    && (channel == "notty"
-                        || channel.strip_prefix("pts/").is_some_and(|s| {
-                            !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-                        }))
-            });
+        let Some(title) = args[0].strip_prefix("sshd: ").map(str::trim_end) else {
+            return false;
+        };
+        let Some((user, channel)) = title.split_once('@') else {
+            // Forward-only connections have no channel label. Require their
+            // privileged monitor; their child workloads are still inspected.
+            return ssh_transport_without_channel(proc, title);
+        };
+        return !user.is_empty()
+            && (channel == "notty"
+                || channel
+                    .strip_prefix("pts/")
+                    .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())));
     }
     if !matches!(comm.trim(), "ssh-agent" | "gpg-agent") {
         return false;
@@ -205,6 +304,114 @@ pub fn disconnected(ids: &BTreeSet<u32>) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unlabelled_ssh_transport_requires_matching_privileged_monitor() {
+        let root = std::env::temp_dir().join(format!("hb-proc-transport-{}", std::process::id()));
+        let child = root.join("42");
+        let parent = root.join("7");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&parent).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let status = format!("Name:\tsshd\nPPid:\t7\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+        let scope = format!("0::/user.slice/user-{uid}.slice/session-21317.scope\n");
+        let privileged = "Name:\tsshd\nUid:\t0\t0\t0\t0\n";
+        fs::write(child.join("comm"), "sshd\n").unwrap();
+        fs::write(child.join("cmdline"), "sshd: user\0").unwrap();
+        fs::write(child.join("status"), &status).unwrap();
+        fs::write(child.join("cgroup"), &scope).unwrap();
+        fs::write(parent.join("status"), privileged).unwrap();
+        fs::write(parent.join("cmdline"), "sshd: user [priv]\0").unwrap();
+        fs::write(parent.join("cgroup"), &scope).unwrap();
+        assert!(authentication_service(&child));
+        for title in ["sshd: other [priv]\0", "sshd: user [net]\0", "custom-job\0"] {
+            fs::write(parent.join("cmdline"), title).unwrap();
+            assert!(!authentication_service(&child));
+        }
+        fs::write(parent.join("cmdline"), "sshd: user [priv]\0").unwrap();
+        for invalid in [
+            "Name:\tsshd\nUid:\t999\t999\t999\t999\n",
+            "Name:\tworker\nUid:\t0\t0\t0\t0\n",
+            "Name:\tsshd\n",
+        ] {
+            fs::write(parent.join("status"), invalid).unwrap();
+            assert!(!authentication_service(&child));
+        }
+        fs::write(parent.join("status"), privileged).unwrap();
+        fs::write(parent.join("cgroup"), scope.replace("21317", "21318")).unwrap();
+        assert!(!authentication_service(&child));
+        fs::write(parent.join("cgroup"), &scope).unwrap();
+        for invalid in [
+            scope.replace("21317", "job"),
+            scope.replace(".scope", ".scope/child"),
+        ] {
+            fs::write(child.join("cgroup"), &invalid).unwrap();
+            fs::write(parent.join("cgroup"), &invalid).unwrap();
+            assert!(!authentication_service(&child));
+        }
+        fs::write(child.join("cgroup"), &scope).unwrap();
+        fs::write(parent.join("cgroup"), &scope).unwrap();
+        fs::write(
+            child.join("status"),
+            status.replace(
+                &format!("Uid:\t{uid}"),
+                &format!("Uid:\t{}", uid.wrapping_add(1)),
+            ),
+        )
+        .unwrap();
+        assert!(!authentication_service(&child));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn only_the_verified_systemd_user_manager_identity_is_exempt() {
+        let status = "Name:\tsystemd\nPPid:\t1\nUid:\t150124\t150124\t150124\t150124\n";
+        let cgroup = "0::/user.slice/user-150124.slice/user@150124.service/init.scope\n";
+        let accepts = |args: &[&str], status: &str, cgroup: &str, uid| {
+            systemd_user_manager(
+                &args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+                status,
+                cgroup,
+                uid,
+            )
+        };
+        for binary in ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"] {
+            assert!(accepts(&[binary, "--user"], status, cgroup, 150124));
+        }
+        for args in [
+            vec!["/tmp/systemd", "--user"],
+            vec!["systemd", "--user"],
+            vec!["/usr/lib/systemd/systemd"],
+            vec!["/usr/lib/systemd/systemd", "--system"],
+            vec![
+                "/usr/lib/systemd/systemd",
+                "--user",
+                "--unit=workload.service",
+            ],
+        ] {
+            assert!(!accepts(&args, status, cgroup, 150124));
+        }
+        let args = ["/usr/lib/systemd/systemd", "--user"];
+        for invalid in [
+            status.replace("Name:\tsystemd", "Name:\tcodex"),
+            status.replace("PPid:\t1", "PPid:\t42"),
+            status.replace(
+                "150124\t150124\t150124\t150124",
+                "150124\t0\t150124\t150124",
+            ),
+            "PPid:\t1\nUid:\t150124\n".into(),
+            "PPid:\t1\n".into(),
+        ] {
+            assert!(!accepts(&args, &invalid, cgroup, 150124));
+        }
+        for invalid in [
+            "0::/user.slice/user-150124.slice/user@150124.service/app.slice/job.service\n",
+            "0::/user.slice/user-150124.slice/user@150124.service/init.scope/child\n",
+            "0::/user.slice/user-999.slice/user@999.service/init.scope\n",
+            "",
+        ] {
+            assert!(!accepts(&args, status, invalid, 150124));
+        }
+        assert!(!accepts(&args, status, cgroup, 999));
+    }
     #[test]
     fn unknown_processes_and_sftp_are_not_credential_exemptions() {
         let root = std::env::temp_dir().join(format!("hb-proc-auth-{}", std::process::id()));
