@@ -34,7 +34,7 @@ pub(super) fn status_text(v: &Value) -> String {
     ] {
         let _ = writeln!(
             out,
-            "{label}: {} reported · {} machines unknown",
+            "{label}: {} reported · unknown machines: {}",
             text(&c[key]["known"]),
             text(&c[key]["unknown_machines"])
         );
@@ -74,12 +74,16 @@ pub(super) fn status_text(v: &Value) -> String {
                 let _ = writeln!(out, "  {key}: {}", text(&m[key]));
             }
         }
-        let _ = writeln!(
-            out,
-            "  Workers: {} ({} omitted)",
-            text(&m["worker_count"]),
-            text(&m["workers_omitted"])
-        );
+        if m["worker_count"].is_null() {
+            out.push_str("  Workers: unknown\n");
+        } else {
+            let _ = writeln!(
+                out,
+                "  Workers: {} ({} omitted)",
+                text(&m["worker_count"]),
+                text(&m["workers_omitted"])
+            );
+        }
         for w in m["workers"].as_array().into_iter().flatten() {
             let _ = writeln!(
                 out,
@@ -112,7 +116,7 @@ pub(super) fn status_text(v: &Value) -> String {
             text(&v["page"]["next_offset"])
         );
     }
-    out.push_str("Last reported machine state; disconnected data may be stale. Unknown is not healthy.\nConflicts count all unresolved supervisor records; companion counts are separate.\nEvents cover retained supervisor memory only, not complete history.\nSummary text is limited to 240 characters; at most 20 workers per machine.\nDetails: hey-boss fleet status --records machines|conflicts|events|signals --limit 1 --offset 0\nJSON: hey-boss fleet status --json · Live pages may shift between reads.\n");
+    out.push_str("Last reported machine state; disconnected data may be stale.\nUnknown is not healthy. Companion counts are separate.\nConflict totals cover all unresolved supervisor records.\nEvents cover retained memory only, not complete history.\nSummary: 240 characters per text value; 20 workers per machine.\nDetails: hey-boss fleet status --records conflicts --limit 1\nOther records: machines, events, signals. Use --offset for more.\nJSON: hey-boss fleet status --json. Pages may shift between reads.\n");
     out
 }
 
