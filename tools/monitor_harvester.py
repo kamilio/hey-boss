@@ -53,13 +53,15 @@ def expected_access_denial(error):
     """Only observed OS privacy boundaries are warnings; other failures still page."""
     caches = {"FamilyCircle", "CloudKit", "com.apple.HomeKit", "com.apple.Safari",
               "com.apple.findmy.imagecache", "com.apple.findmy.fmfcore",
-              "com.apple.containermanagerd"}
+              "com.apple.containermanagerd", "com.apple.homed",
+              "com.apple.findmy.fmipcore", "com.apple.ap.adprivacyd"}
     services = {"com.apple.passd", "com.apple.chrono", "duetexpertd",
                 "com.apple.studentd", "com.apple.parsecd", "com.apple.identityservicesd",
                 "com.apple.bluetoothuserd", "com.apple.imdpersistence.IMDPersistenceAgent",
                 "com.apple.CloudDocs.iCloudDriveFileProvider", "com.apple.appleaccountd",
                 "com.apple.syncdefaultsd", "com.apple.amsengagementd",
-                "com.apple.icloud.searchpartyuseragent"}
+                "com.apple.icloud.searchpartyuseragent", "com.apple.transparencyd",
+                "com.apple.triald", "com.apple.ap.promotedcontentd"}
     for part in error.removeprefix("24-hour cache expiration: ").split("; "):
         suffix = ": Operation not permitted (os error 1)"
         if not part.endswith(suffix):
