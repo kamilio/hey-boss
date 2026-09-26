@@ -20,6 +20,18 @@ struct Policy {
     manual: bool,
 }
 
+fn ineligible_item(name: String, refusal: io::Error, metadata: Details) -> Item {
+    let detail = refusal.to_string();
+    let error = (!super::is_preserved(&refusal)).then(|| detail.clone());
+    Item {
+        name,
+        detail,
+        eligible: false,
+        worktree: Some(metadata),
+        error,
+    }
+}
+
 fn github(remote: &str) -> Option<(String, String)> {
     let path = if let Some(path) = remote.trim().strip_prefix("git@github.com:") {
         path
@@ -271,17 +283,18 @@ fn remote_base(path: &Path) -> Option<String> {
         })
 }
 
-fn check_submodules(path: &Path) -> Result<(), String> {
+fn check_submodules(path: &Path) -> io::Result<()> {
     // Gitlinks may exist without .gitmodules. Large monorepo indexes can exceed
     // the ordinary command-output limit; still fail closed on incomplete output.
     let files = super::output_with_limit(
         &mut git(path, &["ls-files", "--stage", "-z"]),
         Duration::from_secs(20),
         64 * 1024 * 1024,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     if !files.status.success() {
-        return Err("Cannot inspect submodule entries; preserved".into());
+        return Err(io::Error::other(
+            "Cannot inspect submodule entries; preserved",
+        ));
     }
     for entry in files
         .stdout
@@ -291,26 +304,22 @@ fn check_submodules(path: &Path) -> Result<(), String> {
         let name = entry
             .splitn(2, |b| *b == b'\t')
             .nth(1)
-            .ok_or("Invalid submodule entry; preserved")?;
+            .ok_or_else(|| io::Error::other("Invalid submodule entry; preserved"))?;
         let folder = path.join(std::ffi::OsStr::from_bytes(name));
         match std::fs::symlink_metadata(&folder) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e),
             Ok(meta) if meta.is_dir() => {
-                if std::fs::read_dir(&folder)
-                    .map_err(|e| e.to_string())?
-                    .next()
-                    .is_none()
-                {
+                if std::fs::read_dir(&folder)?.next().is_none() {
                     continue;
                 }
             }
             Ok(_) => {}
         }
-        return Err(format!(
+        return Err(super::preserved(format!(
             "Populated or symlinked submodule {}; preserved",
             folder.display()
-        ));
+        )));
     }
     Ok(())
 }
@@ -324,30 +333,30 @@ fn eligible(
     table: &Table,
     policy: Policy,
     at: u64,
-) -> Result<String, String> {
+) -> io::Result<String> {
     if w.path == main {
-        return Err("Primary checkout; preserved".into());
+        return Err(super::preserved("Primary checkout; preserved"));
     }
     if w.locked {
-        return Err(lock_detail(w.lock_reason.as_deref()));
+        return Err(super::preserved(lock_detail(w.lock_reason.as_deref())));
     }
     if w.bare {
-        return Err("Bare worktree; preserved".into());
+        return Err(super::preserved("Bare worktree; preserved"));
     }
     if !w.path.is_dir() {
-        return Err("Missing checkout; metadata preserved".into());
+        return Err(super::preserved("Missing checkout; metadata preserved"));
     }
-    let canonical = w.path.canonicalize().map_err(|e| e.to_string())?;
+    let canonical = w.path.canonicalize()?;
     if canonical != w.path || !policy.manual && !allowed.iter().any(|r| under(&canonical, r)) {
-        return Err("Outside configured roots or symlinked; preserved".into());
+        return Err(super::preserved(
+            "Outside configured roots or symlinked; preserved",
+        ));
     }
-    let admin = PathBuf::from(
-        git_text(&w.path, &["rev-parse", "--absolute-git-dir"]).map_err(|e| e.to_string())?,
-    );
+    let admin = PathBuf::from(git_text(&w.path, &["rev-parse", "--absolute-git-dir"])?);
     // A lock may have been acquired after the registration snapshot. Preserve
     // its reason too; failed reads still fail closed in the checks below.
     if let Ok(reason) = std::fs::read_to_string(admin.join("locked")) {
-        return Err(lock_detail(Some(reason.trim_end())));
+        return Err(super::preserved(lock_detail(Some(reason.trim_end()))));
     }
     if active_paths
         .iter()
@@ -362,7 +371,7 @@ fn eligible(
                         .any(|s| s == canonical.to_string_lossy())
             })
     {
-        return Err("Open in a process or agent; preserved".into());
+        return Err(super::preserved("Open in a process or agent; preserved"));
     }
     for name in [
         "locked",
@@ -377,13 +386,14 @@ fn eligible(
         "sequencer",
     ] {
         if admin.join(name).exists() {
-            return Err("Git operation or worktree lock present; preserved".into());
+            return Err(super::preserved(
+                "Git operation or worktree lock present; preserved",
+            ));
         }
     }
-    let mut newest = git_text(&w.path, &["log", "-1", "--format=%ct"])
-        .map_err(|e| e.to_string())?
+    let mut newest = git_text(&w.path, &["log", "-1", "--format=%ct"])?
         .parse::<u64>()
-        .map_err(|e| e.to_string())?;
+        .map_err(io::Error::other)?;
     for path in [
         w.path.clone(),
         w.path.join(".git"),
@@ -392,11 +402,11 @@ fn eligible(
         admin.join("logs/HEAD"),
     ] {
         if path.exists() {
-            newest = newest.max(modified(&path).map_err(|e| e.to_string())?);
+            newest = newest.max(modified(&path)?);
         }
     }
     if at.saturating_sub(newest) < policy.min_age.min(3600) {
-        return Err("Recently created or changed; preserved".into());
+        return Err(super::preserved("Recently created or changed; preserved"));
     }
     check_submodules(&w.path)?;
     // One status record is enough to preserve the checkout. A clean result
@@ -414,14 +424,17 @@ fn eligible(
         ),
         Duration::from_secs(15),
         |_| Ok(false),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     if !clean {
-        return Err("Modified, untracked, or ignored files; preserved".into());
+        return Err(super::preserved(
+            "Modified, untracked, or ignored files; preserved",
+        ));
     }
-    let head = git_text(&w.path, &["rev-parse", "HEAD"]).map_err(|e| e.to_string())?;
+    let head = git_text(&w.path, &["rev-parse", "HEAD"])?;
     if head != w.head {
-        return Err("Checkout changed during inspection; preserved".into());
+        return Err(super::preserved(
+            "Checkout changed during inspection; preserved",
+        ));
     }
     let retained_branch = git_text(&w.path, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
@@ -437,23 +450,26 @@ fn eligible(
         .is_ok_and(|o| o.status.success())
     });
     if !merged && !retained_branch {
-        return Err("Commits not merged into the remote default branch; preserved".into());
+        return Err(super::preserved(
+            "Commits not merged into the remote default branch; preserved",
+        ));
     }
     let files = super::output_with_limit(
         &mut git(&w.path, &["ls-files", "-v", "-z"]),
         Duration::from_secs(15),
         64 * 1024 * 1024,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     if !files.status.success() {
-        return Err("Cannot inspect tracked files; preserved".into());
+        return Err(io::Error::other("Cannot inspect tracked files; preserved"));
     }
     for file in files.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()) {
         let Some(file) = file.strip_prefix(b"H ") else {
-            return Err("Assume-unchanged, sparse, or unusual index flags; preserved".into());
+            return Err(super::preserved(
+                "Assume-unchanged, sparse, or unusual index flags; preserved",
+            ));
         };
         let path = w.path.join(std::ffi::OsStr::from_bytes(file));
-        newest = newest.max(modified(&path).map_err(|e| e.to_string())?);
+        newest = newest.max(modified(&path)?);
     }
     let required_age = if merged {
         policy.min_age.min(3600)
@@ -461,7 +477,7 @@ fn eligible(
         policy.min_age
     };
     if at.saturating_sub(newest) < required_age {
-        return Err("Recently created or changed; preserved".into());
+        return Err(super::preserved("Recently created or changed; preserved"));
     }
     Ok(head)
 }
@@ -515,8 +531,7 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
         manual: true,
     };
     let (table, paths) = activity()?;
-    let head =
-        eligible(selected, &main, &[], &paths, &table, policy, now()).map_err(io::Error::other)?;
+    let head = eligible(selected, &main, &[], &paths, &table, policy, now())?;
     // Repeat activity and registration checks at the mutation boundary.
     let (table, paths) = activity()?;
     let fresh = list(&main)?;
@@ -524,8 +539,7 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
         .iter()
         .find(|w| w.path == path)
         .ok_or_else(|| io::Error::other("Worktree registration changed; preserved"))?;
-    let checked =
-        eligible(selected, &main, &[], &paths, &table, policy, now()).map_err(io::Error::other)?;
+    let checked = eligible(selected, &main, &[], &paths, &table, policy, now())?;
     if head != checked {
         return Err(io::Error::other("Worktree HEAD changed; preserved"));
     }
@@ -599,13 +613,7 @@ pub fn clean(
             let head = match check {
                 Ok(head) => head,
                 Err(detail) => {
-                    items.push(Item {
-                        name,
-                        detail,
-                        eligible: false,
-                        worktree: Some(metadata),
-                        error: None,
-                    });
+                    items.push(ineligible_item(name, detail, metadata));
                     continue;
                 }
             };
@@ -651,8 +659,8 @@ pub fn clean(
                         fresh_paths.push(PathBuf::from(git.worktree));
                     }
                 }
-                if let Some(fresh) = fresh_trees.iter().find(|x| x.path == w.path)
-                    && eligible(
+                if let Some(fresh) = fresh_trees.iter().find(|x| x.path == w.path) {
+                    let fresh_head = match eligible(
                         fresh,
                         &main,
                         &allowed,
@@ -663,16 +671,28 @@ pub fn clean(
                             manual: false,
                         },
                         now(),
-                    )
-                    .as_deref()
-                        == Ok(&head)
-                {
-                    if remove_checkout(&w.path).is_ok() && !w.path.exists() {
-                        removed += 1;
-                        detail = "Removed clean merged checkout; branch retained".into();
-                        observations.remove(&key);
+                    ) {
+                        Ok(head) => head,
+                        Err(refusal) => {
+                            items.push(ineligible_item(name, refusal, metadata));
+                            continue;
+                        }
+                    };
+                    if fresh_head == head {
+                        match remove_checkout(&w.path) {
+                            Ok(()) if !w.path.exists() => {
+                                removed += 1;
+                                detail = "Removed clean merged checkout; branch retained".into();
+                                observations.remove(&key);
+                            }
+                            Ok(()) => detail = "Checkout reappeared; preserved".into(),
+                            Err(refusal) => {
+                                items.push(ineligible_item(name, refusal, metadata));
+                                continue;
+                            }
+                        }
                     } else {
-                        detail = "Git refused removal; preserved".into();
+                        detail = "Checkout became active or changed; preserved".into();
                     }
                 } else {
                     detail = "Checkout became active or changed; preserved".into();
@@ -694,6 +714,91 @@ pub fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn broken_checkout_inspection_is_reported_without_removal() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-inspection-error-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("main")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main = root.join("main");
+        let work = root.join("work");
+        git_text(&main, &["init", "-b", "main"]).unwrap();
+        git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+        git_text(&main, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(main.join("file"), "committed").unwrap();
+        git_text(&main, &["add", "."]).unwrap();
+        git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+        git_text(
+            &main,
+            &["worktree", "add", "-b", "work", work.to_str().unwrap()],
+        )
+        .unwrap();
+        let w = list(&main).unwrap().remove(1);
+        std::fs::write(work.join("receipt"), "retain me").unwrap();
+        std::fs::rename(work.join(".git"), root.join("saved-git-pointer")).unwrap();
+        let mut outcomes = Vec::new();
+        for aggressive in [false, true] {
+            let inspect = |w: &Worktree| {
+                if aggressive {
+                    aggressive_eligible(
+                        w,
+                        &main,
+                        std::slice::from_ref(&root),
+                        &[],
+                        &Table::new(),
+                        now(),
+                    )
+                } else {
+                    eligible(
+                        w,
+                        &main,
+                        std::slice::from_ref(&root),
+                        &[],
+                        &Table::new(),
+                        Policy {
+                            min_age: 0,
+                            manual: false,
+                        },
+                        now(),
+                    )
+                }
+            };
+            let item = ineligible_item(
+                work.display().to_string(),
+                inspect(&w).unwrap_err(),
+                details(&w, "", &None, now()),
+            );
+            assert!(!item.eligible);
+            assert!(item.detail.contains("not a git repository"));
+            let mut locked = w.clone();
+            locked.locked = true;
+            locked.lock_reason = Some("queued owner; keep".into());
+            let protected = ineligible_item(
+                work.display().to_string(),
+                inspect(&locked).unwrap_err(),
+                details(&locked, "", &None, now()),
+            );
+            assert!(protected.detail.contains("queued owner; keep"));
+            assert!(
+                protected.error.is_none(),
+                "ownership refusals are not failures"
+            );
+            assert_eq!(
+                std::fs::read_to_string(work.join("receipt")).unwrap(),
+                "retain me"
+            );
+            assert!(root.join("saved-git-pointer").exists());
+            outcomes.push((aggressive, item.error));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        for (aggressive, error) in outcomes {
+            assert!(
+                error.is_some_and(|e| e.contains("not a git repository")),
+                "inspection failure missing from error count (aggressive={aggressive})"
+            );
+        }
+    }
+
     #[test]
     fn github_origins_strip_credentials_and_reject_other_hosts() {
         for remote in [
@@ -759,12 +864,22 @@ mod tests {
         assert!(work.join("module/local-file").exists());
         // A missing metadata file must not hide populated gitlinks.
         std::fs::remove_file(work.join(".gitmodules")).unwrap();
-        assert!(check_submodules(&work).unwrap_err().contains("Populated"));
+        assert!(
+            check_submodules(&work)
+                .unwrap_err()
+                .to_string()
+                .contains("Populated")
+        );
         std::fs::write(work.join(".gitmodules"), "").unwrap();
         std::fs::remove_file(work.join("module/local-file")).unwrap();
         std::fs::remove_dir(work.join("module")).unwrap();
         std::os::unix::fs::symlink(&main, work.join("module")).unwrap();
-        assert!(check_submodules(&work).unwrap_err().contains("symlinked"));
+        assert!(
+            check_submodules(&work)
+                .unwrap_err()
+                .to_string()
+                .contains("symlinked")
+        );
         std::fs::remove_file(work.join("module")).unwrap();
         std::fs::create_dir(work.join("module")).unwrap();
         remove_one(&work).unwrap();
@@ -838,7 +953,7 @@ mod tests {
                 now() + 86400,
             )
             .unwrap_err();
-            assert!(error.contains(reason), "{error}");
+            assert!(error.to_string().contains(reason), "{error}");
             assert!(remove_one(&work).unwrap_err().to_string().contains(reason));
             // Exercise the actual Git removal path; a lock protects even if an
             // unrelated caller bypasses the health eligibility check.
@@ -933,34 +1048,67 @@ mod tests {
         assert!(
             check(&trees[0], &[], future)
                 .unwrap_err()
+                .to_string()
                 .contains("Primary")
         );
-        assert!(check(&w, &[], now()).unwrap_err().contains("Recently"));
+        assert!(
+            check(&w, &[], now())
+                .unwrap_err()
+                .to_string()
+                .contains("Recently")
+        );
         assert!(
             check(&w, &[work.join("file")], future)
                 .unwrap_err()
+                .to_string()
                 .contains("Open")
         );
         let mut locked = w.clone();
         locked.locked = true;
-        assert!(check(&locked, &[], future).unwrap_err().contains("Locked"));
+        assert!(
+            check(&locked, &[], future)
+                .unwrap_err()
+                .to_string()
+                .contains("Locked")
+        );
         git_text(&work, &["update-index", "--assume-unchanged", "file"]).unwrap();
-        assert!(check(&w, &[], future).unwrap_err().contains("index flags"));
+        assert!(
+            check(&w, &[], future)
+                .unwrap_err()
+                .to_string()
+                .contains("index flags")
+        );
         git_text(&work, &["update-index", "--no-assume-unchanged", "file"]).unwrap();
         git_text(&work, &["update-index", "--skip-worktree", "file"]).unwrap();
-        assert!(check(&w, &[], future).unwrap_err().contains("index flags"));
+        assert!(
+            check(&w, &[], future)
+                .unwrap_err()
+                .to_string()
+                .contains("index flags")
+        );
         git_text(&work, &["update-index", "--no-skip-worktree", "file"]).unwrap();
         std::fs::write(work.join("private.env"), "important").unwrap();
-        assert!(check(&w, &[], future).unwrap_err().contains("untracked"));
+        assert!(
+            check(&w, &[], future)
+                .unwrap_err()
+                .to_string()
+                .contains("untracked")
+        );
         std::fs::remove_file(work.join("private.env")).unwrap();
         std::fs::write(main.join(".git/info/exclude"), "secret.env\n").unwrap();
         std::fs::write(work.join("secret.env"), "must survive").unwrap();
-        assert!(check(&w, &[], future).unwrap_err().contains("ignored"));
+        assert!(
+            check(&w, &[], future)
+                .unwrap_err()
+                .to_string()
+                .contains("ignored")
+        );
         std::fs::remove_file(work.join("secret.env")).unwrap();
         git_text(&main, &["worktree", "lock", work.to_str().unwrap()]).unwrap();
         assert!(
             check(&list(&main).unwrap()[1], &[], future)
                 .unwrap_err()
+                .to_string()
                 .contains("Locked")
         );
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
@@ -980,6 +1128,7 @@ mod tests {
         assert!(
             check(&list(&main).unwrap()[1], &[], future)
                 .unwrap_err()
+                .to_string()
                 .contains("not merged")
         );
         assert!(
@@ -993,6 +1142,7 @@ mod tests {
                 now()
             )
             .unwrap_err()
+            .to_string()
             .contains("not merged")
         );
         git_text(&work, &["checkout", "done"]).unwrap();
@@ -1046,8 +1196,7 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
             manual: true,
         },
         now(),
-    )
-    .map_err(io::Error::other)?;
+    )?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut pending = vec![path.to_path_buf()];
     while let Some(entry) = pending.pop() {
@@ -1144,7 +1293,7 @@ fn aggressive_eligible(
     active: &[PathBuf],
     table: &Table,
     at: u64,
-) -> Result<String, String> {
+) -> io::Result<String> {
     let head = eligible(
         w,
         main,
@@ -1157,8 +1306,10 @@ fn aggressive_eligible(
         },
         at,
     )?;
-    if !expired(w, at).map_err(|e| e.to_string())? {
-        return Err("Source or Git activity within 24 hours; preserved".into());
+    if !expired(w, at)? {
+        return Err(super::preserved(
+            "Source or Git activity within 24 hours; preserved",
+        ));
     }
     Ok(head)
 }
@@ -1245,13 +1396,7 @@ fn aggressive_clean(
         if let Err(detail) =
             aggressive_eligible(&w, &main, &allowed, &active_paths, &fresh_table, now())
         {
-            items.push(Item {
-                name,
-                detail,
-                eligible: false,
-                worktree: Some(details(&w, "", &None, now())),
-                error: None,
-            });
+            items.push(ineligible_item(name, detail, details(&w, "", &None, now())));
             continue;
         }
         let result = (|| -> io::Result<bool> {
@@ -1347,7 +1492,9 @@ mod aggressive_tests {
         )
         .unwrap_err();
         assert!(
-            refusal.contains("Modified, untracked, or ignored"),
+            refusal
+                .to_string()
+                .contains("Modified, untracked, or ignored"),
             "{refusal}"
         );
         assert!(expired(&w, now() + 172800).unwrap());
@@ -1372,7 +1519,11 @@ mod aggressive_tests {
             now() + 172800,
         )
         .unwrap_err();
-        assert!(refusal.contains("Missing checkout; metadata preserved"));
+        assert!(
+            refusal
+                .to_string()
+                .contains("Missing checkout; metadata preserved")
+        );
         assert_eq!(list(&main).unwrap().len(), 2);
         assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
         assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).unwrap(), w.head);
@@ -1429,6 +1580,7 @@ mod aggressive_tests {
                     now() + 172800
                 )
                 .unwrap_err()
+                .to_string()
                 .contains("Locked")
             );
         }
@@ -1460,6 +1612,7 @@ mod aggressive_tests {
                 now() + 172800
             )
             .unwrap_err()
+            .to_string()
             .contains("Modified")
         );
         assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
@@ -1494,6 +1647,7 @@ mod aggressive_tests {
                 now() + 172800
             )
             .unwrap_err()
+            .to_string()
             .contains("Open")
         );
         assert!(
