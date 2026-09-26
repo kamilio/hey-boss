@@ -57,6 +57,8 @@ struct Frame {
     path: PathBuf,
     #[serde(skip)]
     volume: Option<(u64, bool)>,
+    #[serde(skip)]
+    protected_directory: bool,
     #[serde(default)]
     offset: i64,
     #[serde(default)]
@@ -69,6 +71,7 @@ impl Frame {
         Self {
             path,
             volume: None,
+            protected_directory: false,
             offset: 0,
             identity: None,
             batch: VecDeque::new(),
@@ -88,13 +91,15 @@ impl Frame {
             return Err(io::Error::last_os_error());
         }
         let stat = unsafe { stat.assume_init() };
-        let volume = (file.metadata()?.dev(), stat.f_flag & libc::ST_RDONLY != 0);
+        let metadata = file.metadata()?;
+        let volume = (metadata.dev(), stat.f_flag & libc::ST_RDONLY != 0);
+        self.protected_directory = filesystem_protected(&metadata);
         self.volume = Some(volume);
         Ok(volume)
     }
     fn next(&mut self) -> io::Result<Option<PathBuf>> {
-        // Saved batches must obey the same volume policy as fresh reads.
-        if self.volume()?.1 {
+        // Saved batches must obey the same filesystem protections as fresh reads.
+        if self.volume()?.1 || self.protected_directory {
             return Ok(None);
         }
         if self.batch.is_empty() {
@@ -186,6 +191,21 @@ impl Frame {
         Ok(())
     }
 }
+fn filesystem_protected(metadata: &fs::Metadata) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Immutable and append-only flags prohibit unlinking even owned files.
+        // Preserve these explicit protections; ordinary mode 0444 is different.
+        std::os::macos::fs::MetadataExt::st_flags(metadata)
+            & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE | libc::UF_APPEND | libc::SF_APPEND)
+            != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = metadata;
+        false
+    }
+}
 // Deserialized frames recheck the kernel once per slice. Validate ancestors too:
 // a saved cursor may already be several levels below a newly mounted directory.
 fn traversal_device(frames: &mut Vec<Frame>) -> io::Result<Option<u64>> {
@@ -193,7 +213,10 @@ fn traversal_device(frames: &mut Vec<Frame>) -> io::Result<Option<u64>> {
     for index in 0..frames.len() {
         match frames[index].volume() {
             Ok((current, readonly)) => {
-                if readonly || device.is_some_and(|root| root != current) {
+                if readonly
+                    || frames[index].protected_directory
+                    || device.is_some_and(|root| root != current)
+                {
                     frames.truncate(index);
                     return Ok(None);
                 }
@@ -361,7 +384,9 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
         }
         match frame.next() {
             Ok(Some(path)) => {
-                if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && m.dev() == device) {
+                if !fs::symlink_metadata(&path)
+                    .is_ok_and(|m| m.is_dir() && m.dev() == device && !filesystem_protected(&m))
+                {
                     continue;
                 }
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -600,7 +625,8 @@ fn advance_with_owners(
                     if !m.is_dir() && !old_enough(&path, &m, at, clone_file) {
                         return Ok(());
                     }
-                    if path.file_name().is_some_and(|n| n == ".git")
+                    if filesystem_protected(&m)
+                        || path.file_name().is_some_and(|n| n == ".git")
                         || downloaded_source(&path)
                         || databases::protected(&path)?
                     {
@@ -704,7 +730,7 @@ pub(super) fn clean(
             Some(now().saturating_sub(progress.stats.pass_started_at));
     }
     let detail = format!(
-        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths or owned worktrees; {} roots pending; {}; pass age {}s. {}",
+        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths, owned worktrees or flagged files; {} roots pending; {}; pass age {}s. {}",
         progress.stats.visited_this_cycle,
         progress.stats.slice_millis,
         progress.stats.roots_pending,
@@ -731,6 +757,88 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    struct FileFlags(PathBuf);
+    #[cfg(target_os = "macos")]
+    impl FileFlags {
+        fn set(path: PathBuf, flags: u32) -> Self {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chflags(name.as_ptr(), flags) }, 0);
+            Self(path)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    impl Drop for FileFlags {
+        fn drop(&mut self) {
+            let name = std::ffi::CString::new(self.0.as_os_str().as_bytes()).unwrap();
+            unsafe { libc::chflags(name.as_ptr(), 0) };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn filesystem_flags_preserve_files_and_saved_directory_batches() {
+        use std::os::unix::fs::PermissionsExt;
+        for flags in [libc::UF_IMMUTABLE, libc::UF_APPEND] {
+            let root = std::env::temp_dir()
+                .join(format!("harvester-flags-{flags}-{}", std::process::id()));
+            fs::create_dir_all(root.join("retained")).unwrap();
+            let root = root.canonicalize().unwrap();
+            fs::write(root.join("receipt"), "retained file").unwrap();
+            fs::write(root.join("retained/receipt"), "retained directory").unwrap();
+            fs::write(root.join("expired"), "ordinary read-only file").unwrap();
+            fs::set_permissions(root.join("expired"), fs::Permissions::from_mode(0o444)).unwrap();
+            let mut saved = Frame::new(root.join("retained"));
+            saved.refill().unwrap();
+            let guards = [
+                FileFlags::set(root.join("receipt"), flags),
+                FileFlags::set(root.join("retained"), flags),
+            ];
+            let mut p = Progress {
+                stack: vec![saved],
+                roots: VecDeque::from([root.clone()]),
+                ..Progress::default()
+            };
+            let (removed, _, errors) = advance_with_owners(
+                &mut p,
+                now() + 172800,
+                true,
+                Instant::now() + Duration::from_secs(5),
+                100,
+                &BTreeSet::new(),
+            );
+            let retained = root.join("receipt").exists() && root.join("retained/receipt").exists();
+            let expired = !root.join("expired").exists();
+            drop(guards);
+            fs::remove_dir_all(root).unwrap();
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(removed, 1);
+            assert!(retained && expired);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn filesystem_flags_stop_saved_cache_discovery() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-flags-discovery-{}", std::process::id()));
+        fs::create_dir_all(root.join("out")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let guard = FileFlags::set(root.join("out"), libc::UF_IMMUTABLE);
+        let mut p = Progress {
+            projects: vec![Frame::new(root.join("out"))],
+            ..Progress::default()
+        };
+        discover_projects_until(&mut p, Instant::now() + Duration::from_secs(5));
+        drop(guard);
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            p.roots.is_empty(),
+            "flagged saved caches must not be promoted"
+        );
+    }
+
     #[test]
     fn mount_boundaries_revalidate_saved_volume_and_reject_symlinks() {
         let root =
