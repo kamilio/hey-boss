@@ -150,8 +150,11 @@ fn local_path(destination: &str, base: &Path) -> Result<Option<PathBuf>> {
     let mut bytes = Vec::new();
     let mut i = 0;
     while i < path.len() {
-        if path.as_bytes()[i] == b'%' && i + 2 < path.len()
-            && path.as_bytes()[i + 1..i + 3].iter().all(u8::is_ascii_hexdigit)
+        if path.as_bytes()[i] == b'%'
+            && i + 2 < path.len()
+            && path.as_bytes()[i + 1..i + 3]
+                .iter()
+                .all(u8::is_ascii_hexdigit)
         {
             let byte = u8::from_str_radix(&path[i + 1..i + 3], 16).unwrap();
             bytes.push(byte);
