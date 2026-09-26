@@ -114,6 +114,49 @@ impl Body {
     }
 }
 
+#[derive(Args)]
+struct ListFilters {
+    #[arg(long, conflicts_with = "unassigned")]
+    mine: bool,
+    #[arg(long)]
+    unassigned: bool,
+    /// Filter by an exact session ID, or boss.
+    #[arg(long, conflicts_with_all = ["mine", "unassigned"])]
+    assignee: Option<String>,
+    /// Require each supplied label (repeatable).
+    #[arg(long = "label")]
+    labels: Vec<String>,
+    /// Retrieve every matching issue in queue order, without pagination.
+    #[arg(long, conflicts_with_all = ["limit", "offset"])]
+    all: bool,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
+impl ListFilters {
+    fn operation(&self, state: &str, search: Option<&str>) -> Operation {
+        Operation::List {
+            state: state.into(),
+            mine: self.mine,
+            unassigned: self.unassigned,
+            assignee: self.assignee.as_ref().map(|id| {
+                if id == "boss" {
+                    "human:boss".into()
+                } else {
+                    id.clone()
+                }
+            }),
+            labels: self.labels.clone(),
+            search: search.map(str::to_owned),
+            limit: self.limit,
+            offset: self.offset,
+            all: self.all,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Action {
     /// Atomically update guarded labels and ownership; the entire array is one group.
@@ -193,28 +236,23 @@ enum Action {
     RestoreProject,
     /// List open issues in the current project.
     List {
-        #[arg(long, default_value = "open", value_parser = ["open", "blocked", "ready", "closed", "all", "deleted"])]
+        #[arg(long, default_value = "open", value_parser = ["active", "open", "blocked", "ready", "closed", "all", "deleted"])]
         state: String,
-        #[arg(long, conflicts_with = "unassigned")]
-        mine: bool,
-        #[arg(long)]
-        unassigned: bool,
-        /// Filter by an exact session ID, or boss.
-        #[arg(long, conflicts_with_all = ["mine", "unassigned"])]
-        assignee: Option<String>,
-        /// Require each supplied label (repeatable).
-        #[arg(long = "label")]
-        labels: Vec<String>,
         /// Literal substring in the title or body.
         #[arg(long)]
         search: Option<String>,
-        /// Retrieve every matching issue in queue order, without pagination.
-        #[arg(long, conflicts_with_all = ["limit", "offset"])]
-        all: bool,
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
-        limit: u32,
-        #[arg(long, default_value_t = 0)]
-        offset: u32,
+        #[command(flatten)]
+        filters: ListFilters,
+    },
+    /// Search titles and descriptions of open, ready, and blocked issues.
+    Search {
+        /// Literal substring; ignores ASCII case. Quote phrases containing spaces.
+        query: String,
+        /// Active includes open, ready, and blocked; all also includes closed.
+        #[arg(long, default_value = "active", value_parser = ["active", "open", "blocked", "ready", "closed", "all", "deleted"])]
+        state: String,
+        #[command(flatten)]
+        filters: ListFilters,
     },
     /// Move an inactive issue to an existing project, preserving its history.
     Transfer {
@@ -709,31 +747,14 @@ impl Options {
             Action::Whoami => Operation::Whoami,
             Action::List {
                 state,
-                mine,
-                unassigned,
-                assignee,
-                labels,
                 search,
-                all,
-                limit,
-                offset,
-            } => Operation::List {
-                state: state.clone(),
-                mine: *mine,
-                unassigned: *unassigned,
-                assignee: assignee.as_ref().map(|id| {
-                    if id == "boss" {
-                        "human:boss".into()
-                    } else {
-                        id.clone()
-                    }
-                }),
-                labels: labels.clone(),
-                search: search.clone(),
-                limit: *limit,
-                offset: *offset,
-                all: *all,
-            },
+                filters,
+            } => filters.operation(state, search.as_deref()),
+            Action::Search {
+                query,
+                state,
+                filters,
+            } => filters.operation(state, Some(query)),
             Action::Move {
                 number,
                 before,

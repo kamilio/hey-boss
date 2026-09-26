@@ -1479,6 +1479,145 @@ fn same_named_directories_share_a_destination_and_explicit_names_are_isolated() 
 }
 
 #[test]
+fn issue_search_defaults_to_active_title_and_description_matches() {
+    let f = Fixture::new();
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    for (title, body) in [
+        ("Reconnect after sleep", ""),
+        ("Ready fix", "Verify RECONNECT behavior"),
+        ("Blocked fix", "Reconnect needs a dependency"),
+        ("Closed reconnect", ""),
+        ("Deleted reconnect", ""),
+        ("Unrelated", "No match"),
+    ] {
+        f.run(
+            "a",
+            &["create", "--at-bottom", "--title", title, "--body", body],
+        );
+    }
+    f.sql()
+        .execute_batch(
+            "UPDATE issues SET state='ready' WHERE number=2;
+         UPDATE issues SET state='blocked',manual_blocked=1 WHERE number=3;
+         UPDATE issues SET state='closed' WHERE number=4;
+         UPDATE issues SET deleted_at=1 WHERE number=5;",
+        )
+        .unwrap();
+    f.run(
+        "a",
+        &[
+            "comment",
+            "6",
+            "--body",
+            "Reconnect appears only in a comment",
+        ],
+    );
+    let numbers = |value: &Value| {
+        value["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["number"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let found = f.run("a", &["search", "reconnect"]);
+    assert_eq!(numbers(&found), vec![1, 2, 3]);
+    assert!(
+        found["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue.get("body").is_none())
+    );
+    assert_eq!(
+        numbers(&f.run("a", &["search", "reconnect", "--state", "all"])),
+        vec![1, 2, 3, 4]
+    );
+    for (state, expected) in [
+        ("open", 1),
+        ("ready", 2),
+        ("blocked", 3),
+        ("closed", 4),
+        ("deleted", 5),
+    ] {
+        assert_eq!(
+            numbers(&f.run("a", &["search", "reconnect", "--state", state])),
+            vec![expected]
+        );
+    }
+    assert_eq!(
+        numbers(&f.run("a", &["list", "--search", "reconnect"])),
+        vec![1]
+    );
+    assert_eq!(
+        numbers(&f.run("a", &["list", "--search", "reconnect", "--state", "active"])),
+        vec![1, 2, 3]
+    );
+    assert!(numbers(&f.run("a", &["search", "absent"])).is_empty());
+}
+
+#[test]
+fn issue_search_preserves_literal_matching_filters_and_pagination() {
+    let f = Fixture::new();
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    for title in ["100%_done 🦀", "Second 100%_done 🦀", "100 percent done"] {
+        f.run(
+            "a",
+            &["create", "--at-bottom", "--title", title, "--label", "cli"],
+        );
+    }
+    f.run(
+        "a",
+        &["create", "--project", "other", "--title", "100%_done 🦀"],
+    );
+    let first = f.run(
+        "a",
+        &["search", "100%_done 🦀", "--label", "cli", "--limit", "1"],
+    );
+    assert_eq!(first["issues"][0]["number"], 1);
+    assert_eq!(first["next_offset"], 1);
+    let next = f.run(
+        "a",
+        &["search", "100%_done 🦀", "--limit", "1", "--offset", "1"],
+    );
+    assert_eq!(next["issues"][0]["number"], 2);
+    assert!(next["next_offset"].is_null());
+    assert_eq!(
+        f.run("a", &["search", "100%_done 🦀", "--all"])["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        f.run("a", &["search", "100%_done 🦀", "--label", "missing"])["issues"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    f.run("a", &["claim", "1"]);
+    for filter in [&["--mine"][..], &["--assignee", "a"][..]] {
+        let mut args = vec!["search", "100%_done 🦀"];
+        args.extend_from_slice(filter);
+        let found = f.run("a", &args);
+        assert_eq!(found["issues"].as_array().unwrap().len(), 1);
+        assert_eq!(found["issues"][0]["number"], 1);
+    }
+    let unassigned = f.run("a", &["search", "100%_done 🦀", "--unassigned"]);
+    assert_eq!(unassigned["issues"].as_array().unwrap().len(), 1);
+    assert_eq!(unassigned["issues"][0]["number"], 2);
+    f.fail("a", &["search", " "], 2);
+    f.fail("a", &["search", &"x".repeat(1025)], 2);
+    for args in [
+        vec!["search"],
+        vec!["search", "x", "--mine", "--unassigned"],
+        vec!["search", "x", "--all", "--limit", "1"],
+    ] {
+        assert_eq!(f.cmd("a", &args).output().unwrap().status.code(), Some(2));
+    }
+}
+
+#[test]
 fn filtering_pagination_and_field_validation() {
     let f = Fixture::new();
     for title in ["first bug", "second bug", "third"] {
