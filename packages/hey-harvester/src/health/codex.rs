@@ -4,10 +4,12 @@ use super::{
     Item, Observation, Store, now,
     processes::{Process, Table},
 };
+#[cfg(not(target_os = "linux"))]
+use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
