@@ -48,3 +48,5 @@
   /* A tall, opaque sheet gives touch users room to read and manage files. */
   #map-inspector:has(.file-attachments) { position: fixed; top: max(80px, 12vh); bottom: max(12px, env(safe-area-inset-bottom)); left: 12px; right: 12px; width: auto; max-width: none; z-index: 20; background: var(--solid); }
 }
+.attachment-image-retry { max-width: 100%; white-space: normal; text-align: left; }
+.attachment-inline-status { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }

@@ -158,7 +158,7 @@ export class HubStore{
  }
  close(){this.db.close();}
  artifactRequest(device,value){return this.transaction(()=>{
-  const commands=['list','view','preview','create','edit','archive','delete','comment','resolve','link','unlink','links'];
+  const commands=['list','view','preview','create','edit','import','archive','delete','comment','resolve','link','unlink','links'];
   const attachment=value?.operation?.action==='attachment'&&['list','upload','download','remove'].includes(value.operation.operation?.command);
   const resourceRead=['view','status_view','status_history'].includes(value?.operation?.action)||value?.operation?.action==='mindmap'&&['view','show'].includes(value.operation.operation?.command);
   if(!value||!attachment&&!resourceRead&&(value.operation?.action!=='artifact'||!commands.includes(value.operation.operation?.command))||value.host)throw new HubError(400,'Only project artifact operations are accepted');
@@ -170,7 +170,7 @@ export class HubStore{
    const data=value.operation.operation.data;
    if(typeof data!=='string'||data.length>Math.ceil(10*1048576/3)*4||Buffer.from(data,'base64').length>10*1048576)throw new HubError(400,'Attachments must be at most 10 MiB');
   }
-  if(Buffer.byteLength(payload)>(attachment?16:2)*1048576)throw new HubError(400,'Artifact request is too large');
+  if(Buffer.byteLength(payload)>(attachment||value.operation.operation?.command==='import'?16:2)*1048576)throw new HubError(400,'Artifact request is too large');
   const existing=this.db.prepare('SELECT * FROM artifact_requests WHERE id=?').get(id);
   if(existing){if(existing.device!==device||existing.payload!==payload)throw new HubError(409,'ID belongs to another request');return this.artifactResult(device,id);}
   this.ensureRoom(Buffer.byteLength(payload));
