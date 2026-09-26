@@ -270,6 +270,11 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    /// Read local issue-owned worktrees, excluding verified stale owners.
+    OwnedWorktrees {
+        #[arg(long)]
+        json: bool,
+    },
     /// List running Codex/Claude processes and matched session activity.
     List {
         #[arg(long)]
@@ -593,6 +598,18 @@ fn run() -> std::io::Result<()> {
                 hey_boss::markdown::render_document(&markdown)
             },
         );
+    }
+    if let Command::Agent(AgentAction::OwnedWorktrees { json }) = &cli.command {
+        let worktrees = hey_boss::issues::worktree_ownership::declared_worktrees()
+            .map_err(std::io::Error::other)?;
+        if *json {
+            println!("{}", serde_json::json!({"version":1,"worktrees":worktrees}));
+        } else {
+            for worktree in worktrees {
+                println!("{}", worktree.display());
+            }
+        }
+        return Ok(());
     }
     if let Command::Agent(AgentAction::List { json }) = &cli.command {
         let snapshot = hey_boss::agents::scan();

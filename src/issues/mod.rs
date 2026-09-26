@@ -17,6 +17,7 @@ pub mod worker;
 mod worker_approvals;
 mod worker_infrastructure;
 mod worker_results;
+pub mod worktree_ownership;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
