@@ -192,7 +192,7 @@ impl Frame {
         Ok(())
     }
 }
-fn filesystem_protected(metadata: &fs::Metadata) -> bool {
+pub(super) fn filesystem_protected(metadata: &fs::Metadata) -> bool {
     #[cfg(target_os = "macos")]
     {
         // Immutable and append-only flags prohibit unlinking even owned files.
