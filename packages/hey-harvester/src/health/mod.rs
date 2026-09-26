@@ -392,6 +392,8 @@ impl Store {
     }
     fn checkpoint(&self, state: &mut State, snapshot: &Snapshot) -> io::Result<()> {
         state.snapshot = snapshot.clone();
+        // Early phases have a fresh snapshot, but traversal progress spans cycles.
+        state.snapshot.cache_progress = state.sweep.stats.clone();
         self.save("state.json", state)
     }
     pub fn record_setting(&self, message: &str) -> io::Result<()> {
@@ -1125,6 +1127,43 @@ mod tests {
             serde_json::to_value(enabled).unwrap()["trim_worker_logs"],
             true
         );
+    }
+    #[test]
+    fn checkpoints_preserve_cache_progress_before_cache_inspection_finishes() {
+        let root = std::env::temp_dir().join(format!("hb-health-progress-{}", std::process::id()));
+        let store = Store::new(root.clone()).unwrap();
+        let _lock = store.lock().unwrap();
+        let mut state = State::default();
+        state.sweep.stats = CacheProgress {
+            pass_started_at: 200,
+            last_completed_at: Some(190),
+            last_pass_seconds: Some(90),
+            visited_this_pass: 1234,
+            removed_this_pass: 567,
+            roots_pending: 2,
+            discovery_pending: true,
+            ..CacheProgress::default()
+        };
+        let expected = serde_json::to_value(&state.sweep.stats).unwrap();
+        for phase in ["Inspecting processes", "Inspecting disposable caches"] {
+            let snapshot = Snapshot {
+                running: true,
+                phase: phase.into(),
+                ..Snapshot::default()
+            };
+            store.checkpoint(&mut state, &snapshot).unwrap();
+            let status = store.status().unwrap();
+            assert_eq!(status.phase, phase);
+            assert_eq!(
+                serde_json::to_value(status.cache_progress).unwrap(),
+                expected
+            );
+            assert_eq!(
+                serde_json::to_value(store.state().unwrap().sweep.stats).unwrap(),
+                expected
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn status_recognizes_an_interrupted_check() {
