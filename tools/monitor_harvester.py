@@ -48,7 +48,8 @@ def expected_access_denial(error):
                 "com.apple.studentd", "com.apple.parsecd", "com.apple.identityservicesd",
                 "com.apple.bluetoothuserd", "com.apple.imdpersistence.IMDPersistenceAgent",
                 "com.apple.CloudDocs.iCloudDriveFileProvider", "com.apple.appleaccountd",
-                "com.apple.syncdefaultsd"}
+                "com.apple.syncdefaultsd", "com.apple.amsengagementd",
+                "com.apple.icloud.searchpartyuseragent"}
     for part in error.removeprefix("24-hour cache expiration: ").split("; "):
         suffix = ": Operation not permitted (os error 1)"
         if not part.endswith(suffix):
