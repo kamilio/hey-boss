@@ -18,6 +18,7 @@ pub struct Details {
 struct Policy {
     min_age: u64,
     manual: bool,
+    discard_ignored: bool,
 }
 
 fn ineligible_item(name: String, refusal: io::Error, metadata: Details) -> Item {
@@ -419,7 +420,11 @@ fn eligible(
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
-                "--ignored=matching",
+                if policy.discard_ignored {
+                    "--ignored=no"
+                } else {
+                    "--ignored=matching"
+                },
             ],
         ),
         Duration::from_secs(15),
@@ -505,6 +510,10 @@ fn activity() -> io::Result<(Table, Vec<PathBuf>)> {
 
 /// Explicit checkout removal bypasses age only. A named branch retains unmerged commits.
 pub fn remove_one(path: &Path) -> io::Result<()> {
+    remove_one_with_policy(path, false)
+}
+
+fn remove_one_with_policy(path: &Path, discard_ignored: bool) -> io::Result<()> {
     if !path.is_absolute() || path.canonicalize()? != path {
         return Err(io::Error::other(
             "Select an absolute, non-symlinked worktree path",
@@ -530,6 +539,7 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
     let policy = Policy {
         min_age: 0,
         manual: true,
+        discard_ignored,
     };
     let (table, paths) = activity()?;
     let head = eligible(selected, &main, &[], &paths, &table, policy, now())?;
@@ -544,7 +554,7 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
     if head != checked {
         return Err(io::Error::other("Worktree HEAD changed; preserved"));
     }
-    remove_checkout(path)?;
+    remove_checkout_with_policy(path, discard_ignored)?;
     Ok(())
 }
 
@@ -609,6 +619,7 @@ pub fn clean(
                 Policy {
                     min_age: config.worktree_min_age_days * 86400,
                     manual: false,
+                    discard_ignored: false,
                 },
                 at,
             );
@@ -671,6 +682,7 @@ pub fn clean(
                         Policy {
                             min_age: config.worktree_min_age_days * 86400,
                             manual: false,
+                            discard_ignored: false,
                         },
                         now(),
                     ) {
@@ -760,6 +772,7 @@ mod tests {
                         Policy {
                             min_age: 0,
                             manual: false,
+                            discard_ignored: false,
                         },
                         now(),
                     )
@@ -951,6 +964,7 @@ mod tests {
                 Policy {
                     min_age: 0,
                     manual: false,
+                    discard_ignored: false,
                 },
                 now() + 86400,
             )
@@ -1040,6 +1054,7 @@ mod tests {
                 Policy {
                     min_age: 86400,
                     manual: false,
+                    discard_ignored: false,
                 },
                 at,
             )
@@ -1124,6 +1139,7 @@ mod tests {
         let manual = Policy {
             min_age: 0,
             manual: true,
+            discard_ignored: false,
         };
         assert!(eligible(&unmerged, &main, &[], &[], &table, manual, now()).is_ok());
         git_text(&work, &["checkout", "--detach"]).unwrap();
@@ -1176,6 +1192,12 @@ mod tests {
 /// Recheck Git state and inspect databases before any deletion. Git itself enforces
 /// ownership locks and refuses newly dirty work at the final removal boundary.
 fn remove_checkout(path: &Path) -> io::Result<()> {
+    remove_checkout_with_policy(path, false)
+}
+
+fn remove_checkout_with_policy(path: &Path, discard_ignored: bool) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
     if path.canonicalize()? != path {
         return Err(io::Error::other("Noncanonical checkout preserved"));
     }
@@ -1196,10 +1218,12 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
         Policy {
             min_age: 0,
             manual: true,
+            discard_ignored,
         },
         now(),
     )?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let device = std::fs::symlink_metadata(path)?.dev();
     let mut pending = vec![path.to_path_buf()];
     while let Some(entry) = pending.pop() {
         if std::time::Instant::now() >= deadline || pending.len() > 100000 {
@@ -1207,10 +1231,16 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
                 "Database inspection limit reached; preserved",
             ));
         }
+        let metadata = std::fs::symlink_metadata(&entry)?;
+        if metadata.dev() != device || super::sweep::filesystem_protected(&metadata) {
+            return Err(super::preserved(
+                "Filesystem boundary or protection preserved",
+            ));
+        }
         if super::databases::protected(&entry)? {
             return Err(super::preserved("SQLite database or sidecar preserved"));
         }
-        if std::fs::symlink_metadata(&entry)?.is_dir() {
+        if metadata.is_dir() {
             for child in std::fs::read_dir(&entry)? {
                 let child = child?;
                 if child.file_name() != ".git" {
@@ -1305,6 +1335,7 @@ fn aggressive_eligible(
         Policy {
             min_age: 86400,
             manual: false,
+            discard_ignored: true,
         },
         at,
     )?;
@@ -1405,7 +1436,7 @@ fn aggressive_clean(
             if apply {
                 // Recheck all activity, registration and Git state, then use
                 // ordinary Git removal. Missing checkout indexes stay in place.
-                remove_one(&w.path)?;
+                remove_one_with_policy(&w.path, true)?;
                 removed += 1;
             }
             Ok(true)
@@ -1443,6 +1474,121 @@ fn aggressive_clean(
 #[cfg(test)]
 mod aggressive_tests {
     use super::*;
+    #[test]
+    fn aggressive_cleanup_accepts_ignored_files_in_an_unused_checkout() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-ignored-worktree-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main = root.join("main");
+        let work = root.join("work");
+        std::fs::create_dir(&main).unwrap();
+        git_text(&main, &["init", "-b", "main"]).unwrap();
+        git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+        git_text(&main, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(main.join("file"), "committed").unwrap();
+        std::fs::write(main.join(".gitignore"), ".claude/\nnode_modules/\n").unwrap();
+        git_text(&main, &["add", "."]).unwrap();
+        git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+        git_text(
+            &main,
+            &["worktree", "add", "-b", "completed", work.to_str().unwrap()],
+        )
+        .unwrap();
+        std::fs::create_dir(work.join(".claude")).unwrap();
+        std::fs::write(work.join(".claude/settings.local.json"), "{}").unwrap();
+        let checkout = list(&main).unwrap().remove(1);
+        assert!(
+            aggressive_eligible(
+                &checkout,
+                &main,
+                std::slice::from_ref(&root),
+                &[],
+                &Table::new(),
+                now() + 172800,
+            )
+            .is_ok(),
+            "ignored settings alone must not retain an otherwise eligible checkout"
+        );
+        assert!(
+            remove_checkout(&work).is_err(),
+            "ordinary removal stays conservative"
+        );
+        assert!(
+            aggressive_eligible(
+                &checkout,
+                &main,
+                std::slice::from_ref(&root),
+                std::slice::from_ref(&work),
+                &Table::new(),
+                now() + 172800,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Open")
+        );
+        std::fs::create_dir(work.join("node_modules")).unwrap();
+        let database = work.join("node_modules/History");
+        std::fs::write(&database, b"SQLite format 3\0fixture").unwrap();
+        assert!(
+            remove_checkout_with_policy(&work, true)
+                .unwrap_err()
+                .to_string()
+                .contains("SQLite")
+        );
+        assert!(database.exists() && work.join(".claude/settings.local.json").exists());
+        std::fs::remove_file(database).unwrap();
+        std::fs::write(work.join("receipt"), "untracked recovery evidence").unwrap();
+        assert!(remove_checkout_with_policy(&work, true).is_err());
+        assert!(work.join("receipt").exists());
+        std::fs::remove_file(work.join("receipt")).unwrap();
+        std::fs::write(work.join("file"), "new source edits").unwrap();
+        assert!(remove_checkout_with_policy(&work, true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(work.join("file")).unwrap(),
+            "new source edits"
+        );
+        std::fs::write(work.join("file"), "committed").unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            struct RestoreFlags(PathBuf);
+            impl Drop for RestoreFlags {
+                fn drop(&mut self) {
+                    let path = std::ffi::CString::new(self.0.as_os_str().as_bytes()).unwrap();
+                    unsafe { libc::chflags(path.as_ptr(), 0) };
+                }
+            }
+            let protected = work.join("node_modules/protected.log");
+            std::fs::write(&protected, "preserved artifact").unwrap();
+            let name = std::ffi::CString::new(protected.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe { libc::chflags(name.as_ptr(), libc::UF_IMMUTABLE) },
+                0
+            );
+            let flags = RestoreFlags(protected.clone());
+            assert!(
+                remove_checkout_with_policy(&work, true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Filesystem")
+            );
+            assert!(work.join("file").exists());
+            drop(flags);
+            std::fs::remove_file(protected).unwrap();
+        }
+        git_text(&main, &["worktree", "lock", work.to_str().unwrap()]).unwrap();
+        assert!(
+            remove_checkout_with_policy(&work, true)
+                .unwrap_err()
+                .to_string()
+                .contains("Locked")
+        );
+        git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
+        remove_checkout_with_policy(&work, true).unwrap();
+        assert!(!work.exists());
+        assert!(git_text(&main, &["rev-parse", "completed"]).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn empty_git_marker_is_not_a_repository() {
         let root = std::env::temp_dir().join(format!("harvester-empty-git-{}", std::process::id()));
