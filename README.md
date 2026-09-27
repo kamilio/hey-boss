@@ -529,6 +529,8 @@ advances beyond its base commit (or a normal upgrade is requested). Deployment
 reports must verify the requested published build and source receipt; a different
 release is retried with the normal failure backoff without interrupting sync.
 An already matching companion connection stays open after a no-change upgrade.
+Verified installations remain current while reconnecting; a stale runtime build
+cannot trigger repeated installs or terminate a replacement connection before hello.
 
 Each machine queues installers behind its installation lock, then checks source
 ancestry against its last verified installation. Older or unrelated commits are
