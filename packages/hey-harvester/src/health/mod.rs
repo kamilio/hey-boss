@@ -524,6 +524,22 @@ impl Store {
                 snapshot.errors.push(format!("Cache cleaner: {error}"));
             }
         }
+        if config.aggressive && config.clean_caches {
+            snapshot.phase = "Inspecting inactive application caches".into();
+            self.checkpoint(&mut state, &snapshot)?;
+            match caches::clean_applications(&observation_config, &mut state.caches, apply) {
+                Ok((items, count)) => {
+                    snapshot.caches.extend(items);
+                    snapshot.removed_caches += count;
+                }
+                Err(error) => {
+                    state.caches.clear();
+                    snapshot
+                        .errors
+                        .push(format!("Application cache cleaner: {error}"));
+                }
+            }
+        }
         for item in snapshot.caches.clone() {
             snapshot.record("cache", format!("{} — {}", item.name, item.detail));
         }

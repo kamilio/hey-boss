@@ -248,7 +248,6 @@ fn discover() -> VecDeque<PathBuf> {
         ".cache",
         ".bun/install/cache",
         ".yarn/cache",
-        "Library/Caches",
         ".codex/log",
     ] {
         add(&mut roots, home.join(name));
@@ -259,46 +258,7 @@ fn discover() -> VecDeque<PathBuf> {
     if let Ok(temp) =
         super::text(std::process::Command::new("/usr/bin/getconf").arg("DARWIN_USER_TEMP_DIR"))
     {
-        let p = PathBuf::from(temp.trim());
-        add(&mut roots, p.clone());
-        if let Some(parent) = p.parent() {
-            add(
-                &mut roots,
-                parent.join("X/com.google.Chrome.code_sign_clone"),
-            );
-        }
-    }
-    for browser in ["Chrome", "Chrome Beta"] {
-        let profiles = home
-            .join("Library/Application Support/Google")
-            .join(browser);
-        let mut folders = vec![profiles.clone()];
-        if let Ok(entries) = fs::read_dir(profiles) {
-            folders.extend(
-                entries
-                    .flatten()
-                    .filter(|e| {
-                        e.file_name() == "Default"
-                            || e.file_name().to_string_lossy().starts_with("Profile ")
-                    })
-                    .map(|e| e.path()),
-            );
-        }
-        for folder in folders {
-            for cache in [
-                "Cache",
-                "Code Cache",
-                "GPUCache",
-                "DawnCache",
-                "ShaderCache",
-                "GrShaderCache",
-                "DawnGraphiteCache",
-                "DawnWebGPUCache",
-                "Media Cache",
-            ] {
-                add(&mut roots, folder.join(cache));
-            }
-        }
+        add(&mut roots, PathBuf::from(temp.trim()));
     }
     // Avoid duplicate sweeps of nested roots.
     let all = roots.clone();
@@ -308,19 +268,43 @@ fn discover() -> VecDeque<PathBuf> {
         .collect()
 }
 
+pub(super) fn software_bundle(path: &std::path::Path) -> bool {
+    path.ancestors().any(|dir| {
+        dir.extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|extension| {
+                [
+                    "app",
+                    "framework",
+                    "bundle",
+                    "xpc",
+                    "appex",
+                    "plugin",
+                    "docktileplugin",
+                ]
+                .iter()
+                .any(|kind| extension.eq_ignore_ascii_case(kind))
+            })
+    })
+}
+
 fn protected_dependency(path: &std::path::Path) -> bool {
     // Installed runtimes and extracted dependencies must remain complete. Their
     // node_modules/build/dist folders are not project caches, even under HOME or
     // .cache. Check ancestors so persisted cursors inside an installation stop too.
-    path.ancestors().any(|dir| {
-        let name = dir.file_name().and_then(|name| name.to_str());
-        let parent = dir
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str());
-        matches!(
-            (name, parent),
-            (Some("src"), Some("registry"))
+    software_bundle(path)
+        || path.ancestors().any(|dir| {
+            let name = dir.file_name().and_then(|name| name.to_str());
+            let parent = dir
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str());
+            matches!(
+                (name, parent),
+                (Some("src"), Some("registry"))
+                // App caches include updater payloads and live multi-file stores.
+                // Only the narrow, activity-aware cache cleaner may handle them.
+                | (Some("Caches" | "Application Support"), Some("Library"))
                 | (Some("mod"), Some("pkg"))
                 | (Some("node_modules"), Some("lib" | "lib64" | "global"))
                 | (Some("bin" | "lib" | "lib64"), Some(".local"))
@@ -332,22 +316,24 @@ fn protected_dependency(path: &std::path::Path) -> bool {
                 | (Some("instances"), Some("hey-gh"))
                 | (Some("global"), Some("pnpm"))
                 | (Some("Cellar" | "Caskroom"), Some("homebrew"))
-        ) || matches!(
-            name,
-            Some(
-                ".nvm"
-                    | ".fnm"
-                    | ".volta"
-                    | ".asdf"
-                    | ".pyenv"
-                    | ".rbenv"
-                    | ".rustup"
-                    | ".sdkman"
-                    | "site-packages"
-                    | "dist-packages"
+            ) || matches!(
+                name,
+                Some(
+                    ".nvm"
+                        | "org.sparkle-project.Sparkle"
+                        | "com.google.Chrome.code_sign_clone"
+                        | ".fnm"
+                        | ".volta"
+                        | ".asdf"
+                        | ".pyenv"
+                        | ".rbenv"
+                        | ".rustup"
+                        | ".sdkman"
+                        | "site-packages"
+                        | "dist-packages"
+                )
             )
-        )
-    })
+        })
 }
 
 fn project_cache(path: &std::path::Path) -> bool {
@@ -445,25 +431,8 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
         }
     }
 }
-fn old_enough(path: &std::path::Path, m: &fs::Metadata, at: u64, clone_file: bool) -> bool {
-    let newest = if clone_file {
-        // Hard-link churn changes ctime across every signing copy. Age the copy's
-        // container and file content instead, so old clones actually expire.
-        let container = path.ancestors().find(|p| {
-            p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("code_sign_clone."))
-        });
-        let Some(created) = container
-            .and_then(|p| fs::symlink_metadata(p).ok())
-            .map(|m| m.mtime().max(m.ctime()))
-        else {
-            return false;
-        };
-        m.mtime().max(created)
-    } else {
-        m.mtime().max(m.ctime())
-    };
-    at.saturating_sub(newest.max(0) as u64) >= 86400
+fn old_enough(m: &fs::Metadata, at: u64) -> bool {
+    at.saturating_sub(m.mtime().max(m.ctime()).max(0) as u64) >= 86400
 }
 
 fn repository_metadata(path: &std::path::Path) -> io::Result<bool> {
@@ -674,18 +643,12 @@ fn advance_with_owners(
                     if m.dev() != device {
                         return Ok(());
                     }
-                    let clone_file = m.is_file()
-                        && path.components().any(|c| {
-                            c.as_os_str()
-                                .to_string_lossy()
-                                .starts_with("code_sign_clone.")
-                        });
-                    if m.uid() != unsafe { libc::geteuid() } && !clone_file {
+                    if m.uid() != unsafe { libc::geteuid() } {
                         return Ok(());
                     }
                     // Fresh files cannot be deleted. Avoid opening every fresh
                     // build artifact just to inspect its database header.
-                    if !m.is_dir() && !old_enough(&path, &m, at, clone_file) {
+                    if !m.is_dir() && !old_enough(&m, at) {
                         return Ok(());
                     }
                     if filesystem_protected(&m)
@@ -701,7 +664,7 @@ fn advance_with_owners(
                             progress.stack.push(Frame::new(path.clone()));
                         }
                     } else if (m.is_file() || m.file_type().is_symlink())
-                        && old_enough(&path, &m, at, clone_file)
+                        && old_enough(&m, at)
                         && apply
                     {
                         fs::remove_file(&path)?;
@@ -721,8 +684,7 @@ fn advance_with_owners(
                 let frame = progress.stack.pop().unwrap();
                 if apply
                     && !progress.stack.is_empty()
-                    && fs::symlink_metadata(&frame.path)
-                        .is_ok_and(|m| old_enough(&frame.path, &m, at, false))
+                    && fs::symlink_metadata(&frame.path).is_ok_and(|m| old_enough(&m, at))
                 {
                     let _ = fs::remove_dir(frame.path);
                 }
@@ -1442,6 +1404,73 @@ mod tests {
                     && p.deferred.is_empty()
                     && p.projects.is_empty()
             );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn application_files_survive_fresh_and_persisted_sweeps() {
+        let files = [
+            "tmp/ChatGPT.app/Contents/Resources/node_modules/runtime/index.js",
+            "tmp/Example.framework/Versions/A/build/library",
+            "tmp/Updater.xpc/Contents/MacOS/Updater",
+            "tmp/Example.APP/Contents/MacOS/Example",
+            "tmp/org.sparkle-project.Sparkle/Installation/download/update.zip",
+            "Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation/update/ChatGPT.app/Contents/MacOS/ChatGPT",
+            "Library/Caches/Codex/Default/Code Cache/js/index",
+            "Library/Application Support/Example/plugins/node_modules/runtime/index.js",
+            "X/com.google.Chrome.code_sign_clone/code_sign_clone.old/Google Chrome.app.bundle/Contents/MacOS/Chrome",
+        ];
+        for mode in 0..3 {
+            let root = std::env::temp_dir().join(format!(
+                "harvester-app-protection-{}-{mode}",
+                std::process::id()
+            ));
+            for name in files.iter().copied().chain(["project/target/output"]) {
+                let file = root.join(name);
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, b"fixture").unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            let mut p = Progress::default();
+            match mode {
+                0 => p.roots.push_back(root.clone()),
+                1 => p.project_roots.push_back(root.clone()),
+                _ => {
+                    for name in files {
+                        let parent = root.join(name).parent().unwrap().to_owned();
+                        p.roots.push_back(parent.clone());
+                        let mut saved = Frame::new(parent.clone());
+                        saved.refill().unwrap();
+                        p.deferred.push_back(vec![saved]);
+                        p.project_roots.push_back(parent);
+                    }
+                    p.stack = p.deferred.pop_front().unwrap();
+                    p.projects
+                        .push(Frame::new(p.project_roots.pop_front().unwrap()));
+                    p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+                }
+            }
+            discover_projects(&mut p);
+            let (_, _, errors) = advance_with_owners(
+                &mut p,
+                now() + 90000,
+                true,
+                Instant::now() + Duration::from_secs(5),
+                1000,
+                &BTreeSet::new(),
+            );
+            assert!(errors.is_empty(), "{errors:?}");
+            for name in files {
+                assert_eq!(
+                    fs::read(root.join(name)).unwrap_or_default(),
+                    b"fixture",
+                    "Application file removed in mode {mode}: {name}"
+                );
+            }
+            if mode < 2 {
+                assert!(!root.join("project/target/output").exists());
+            }
             fs::remove_dir_all(root).unwrap();
         }
     }

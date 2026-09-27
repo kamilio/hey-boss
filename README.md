@@ -910,9 +910,13 @@ slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
 See [ownership and recovery](docs/worktree-ownership.md).
 
 Aggressive cache cleanup expires individual files after 24 hours across OS temp,
-Chrome signing copies and caches, npm/Bun/Yarn/Python caches, `~/.cache`, and
+npm/Bun/Yarn/Python caches, `~/.cache`, and
 project dependency/build/output directories. New siblings do not protect old
 files. Locked worktrees also protect their cached output and validation receipts.
+Installed runtimes, application bundles, Sparkle update staging, and macOS
+application data are excluded, including when resuming old traversal cursors.
+Known macOS application caches and Chrome signing copies use the activity-aware
+cache checks below, even in aggressive mode; `Library/Caches` is not swept wholesale.
 Directory discovery and file traversal save cursors between bounded runs,
 so large caches make forward progress. Worker diagnostic log rotation is enabled
 with this policy.

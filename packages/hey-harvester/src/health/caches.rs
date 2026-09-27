@@ -64,7 +64,11 @@ fn add(candidates: &mut Vec<Candidate>, path: PathBuf, min_age: u64) {
     }
 }
 
-fn discover(home: &Path, temp: Option<&Path>) -> io::Result<Vec<Candidate>> {
+fn discover(
+    home: &Path,
+    temp: Option<&Path>,
+    applications_only: bool,
+) -> io::Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
     for path in [
         home.join(".npm/_cacache"),
@@ -152,6 +156,9 @@ fn discover(home: &Path, temp: Option<&Path>) -> io::Result<Vec<Candidate>> {
             }
         }
     }
+    if applications_only {
+        candidates.retain(|c| c.signing_copy || c.path.starts_with(home.join("Library")));
+    }
     candidates.sort_by(|a, b| a.path.cmp(&b.path));
     candidates.dedup_by(|a, b| a.path == b.path);
     // New active copies must not indefinitely hide older entries behind the cap.
@@ -178,10 +185,16 @@ fn fingerprint(candidate: &Candidate, active: &[PathBuf], at: u64) -> io::Result
     // macOS keeps the copied Chrome executable owned by root. Only this exact,
     // user-owned disposable container may include root-owned regular files.
     let allow_root_files = candidate.allows_root_file();
+    if candidate.signing_copy && !allow_root_files {
+        return Err(io::Error::other("Unrecognized signing copy; preserved"));
+    }
     let mut pending = vec![root.clone()];
     let mut hash = Sha256::new();
     let mut count = 0;
     while let Some(path) = pending.pop() {
+        if !allow_root_files && super::sweep::software_bundle(&path) {
+            return Err(io::Error::other("Application bundle in cache; preserved"));
+        }
         count += 1;
         if count > 100000 || Instant::now() >= deadline {
             return Err(io::Error::other(
@@ -323,6 +336,24 @@ pub(super) fn clean(
     observations: &mut BTreeMap<String, Observation>,
     apply: bool,
 ) -> io::Result<(Vec<Item>, usize)> {
+    clean_scope(config, observations, apply, false)
+}
+
+// Aggressive file expiration must not bypass live-file checks for app caches.
+pub(super) fn clean_applications(
+    config: &super::Config,
+    observations: &mut BTreeMap<String, Observation>,
+    apply: bool,
+) -> io::Result<(Vec<Item>, usize)> {
+    clean_scope(config, observations, apply, true)
+}
+
+fn clean_scope(
+    config: &super::Config,
+    observations: &mut BTreeMap<String, Observation>,
+    apply: bool,
+    applications_only: bool,
+) -> io::Result<(Vec<Item>, usize)> {
     let home = PathBuf::from(
         std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME unavailable"))?,
     );
@@ -333,7 +364,7 @@ pub(super) fn clean(
             .and_then(|p| PathBuf::from(p.trim()).canonicalize().ok());
     #[cfg(not(target_os = "macos"))]
     let temp = std::env::temp_dir().canonicalize().ok();
-    let candidates = discover(&home, temp.as_deref())?;
+    let candidates = discover(&home, temp.as_deref(), applications_only)?;
     if candidates.is_empty() {
         observations.clear();
         return Ok((vec![], 0));
@@ -396,7 +427,7 @@ mod tests {
         let persistent = root
             .join("Workspace/project/.wrangler/state/miniflare-41cacae4eaacdedba85c60730da67a4d");
         fs::create_dir_all(&persistent).unwrap();
-        let candidates = discover(&root, Some(&temp)).unwrap();
+        let candidates = discover(&root, Some(&temp), false).unwrap();
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().all(|c| c.min_age == 3600));
         let at = super::super::now();
@@ -446,6 +477,88 @@ mod tests {
         );
         assert!(!abandoned.exists());
         assert!(live.exists() && unrelated.exists() && persistent.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn application_bundle_inside_disposable_cache_is_preserved() {
+        let root = fixture();
+        let candidate = Candidate {
+            path: root.join("Cache"),
+            min_age: 0,
+            signing_copy: false,
+        };
+        let binary = candidate.path.join("ChatGPT.app/Contents/MacOS/ChatGPT");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"signed executable").unwrap();
+        assert!(fingerprint(&candidate, &[], super::super::now() + 90000).is_err());
+        assert!(binary.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn signing_copy_waits_for_closed_files_and_leaves_installed_hardlinks_intact() {
+        let root = fixture();
+        let candidate = Candidate {
+            path: root.join("code_sign_clone.idle"),
+            min_age: 3600,
+            signing_copy: true,
+        };
+        let binary = candidate
+            .path
+            .join("Google Chrome.app.bundle/Contents/MacOS/Chrome");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"signed executable").unwrap();
+        let original = root.join("installed-executable");
+        fs::hard_link(&binary, &original).unwrap();
+        let at = super::super::now() + 90000;
+        let mut observations = BTreeMap::new();
+        let candidates = std::slice::from_ref(&candidate);
+        assert_eq!(
+            run(
+                candidates,
+                &mut observations,
+                &[binary.clone()],
+                at,
+                &config(),
+                true,
+                || Ok(vec![binary.clone()])
+            )
+            .unwrap()
+            .1,
+            0
+        );
+        assert!(binary.exists());
+        assert_eq!(
+            run(
+                candidates,
+                &mut observations,
+                &[],
+                at + 1,
+                &config(),
+                true,
+                || Ok(vec![])
+            )
+            .unwrap()
+            .1,
+            0
+        );
+        assert_eq!(
+            run(
+                candidates,
+                &mut observations,
+                &[],
+                at + 62,
+                &config(),
+                true,
+                || Ok(vec![])
+            )
+            .unwrap()
+            .1,
+            1
+        );
+        assert!(!candidate.path.exists());
+        assert_eq!(fs::read(&original).unwrap(), b"signed executable");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -592,7 +705,7 @@ mod tests {
         let clones = root.join("X/com.google.Chrome.code_sign_clone");
         fs::create_dir_all(clones.join("code_sign_clone.valid/Google Chrome.app.bundle")).unwrap();
         fs::create_dir_all(clones.join("code_sign_clone.other/Important.app")).unwrap();
-        let candidates = discover(&root, Some(&temp)).unwrap();
+        let candidates = discover(&root, Some(&temp), false).unwrap();
         assert_eq!(candidates.len(), 3);
         assert!(
             candidates
@@ -607,6 +720,18 @@ mod tests {
         assert!(!candidates.iter().any(|c| c.path == profile
             || c.path.ends_with("Service Worker")
             || c.path.ends_with("unrelated-project")));
+        let updater =
+            root.join("Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation");
+        fs::create_dir_all(&updater).unwrap();
+        let applications = discover(&root, Some(&temp), true).unwrap();
+        assert_eq!(applications.len(), 2);
+        assert!(
+            applications
+                .iter()
+                .any(|c| c.path == profile.join("Code Cache"))
+        );
+        assert!(applications.iter().any(|c| c.signing_copy));
+        assert!(!applications.iter().any(|c| updater.starts_with(&c.path)));
         fs::remove_dir_all(root).unwrap();
     }
 
