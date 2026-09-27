@@ -135,6 +135,62 @@ impl Drop for Service {
 }
 
 #[test]
+fn configuration_reports_liveness_while_waiting_for_the_writer() {
+    use serde_json::json;
+    use std::sync::mpsc;
+
+    let fixture = Fixture::new();
+    fixture.issue();
+    let mut child = Service(
+        fixture
+            .command(&["fleet", "companion", "--stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = child.0.stdin.take().unwrap();
+    let output = child.0.stdout.take().unwrap();
+    let (frames, received) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if frames
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(15)).unwrap()["kind"],
+        "hello"
+    );
+    let db = hey_boss::database::Connection::connect(&fixture.root.join("issues.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writeln!(input, "{}", json!({"version":1,"kind":"configure","controller":"fixture","revision":"waiting","workers":[]})).unwrap();
+    let progress = received.recv_timeout(Duration::from_secs(8));
+    // Always release the fixture writer, including when the regression fails.
+    db.execute_batch("ROLLBACK").unwrap();
+    let progress = progress.expect("Configuration hid companion liveness behind the writer");
+    assert_eq!(progress["kind"], "ack");
+    assert_eq!(progress["progress"], "configure");
+    assert!(progress.get("revision").is_none());
+    assert!(progress.get("cursor").is_none());
+    loop {
+        let frame = received.recv_timeout(Duration::from_secs(10)).unwrap();
+        if frame.get("progress").is_none() {
+            assert_eq!(frame["revision"], "waiting", "{frame}");
+            break;
+        }
+    }
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
+#[test]
 fn authority_replies_arrive_while_a_replica_pull_waits_for_the_writer() {
     use serde_json::json;
     use std::sync::mpsc;

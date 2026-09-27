@@ -531,6 +531,8 @@ release is retried with the normal failure backoff without interrupting sync.
 An already matching companion connection stays open after a no-change upgrade.
 Verified installations remain current while reconnecting; a stale runtime build
 cannot trigger repeated installs or terminate a replacement connection before hello.
+Companions keep reporting liveness while database work delays configuration,
+heartbeat collection, or sync; revision and cursor acknowledgments still wait for application.
 
 Each machine queues installers behind its installation lock, then checks source
 ancestry against its last verified installation. Older or unrelated commits are
