@@ -308,18 +308,41 @@ fn discover() -> VecDeque<PathBuf> {
         .collect()
 }
 
-fn downloaded_source(path: &std::path::Path) -> bool {
-    // Package managers assume extracted sources are complete. Nested build/target
-    // folders can be source, including read-only Go modules under any GOPATH.
+fn protected_dependency(path: &std::path::Path) -> bool {
+    // Installed runtimes and extracted dependencies must remain complete. Their
+    // node_modules/build/dist folders are not project caches, even under HOME or
+    // .cache. Check ancestors so persisted cursors inside an installation stop too.
     path.ancestors().any(|dir| {
+        let name = dir.file_name().and_then(|name| name.to_str());
+        let parent = dir
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str());
         matches!(
-            (
-                dir.file_name().and_then(|name| name.to_str()),
-                dir.parent()
-                    .and_then(|parent| parent.file_name())
-                    .and_then(|name| name.to_str()),
-            ),
-            (Some("src"), Some("registry")) | (Some("mod"), Some("pkg"))
+            (name, parent),
+            (Some("src"), Some("registry"))
+                | (Some("mod"), Some("pkg"))
+                | (Some("node_modules"), Some("lib" | "lib64" | "global"))
+                | (Some("bin" | "lib" | "lib64"), Some(".local"))
+                | (Some("codex-runtimes"), Some(".cache"))
+                | (Some("packages" | "plugins" | "skills"), Some(".codex"))
+                | (Some("skills"), Some(".agents"))
+                | (Some("global"), Some("pnpm"))
+                | (Some("Cellar" | "Caskroom"), Some("homebrew"))
+        ) || matches!(
+            name,
+            Some(
+                ".nvm"
+                    | ".fnm"
+                    | ".volta"
+                    | ".asdf"
+                    | ".pyenv"
+                    | ".rbenv"
+                    | ".rustup"
+                    | ".sdkman"
+                    | "site-packages"
+                    | "dist-packages"
+            )
         )
     })
 }
@@ -378,7 +401,7 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
         if let Some(index) = p
             .projects
             .iter()
-            .position(|frame| downloaded_source(&frame.path))
+            .position(|frame| protected_dependency(&frame.path))
         {
             p.projects.truncate(index);
             continue;
@@ -623,7 +646,7 @@ fn advance_with_owners(
         let frame = progress.stack.last_mut().unwrap();
         // Never follow a changed ancestor or walk into a repository from /tmp.
         let permitted = (|| -> io::Result<bool> {
-            Ok(!downloaded_source(&frame.path)
+            Ok(!protected_dependency(&frame.path)
                 && frame.path.canonicalize()? == frame.path
                 && !checkout_marker(&frame.path)?
                 && !databases::protected(&frame.path)?)
@@ -664,7 +687,7 @@ fn advance_with_owners(
                     }
                     if filesystem_protected(&m)
                         || path.file_name().is_some_and(|n| n == ".git")
-                        || downloaded_source(&path)
+                        || protected_dependency(&path)
                         || databases::protected(&path)?
                     {
                         protected += 1;
@@ -1264,6 +1287,36 @@ mod tests {
                 "custom-gopath/pkg/mod/example.com/pkg@v1.0.0",
                 "target/source.go",
                 "build/appveyor/check.bat",
+            ),
+            (
+                ".nvm/versions/node/v22.22.0/lib/node_modules",
+                "@openai/codex/bin/codex.js",
+                "npm/bin/npm-cli.js",
+            ),
+            (
+                "custom-prefix/lib/node_modules",
+                "@openai/codex/bin/codex.js",
+                "npm/bin/npm-cli.js",
+            ),
+            (
+                ".cache/codex-runtimes/primary",
+                "node_modules/tool/build/entry.js",
+                "dependencies/node/bin/node",
+            ),
+            (
+                ".volta/tools/image/node/22",
+                "lib/node_modules/npm/bin/npm-cli.js",
+                "node_modules/cli/dist/index.js",
+            ),
+            (
+                ".local/lib/python3.13/site-packages/tool",
+                "build/source.py",
+                "target/source.py",
+            ),
+            (
+                ".bun/install/global/node_modules/tool",
+                "dist/index.js",
+                "build/source.js",
             ),
         ]
         .into_iter()
