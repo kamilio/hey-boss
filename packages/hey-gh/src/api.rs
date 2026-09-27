@@ -1020,7 +1020,11 @@ async fn local_requests(
             .and_then(|h| h.strip_prefix("Bearer "))
             .unwrap_or("");
         if !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes())) {
-            return (StatusCode::UNAUTHORIZED,Json(json!({"error":"local API authentication required; use hey-gh or ApiClient","code":"local_auth"}))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error":crate::local_auth::RECOVERY,"code":"local_auth"})),
+            )
+                .into_response();
         }
     }
     next.run(request).await

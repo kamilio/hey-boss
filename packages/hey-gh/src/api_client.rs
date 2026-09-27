@@ -345,7 +345,15 @@ async fn remote_error(response: reqwest::Response) -> Error {
         .as_u64()
         .filter(|value| (100..=599).contains(value) && !(200..300).contains(value));
     match body["code"].as_str().unwrap_or("") {
-        "local_auth" => Error::LocalAuth(message),
+        // Older daemons tell even official clients to "use hey-gh". Supply
+        // recovery locally so upgrading the client also fixes that dead end.
+        "local_auth" => Error::LocalAuth(
+            if message == "local API authentication required; use hey-gh or ApiClient" {
+                crate::local_auth::RECOVERY.into()
+            } else {
+                message
+            },
+        ),
         "auth" => {
             let hostname = body["auth_hostname"]
                 .as_str()

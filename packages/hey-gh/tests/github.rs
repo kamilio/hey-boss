@@ -1823,6 +1823,190 @@ async fn ci_only_path_uses_no_graphql_and_sdk_consumes_the_same_daemon() {
 }
 
 #[tokio::test]
+async fn official_cli_explains_recovery_from_legacy_local_auth_rejection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let router = axum::Router::new().fallback(|| async {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(json!({
+                "error": "local API authentication required; use hey-gh or ApiClient",
+                "code": "local_auth"
+            })),
+        )
+    });
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    for args in [
+        vec![
+            "pr",
+            "list",
+            "-R",
+            "acme/demo",
+            "--cached-only",
+            "--json",
+            "number",
+        ],
+        vec!["required-checks", "acme/demo", "7", "--timeout", "15"],
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
+            .kill_on_drop(true)
+            .args(args)
+            .args(["--server", &base])
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            output.stdout.is_empty(),
+            "auth failure must not invent a cursor"
+        );
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("same OS user"), "{error}");
+        assert!(error.contains("hey-gh serve"), "{error}");
+        assert!(
+            error.contains("--listen") && error.contains("--cache"),
+            "{error}"
+        );
+        assert!(error.contains("preserve watches and cursors"), "{error}");
+        assert!(
+            !error.contains("gh auth login"),
+            "local auth is separate from GitHub"
+        );
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn authenticated_cli_reads_and_restart_preserve_watches_and_cursors() {
+    let h = Harness::new().await;
+    h.mode("account");
+    h.phase(2);
+    let client = h.client();
+    client
+        .refresh_pr_status(Freshness::Revalidate, false)
+        .await
+        .unwrap();
+    client
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let api = hey_gh::api::Api::new(client.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}/");
+    let sdk = hey_gh::ApiClient::new(base.parse().unwrap()).unwrap();
+    let (key, registration) = hey_gh::local_auth::register(address).unwrap();
+    let router = api.router_with_auth(Some(key.clone()));
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    // Persist a watch without starting unrelated background traffic in this test.
+    let watch = client.save_watch("acme/demo", 7, 60).await.unwrap();
+    let baseline = sdk
+        .pr_status(
+            Some("acme/demo"),
+            None,
+            100,
+            Duration::ZERO,
+            Freshness::CachedOnly,
+        )
+        .await
+        .unwrap();
+    let sources = sdk.bootstrap().await.unwrap();
+    let calls = h.calls().len();
+    for args in [
+        vec![
+            "pr",
+            "list",
+            "-R",
+            "acme/demo",
+            "--cached-only",
+            "--json",
+            "number,complete,sourceErrors",
+        ],
+        vec![
+            "required-checks",
+            "acme/demo",
+            "7",
+            "--cached-only",
+            "--timeout",
+            "15",
+        ],
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
+            .kill_on_drop(true)
+            .args(args)
+            .args(["--server", &base])
+            .output()
+            .await
+            .unwrap();
+        let value: Value =
+            serde_json::from_slice(&output.stdout).expect("authenticated CLI returns JSON");
+        assert!(!value.is_null());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("authentication"));
+    }
+    assert_eq!(h.calls().len(), calls, "cached reads cannot call GitHub");
+    drop(registration); // Reproduce expiration of the live daemon's credential.
+    assert!(matches!(sdk.status().await, Err(Error::LocalAuth(_))));
+    task.abort();
+    let _ = task.await;
+    api.stop().await;
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let (replacement, registration) = hey_gh::local_auth::register(address).unwrap();
+    let router = api.router_with_auth(Some(replacement.clone()));
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let http = reqwest::Client::new();
+    for token in [None, Some(key.as_str())] {
+        let mut request = http.get(format!("{base}v1/status"));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        assert_eq!(request.send().await.unwrap().status(), 401);
+    }
+    for (header, value) in [
+        ("Origin", "https://example.invalid"),
+        ("Host", "example.invalid"),
+        ("sec-fetch-site", "same-origin"),
+    ] {
+        assert_eq!(
+            http.get(format!("{base}v1/status"))
+                .bearer_auth(&replacement)
+                .header(header, value)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    assert!(
+        sdk.status().await.is_ok(),
+        "existing SDK reloads the replacement credential"
+    );
+    assert_eq!(client.watches().await.unwrap()[0].id, watch.id);
+    let resumed = sdk
+        .pr_status(
+            Some("acme/demo"),
+            Some(&baseline.cursor),
+            100,
+            Duration::ZERO,
+            Freshness::CachedOnly,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.cursor, baseline.cursor);
+    assert!(resumed.changes.is_empty());
+    assert!(
+        sdk.changes(Some(&sources.cursor), 100, Duration::ZERO)
+            .await
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+    task.abort();
+    let _ = task.await;
+    drop(registration);
+}
+
+#[tokio::test]
 async fn ci_batches_independent_sources_but_preserves_single_slot_queue_reads() {
     for capacity in [1, 256] {
         let h = Harness::new().await;

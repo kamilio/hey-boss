@@ -3,6 +3,8 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{io::Write, net::SocketAddr, path::PathBuf};
 
+pub(crate) const RECOVERY: &str = "local API credential missing, unreadable, or rejected; run the client as the same OS user with the same cache directory as the daemon. Restart the existing hey-gh serve process with its original --listen/--cache options to recreate the credential; keep the cache database to preserve watches and cursors";
+
 #[derive(Serialize, Deserialize)]
 struct Registration {
     token: String,
@@ -86,11 +88,10 @@ pub(crate) fn token(port: u16) -> Result<Option<String>> {
     let data = match std::fs::read(path(port)) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(storage(e)),
+        Err(_) => return Err(Error::LocalAuth(RECOVERY.into())),
     };
-    let registration: Registration = serde_json::from_slice(&data).map_err(|_| {
-        Error::Invalid("invalid local API registration; restart hey-gh serve".into())
-    })?;
+    let registration: Registration =
+        serde_json::from_slice(&data).map_err(|_| Error::LocalAuth(RECOVERY.into()))?;
     Ok(Some(registration.token))
 }
 fn storage(error: impl std::fmt::Display) -> Error {
