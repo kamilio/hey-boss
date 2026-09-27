@@ -121,7 +121,7 @@ fn elapsed(run: &Value, now_ms: i64) -> String {
     };
     let end = run["finished_at"].as_i64().unwrap_or(now_ms);
     let seconds = end.saturating_sub(start).max(0) / 1000;
-    format!(" · {}m{:02}s", seconds / 60, seconds % 60)
+    format!(" · {}", super::duration::format_runtime(seconds))
 }
 
 // Preserve paragraph boundaries while keeping the same bounded, safe queue text.
@@ -643,11 +643,6 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 Line::from(vec![
                     Span::raw(format!("{} ", run_label(r))),
                     Span::styled(status.clone(), Style::default().fg(color(&status))),
-                    Span::raw(if r["finished_at"].is_null() {
-                        " · active"
-                    } else {
-                        " · history"
-                    }),
                     Span::raw(elapsed(r, app.now_ms)),
                 ]),
                 Line::from(format!("  {}", text(&r["title"]))),
@@ -811,6 +806,79 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_timestamps_handle_boundaries_finished_runs_and_clock_skew() {
+        use serde_json::json;
+        let mut run = json!({"started_at": 1000});
+        for (now, label) in [
+            (999, " · 0s"),
+            (60_999, " · 59s"),
+            (61_000, " · 1m 00s"),
+            (3_600_999, " · 59m 59s"),
+            (3_601_000, " · 1h 00m"),
+            (86_400_999, " · 23h 59m"),
+            (86_401_000, " · 1d 00h"),
+        ] {
+            assert_eq!(super::elapsed(&run, now), label);
+        }
+        run["finished_at"] = json!(126_601_000);
+        assert_eq!(super::elapsed(&run, 200_000_000), " · 1d 11h");
+        assert_eq!(super::elapsed(&run, 300_000_000), " · 1d 11h");
+        assert_eq!(super::elapsed(&json!({}), 1000), "");
+        assert_eq!(
+            super::elapsed(&json!({"started_at": 1000, "finished_at": 0}), 1000),
+            " · 0s"
+        );
+    }
+
+    #[test]
+    fn long_runtimes_remain_visible_in_agent_list_and_activity() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use serde_json::json;
+        for history in [false, true] {
+            let mut app = super::Dashboard {
+                history,
+                now_ms: 126_601_000,
+                ..Default::default()
+            };
+            app.apply(json!({
+                "worker_id": "test",
+                "workers": [{"id": "test", "pid": 42, "active": 1,
+                    "config": {"enabled": true, "concurrency": 2}}],
+                "runs": [{"id": "run", "project_name": "poe-code", "number": 2861,
+                    "title": "Improve runtime display", "state": if history { "completed" } else { "running" },
+                    "started_at": 1000, "finished_at": if history { json!(126_601_000) } else { json!(null) }}]
+            }));
+            for (width, height) in [(48, 12), (64, 18), (80, 24), (120, 36), (240, 36)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| super::render(frame, &app)).unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                if height > MIN_HEIGHT {
+                    assert!(
+                        text.contains("1d 11h"),
+                        "Runtime missing at {width}x{height}: {text}"
+                    );
+                } else {
+                    assert!(text.contains("#2861"), "Selection missing: {text}");
+                }
+                if width >= 120 {
+                    assert_eq!(
+                        text.matches("1d 11h").count(),
+                        2,
+                        "List and activity must agree: {text}"
+                    );
+                }
+                assert!(!text.contains("2110m"));
+            }
+        }
+    }
+
     use super::*;
     #[test]
     fn multi_project_checkout_labels_use_registered_names() {

@@ -222,6 +222,48 @@ fn json_status_and_watch_limit_finished_attempts_without_hiding_live_work() {
 }
 
 #[test]
+fn text_status_formats_completed_runtimes_in_seconds_hours_and_days() {
+    let fixture = Fixture::new("runtime");
+    fixture.add_worker("chosen");
+    let db = rusqlite::Connection::open(fixture.0.join("issues.db")).unwrap();
+    db.execute(
+        "INSERT INTO projects(id,name,next_number) VALUES('named:QA','QA',1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO agents(id,metadata,last_seen) VALUES('fixture','{}',0)",
+        [],
+    )
+    .unwrap();
+    for (number, seconds) in [(1, 59), (2, 3661), (3, 126601)] {
+        db.execute("INSERT INTO issues(project_id,number,title,body,state,labels,version,created_by,created_at,updated_at,sort_order) VALUES('named:QA',?1,'Runtime check','','open','[]',1,'fixture',0,0,?1)", [number]).unwrap();
+        db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) VALUES(?1,'named:QA',?2,'{\"issue\":{\"title\":\"Runtime check\"}}','fixture','completed',?3,'start','qa',1000,0,'chosen',?4)", rusqlite::params![format!("runtime-{number}"), number, std::process::id(), 1000 + seconds * 1000]).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&fixture.0)
+        .env("HEY_BOSS_ISSUE_DB", fixture.0.join("issues.db"))
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
+        .args(["worker", "--id", "chosen", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "#1 · completed · 59s",
+        "#2 · completed · 1h 01m",
+        "#3 · completed · 1d 11h",
+    ] {
+        assert!(text.contains(expected), "{expected} missing: {text}");
+    }
+}
+
+#[test]
 fn worker_status_displays_unique_names_while_preserving_storage_keys() {
     let fixture = Fixture::new("project-names");
     fixture.add_worker("chosen");
