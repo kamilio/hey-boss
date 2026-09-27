@@ -245,7 +245,7 @@ fn text_status_formats_completed_runtimes_in_seconds_hours_and_days() {
         .env("HEY_BOSS_ISSUE_DB", fixture.0.join("issues.db"))
         .env_remove("HEY_BOSS_ISSUE_HOST")
         .env_remove("HEY_BOSS_ISSUE_PROJECT")
-        .args(["worker", "--id", "chosen", "status"])
+        .args(["worker", "--id", "chosen", "--history", "3", "status"])
         .output()
         .unwrap();
     assert!(
