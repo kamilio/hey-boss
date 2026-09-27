@@ -37,6 +37,21 @@ for offline replay. `fleet capabilities` reports `issue_ready`; older peers must
 be upgraded. The web Ready action sends the displayed snapshot and retains retry
 IDs after uncertain errors.
 
+Labels, including `PR ready` and `rework needed`, are metadata: a label-only
+batch preserves lifecycle and ownership. It advances the issue version, so an
+older Ready guard must be refreshed. Dependency reconciliation uses lifecycle,
+holds and dependency links, not label names. If a later read differs from a batch
+receipt, inspect issue history for intervening lifecycle writes; a receipt records
+the original result, not current state.
+
+When a useful source has a separate runnable repair, put rework metadata on the
+repair and hand off only the source with its fresh Ready guard. That transaction
+unblocks source dependents while preserving the separate repair's labels, claim
+and reservation. Do not add the repair as a source blocker unless it truly makes
+the source unusable. If the source itself needs rework, explicitly reopen it;
+that pauses new dependent pickups while preserving running work. A concurrent
+source pickup rejects Ready instead of releasing the new owner.
+
 Verification: `cargo test --test issue_ready_guards`, focused Ready worker and
 explicit dependency regressions, and `tools/issue_ready_browser_checks.js` through
 Playwright CLI against `tools/serve_issue_reopen_fixture.mjs`. Browser checks use
