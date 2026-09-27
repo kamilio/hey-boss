@@ -52,6 +52,13 @@ PR numbers above are examples. `watch` registrations and discovery state survive
 
 The daemon binds to `127.0.0.1:8787` by default. Use `serve --listen 127.0.0.1:PORT` and `--server http://127.0.0.1:PORT` on client commands for another port. Only loopback addresses are supported. Browser requests and nonlocal Host headers are rejected. The daemon creates a private local API credential automatically; the CLI and `ApiClient` load it without another login or token entry.
 
+If the official CLI reports a local API credential failure, use the same OS user
+and cache directory as the daemon. Restart the existing `hey-gh serve` process
+with its original `--listen` and `--cache` options to recreate a lost credential.
+Keep the cache database: it holds watches and resumable cursors. This local
+credential is separate from the GitHub login. Harvester preserves the private
+`hey-gh/instances` directory during cache expiration, including resumed sweeps.
+
 ## Recent diagnostics
 
 The daemon automatically keeps private, rotated logs: `hey-gh.log` plus four

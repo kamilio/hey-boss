@@ -327,6 +327,9 @@ fn protected_dependency(path: &std::path::Path) -> bool {
                 | (Some("codex-runtimes"), Some(".cache"))
                 | (Some("packages" | "plugins" | "skills"), Some(".codex"))
                 | (Some("skills"), Some(".agents"))
+                // These credentials authenticate to a running daemon. Expiring
+                // them locks out its own CLI; saved cursors must preserve them too.
+                | (Some("instances"), Some("hey-gh"))
                 | (Some("global"), Some("pnpm"))
                 | (Some("Cellar" | "Caskroom"), Some("homebrew"))
         ) || matches!(
@@ -817,6 +820,49 @@ pub(super) fn clean(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hey_gh_credentials_survive_fresh_and_resumed_cache_expiration() {
+        for resumed in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "harvester-hey-gh-auth-{resumed}-{}",
+                std::process::id()
+            ));
+            let registry = root.join("hey-gh/instances");
+            fs::create_dir_all(&registry).unwrap();
+            let root = root.canonicalize().unwrap();
+            let registry = registry.canonicalize().unwrap();
+            let credential = registry.join("8787.json");
+            fs::write(&credential, br#"{"token":"synthetic-local-token"}"#).unwrap();
+            fs::write(root.join("expired"), "disposable").unwrap();
+            let mut p = Progress {
+                roots: VecDeque::from([root.clone()]),
+                ..Default::default()
+            };
+            if resumed {
+                let mut frame = Frame::new(registry);
+                frame.batch.push_back(b"8787.json".to_vec());
+                p.stack.push(frame);
+                // Persisted cursors must not bypass new runtime protections.
+                p = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+            }
+            advance(
+                &mut p,
+                now() + 90000,
+                true,
+                Instant::now() + Duration::from_secs(5),
+                100,
+            );
+            let retained = credential.exists();
+            let expired = !root.join("expired").exists();
+            fs::remove_dir_all(root).unwrap();
+            assert!(
+                retained,
+                "a live daemon's credential is not disposable cache"
+            );
+            assert!(expired, "unrelated expired cache must still be removed");
+        }
+    }
 
     fn bare_git_expiration(resumed: bool, discovery: bool) {
         let root = std::env::temp_dir().join(format!(
