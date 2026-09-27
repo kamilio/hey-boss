@@ -36,6 +36,8 @@ mod batch;
 mod pr_monitor;
 #[path = "project_names.rs"]
 mod project_names;
+#[path = "ready.rs"]
+mod ready;
 #[path = "status.rs"]
 mod status;
 #[path = "title_content.rs"]
@@ -506,6 +508,29 @@ fn validate(r: &Request) -> Result<()> {
         identifier(key, "request ID", 256)?;
         if !r.operation.writes() {
             return Err(Error::invalid("--request-id applies only to mutations"));
+        }
+    }
+    if let Operation::Ready {
+        guard,
+        clear_manual_hold,
+        ..
+    } = &r.operation
+    {
+        if *clear_manual_hold && guard.is_none() {
+            return Err(Error::invalid(
+                "Clearing a manual hold for Ready requires version, assignee and reservation guards",
+            ));
+        }
+        if let Some(guard) = guard {
+            if guard.if_version < 1 || r.request_id.is_none() {
+                return Err(Error::invalid(
+                    "Guarded Ready requires a positive version and --request-id",
+                ));
+            }
+            if let Some(owner) = &guard.expected_assignee {
+                identifier(owner, "expected assignee", 512)?;
+            }
+            identifier(&guard.expected_reservation, "expected reservation", 128)?;
         }
     }
     if r.operation.number().is_some_and(|n| n <= 0) {
@@ -1259,6 +1284,22 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        if let Operation::Ready { guard, .. } = &r.operation {
+            validate(r)?;
+            let replica: bool = self.db.query_row(
+                "SELECT role='agent' FROM fleet_meta WHERE id=1",
+                [],
+                |row| row.get(0),
+            )?;
+            if replica {
+                if guard.is_none() {
+                    return Err(Error::conflict(
+                        "Ready on a companion requires a current supervisor view and version, assignee and reservation guards; no local change was saved",
+                    ));
+                }
+                return self.execute_supervisor(r);
+            }
+        }
         // Drafting is an online authority operation on companions. Never make a
         // local edit that cannot be accepted by the supervisor on replay.
         if matches!(
@@ -1796,7 +1837,7 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
+                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"ready_guard":ready::snapshot(&tx,&project.id,&issue)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
             }
             Operation::Comments {
                 number,
@@ -2402,76 +2443,57 @@ fn mutate(
             action = "plan_bound";
             data = json!({"plan":plan});
         }
-        Operation::Claim { force, .. }
-        | Operation::AssignBoss { force, .. }
-        | Operation::Ready { force, .. } => {
+        Operation::Ready {
+            guard,
+            clear_manual_hold,
+            ..
+        } => {
+            if let Some(handoff) = ready::handoff(
+                db,
+                project,
+                &mut issue,
+                actor,
+                guard.as_ref(),
+                *clear_manual_hold,
+                now,
+            )? {
+                action = "ready";
+                data = handoff;
+            }
+        }
+        Operation::Claim { force, .. } | Operation::AssignBoss { force, .. } => {
             if issue.draft {
                 return Err(Error::conflict("Undraft the issue before claiming it"));
             }
             registry::claim_lock(db, project, number, actor, *force)?;
-            let ready = matches!(operation, Operation::Ready { .. });
-            if ready {
-                if registry::project_settings(db, project)?["prs_enabled"] != true {
-                    return Err(Error::conflict(
-                        "Ready requires pull requests enabled for this project",
-                    ));
-                }
-                let attached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))", params![project.id,number], |r| r.get(0))?;
-                if !attached {
-                    return Err(Error::conflict(
-                        "Attach the task's PR before marking it Ready",
-                    ));
-                }
-            }
-            if issue.state != "open" && !(ready && issue.state == "ready") {
+            if issue.state != "open" {
                 return Err(Error::conflict("Reopen the issue before claiming it"));
             }
-            if (issue.assignee.is_none() || ready)
+            if issue.assignee.is_none()
                 && super::blockers::has_dependencies(db, &project.id, number)?
             {
                 return Err(Error::conflict(
                     "This issue is blocked by unfinished issues. Complete earlier subtasks and other dependencies before claiming it.",
                 ));
             }
-            let target = if ready || matches!(operation, Operation::AssignBoss { .. }) {
+            let target = if matches!(operation, Operation::AssignBoss { .. }) {
                 "human:boss"
             } else {
                 &actor.id
             };
-            let own_handoff = ready && issue.assignee.as_deref() == Some("human:boss") && db.query_row(
-                "SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",
-                params![project.id,number,actor.id], |r| r.get::<_,bool>(0),
-            )?;
-            if issue.assignee.as_deref() != Some(target)
-                || (ready && issue.state != "ready" && !own_handoff)
-            {
+            if issue.assignee.as_deref() != Some(target) {
                 ownership(&issue, actor, *force)?;
             }
             if matches!(operation, Operation::Claim { .. }) {
                 super::fleet::reserve_manual_claim(db, &project.id, number, &actor.machine)?;
             }
             if target == "human:boss" {
-                let mut boss = actor.clone();
-                boss.id = target.into();
-                boss.kind = "human".into();
-                boss.session_id = None;
-                boss.pid = None;
-                boss.process_start = None;
-                boss.source = "Boss assignment".into();
-                db.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING", params![target,serde_json::to_string(&boss)?,now])?;
+                ready::register_boss(db, actor, now)?;
             }
             if issue.assignee.as_deref() != Some(target) {
                 action = "claimed";
                 data = json!({"previous_assignee":issue.assignee,"assignee":target,"forced":force});
                 issue.assignee = Some(target.into());
-            }
-            if ready && issue.state != "ready" {
-                action = "ready";
-                // Keep the original owner in the event for deliberate worker handoff.
-                if data["assignee"].is_null() {
-                    data = json!({"assignee":target,"previous_assignee":if own_handoff { Some(actor.id.clone()) } else { issue.assignee.clone() }});
-                }
-                issue.state = "ready".into();
             }
         }
         Operation::Unassign { force, .. } => {

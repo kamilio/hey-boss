@@ -971,7 +971,7 @@ function issueStateActions(issue) {
   let buttons = `<button type="button" class="button" data-action="${clearHold ? "clear_manual_hold" : reopen ? "reopen" : "close"}" ${reopen && issue.state !== "closed" && !clearHold && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${clearHold ? "Release hold" : reopen ? "Reopen issue" : "Close issue"}</button>`;
   if (issue.state === "open") buttons += `<button type="button" class="button" data-action="block">${icon("blocked")}Block issue</button>`;
   if (issue.state === "blocked" || issue.state === "ready") buttons += `<button type="button" class="button" data-action="close">${icon("closed")}Close issue</button>`;
-  if (issue.state === "open" && !issue.draft && model.detail?.prs_enabled) buttons += `<button type="button" class="button" data-action="ready" ${issue.pull_requests?.some(pr => ["fix", "unspecified"].includes(pr.purpose)) ? "" : 'disabled title="Attach the task’s PR first"'}>${icon("pull-request")}PR ready</button>`;
+  if ((issue.state === "open" || (issue.state === "blocked" && issue.manual_blocked)) && !issue.draft && model.detail?.prs_enabled) buttons += `<button type="button" class="button" data-action="ready" ${issue.pull_requests?.some(pr => ["fix", "unspecified"].includes(pr.purpose)) ? "" : 'disabled title="Attach the task’s PR first"'}>${icon("pull-request")}PR ready</button>`;
   return buttons;
 }
 function renderDraftNotice(issue) {
@@ -1172,6 +1172,7 @@ async function performAction(action, button) {
   const i = model.detail.issue,
     project = model.project.id;
   const allocation = model.detail.allocation, host = model.route.host || null;
+  const readyGuard = action === "ready" ? model.detail?.ready_guard : null;
   let force = false;
   if (action === "release_allocation") {
     if (!allocation?.authoritative || !allocation.reserved_machine) return;
@@ -1217,6 +1218,12 @@ async function performAction(action, button) {
   if (action === "close") operation.comment = null;
   if (action === "block") operation.comment = $("#comment-body")?.value.trim() || null;
   if (action === "reopen") operation.if_version = i.version;
+  if (action === "ready") {
+    const guard = readyGuard;
+    if (!guard || guard.if_version !== i.version) { toast("Refresh this issue before marking its PR Ready", true); return; }
+    operation.guard = guard;
+    if (i.manual_blocked) operation.clear_manual_hold = true;
+  }
   button.disabled = true;
   try {
     const result = await mutate(operation, project, host);

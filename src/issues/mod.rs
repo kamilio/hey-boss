@@ -172,6 +172,16 @@ pub struct Invocation {
     pub call_id: Option<String>,
 }
 
+/// Snapshot read with the issue; reservation fingerprint binds worker attempt identities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyGuard {
+    pub if_version: i64,
+    #[serde(deserialize_with = "required_assignee")]
+    pub expected_assignee: Option<String>,
+    pub expected_reservation: String,
+}
+
 /// A guarded triage entry. The owner guard must be present, including null.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -428,6 +438,10 @@ pub enum Operation {
     Ready {
         number: i64,
         force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guard: Option<ReadyGuard>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear_manual_hold: bool,
     },
     AssignBoss {
         number: i64,
