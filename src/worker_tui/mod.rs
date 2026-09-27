@@ -1,6 +1,7 @@
 //! Worker dashboard components. Rendering never performs IO or controls workers.
 pub mod backend;
 pub mod diagnostics;
+pub(crate) mod duration;
 pub mod runtime;
 mod terminal_name;
 pub mod ui;

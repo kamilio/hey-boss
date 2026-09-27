@@ -212,7 +212,7 @@ fn live_timers_advance_but_finished_attempts_keep_their_duration() {
     value["runs"][1]["finished_at"] = json!(61_000);
     app.apply(value);
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
-    for (now, elapsed, claim) in [(65_000, "1m04s", "10s"), (80_000, "1m19s", "0s")] {
+    for (now, elapsed, claim) in [(65_000, "1m 04s", "10s"), (80_000, "1m 19s", "0s")] {
         app.now_ms = now;
         terminal.draw(|frame| ui::render(frame, &app)).unwrap();
         let screen: String = terminal
@@ -222,7 +222,7 @@ fn live_timers_advance_but_finished_attempts_keep_their_duration() {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(screen.contains("history · 1m00s"));
+        assert!(screen.contains("completed · 1m 00s"));
         app.history = false;
         app.normalize_run();
         let active = self::screen(&app);

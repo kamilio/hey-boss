@@ -2070,19 +2070,21 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
                 printed_history = true;
             }
             let end = run["finished_at"].as_i64().unwrap_or_else(now);
-            let seconds = (end - run["started_at"].as_i64().unwrap_or(end)).max(0) / 1000;
+            let seconds = end
+                .saturating_sub(run["started_at"].as_i64().unwrap_or(end))
+                .max(0)
+                / 1000;
             let claim = run["reservation_expires"]
                 .as_i64()
                 .filter(|_| run["finished_at"].is_null())
                 .map(|t| format!(" · claim in {}s", ((t - now()).max(0) + 999) / 1000))
                 .unwrap_or_default();
             println!(
-                "{} #{} · {} · {}m{:02}s{} · Codex {} · {}",
+                "{} #{} · {} · {}{} · Codex {} · {}",
                 run["project_name"].as_str().unwrap_or(""),
                 run["number"],
                 run["state"].as_str().unwrap_or(""),
-                seconds / 60,
-                seconds % 60,
+                crate::worker_tui::duration::format_runtime(seconds),
                 claim,
                 run["session_id"]
                     .as_str()

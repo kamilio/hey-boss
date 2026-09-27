@@ -78,6 +78,7 @@ ellipsis. Selection reserves the same space as inactive tabs, so labels do not s
 The dashboard uses the main app's blue and slate palette. At 100 columns and up,
 activity appears beside sessions; narrower terminals stack the panes. Short
 terminals prioritize sessions, while 64 × 18 still shows the latest update.
+Runtimes use seconds, minutes, hours, or days: `45s`, `1m 04s`, `11h 09m`, `1d 11h`.
 Activity retains twelve recent updates, newest first, with relative timestamps,
 multiline messages, readable goal status, and a result section for finished
 attempts. PgUp/PgDn scroll safely within the log; the bottom border shows the
@@ -118,6 +119,7 @@ cd worker-tui
 npm ci
 npm run test:terminal
 npm run test:activity
+node tests/runtime-terminal.mjs
 cargo build --locked --manifest-path ../Cargo.toml
 node tests/integrated-terminal.mjs
 python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
