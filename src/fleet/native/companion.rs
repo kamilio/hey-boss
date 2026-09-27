@@ -31,14 +31,14 @@ fn reply(output: &Arc<Mutex<std::io::Stdout>>, value: Value) -> Result<()> {
     send(&mut *output.lock().unwrap(), value)
 }
 
-// Verification and atomic application can outlast a heartbeat interval. This
-// reports liveness only: the durable cursor acknowledgment still follows commit.
-struct PullProgress {
+// Database work can outlast a heartbeat interval. Report transport liveness
+// independently; revision/cursor acknowledgments still follow application.
+struct OperationProgress {
     done: Option<mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
-impl PullProgress {
-    fn start<W: Write + Send + 'static>(output: Arc<Mutex<W>>) -> Self {
+impl OperationProgress {
+    fn start<W: Write + Send + 'static>(output: Arc<Mutex<W>>, operation: &'static str) -> Self {
         let (done, wait) = mpsc::channel::<()>();
         let thread = std::thread::spawn(move || {
             while matches!(
@@ -47,7 +47,7 @@ impl PullProgress {
             ) {
                 if send(
                     &mut *output.lock().unwrap(),
-                    json!({"kind":"ack","progress":"pull"}),
+                    json!({"kind":"ack","progress":operation}),
                 )
                 .is_err()
                 {
@@ -61,7 +61,7 @@ impl PullProgress {
         }
     }
 }
-impl Drop for PullProgress {
+impl Drop for OperationProgress {
     fn drop(&mut self) {
         drop(self.done.take());
         let _ = self.thread.take().unwrap().join();
@@ -248,8 +248,15 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
         let Some(message) = input.next()? else {
             break;
         };
-        let _progress = matches!(message["kind"].as_str(), Some("pull" | "pull_end"))
-            .then(|| PullProgress::start(output.clone()));
+        let operation = match message["kind"].as_str() {
+            Some("pull" | "pull_end") => Some("pull"),
+            Some("configure") => Some("configure"),
+            Some("ping") => Some("heartbeat"),
+            Some("conversation" | "takeover" | "steer") => Some("request"),
+            _ => None,
+        };
+        let _progress =
+            operation.map(|operation| OperationProgress::start(output.clone(), operation));
         let Some(message) = pulls.receive(message)? else {
             continue;
         };
@@ -454,7 +461,7 @@ mod tests {
             bytes: Vec::new(),
             frames,
         }));
-        let progress = PullProgress::start(output.clone());
+        let progress = OperationProgress::start(output.clone(), "pull");
         let frame = received.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(frame, json!({"version":1,"kind":"ack","progress":"pull"}));
         assert!(frame.get("cursor").is_none());
