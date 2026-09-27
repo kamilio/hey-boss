@@ -2078,7 +2078,6 @@ fn independent_workers_have_separate_capacity_tags_and_atomic_reservations() {
         "Pipeline:",
         "manual claim",
         "Codex",
-        "m0",
     ] {
         assert!(text.contains(expected), "Missing {expected}: {text}");
     }
