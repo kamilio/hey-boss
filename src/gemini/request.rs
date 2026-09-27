@@ -21,6 +21,7 @@ pub struct ConvertedRequest {
     pub tools: BTreeMap<String, Tool>,
     pub response_fields: serde_json::Map<String, Value>,
     pub(crate) output_schema: Option<Arc<jsonschema::Validator>>,
+    pub(crate) suppress_hallucinated_calls: bool,
 }
 
 fn tool_identity(item: &Value) -> Result<String> {
@@ -33,10 +34,8 @@ fn tool_identity(item: &Value) -> Result<String> {
         },
     )
 }
-fn native_tool_name(name: &str) -> String {
-    let hash = Sha256::digest(name.as_bytes());
-    let readable: String = name
-        .chars()
+pub(crate) fn readable_tool_prefix(name: &str) -> String {
+    name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
                 c
@@ -45,7 +44,11 @@ fn native_tool_name(name: &str) -> String {
             }
         })
         .take(32)
-        .collect();
+        .collect()
+}
+pub(crate) fn native_tool_name(name: &str) -> String {
+    let hash = Sha256::digest(name.as_bytes());
+    let readable = readable_tool_prefix(name);
     format!("hey_{readable}_{}", &format!("{hash:x}")[..16])
 }
 fn initial_instruction(system: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
@@ -764,9 +767,15 @@ pub fn convert_request(
         let (mode, allowed) = if let Some(choice) = choice.as_str() {
             (
                 match choice {
+                    "auto" if declarations.is_empty() => "NONE",
                     "auto" => "AUTO",
                     "none" => "NONE",
-                    "required" => "ANY",
+                    "required" => {
+                        if declarations.is_empty() {
+                            bail!("tool_choice:required requires declared tools");
+                        }
+                        "ANY"
+                    }
                     _ => bail!("Invalid tool_choice"),
                 },
                 None,
@@ -845,6 +854,31 @@ pub fn convert_request(
             }
         }
     }
+    if body.get("toolConfig").is_none() && body.get("tools").is_none() && !calls.is_empty() {
+        body["toolConfig"] = json!({"functionCallingConfig":{"mode":"NONE"}});
+    }
+    let tools_disabled = body.get("tools").is_none()
+        || body.pointer("/toolConfig/functionCallingConfig/mode") == Some(&json!("NONE"));
+    if !calls.is_empty() {
+        if tools_disabled {
+            system.push(json!({"text":"Ordered instruction update: role=developer, effective for the current response turn after all historical tool calls. Tool calling is disabled for this turn (tools=[] / mode=NONE). Do not emit any functionCall parts or attempt to run any tool or command; respond with assistant text only."}));
+            body["systemInstruction"] = json!({"parts":system});
+        } else {
+            let mut retired: Vec<&str> = calls
+                .values()
+                .map(|(native, _)| native.as_str())
+                .filter(|native| !tools.contains_key(*native))
+                .collect();
+            retired.sort_unstable();
+            retired.dedup();
+            if !retired.is_empty() {
+                system.push(json!({"text":format!("Ordered instruction update: role=developer, effective for the current response turn. Historical tool(s) [{}] from earlier turns are retired and unavailable; do not emit functionCall parts for them. Only call currently declared tools.", retired.join(", "))}));
+                body["systemInstruction"] = json!({"parts":system});
+            }
+        }
+    }
+    let suppress_hallucinated_calls =
+        tools.is_empty() && body.get("tools").is_none() && request.get("tool_choice").is_some();
     let response_fields = [
         "metadata",
         "client_metadata",
@@ -878,5 +912,6 @@ pub fn convert_request(
         tools,
         response_fields,
         output_schema,
+        suppress_hallucinated_calls,
     })
 }

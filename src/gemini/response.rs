@@ -1,6 +1,43 @@
-use super::{ConvertedRequest, ReasoningCodec};
+use super::request::{native_tool_name, readable_tool_prefix};
+use super::{ConvertedRequest, ReasoningCodec, Tool};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+
+fn resolve_tool<'a>(native: &str, tools: &'a BTreeMap<String, Tool>) -> Option<&'a Tool> {
+    if let Some(tool) = tools.get(native) {
+        return Some(tool);
+    }
+    let qualified = |tool: &Tool| {
+        if let Some(ns) = &tool.namespace {
+            format!("{ns}.{}", tool.name)
+        } else {
+            tool.name.clone()
+        }
+    };
+    for tool in tools.values() {
+        let full = qualified(tool);
+        if full == native || native_tool_name(&full) == native {
+            return Some(tool);
+        }
+    }
+    let matches: Vec<&Tool> = tools
+        .values()
+        .filter(|tool| {
+            let full = qualified(tool);
+            let readable = readable_tool_prefix(&full);
+            let leaf_readable = readable_tool_prefix(&tool.name);
+            tool.name == native
+                || readable == native
+                || leaf_readable == native
+                || format!("hey_{readable}") == native
+                || format!("hey_{leaf_readable}") == native
+                || native.starts_with(&format!("hey_{readable}_"))
+                || native.starts_with(&format!("hey_{leaf_readable}_"))
+        })
+        .collect();
+    (matches.len() == 1).then(|| matches[0])
+}
 
 pub fn usage(native: &Value) -> Option<Value> {
     let u = native.get("usageMetadata")?;
@@ -49,11 +86,24 @@ pub(crate) fn output_items(
             let native = call["name"]
                 .as_str()
                 .ok_or_else(|| anyhow!("Gemini function call name missing"))?;
-            let tool = request
-                .tools
-                .get(native)
-                .ok_or_else(|| anyhow!("Gemini called undeclared tool {native}"))?;
             let args = call.get("args").cloned().unwrap_or(json!({}));
+            let Some(tool) = resolve_tool(native, &request.tools) else {
+                if request.suppress_hallucinated_calls {
+                    let text = format!(
+                        "[Tool call `{native}` skipped because tool calling is disabled for this turn: {}]",
+                        serde_json::to_string(&args).unwrap_or_else(|_| "{}".into())
+                    );
+                    output.push(json!({
+                        "id": format!("msg_{id}_{index}"),
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": text, "annotations": []}]
+                    }));
+                    continue;
+                }
+                bail!("Gemini called undeclared tool {native}");
+            };
             let call_id = call
                 .get("id")
                 .and_then(Value::as_str)

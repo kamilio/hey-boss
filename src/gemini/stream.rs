@@ -235,10 +235,37 @@ impl ResponseStream {
                             if item["type"] == "custom_tool_call" {
                                 initial["input"] = json!("");
                             }
+                            if item["type"] == "message"
+                                && item
+                                    .pointer("/content/0/type")
+                                    .and_then(Value::as_str)
+                                    == Some("output_text")
+                            {
+                                initial["content"] = json!([]);
+                            }
                             events.push(self.emit(
                                 "response.output_item.added",
                                 json!({"output_index":index,"item":initial}),
                             ));
+                            if item["type"] == "message"
+                                && let Some(text) = item
+                                    .pointer("/content/0/text")
+                                    .and_then(Value::as_str)
+                            {
+                                let mut added = self.item_event(index);
+                                added["part"] =
+                                    json!({"type":"output_text","text":"","annotations":[]});
+                                events.push(self.emit("response.content_part.added", added));
+                                let mut delta = self.item_event(index);
+                                delta["delta"] = json!(text);
+                                events.push(self.emit("response.output_text.delta", delta));
+                                let mut done = self.item_event(index);
+                                done["text"] = json!(text);
+                                events.push(self.emit("response.output_text.done", done));
+                                let mut part_done = self.item_event(index);
+                                part_done["part"] = item["content"][0].clone();
+                                events.push(self.emit("response.content_part.done", part_done));
+                            }
                             for (kind, field) in [
                                 ("function_call", "arguments"),
                                 ("custom_tool_call", "input"),

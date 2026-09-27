@@ -24,6 +24,9 @@ pub(super) fn content(value: &Value, require_role: bool) -> Result<()> {
             "Invalid Gemini content role"
         );
     }
+    if !require_role && value.get("parts").is_none() && value.get("role").is_some() {
+        return Ok(());
+    }
     let Some(parts) = value.get("parts").and_then(Value::as_array) else {
         bail!("Gemini content.parts must be an array");
     };

@@ -1906,3 +1906,93 @@ fn signed_tool_image_results_keep_resolution_and_parallel_call_association() {
         );
     }
 }
+
+#[test]
+fn compaction_and_unhashed_tool_names_and_empty_model_content_parts() {
+    let codec = codec();
+    let cfg = config();
+
+    // 1. Declared tool called by unhashed name or readable prefix resolves and replays cleanly.
+    let mut req = base_request();
+    req["tools"] = json!([
+        {"type": "function", "name": "exec_command", "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}}
+    ]);
+    req["tool_choice"] = json!("auto");
+    let converted = convert_request(&req, &cfg, &codec).unwrap();
+    for called_name in ["exec_command", "hey_exec_command"] {
+        let parts = json!([
+            {"thought": true, "text": "Run status check.", "thoughtSignature": "sig-1"},
+            {"functionCall": {"name": called_name, "args": {"cmd": "git status"}, "id": "call_unhashed"}, "thoughtSignature": "sig-2"}
+        ]);
+        let native = json!({"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}]});
+        let resp = convert_response(&native, &converted, &codec, "unhashed").unwrap();
+        assert_eq!(resp["status"], "completed");
+        assert_eq!(resp["output"][1]["type"], "function_call");
+        assert_eq!(resp["output"][1]["name"], "exec_command");
+        assert_eq!(resp["output"][1]["call_id"], "call_unhashed");
+
+        // Replay into a compaction turn (`tools: []`, `tool_choice: "auto"`).
+        let mut history = resp["output"].as_array().unwrap().clone();
+        history.push(json!({"type": "function_call_output", "call_id": "call_unhashed", "output": "clean"}));
+        history.push(json!({"type": "message", "role": "user", "content": "You are performing a CONTEXT CHECKPOINT COMPACTION."}));
+
+        let mut compact_req = base_request();
+        compact_req["tools"] = json!([]);
+        compact_req["tool_choice"] = json!("auto");
+        compact_req["input"] = json!(history);
+        let compact_converted = convert_request(&compact_req, &cfg, &codec).unwrap();
+        assert_eq!(
+            compact_converted.body["toolConfig"]["functionCallingConfig"]["mode"],
+            "NONE"
+        );
+        assert!(
+            compact_converted.body["systemInstruction"]["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["text"].as_str().is_some_and(|t| t.contains("Tool calling is disabled for this turn")))
+        );
+
+        // Even if Gemini hallucinates a functionCall during compaction, unary and streaming succeed without executing tools.
+        let hallucinated_native = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "## Context Checkpoint Summary\nAll tests passed."},
+                        {"functionCall": {"name": "hey_exec_command_aa6e99885a69dcd1", "args": {"cmd": "git status"}}}
+                    ]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        let compact_resp = convert_response(&hallucinated_native, &compact_converted, &codec, "compact").unwrap();
+        assert_eq!(compact_resp["status"], "completed");
+        assert!(
+            compact_resp["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["type"] != "function_call" && item["type"] != "custom_tool_call")
+        );
+
+        let mut stream = ResponseStream::new(compact_converted.clone(), "compact-stream");
+        let mut events = stream.feed(&json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "## Context Checkpoint Summary\nAll tests passed."},
+                        {"functionCall": {"name": "hey_exec_command_aa6e99885a69dcd1", "args": {"cmd": "git status"}}}
+                    ]
+                }
+            }]
+        })).unwrap();
+        // 2. Final SSE chunk with content: {"role": "model"} and omitted parts array succeeds.
+        events.extend(stream.feed(&json!({
+            "candidates": [{"content": {"role": "model"}, "finishReason": "STOP"}]
+        })).unwrap());
+        events.extend(stream.finish(&codec).unwrap());
+        assert!(events.iter().any(|e| e["type"] == "response.completed"));
+    }
+}
