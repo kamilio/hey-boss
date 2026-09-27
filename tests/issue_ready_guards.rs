@@ -248,6 +248,92 @@ fn ready_guard_authorizes_exact_manual_owner_without_claiming_work() {
 }
 
 #[test]
+fn labels_preserve_ready_through_reconciliation_but_invalidate_old_guards() {
+    let mut f = Fixture::new();
+    let request = f.handoff();
+    f.store.execute(&request).unwrap();
+    let mut stale = f.handoff();
+    stale.request_id = Some("before-label-edit".into());
+    let before = f.view()["issue"].clone();
+    let mut batch = Fixture::request(json!({"action":"batch","edits":[{
+        "number":1,"if_version":before["version"],"expected_assignee":"human:boss",
+        "add_labels":["rework needed"],"remove_labels":["PR ready"],"assignment":"keep"
+    }]}));
+    batch.request_id = Some("label-only".into());
+    assert_eq!(f.store.execute(&batch).unwrap()["applied"], true);
+    // Creating a dependent runs graph reconciliation after the label-only batch.
+    f.run(json!({"action":"create","title":"Dependent","body":"","labels":[]}));
+    f.run(json!({"action":"set_blockers","number":2,"blockers":[1],"force":false}));
+    let after = f.view()["issue"].clone();
+    assert_eq!(after["state"], "ready");
+    assert_eq!(after["assignee"], "human:boss");
+    assert_eq!(after["labels"], json!(["rework needed"]));
+    assert_eq!(
+        after["version"].as_i64(),
+        Some(before["version"].as_i64().unwrap() + 1)
+    );
+    assert_eq!(
+        f.run(json!({"action":"view","number":2}))["issue"]["state"],
+        "open"
+    );
+    f.reject(&stale, "version");
+    // A separate lifecycle write, not a label, pauses dependent pickups.
+    f.run(json!({"action":"reopen","number":1}));
+    assert_eq!(
+        f.run(json!({"action":"view","number":2}))["issue"]["state"],
+        "blocked"
+    );
+}
+
+#[test]
+fn source_handoff_preserves_separate_repair_claim_and_labels() {
+    let mut f = Fixture::new();
+    f.run(
+        json!({"action":"create","title":"Separate repair","body":"","labels":["rework needed"]}),
+    );
+    f.run(json!({"action":"create","title":"Dependent","body":"","labels":[]}));
+    f.run(json!({"action":"set_blockers","number":3,"blockers":[1],"force":false}));
+    let mut claim = Fixture::request(json!({"action":"claim","number":2,"force":false}));
+    claim.actor.as_mut().unwrap().id = "codex:repairer".into();
+    f.store.execute(&claim).unwrap();
+    f.sql("INSERT INTO fleet_allocations VALUES('named:Ready QA',2,'foreign'); INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,claimed_at,job,machine,owner_pid,owner_start) VALUES('repair','named:Ready QA',2,'codex:repairer','running',0,0,1,'{}','foreign',1,'test')");
+    let repair = f.run(json!({"action":"view","number":2}));
+    let request = f.handoff();
+    assert_eq!(
+        f.store.execute(&request).unwrap()["issue"]["state"],
+        "ready"
+    );
+    assert_eq!(f.run(json!({"action":"view","number":2})), repair);
+    assert_eq!(
+        f.run(json!({"action":"view","number":3}))["issue"]["state"],
+        "open"
+    );
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT state,claimed_at,finished_at FROM worker_runs WHERE id='repair'",
+            [],
+            |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?
+            ))
+        )
+        .unwrap(),
+        ("running".into(), 1, None)
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT node FROM fleet_allocations WHERE issue_number=2",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "foreign"
+    );
+}
+
+#[test]
 fn ready_cli_exposes_guards_and_rejects_incomplete_snapshots() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_hey-boss"))
         .args(["issue", "ready", "--help"])
