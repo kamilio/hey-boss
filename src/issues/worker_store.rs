@@ -588,6 +588,8 @@ impl Store {
                         Operation::Ready {
                             number: job.number(),
                             force: false,
+                            guard: None,
+                            clear_manual_hold: false,
                         }
                     } else {
                         Operation::AssignBoss {
@@ -1587,6 +1589,8 @@ mod tests {
         f.apply(Operation::Ready {
             number: 1,
             force: false,
+            guard: None,
+            clear_manual_hold: false,
         });
         assert!(!f.store.worker_cancelled(&f.job).unwrap());
         f.store

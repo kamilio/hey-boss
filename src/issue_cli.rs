@@ -353,11 +353,24 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
-    /// Mark an attached PR ready for Boss and unblock dependent tasks.
+    /// Hand an attached PR to Boss and unblock dependents; caller assesses usability.
     Ready {
         number: i64,
+        /// Legacy flag; never overrides a Ready ownership or reservation guard.
         #[arg(long)]
         force: bool,
+        /// Version from issue view --json; supply all three guards together.
+        #[arg(long, requires_all = ["expected_assignee", "expected_reservation", "request_id"])]
+        if_version: Option<i64>,
+        /// Exact assignee from ready_guard; use unassigned for null.
+        #[arg(long, requires = "if_version")]
+        expected_assignee: Option<String>,
+        /// Opaque ready_guard.expected_reservation from the same view.
+        #[arg(long, requires = "if_version")]
+        expected_reservation: Option<String>,
+        /// Reconcile a manual hold atomically; guards required, dependencies retained.
+        #[arg(long, requires = "if_version")]
+        clear_manual_hold: bool,
     },
     /// Assign an open issue to Boss.
     #[command(visible_alias = "assign-boss")]
@@ -856,9 +869,22 @@ impl Options {
                 number: *number,
                 force: *force,
             },
-            Action::Ready { number, force } => Operation::Ready {
+            Action::Ready {
+                number,
+                force,
+                if_version,
+                expected_assignee,
+                expected_reservation,
+                clear_manual_hold,
+            } => Operation::Ready {
                 number: *number,
                 force: *force,
+                guard: if_version.map(|version| issues::ReadyGuard {
+                    if_version: version,
+                    expected_assignee: expected_assignee.clone().filter(|v| v != "unassigned"),
+                    expected_reservation: expected_reservation.clone().unwrap(),
+                }),
+                clear_manual_hold: *clear_manual_hold,
             },
             Action::AssignToBoss { number, force } => Operation::AssignBoss {
                 number: *number,

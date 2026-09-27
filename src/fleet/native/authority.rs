@@ -132,7 +132,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true,"issue_ready":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -225,6 +225,7 @@ impl Relay {
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
                             "issue_reopen": message["capabilities"]["issue_reopen"] == true,
+                            "issue_ready": message["capabilities"]["issue_ready"] == true,
                         });
                         return Ok(capability_report(
                             "supervisor_tunnel",
@@ -255,6 +256,13 @@ impl Relay {
                                     crate::issues::Operation::Reopen { .. }
                                 )
                                 .then_some("issue_reopen"),
+                            )
+                            .chain(
+                                matches!(
+                                    metadata.operation,
+                                    crate::issues::Operation::Ready { .. }
+                                )
+                                .then_some("issue_ready"),
                             )
                         {
                             if message["capabilities"][capability] != true {
@@ -457,6 +465,14 @@ mod tests {
         assert_eq!(details["required_capability"], "issue_draft");
         assert_eq!(details["supervisor_build"], "old-metadata-build");
         assert_eq!(details["sent"], false);
+        let ready = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"ready-old","operation":{"action":"ready","number":1,"force":true,"guard":{"if_version":1,"expected_assignee":null,"expected_reservation":"snapshot"}}}});
+        let error = call(&ctx.state, &ctx.path, ready).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_ready"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
         let reopen = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"reopen-old","operation":{"action":"reopen","number":1,"if_version":1}}});
         let error = call(&ctx.state, &ctx.path, reopen).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");

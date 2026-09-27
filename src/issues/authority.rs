@@ -13,13 +13,14 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             if_version: Some(version),
             ..
         } if *version > 0 => {}
+        Operation::Ready { guard: Some(_), .. } => {}
         Operation::Batch { edits }
             if edits
                 .iter()
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, version-guarded title/body/label edits, drafting and reopening unassigned, unreserved issues, and label-only batches with assignment: keep. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, allocation, version-guarded title/body/label edits, drafting and reopening unassigned, unreserved issues, guarded Ready handoffs, and label-only batches with assignment: keep. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }
