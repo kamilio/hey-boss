@@ -668,7 +668,7 @@ impl Supervisor {
             &self.configured(host, &fallback)?,
         )?;
         let mut revision = control::revision(&self.ctx.node, &workers);
-        self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
+        self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
@@ -915,6 +915,17 @@ impl Supervisor {
             .as_str()
             .filter(|build| !build.is_empty())
             .ok_or_else(|| invalid("No desired published build for deployment"))?;
+        // A remembered hello belongs to the previous transport during reconnect.
+        // Retire only the confirmed obsolete connection present at admission.
+        let obsolete_transport = {
+            let state = self.state.lock().unwrap();
+            let machine = state.machines.get(host);
+            machine
+                .filter(|m| m["state"] == "connected")
+                .and_then(|m| m["build"].as_str())
+                .filter(|build| !build.contains(&format!("build {desired})")))
+                .and_then(|_| state.connections.get(host).map(|(pid, _)| *pid))
+        };
         self.update(host, json!({"deployment":"updating"}))?;
         self.event(host, "deployment", "Installing desired software");
         let mut command = Command::new(&self.ctx.binary);
@@ -967,7 +978,7 @@ impl Supervisor {
         }
         self.update(
             host,
-            json!({"deployment":"current","deployment_error":null,"retry_deploy_at":null}),
+            json!({"deployment":"current","installed_build":desired,"deployment_error":null,"retry_deploy_at":null}),
         )?;
         self.event(host, "deployment", "Software deployment complete");
         let state = self.state.lock().unwrap();
@@ -976,7 +987,10 @@ impl Supervisor {
             .get(host)
             .and_then(|machine| machine["build"].as_str())
             .is_some_and(|build| build.contains(&format!("build {desired})")));
-        if !matching_transport && let Some((pid, _)) = state.connections.get(host) {
+        if !matching_transport
+            && let Some((pid, _)) = state.connections.get(host)
+            && Some(*pid) == obsolete_transport
+        {
             unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
         }
         Ok(())
@@ -1115,7 +1129,9 @@ impl Supervisor {
                     let host = entry["host"].as_str().unwrap();
                     let m = self.machine(host);
                     if let Some(installed) = m["build"].as_str() {
-                        if installed.contains(&needle) {
+                        if installed.contains(&needle)
+                            || (m["state"] != "connected" && m["installed_build"] == *build)
+                        {
                             if m["deployment"] != "current" || !m["deployment_error"].is_null() {
                                 self.update(
                                     host,
@@ -1865,6 +1881,68 @@ mod tests {
     }
 
     #[test]
+    fn deployment_keeps_a_reconnect_with_a_stale_previous_build() {
+        let (_directory, app, mut transport, report) = deployment_fixture("current");
+        app.update(
+            "peer",
+            json!({"build":"hey-boss (build old)","state":"connecting"}),
+        )
+        .unwrap();
+        write_deployment_report(&app, &report);
+        app.deploy("peer").unwrap();
+        transport.assert_alive();
+        assert_eq!(app.machine("peer")["build"], "hey-boss (build old)");
+        assert_eq!(app.machine("peer")["state"], "connecting");
+    }
+
+    #[test]
+    fn deployment_does_not_retire_a_transport_replaced_during_installation() {
+        let (directory, app, mut old, report) = deployment_fixture("updated");
+        app.update("peer", json!({"build":"hey-boss (build old)"}))
+            .unwrap();
+        write_deployment_report(&app, &report);
+        let gate = directory.0.join("install-gate");
+        let started = directory.0.join("install-started");
+        std::fs::write(&gate, "").unwrap();
+        let script = std::fs::read_to_string(&app.ctx.binary).unwrap().replace(
+            "else\n",
+            &format!(
+                "else\n: > '{}'\nwhile [ -f '{}' ]; do sleep 0.01; done\n",
+                started.display(),
+                gate.display()
+            ),
+        );
+        std::fs::write(&app.ctx.binary, script).unwrap();
+        let app = Arc::new(app);
+        let installing = app.clone();
+        let install =
+            std::thread::spawn(move || installing.deploy("peer").map_err(|e| e.to_string()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "Installer did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut replacement = TestTransport(
+            Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let (tx, _rx) = mpsc::sync_channel(1);
+        app.state
+            .lock()
+            .unwrap()
+            .connections
+            .insert("peer".into(), (replacement.0.id(), tx));
+        app.update("peer", json!({"state":"connecting"})).unwrap();
+        std::fs::remove_file(gate).unwrap();
+        install.join().unwrap().unwrap();
+        replacement.assert_alive();
+        old.assert_alive();
+    }
+
+    #[test]
     fn deployment_refuses_inconsistent_final_build_or_source_receipt() {
         for field in ["build", "source", "receipt", "missing-final", "development"] {
             let (_directory, app, mut transport, mut report) = deployment_fixture("updated");
@@ -2004,6 +2082,22 @@ mod tests {
         transport.assert_alive();
         assert_eq!(app.machine("peer")["workers"][0]["active"], 1);
         assert_eq!(app.machine("peer")["last_sync"], 123);
+        // The installation is verified even while the next hello is pending.
+        // A stale runtime build must not schedule the same deployment each tick.
+        app.update(
+            "peer",
+            json!({"build":"hey-boss (build old)","state":"disconnected"}),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            app.tick().unwrap();
+            assert_eq!(app.machine("peer")["deployment"], "current");
+        }
+        // A fresh hello supersedes the receipt, including an actual downgrade.
+        app.update("peer", json!({"installed_build":null,"state":"connected"}))
+            .unwrap();
+        app.tick().unwrap();
+        assert_eq!(app.machine("peer")["deployment"], "outdated");
         assert_eq!(
             replica::state_get(&app.ctx.db().unwrap(), "desired_build", Value::Null).unwrap(),
             published

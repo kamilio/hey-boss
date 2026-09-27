@@ -37,6 +37,7 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
             "pending",
             "conflicts",
             "build",
+            "installed_build",
             "deployment",
             "error",
             "deployment_error",
