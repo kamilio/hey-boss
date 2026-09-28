@@ -17,11 +17,13 @@ assert.equal(result.capacity, 5, 'Saved capacity is excluded; paused live proces
 assert.deepEqual(result.saved.map(({worker}) => worker.id), ['saved']);
 assert.deepEqual(result.offline.map(machine => machine.host), ['offline', 'stale']);
 assert.equal(result.supervisor.host, 'local');
-assert.equal(elapsed(run, now), '1m39s');
-assert.equal(elapsed({...run, finished_at: 61000}, now), '1m00s', 'Finished time freezes history duration');
-assert.equal(elapsed({started_at: 0, finished_at: 3601000}, now), '1h00m01s');
-assert.equal(elapsed({started_at: now + 1000}, now), '0m00s');
-assert.equal(elapsed({}, now), '0m00s');
+assert.equal(elapsed(run, now), '1m 39s');
+assert.equal(elapsed({...run, finished_at: 61000}, now), '1m 00s', 'Finished time freezes history duration');
+for(const [seconds,expected] of [[0,'0s'],[59,'59s'],[60,'1m 00s'],[3599,'59m 59s'],[3600,'1h 00m'],[3661,'1h 01m'],[86399,'23h 59m'],[86400,'1d 00h'],[126601,'1d 11h']]){
+  assert.equal(elapsed({started_at:0},seconds*1000),expected,'Runtime matches the TUI at '+seconds+' seconds');
+}
+assert.equal(elapsed({started_at: now + 1000}, now), '0s');
+assert.equal(elapsed({}, now), '', 'Unknown start time must not look newly started');
 assert.deepEqual(fleetView({}, now).live, []);
 console.log('Fleet visibility and elapsed time checks passed');
 const {projectView} = require('../src/issues/web/fleet.js');
