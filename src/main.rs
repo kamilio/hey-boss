@@ -70,6 +70,18 @@ enum Command {
         #[arg(long)]
         codex_home: Option<PathBuf>,
     },
+    /// Configure the current user's Pi with this proxy's providers and models
+    ConfigurePi,
+}
+
+fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
+    match config {
+        Some(path) => Ok(path),
+        None => Ok(PathBuf::from(
+            std::env::var_os("HOME").context("HOME is not set; use --config")?,
+        )
+        .join(".hey-proxy/config.json")),
+    }
 }
 
 #[tokio::main]
@@ -107,11 +119,20 @@ async fn main() -> Result<()> {
             token.as_deref(),
         );
     }
-    let path = match args.config {
-        Some(path) => path,
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set; use --config")?)
-            .join(".hey-proxy/config.json"),
-    };
+    if matches!(args.command, Some(Command::ConfigurePi)) {
+        // Everything comes from the proxy's own config: where it listens, and
+        // the models it serves.
+        let path = config_path(args.config)?;
+        let config = config::load(&path)?;
+        let api_key = if config.mode == config::Mode::Host {
+            access::ensure(&path, &[])?.local
+        } else {
+            // Loopback mode ignores the client key; Pi needs one to offer models.
+            "hey-proxy".to_owned()
+        };
+        return rollout::configure_pi(&config, &api_key, None);
+    }
+    let path = config_path(args.config)?;
     // Fingerprint before loading so an edit racing startup is picked up by the first request.
     let fingerprint = config::fingerprint(&path);
     let config = if matches!(args.command, Some(Command::Rollout { .. })) {

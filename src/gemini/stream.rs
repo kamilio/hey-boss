@@ -236,9 +236,7 @@ impl ResponseStream {
                                 initial["input"] = json!("");
                             }
                             if item["type"] == "message"
-                                && item
-                                    .pointer("/content/0/type")
-                                    .and_then(Value::as_str)
+                                && item.pointer("/content/0/type").and_then(Value::as_str)
                                     == Some("output_text")
                             {
                                 initial["content"] = json!([]);
@@ -248,9 +246,8 @@ impl ResponseStream {
                                 json!({"output_index":index,"item":initial}),
                             ));
                             if item["type"] == "message"
-                                && let Some(text) = item
-                                    .pointer("/content/0/text")
-                                    .and_then(Value::as_str)
+                                && let Some(text) =
+                                    item.pointer("/content/0/text").and_then(Value::as_str)
                             {
                                 let mut added = self.item_event(index);
                                 added["part"] =

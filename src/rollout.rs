@@ -1,6 +1,12 @@
 use crate::config::{ClientConnection, Config, Mode, SshHost};
 use anyhow::{Context, Result, bail};
-use std::{fs, path::Path, process::Stdio};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+    process::Stdio,
+};
 use tokio::process::Command;
 use toml_edit::{DocumentMut, Item, Table, value};
 
@@ -164,6 +170,199 @@ pub fn configure_gemini(base_url: &str, model: &str, home: Option<&Path>) -> Res
     }
     write_private(&path, doc.to_string().as_bytes(), false)?;
     println!("Gemini profile ready: {}", path.display());
+    Ok(())
+}
+/// The provider id Pi uses for this proxy. Only this entry is ever rewritten.
+const PI_PROVIDER: &str = "hey-proxy";
+
+/// Every model this proxy serves by name: each overwrite plus the models it
+/// routes to. A reasoning overwrite is marked so Pi sends an effort level, which
+/// is what `reasoning_routes` selects on.
+fn pi_models(config: &Config) -> BTreeMap<String, bool> {
+    let mut models = BTreeMap::new();
+    for alias in &config.aliases {
+        let reasoning = alias.reasoning.is_some() || !alias.reasoning_routes.is_empty();
+        let entry = models.entry(alias.from.clone()).or_insert(false);
+        *entry = *entry || reasoning;
+        for destination in alias
+            .to
+            .iter()
+            .chain(alias.reasoning_routes.values().map(|route| &route.to))
+        {
+            models.entry(destination.clone()).or_insert(false);
+        }
+    }
+    models
+}
+/// Apply Pi's conservative compaction defaults only to names that can route to
+/// Gemini. These are retention/output budgets, not claims about upstream limits.
+fn pi_gemini_models(config: &Config) -> BTreeSet<String> {
+    let mut models = BTreeSet::new();
+    for alias in &config.aliases {
+        if !alias.matches_shape("/v1/responses") {
+            continue;
+        }
+        let mut gemini = alias.to.is_none() && alias.from.starts_with("gemini/");
+        for destination in alias
+            .to
+            .iter()
+            .chain(alias.reasoning_routes.values().map(|r| &r.to))
+        {
+            if destination.starts_with("gemini/") {
+                models.insert(destination.clone());
+                gemini = true;
+            }
+        }
+        if gemini {
+            models.insert(alias.from.clone());
+        }
+    }
+    models
+}
+
+fn pi_object<'a>(
+    parent: &'a mut Value,
+    key: &str,
+    location: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    let parent = parent
+        .as_object_mut()
+        .with_context(|| format!("Pi {location} parent must be an object; left unchanged"))?;
+    parent
+        .entry(key)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .with_context(|| format!("Pi {location} must be an object; left unchanged"))
+}
+
+fn pi_compaction(settings: &mut Value, config: &Config) -> Result<()> {
+    for id in pi_gemini_models(config) {
+        pi_object(settings, "compaction", "settings.json compaction")?;
+        let compaction = &mut settings["compaction"];
+        pi_object(
+            compaction,
+            "modelOverrides",
+            "settings.json compaction.modelOverrides",
+        )?;
+        let key = format!("{PI_PROVIDER}/{id}");
+        let entry = pi_object(
+            &mut compaction["modelOverrides"],
+            &key,
+            &format!("settings.json compaction.modelOverrides[{key}]"),
+        )?;
+        // Fill each absent field independently; explicit per-model choices win.
+        entry.entry("keepRecentTokens").or_insert(json!(20000));
+        entry.entry("reserveTokens").or_insert(json!(16384));
+    }
+    Ok(())
+}
+/// Read one of Pi's JSON configs; a missing or empty file is an empty object.
+fn pi_document(path: &Path, name: &str) -> Result<Value> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    if content.trim().is_empty() {
+        return Ok(Value::Object(Default::default()));
+    }
+    let value: Value = serde_json::from_str(&content)
+        .with_context(|| format!("Invalid Pi {name}; left unchanged"))?;
+    if !value.is_object() {
+        bail!("Pi {name} must be a JSON object; left unchanged");
+    }
+    Ok(value)
+}
+fn write_json(path: &Path, document: &Value) -> Result<()> {
+    write_private(
+        path,
+        (serde_json::to_string_pretty(document)? + "\n").as_bytes(),
+        true,
+    )
+}
+/// Point Pi at this proxy: one provider entry holding the models this proxy
+/// serves, plus the startup defaults. Other providers and settings are kept.
+pub fn configure_pi(config: &Config, api_key: &str, home: Option<&Path>) -> Result<()> {
+    // The proxy already knows where it listens and what it serves; nothing here
+    // is worth retyping on the command line.
+    let base_url = format!("http://{}/v1", config.local_address());
+    let default = config
+        .aliases
+        .first()
+        .map(|alias| alias.from.clone())
+        .context("Proxy config has no model overwrites; add one to `aliases` first")?;
+    let models = pi_models(config);
+    let home = match home {
+        Some(path) => path.to_path_buf(),
+        // Pi's own directory, and its own override for it.
+        None => std::env::var_os("PI_CODING_AGENT_DIR")
+            .map(Into::into)
+            .unwrap_or(
+                std::path::PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
+                    .join(".pi/agent"),
+            ),
+    };
+    let models_path = home.join("models.json");
+    let mut catalog = pi_document(&models_path, "models.json")?;
+    if !catalog["providers"].is_null() && !catalog["providers"].is_object() {
+        bail!("Pi models.json providers must be an object; left unchanged");
+    }
+    // Keep full model entries by ID, including context/output limits, costs,
+    // reasoning and compatibility fields. Retired IDs are removed below.
+    let mut existing = BTreeMap::new();
+    if let Some(provider) = catalog["providers"].get(PI_PROVIDER) {
+        if !provider.is_object() {
+            bail!("Pi models.json hey-proxy provider must be an object; left unchanged");
+        }
+        if let Some(entries) = provider.get("models") {
+            let entries = entries
+                .as_array()
+                .context("Pi models.json hey-proxy models must be an array; left unchanged")?;
+            for model in entries {
+                let id = model
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .context("Pi models.json model must have a string id; left unchanged")?;
+                if existing.insert(id.to_owned(), model.clone()).is_some() {
+                    bail!("Pi models.json has duplicate model id {id}; left unchanged");
+                }
+            }
+        }
+    }
+    let overrides = catalog["providers"][PI_PROVIDER]["modelOverrides"].clone();
+    // Replace only our own provider, so a stale endpoint or key cannot survive.
+    catalog["providers"][PI_PROVIDER] = json!({
+        "name": PI_PROVIDER,
+        "baseUrl": base_url,
+        "api": "openai-responses",
+        "apiKey": api_key,
+        "models": models
+            .iter()
+            .map(|(id, reasoning)| {
+                let mut model = existing.get(id).cloned().unwrap_or_else(|| json!({"id": id}));
+                if *reasoning && model.get("reasoning").is_none() {
+                    model["reasoning"] = json!(true);
+                }
+                model
+            })
+            .collect::<Vec<_>>(),
+    });
+    if !overrides.is_null() {
+        catalog["providers"][PI_PROVIDER]["modelOverrides"] = overrides;
+    }
+    let settings_path = home.join("settings.json");
+    let mut settings = pi_document(&settings_path, "settings.json")?;
+    settings["defaultProvider"] = json!(PI_PROVIDER);
+    settings["defaultModel"] = json!(default);
+    pi_compaction(&mut settings, config)?;
+    // Both documents parse and validate before either file is changed.
+    write_json(&models_path, &catalog)?;
+    write_json(&settings_path, &settings)?;
+    println!(
+        "Pi configured: {} → {base_url} ({} models, default {default})",
+        models_path.display(),
+        models.len()
+    );
     Ok(())
 }
 #[cfg(test)]
@@ -914,6 +1113,118 @@ pub async fn verify(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pi_catalog_lists_every_overwrite_and_the_models_it_routes_to() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "listen": "127.0.0.1:8080",
+            "aliases": [
+                {"from": "coding", "to": "gpt-4.1"},
+                {"from": "careful", "to": "gpt-5", "reasoning": "high"},
+                {"from": "reasoning", "to": "gpt-5", "reasoning_routes": {"low": {"to": "gpt-5-mini"}}}
+            ]
+        }))
+        .unwrap();
+        let models = pi_models(&config);
+        assert_eq!(
+            models.keys().cloned().collect::<Vec<_>>(),
+            [
+                "careful",
+                "coding",
+                "gpt-4.1",
+                "gpt-5",
+                "gpt-5-mini",
+                "reasoning"
+            ]
+        );
+        // Only the overwrites that route on effort ask Pi to send one.
+        assert_eq!(
+            models
+                .iter()
+                .filter(|(_, reasoning)| **reasoning)
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["careful", "reasoning"]
+        );
+    }
+
+    #[test]
+    fn pi_setup_replaces_only_our_provider_and_keeps_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            // A wildcard bind still points Pi at the loopback address.
+            "listen": "0.0.0.0:18080",
+            "aliases": [{"from": "coding", "to": "gpt-4.1"}, {"from": "fast", "to": "gpt-4.1-mini"}]
+        }))
+        .unwrap();
+        fs::write(
+            home.join("models.json"),
+            r#"{"providers":{"mine":{"baseUrl":"http://localhost:1/v1","models":[{"id":"local"}]},"hey-proxy":{"apiKey":"stale","models":[{"id":"gone"}],"modelOverrides":{"coding":{"contextWindow":400000}}}}}"#,
+        )
+        .unwrap();
+        fs::write(home.join("settings.json"), r#"{"theme":"light"}"#).unwrap();
+        configure_pi(&config, "local-token", Some(home)).unwrap();
+
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.join("models.json")).unwrap()).unwrap();
+        assert_eq!(catalog["providers"]["mine"]["models"][0]["id"], "local");
+        let provider = &catalog["providers"]["hey-proxy"];
+        assert_eq!(provider["baseUrl"], "http://127.0.0.1:18080/v1");
+        assert_eq!(provider["api"], "openai-responses");
+        assert_eq!(provider["apiKey"], "local-token");
+        assert_eq!(
+            provider["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|model| model["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["coding", "fast", "gpt-4.1", "gpt-4.1-mini"]
+        );
+        // A stale model is gone, but the user's own per-model tuning survives.
+        assert_eq!(
+            provider["modelOverrides"]["coding"]["contextWindow"],
+            400000
+        );
+        let settings: Value =
+            serde_json::from_slice(&fs::read(home.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["theme"], "light");
+        assert_eq!(settings["defaultProvider"], "hey-proxy");
+        // The first overwrite in the config is where Pi starts.
+        assert_eq!(settings["defaultModel"], "coding");
+
+        let written = fs::read(home.join("models.json")).unwrap();
+        configure_pi(&config, "local-token", Some(home)).unwrap();
+        assert_eq!(fs::read(home.join("models.json")).unwrap(), written);
+    }
+
+    #[test]
+    fn pi_setup_needs_an_overwrite_and_leaves_a_broken_catalog_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "listen": "127.0.0.1:8080",
+            "aliases": [{"from": "coding", "to": "gpt-4.1"}]
+        }))
+        .unwrap();
+        // Nothing to offer Pi until the proxy has an overwrite to serve.
+        let empty: Config =
+            serde_json::from_value(serde_json::json!({"listen": "127.0.0.1:8080"})).unwrap();
+        assert!(configure_pi(&empty, "k", Some(home)).is_err());
+        assert!(!home.join("models.json").exists());
+        assert!(!home.join("settings.json").exists());
+
+        let broken = b"{\"providers\":";
+        fs::write(home.join("models.json"), broken).unwrap();
+        assert!(configure_pi(&config, "k", Some(home)).is_err());
+        assert_eq!(fs::read(home.join("models.json")).unwrap(), broken);
+        assert!(!home.join("settings.json").exists());
+
+        fs::write(home.join("models.json"), b"[]").unwrap();
+        assert!(configure_pi(&config, "k", Some(home)).is_err());
+        assert_eq!(fs::read(home.join("models.json")).unwrap(), b"[]");
+    }
+
     #[test]
     fn gemini_profile_upgrades_disabled_retries_and_preserves_positive_overrides() {
         let dir = tempfile::tempdir().unwrap();

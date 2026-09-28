@@ -1933,7 +1933,9 @@ fn compaction_and_unhashed_tool_names_and_empty_model_content_parts() {
 
         // Replay into a compaction turn (`tools: []`, `tool_choice: "auto"`).
         let mut history = resp["output"].as_array().unwrap().clone();
-        history.push(json!({"type": "function_call_output", "call_id": "call_unhashed", "output": "clean"}));
+        history.push(
+            json!({"type": "function_call_output", "call_id": "call_unhashed", "output": "clean"}),
+        );
         history.push(json!({"type": "message", "role": "user", "content": "You are performing a CONTEXT CHECKPOINT COMPACTION."}));
 
         let mut compact_req = base_request();
@@ -1950,7 +1952,9 @@ fn compaction_and_unhashed_tool_names_and_empty_model_content_parts() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|p| p["text"].as_str().is_some_and(|t| t.contains("Tool calling is disabled for this turn")))
+                .any(|p| p["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Tool calling is disabled for this turn")))
         );
 
         // Even if Gemini hallucinates a functionCall during compaction, unary and streaming succeed without executing tools.
@@ -1966,7 +1970,8 @@ fn compaction_and_unhashed_tool_names_and_empty_model_content_parts() {
                 "finishReason": "STOP"
             }]
         });
-        let compact_resp = convert_response(&hallucinated_native, &compact_converted, &codec, "compact").unwrap();
+        let compact_resp =
+            convert_response(&hallucinated_native, &compact_converted, &codec, "compact").unwrap();
         assert_eq!(compact_resp["status"], "completed");
         assert!(
             compact_resp["output"]
@@ -1989,9 +1994,13 @@ fn compaction_and_unhashed_tool_names_and_empty_model_content_parts() {
             }]
         })).unwrap();
         // 2. Final SSE chunk with content: {"role": "model"} and omitted parts array succeeds.
-        events.extend(stream.feed(&json!({
-            "candidates": [{"content": {"role": "model"}, "finishReason": "STOP"}]
-        })).unwrap());
+        events.extend(
+            stream
+                .feed(&json!({
+                    "candidates": [{"content": {"role": "model"}, "finishReason": "STOP"}]
+                }))
+                .unwrap(),
+        );
         events.extend(stream.finish(&codec).unwrap());
         assert!(events.iter().any(|e| e["type"] == "response.completed"));
     }
