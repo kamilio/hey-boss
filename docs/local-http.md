@@ -91,7 +91,9 @@ address-in-use warning means another service owns the port. Inspect that owner;
 do not kill it or add a broad wildcard listener. The old 4781 URL remains usable
 when the optional port-80 listener cannot start.
 
-The launchd job writes diagnostics to `/var/log/hey-boss-web.log`. It can serve
+The launchd job writes diagnostics to `~/.hey-boss-web.log` in the service user's
+home. launchd opens logs after dropping privileges; a missing log in `/var/log`
+prevents startup with `EX_CONFIG` / permission denied. It can serve
 only while the user installation and state are accessible (for example, after
 FileVault unlock). On another OS, an unprivileged port-80 bind may work directly;
 otherwise use that OS's socket-activation/service provisioning rather than
