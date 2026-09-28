@@ -12,6 +12,16 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let path = ProcessInfo.processInfo.environment["HEY_BOSS_ARTIFACT_EDITOR_PREVIEW"] {
+        app.setActivationPolicy(.regular)
+        let launch = ArtifactLaunch(project: "named:Editor visual test", file: path)
+        let editor = NativeArtifactEditor(launch: launch, journalRoot: URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("drafts"))
+        editor.onOpen = { ArtifactEditors.shared.open($0) }
+        editor.show()
+        withExtendedLifetime(editor) { app.run() }
+        return
+    }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_POE_CORPUS"] { auditPoeMarkdownCorpus(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NATIVE_READER"] == "1" {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-native-reader-"+UUID().uuidString)
@@ -44,6 +54,7 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
     auditQuickIssue()
+    auditArtifactEditor()
     auditIssuesShortcut()
     auditSecretInput()
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
@@ -2514,4 +2525,105 @@ func auditPoeMarkdownCorpus(_ path: String) {
         }
     }
     print("Passed: all \(count) upstream document/renderer inputs retain text order and native plain/rich selection copying")
+}
+
+func auditArtifactEditor() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-editor-tests-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let launch = ArtifactLaunch(project: "named:Editor tests", id: "test-doc")
+    let session = ArtifactEditingSession(launch: launch, journalRoot: root)
+    session.adopt(ArtifactDocument(id: "test-doc", title: "Notes", body: "original", version: 4))
+    var requests: [ArtifactSave] = []
+    var callbacks: [(Result<ArtifactDocument, Error>) -> Void] = []
+    session.writer = { request, completion in requests.append(request); callbacks.append(completion) }
+    session.change(title: "Notes", body: "first edit")
+    session.flush()
+    precondition(requests.count == 1 && requests[0].version == 4)
+    session.change(title: "Notes", body: "typed during save")
+    session.flush()
+    precondition(requests.count == 1, "only one write in flight")
+    callbacks.removeFirst()(.success(ArtifactDocument(id: "test-doc", title: "Notes", body: "first edit", version: 5)))
+    session.flush()
+    precondition(requests.count == 2 && requests[1].version == 5 && requests[1].body == "typed during save")
+    callbacks.removeFirst()(.failure(StorageError(description: "Disconnected")))
+    let retry = requests[1].requestID
+    session.flush()
+    precondition(requests[2].requestID == retry, "uncertain writes reuse their durable request ID")
+    callbacks.removeFirst()(.success(ArtifactDocument(id: "test-doc", title: "Notes", body: "typed during save", version: 6)))
+    precondition(!session.dirty && session.version == 6)
+    session.change(title: "Recovered", body: "unsent 🦀 draft")
+    try! session.persist()
+    let recovered = ArtifactEditingSession(launch: launch, journalRoot: root)
+    precondition(recovered.body == "unsent 🦀 draft" && recovered.version == 6 && recovered.dirty)
+    session.timer?.invalidate(); recovered.timer?.invalidate()
+    // A newly created document keeps its journal identity when the server assigns an ID.
+    let newNote = ArtifactEditingSession(launch: ArtifactLaunch(project: "named:Editor tests", title: "New note"), journalRoot: root)
+    newNote.adopt(ArtifactDocument(id: "assigned-id", title: "New note", body: "saved", version: 1))
+    newNote.change(title: "New note", body: "pending after creation")
+    try! newNote.persist()
+    let reopened = ArtifactEditingSession(launch: newNote.launch, journalRoot: root)
+    precondition(reopened.journal == newNote.journal && reopened.body == "pending after creation")
+    newNote.timer?.invalidate(); reopened.timer?.invalidate()
+    print("PASS artifact autosave serializes writes, retries idempotently and recovers Unicode drafts")
+
+    let text = ArtifactMarkdownText(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+    text.isRichText = false; text.isEditable = true; text.allowsUndo = true
+    text.string = "hello 🦀 world"; text.setSelectedRange(NSRange(location: 6, length: 2))
+    text.wrap("**")
+    precondition(text.string == "hello **🦀** world" && text.selectedRange() == NSRange(location: 8, length: 2))
+    text.wrap("**")
+    precondition(text.string == "hello 🦀 world")
+    text.string = "one\ntwo\n"; text.setSelectedRange(NSRange(location: 0, length: 7))
+    text.prefixLines("- ")
+    precondition(text.string == "- one\n- two\n")
+    text.prefixLines("- ")
+    precondition(text.string == "one\ntwo\n")
+    text.string = "3. third"; text.setSelectedRange(NSRange(location: 8, length: 0)); text.insertNewline(nil)
+    precondition(text.string == "3. third\n4. ")
+    text.insertNewline(nil)
+    precondition(text.string == "3. third\n", "Return exits an empty list item")
+    print("PASS Markdown formatting preserves Unicode selections and toggles selected lines")
+
+    let file = root.appendingPathComponent("Keyboard.md")
+    try! Data("A native note 🦀\n".utf8).write(to: file)
+    let editor = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:Editor tests", file: file.path), journalRoot: root, cli: "/usr/bin/false", present: false)
+    func wait(_ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        precondition(condition(), "Native operation completed")
+    }
+    wait { editor.session.ready }
+    precondition(editor.focusMode && editor.sidebar.superview == nil)
+    editor.window.makeFirstResponder(editor.text)
+    editor.text.setSelectedRange(NSRange(location: 2, length: 6))
+    precondition(editor.command("b", shift: false))
+    precondition(editor.text.string == "A **native** note 🦀\n")
+    editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note 🦀\n")
+    editor.text.undoManager?.redo()
+    precondition(editor.text.string == "A **native** note 🦀\n")
+    wait { !editor.session.dirty && !editor.session.saving }
+    precondition(try! String(contentsOf: file, encoding: .utf8) == editor.text.string, "No manual save is required")
+    precondition(editor.command("p", shift: false) && !editor.focusMode && editor.sidebar.superview != nil)
+    precondition(editor.command("f", shift: true) && editor.focusMode)
+    precondition(editor.command("f", shift: false) && editor.scroll.isFindBarVisible)
+    let large = String(repeating: "A line of Markdown text.\n", count: 42000)
+    editor.text.string = large; editor.bodyByteCount = large.utf8.count
+    editor.text.setSelectedRange(NSRange(location: (large as NSString).length / 2, length: 0))
+    let start = Date()
+    for _ in 0..<20 { editor.text.insertText("x", replacementRange: editor.text.selectedRange()) }
+    let latency = Date().timeIntervalSince(start) * 1000 / 20
+    precondition(latency < 100, "Typing in a 1 MiB note must not stall the main thread")
+    print(String(format: "PASS 1 MiB native document: %.2f ms per edit", latency))
+    editor.session.flush(); wait { !editor.session.dirty && !editor.session.saving }
+    // A concurrent external edit cannot be silently overwritten.
+    try! Data("external edit".utf8).write(to: file)
+    editor.session.change(title: editor.session.title, body: "my unsent change")
+    editor.session.flush()
+    wait { editor.session.failure != nil }
+    precondition(try! String(contentsOf: file, encoding: .utf8) == "external edit")
+    precondition(editor.session.body == "my unsent change")
+    editor.session.timer?.invalidate(); editor.window.close()
+    print("PASS focus, quick switch, find, undo/redo, automatic disk save and external-edit protection")
 }

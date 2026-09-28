@@ -196,7 +196,7 @@ fn handle(
     // Control requests use the established bridge and are never put in the durable queue.
     if matches!(
         request.command.as_str(),
-        "overview" | "overview_snapshot" | "inbox" | "inbox_list" | "action"
+        "overview" | "overview_snapshot" | "inbox" | "inbox_list" | "action" | "artifact_editor"
     ) {
         return forward(state, &request);
     }

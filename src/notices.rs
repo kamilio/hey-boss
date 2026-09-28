@@ -65,6 +65,23 @@ pub enum Action {
     OpenLink {
         task_id: String,
     },
+    OpenArtifact {
+        project: String,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        issue: Option<i64>,
+        #[serde(default)]
+        node: Option<String>,
+        #[serde(default)]
+        file: Option<String>,
+    },
 }
 impl Action {
     pub fn payload(&self) -> Result<Value> {
@@ -79,6 +96,7 @@ impl Action {
             Self::FinishReview { task_id } => ("inbox_finish_review", Some(task_id)),
             Self::Link { task_id, .. } => ("inbox_link", Some(task_id)),
             Self::OpenLink { task_id } => ("inbox_open_link", Some(task_id)),
+            Self::OpenArtifact { .. } => ("artifact_editor", None),
         };
         if let Some(id) = id {
             crate::issues::identifier(id, "task ID", 256)?;
@@ -116,6 +134,57 @@ impl Action {
                     issue.validate()?;
                 }
                 value["issue"] = json!(issue);
+            }
+            Self::OpenArtifact {
+                project,
+                id,
+                host,
+                title,
+                body,
+                issue,
+                node,
+                file,
+            } => {
+                crate::issues::identifier(project, "artifact project", 8192)?;
+                if let Some(id) = id.as_deref().filter(|s| !s.is_empty()) {
+                    crate::issues::identifier(id, "artifact ID", 128)?;
+                }
+                if let Some(host) = host.as_deref().filter(|s| !s.is_empty())
+                    && !crate::health::remote::valid_host(host)
+                {
+                    return Err(Error::invalid("Invalid artifact SSH host"));
+                }
+                if let Some(title) = title.as_deref().filter(|s| !s.is_empty()) {
+                    crate::issues::identifier(title, "title", 512)?;
+                }
+                if let Some(body) = body
+                    && body.len() > crate::issues::BODY_LIMIT
+                {
+                    return Err(Error::invalid("Markdown must be at most 1 MiB"));
+                }
+                if issue.is_some_and(|n| n <= 0) {
+                    return Err(Error::invalid("Issue number must be positive"));
+                }
+                if let Some(node) = node.as_deref().filter(|s| !s.is_empty()) {
+                    crate::issues::identifier(node, "mindmap node", 2048)?;
+                }
+                if let Some(file) = file.as_deref().filter(|s| !s.is_empty())
+                    && (file.len() > 4096 || file.contains('\0'))
+                {
+                    return Err(Error::invalid("Invalid Markdown file path"));
+                }
+                value["project"] = json!(project);
+                value["title"] = json!(title);
+                value["question"] = json!(serde_json::to_string(&json!({
+                    "project": project,
+                    "id": id.as_deref().filter(|s| !s.is_empty()),
+                    "host": host.as_deref().filter(|s| !s.is_empty()),
+                    "title": title,
+                    "body": body,
+                    "issue": issue,
+                    "node": node.as_deref().filter(|s| !s.is_empty()),
+                    "file": file.as_deref().filter(|s| !s.is_empty()),
+                }))?);
             }
             _ => {}
         }
@@ -272,6 +341,33 @@ mod tests {
             .payload()
             .unwrap()["command"],
             "inbox_link"
+        );
+        let open: Action = serde_json::from_value(json!({
+            "action": "open_artifact",
+            "project": "named:Atlas",
+            "id": "a-1234",
+            "host": "devbox",
+            "title": "Design Doc",
+            "body": "# Design",
+            "issue": 12
+        }))
+        .unwrap();
+        let payload = open.payload().unwrap();
+        assert_eq!(payload["command"], "artifact_editor");
+        assert_eq!(payload["project"], "named:Atlas");
+        let parsed: Value = serde_json::from_str(payload["question"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed["id"], "a-1234");
+        assert_eq!(parsed["host"], "devbox");
+        assert_eq!(parsed["issue"], 12);
+        assert!(
+            serde_json::from_value::<Action>(json!({
+                "action": "open_artifact",
+                "project": "named:Atlas",
+                "host": "-oProxyCommand=evil"
+            }))
+            .unwrap()
+            .payload()
+            .is_err()
         );
     }
 }

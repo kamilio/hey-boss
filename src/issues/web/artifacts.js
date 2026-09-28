@@ -30,6 +30,19 @@ const HeyBossArtifacts = (() => {
     return value;
   }
   const api=(context,operation,requestID)=>rpc(context,{action:"artifact",operation},reads.has(operation.command),requestID);
+  async function openNative(context,options={}) {
+    if(mobile)throw failure("Native editor is available on macOS desktop.",false);
+    let response;
+    try {
+      response=await fetch("/api/inbox",{method:"POST",headers:{"Content-Type":"application/json","X-Hey-Boss-CSRF":context.csrf},body:JSON.stringify({action:"open_artifact",project:context.project,...(context.host?{host:context.host}:{}),...options}),signal:AbortSignal.timeout(8000)});
+    } catch(e) {
+      throw failure("Desktop app could not be reached. Start Hey Boss on your Mac to open the native editor.",false);
+    }
+    let value;
+    try { value=await response.json(); } catch(e) { throw failure("Could not confirm native editor launch.",false); }
+    if(!response.ok||!value.ok) throw failure(value.error?.message||value.error||"Start or update the Hey Boss desktop app to open the native editor.",false);
+    return value;
+  }
   function anchorText(range) {
     if(!range.commonAncestorContainer.querySelector?.(".artifact-diagram"))return range.toString();
     const fragment=range.cloneContents();
@@ -144,9 +157,10 @@ const HeyBossArtifacts = (() => {
     if(!root)return;
     const render = artifacts => {
       root.classList.add("artifact-relationship");
-      root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul class="artifact-attachment-list" ${artifacts.length?"":"hidden"}>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${HeyBossUI.icon("docs")}<span>${esc(a.title)}${a.archived?'<small>Archived</small>':""}</span></a><button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}" title="Unlink artifact">${HeyBossUI.icon("x")}</button></li>`).join("")}</ul><div class="artifact-attachment-actions"><a class="artifact-text-button" href="${esc(url(context.project,null,{new:"1",...(context.issue?{issue:context.issue}:{node:context.node}),...(context.host?{host:context.host}:{})}))}">${HeyBossUI.icon("plus")}Create artifact</a><button type="button" class="artifact-text-button" data-attach>${HeyBossUI.icon("link")}Attach existing</button></div><div data-attach-form></div><p role="alert" hidden></p>`;
+      root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul class="artifact-attachment-list" ${artifacts.length?"":"hidden"}>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${HeyBossUI.icon("docs")}<span>${esc(a.title)}${a.archived?'<small>Archived</small>':""}</span></a>${mobile?"":`<button type="button" data-open-native="${esc(a.id)}" aria-label="Edit ${esc(a.title)} in native editor" title="Edit in native editor">${HeyBossUI.icon("edit")}</button>`}<button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}" title="Unlink artifact">${HeyBossUI.icon("x")}</button></li>`).join("")}</ul><div class="artifact-attachment-actions"><a class="artifact-text-button" href="${esc(url(context.project,null,{new:"1",...(context.issue?{issue:context.issue}:{node:context.node}),...(context.host?{host:context.host}:{})}))}">${HeyBossUI.icon("plus")}Create artifact</a><button type="button" class="artifact-text-button" data-attach>${HeyBossUI.icon("link")}Attach existing</button></div><div data-attach-form></div><p role="alert" hidden></p>`;
       const error=e=>{const p=$("[role=alert]",root);p.hidden=false;p.textContent=e.message;};
       const target=context.issue?{issue:context.issue}:{node:context.node};
+      root.querySelectorAll("[data-open-native]").forEach(b=>b.onclick=async()=>{b.disabled=true;try{await openNative(context,{id:b.dataset.openNative});}catch(e){error(e);}finally{b.disabled=false;}});
       root.querySelectorAll("[data-unlink]").forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(context,{command:"unlink",id:b.dataset.unlink,...target});render(artifacts.filter(a=>a.id!==b.dataset.unlink));}catch(e){b.disabled=false;error(e);}});
       $("[data-attach]",root).onclick=async()=>{
         const panel=$("[data-attach-form]",root),actions=$(".artifact-attachment-actions",root);
@@ -207,8 +221,34 @@ const HeyBossArtifacts = (() => {
       if(retry)$("button",panel).onclick=()=>{panel.hidden=true;retry();};
       status(editing?"Could not save · draft preserved":"");
     };
-    let boot,context,project,doc=null,editing=false,generation=0,offset=0,rows=[],anchor=null,commentsOpen=null,draftTimer,resizeEditor,resizeFrame,readingHTML,selectText,selectionFrame,writingEditor;
+    let boot,context,project,doc=null,editing=false,generation=0,offset=0,rows=[],anchor=null,commentsOpen=null,draftTimer,resizeEditor,resizeFrame,readingHTML,selectText,selectionFrame,writingEditor,nativeSyncTimer;
     const editorBody=()=>writingEditor?writingEditor.content():$("#artifact-body").value;
+    async function syncFromNative() {
+      if(!doc?.id||!context||editing||document.hidden)return;
+      const current=doc.id,projectID=context.project,host=context.host,sequence=generation;
+      try {
+        const latest=await api(context,{command:"view",id:current});
+        if(editing||sequence!==generation||context.project!==projectID||context.host!==host||doc?.id!==current||latest.artifact.version<=doc.version)return;
+        doc=latest.artifact;doc.result=latest;
+        reading();status(`Auto-saved in native editor · revision ${doc.version}`);
+      } catch {}
+    }
+    function startNativeSync() {
+      clearInterval(nativeSyncTimer);
+      nativeSyncTimer=setInterval(syncFromNative,1500);
+    }
+    async function triggerNativeEdit(options={}) {
+      if(mobile)return false;
+      try {
+        await openNative(context,options);
+        startNativeSync();
+        status("Opened in native editor · auto-saving");
+        return true;
+      } catch(e) {
+        error(e);
+        return false;
+      }
+    }
     try {mobile=document.documentElement.dataset.artifactMobile==="true";const r=await fetch(mobile?"/api/artifact-bootstrap":"/api/bootstrap");boot=await r.json();if(!r.ok)throw Error(boot.error?.message||boot.error||"Pair this device to continue");}catch(e){error(e,()=>location.reload());return;}
     const picker=new HeyBossUI.ProjectPicker({onSelect:id=>{location.hash=new URLSearchParams({project:id});}});
     const draftKey=id=>`hey-boss-artifact-draft:${context.host||"local"}:${context.project}:${id||"new"}`;
@@ -386,7 +426,7 @@ const HeyBossArtifacts = (() => {
       const commentCount=v.comments.filter(c=>!c.parent&&!c.resolved).length;
       commentsOpen ??= false;
       $("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
-        <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel"><button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
+        <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel">${mobile?"":`<button id="artifact-edit-browser" type="button">${icon("edit")}Edit in browser</button>`}<button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
       if(reuse)$("#artifact-reading").replaceWith(previous);
@@ -403,7 +443,8 @@ const HeyBossArtifacts = (() => {
       const menu=$(".artifact-menu");
       menu.onkeydown=e=>{if(e.key==="Escape"){menu.open=false;$("summary",menu).focus();}};
       document.title=`${doc.title} · Artifacts · Hey Boss`;
-      $("#artifact-edit").onclick=editor;
+      if($("#artifact-edit-browser"))$("#artifact-edit-browser").onclick=editor;
+      $("#artifact-edit").onclick=()=>mobile?editor():triggerNativeEdit({id:doc.id});
       $("#artifact-export").onclick=()=>{menu.open=false;const blob=new Blob([doc.body],{type:"text/markdown;charset=utf-8"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=(doc.title.replace(/[^\p{L}\p{N}_ -]/gu,"_")||"artifact")+".md";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
       const mutate=async(op,button)=>{button.disabled=true;try{const r=await api(context,op);if(!button.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Saved");}catch(e){button.disabled=false;error(e);}};
       $("#artifact-archive").onclick=e=>documentAction(doc,"archive",e.currentTarget);
@@ -492,7 +533,8 @@ const HeyBossArtifacts = (() => {
       try {const value=await api(context,{command:"list",query:$("#artifact-search").value,archived:$("#artifact-archived").checked,offset:append?offset:0});if(seq!==generation)return;rows=append?[...rows,...value.artifacts]:value.artifacts;offset=rows.length;
         const query=$("#artifact-search").value.trim(),archived=$("#artifact-archived").checked;
         $("#artifact-new").hidden=!rows.length&&!query;
-        $("#artifact-list").innerHTML=rows.map(a=>`<div class="artifact-row"><a class="artifact-row-link" href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}"><span class="artifact-document-icon">${icon("docs")}</span><span class="artifact-row-content"><strong>${esc(a.title)}</strong><span class="artifact-row-meta">${a.archived?'<span class="artifact-badge">Archived</span>':""}Updated ${esc(date(a.updated_at))}</span></span></a><div class="artifact-row-actions"><button class="icon-button" type="button" data-archive="${esc(a.id)}" aria-label="${a.archived?"Restore":"Archive"} ${esc(a.title)}" title="${a.archived?"Restore":"Archive"}">${icon(a.archived?"refresh":"archive")}</button><button class="icon-button artifact-danger" type="button" data-delete="${esc(a.id)}" aria-label="Delete ${esc(a.title)} permanently" title="Delete permanently…">${icon("trash")}</button></div></div>`).join("")||`<div class="artifact-empty"><span class="artifact-empty-icon">${icon(query?"search":"docs")}</span><h2>${query?"No matching artifacts":archived?"No archived artifacts":"Your documents start here"}</h2><p>${query?"Try a different title or a phrase from the document.":archived?"Archived documents appear here. Restore them whenever you need them.":"Keep plans, notes, and decisions together in your project."}</p><button class="button${query?"":" primary"}" type="button" id="artifact-empty-action">${query?"Clear search":archived?"Show active artifacts":"New artifact"}</button></div>`;
+        $("#artifact-list").innerHTML=rows.map(a=>`<div class="artifact-row"><a class="artifact-row-link" href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}"><span class="artifact-document-icon">${icon("docs")}</span><span class="artifact-row-content"><strong>${esc(a.title)}</strong><span class="artifact-row-meta">${a.archived?'<span class="artifact-badge">Archived</span>':""}Updated ${esc(date(a.updated_at))}</span></span></a><div class="artifact-row-actions">${mobile?"":`<button class="icon-button" type="button" data-open-native="${esc(a.id)}" aria-label="Edit ${esc(a.title)} in native editor" title="Edit in native editor">${icon("edit")}</button>`}<button class="icon-button" type="button" data-archive="${esc(a.id)}" aria-label="${a.archived?"Restore":"Archive"} ${esc(a.title)}" title="${a.archived?"Restore":"Archive"}">${icon(a.archived?"refresh":"archive")}</button><button class="icon-button artifact-danger" type="button" data-delete="${esc(a.id)}" aria-label="Delete ${esc(a.title)} permanently" title="Delete permanently…">${icon("trash")}</button></div></div>`).join("")||`<div class="artifact-empty"><span class="artifact-empty-icon">${icon(query?"search":"docs")}</span><h2>${query?"No matching artifacts":archived?"No archived artifacts":"Your documents start here"}</h2><p>${query?"Try a different title or a phrase from the document.":archived?"Archived documents appear here. Restore them whenever you need them.":"Keep plans, notes, and decisions together in your project."}</p><button class="button${query?"":" primary"}" type="button" id="artifact-empty-action">${query?"Clear search":archived?"Show active artifacts":"New artifact"}</button></div>`;
+        list.querySelectorAll("[data-open-native]").forEach(b=>b.onclick=()=>triggerNativeEdit({id:b.dataset.openNative}));
         list.querySelectorAll("[data-archive]").forEach(b=>b.onclick=()=>documentAction(rows.find(a=>a.id===b.dataset.archive),"archive",b));
         list.querySelectorAll("[data-delete]").forEach(b=>b.onclick=()=>confirmDelete(rows.find(a=>a.id===b.dataset.delete),b));
         if($("#artifact-empty-action"))$("#artifact-empty-action").onclick=()=>{if(query){$("#artifact-search").value="";$("#artifact-search").focus();library();}else if(archived){$("#artifact-archived").checked=false;library();}else $("#artifact-new").click();};
@@ -502,7 +544,7 @@ const HeyBossArtifacts = (() => {
     }
     async function navigate() {
       $("#artifact-delete-dialog")?.close();
-      clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
+      clearInterval(nativeSyncTimer);clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
       const params=route(),id=HeyBossUI.projectId(boot.projects[0]?.id);project=boot.projects.find(p=>p.id===id)||boot.projects[0];
       if(!project){error(Error("No registered projects. Reconnect the supervisor to load project data."),()=>location.reload());return;}
       context={project:project.id,csrf:boot.csrf,host:params.get("host")};for(const input of [$("#artifact-new"),$("#artifact-search"),$("#artifact-archived")])input.disabled=false;picker.update(boot.projects,project);doc=null;commentsOpen=null;
@@ -521,6 +563,14 @@ const HeyBossArtifacts = (() => {
     document.addEventListener("selectionchange",()=>{cancelAnimationFrame(selectionFrame);selectionFrame=requestAnimationFrame(()=>selectText?.());});
     document.addEventListener("scroll",()=>{const button=$("#artifact-selection-comment");if(button)button.hidden=true;},{passive:true});
     window.addEventListener("hashchange",navigate);window.addEventListener("beforeunload",()=>keepDraft());
+    window.addEventListener("focus",()=>{if(doc?.id)syncFromNative();else if(context&&!editing)library();});
+    window.addEventListener("pagehide",()=>clearInterval(nativeSyncTimer));
+    document.addEventListener("keydown",e=>{
+      if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&e.key.toLowerCase()==="e"&&doc&&!editing){
+        e.preventDefault();
+        triggerNativeEdit({id:doc.id});
+      }
+    });
     await navigate();
   }
   let resourceGeneration=0,resourcePicker,resourceStatusTimer;
@@ -577,5 +627,5 @@ const HeyBossArtifacts = (() => {
   if($("#resource-main"))window.addEventListener("hashchange",startResource);
   startResource();
   start();
-  return {mount,url,rpc};
+  return {mount,url,rpc,openNative};
 })();
