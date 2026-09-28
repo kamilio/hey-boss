@@ -132,7 +132,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true,"issue_ready":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true,"issue_ready":true,"issue_ready_keep_draft":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -226,6 +226,7 @@ impl Relay {
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
                             "issue_reopen": message["capabilities"]["issue_reopen"] == true,
                             "issue_ready": message["capabilities"]["issue_ready"] == true,
+                            "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
                         });
                         return Ok(capability_report(
                             "supervisor_tunnel",
@@ -263,6 +264,10 @@ impl Relay {
                                     crate::issues::Operation::Ready { .. }
                                 )
                                 .then_some("issue_ready"),
+                            )
+                            .chain(
+                                matches!(metadata.operation, crate::issues::Operation::Ready { keep_draft: true, .. })
+                                    .then_some("issue_ready_keep_draft"),
                             )
                         {
                             if message["capabilities"][capability] != true {
@@ -471,6 +476,15 @@ mod tests {
         assert_eq!(
             error.details.as_ref().unwrap()["required_capability"],
             "issue_ready"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
+        relay.configure(&json!({"build":"old-ready-build","capabilities":{"authority_rpc":true,"issue_metadata":true,"issue_ready":true}}));
+        let draft_ready = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"draft-ready-old","operation":{"action":"ready","number":1,"force":false,"keep_draft":true,"guard":{"if_version":1,"expected_assignee":null,"expected_reservation":"snapshot"}}}});
+        let error = call(&ctx.state, &ctx.path, draft_ready).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_ready_keep_draft"
         );
         assert_eq!(error.details.unwrap()["sent"], false);
         let reopen = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"reopen-old","operation":{"action":"reopen","number":1,"if_version":1}}});

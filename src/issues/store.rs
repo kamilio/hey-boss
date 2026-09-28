@@ -513,9 +513,15 @@ fn validate(r: &Request) -> Result<()> {
     if let Operation::Ready {
         guard,
         clear_manual_hold,
+        keep_draft,
         ..
     } = &r.operation
     {
+        if *keep_draft && guard.is_none() {
+            return Err(Error::invalid(
+                "--keep-draft requires version, assignee and reservation guards; it records development usability without enabling workers",
+            ));
+        }
         if *clear_manual_hold && guard.is_none() {
             return Err(Error::invalid(
                 "Clearing a manual hold for Ready requires version, assignee and reservation guards",
@@ -2443,20 +2449,8 @@ fn mutate(
             action = "plan_bound";
             data = json!({"plan":plan});
         }
-        Operation::Ready {
-            guard,
-            clear_manual_hold,
-            ..
-        } => {
-            if let Some(handoff) = ready::handoff(
-                db,
-                project,
-                &mut issue,
-                actor,
-                guard.as_ref(),
-                *clear_manual_hold,
-                now,
-            )? {
+        Operation::Ready { .. } => {
+            if let Some(handoff) = ready::handoff(db, project, &mut issue, actor, operation, now)? {
                 action = "ready";
                 data = handoff;
             }

@@ -442,6 +442,8 @@ pub enum Operation {
         guard: Option<ReadyGuard>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         clear_manual_hold: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_draft: bool,
     },
     AssignBoss {
         number: i64,

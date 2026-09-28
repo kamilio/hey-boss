@@ -52,10 +52,20 @@ pub(super) fn handoff(
     project: &Project,
     issue: &mut Issue,
     actor: &Actor,
-    guard: Option<&ReadyGuard>,
-    clear_manual_hold: bool,
+    operation: &Operation,
     now: i64,
 ) -> Result<Option<Value>> {
+    let Operation::Ready {
+        guard,
+        clear_manual_hold,
+        keep_draft,
+        ..
+    } = operation
+    else {
+        unreachable!("Ready handoff requires a Ready operation")
+    };
+    let guard = guard.as_ref();
+    let clear_manual_hold = *clear_manual_hold;
     if let Some(expected) = guard {
         let current = snapshot(db, &project.id, issue)?;
         if expected.if_version != current.if_version {
@@ -90,8 +100,25 @@ pub(super) fn handoff(
             "Ready blocked by fleet reservation for {machine}; reservation preserved"
         )));
     }
-    if issue.draft {
-        return Err(Error::conflict("Ready requires an undrafted issue"));
+    if *keep_draft {
+        if !issue.draft {
+            return Err(Error::conflict(
+                "--keep-draft requires a draft; refresh issue view. No lifecycle or scheduling change was saved",
+            ));
+        }
+        let reserved: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2) OR EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
+            params![project.id, issue.number], |r| r.get(0),
+        )?;
+        if reserved {
+            return Err(Error::conflict(
+                "--keep-draft requires an unreserved draft with no unfinished worker attempt; reservations and claims were preserved",
+            ));
+        }
+    } else if issue.draft {
+        return Err(Error::conflict(
+            "Ready requires an undrafted issue, or --keep-draft with version, assignee and reservation guards to record development usability without enabling workers. Neither path asserts CI, merge, or production approval",
+        ));
     }
     if issue.manual_blocked && (!clear_manual_hold || guard.is_none()) {
         return Err(Error::conflict(
@@ -145,7 +172,7 @@ pub(super) fn handoff(
         return Ok(None);
     }
     register_boss(db, actor, now)?;
-    let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":"human:boss","previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard});
+    let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":"human:boss","previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
     issue.state = "ready".into();
     issue.assignee = Some("human:boss".into());
     issue.manual_blocked = false;
