@@ -901,6 +901,8 @@ The existing macOS `local.hey-boss.health` LaunchAgent and Linux `hey-boss-healt
 systemd timer names are retained to prevent duplicate schedules; they now invoke
 `hey-harvester run`. Linux user timers require a user manager (login or lingering).
 Disabled automatic maintenance stays disabled during installation.
+macOS installations and full upgrades refresh launchd's cached executable identity,
+even when the plist is unchanged. Failed upgrades restore both binaries and registration.
 `tools/machine-health.sh` runs a one-shot cleanup using the harvester release build.
 `hey-harvester --version` and status expose a content build ID. The dashboard and
 JSON status distinguish the responding binary (`reporting_build`) from the worker
