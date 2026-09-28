@@ -40,3 +40,13 @@ for (const status of ['open', 'closed', 'merged', 'unknown']) {
 }
 const stale = context.listPullRequests({pull_requests:[{url:'https://github.com/o/r/pull/1',status:'open',error:'GitHub unavailable',checked_at:1}]});
 assert.ok(stale.includes('pr-status-stale'));
+for (const [status, age, delayed] of [
+  ['open', 4 * 60_000, false],
+  ['open', 8 * 60_000, true],
+  ['closed', 20 * 60_000, false],
+  ['closed', 33 * 60_000, true],
+  ['merged', 24 * 60 * 60_000, false],
+]) {
+  const html = context.prStatus({status, checked_at: Date.now() - age});
+  assert.equal(html.includes('pr-status-stale'), delayed, `${status} at ${age}ms respects its monitoring cadence`);
+}
