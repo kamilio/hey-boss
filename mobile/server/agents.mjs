@@ -40,11 +40,11 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  function requestFleet(req,res,action){
   if(!snapshot||now()-seen>15000)throw new HubError(503,'Connect your supervisor to edit worker configuration.');
   const input=req.method==='GET'?{}:req.body;
-  if(action==='configuration'&&req.method==='POST'&&(typeof input.text!=='string'||Buffer.byteLength(input.text)>1048576||typeof input.revision!=='string'||typeof input.save!=='boolean'))throw new HubError(400,'Provide YAML text, its revision, and whether to save.');
+  if(action==='configuration'&&req.method==='POST'&&((typeof input.text!=='string'&&!input.worker_update)||Buffer.byteLength(JSON.stringify(input))>1048576||typeof input.revision!=='string'||typeof input.save!=='boolean'))throw new HubError(400,'Provide YAML text, its revision, and whether to save.');
   if(action==='signal'&&(!['pause','resume','stop','restart'].includes(input.signal)||typeof input.host!=='string'||typeof input.worker!=='string'||typeof input.id!=='string'))throw new HubError(400,'Invalid worker action');
   if(pending.size>=32||[...pending.values()].filter(p=>p.device===req.device.id).length>=2)throw new HubError(429,'Wait for your current request to finish.');
   const id=randomUUID(),timer=setTimeout(()=>{pending.delete(id);if(!res.destroyed)res.status(504).json({error:'No confirmation from your supervisor. Reload to check whether the change was saved.'});},20000);timer.unref();
-  pending.set(id,{id,action,text:input.text,revision:input.revision,save:input.save,host:input.host,worker:input.worker,signal:input.signal,signal_id:input.id,device:req.device.id,res,timer});
+  pending.set(id,{id,action,text:input.text,worker_update:input.worker_update,revision:input.revision,save:input.save,host:input.host,worker:input.worker,signal:input.signal,signal_id:input.id,device:req.device.id,res,timer});
   res.on('close',()=>{clearTimeout(timer);pending.delete(id);});
  }
  app.get('/api/fleet/configuration',auth,(req,res)=>requestFleet(req,res,'configuration'));
@@ -58,7 +58,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
   if(!Array.isArray(req.body.machines)||req.body.machines.length>100)throw new HubError(400,'Invalid agent snapshot');
   snapshot=req.body;seen=now();res.json({ok:true});
  });
- app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id})=>({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id}))}));
+ app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id,worker_update})=>({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id,worker_update}))}));
  app.post('/api/bridge/agents/:id/result',bridge,(req,res)=>{
   const request=pending.get(req.params.id);
   if(request){
