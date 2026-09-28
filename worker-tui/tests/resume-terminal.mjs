@@ -41,7 +41,7 @@ const until = async (predicate, label) => {
   }
   throw Error(`Timed out: ${label}`);
 };
-const service = spawn(binary, ['fleet', 'companion'], {env, cwd: checkout, stdio: 'ignore'});
+const service = spawn(binary, ['fleet', 'supervisor'], {env, cwd: checkout, stdio: 'ignore'});
 const serviceExit = new Promise(resolve => service.once('exit', (code, signal) => resolve({code, signal})));
 let pilot;
 let added = false;
@@ -74,6 +74,9 @@ try {
   assert.equal(await observer.waitForExit({timeout: 5000}), 0);
   assert.equal((await status()).workers[0].config.enabled, false, 'Observation resumed pickup');
   await cli(['auto-workers', '--json', 'run']);
+  assert.equal((await status()).workers[0].config.enabled, false, 'Reconciliation resumed paused pickup');
+  await cli(['fleet', 'signal', 'local', 'resume-fixture', 'resume']);
+  await until(async () => (await status()).workers[0].config.enabled, 'explicit pickup resume');
   const resumed = await open(['auto-workers', 'watch']);
   await resumed.waitFor('0 available / 1 slots', {scope: 'screen', timeout: 15000});
   await resumed.type('w');
