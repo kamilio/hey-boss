@@ -1,10 +1,12 @@
 # Worker fleet
 
-Open **Agents → Workers** (`/workers`). **Activity** shows occupied, available,
-and paused slots, grouped by machine and worker. Running tasks show their title,
-project, elapsed time, and latest activity; open one to read its conversation.
+Open **Agents → Workers** (`/workers`). **Activity** is a compact outline:
+machine → worker → tasks. Each worker row shows occupied slots, its current task,
+and latest activity. Expand a worker for all its tasks and conversation links;
+collapse a machine to hide its workers. Capacity belongs to each machine heading,
+without aggregate number cards.
 Offline machines show last-known activity and contribute no available capacity.
-Organizers are shown separately because they do not consume issue-agent slots.
+Organizers have a separate disclosure because they do not consume issue-agent slots.
 
 Use **Workers & settings** to find a saved worker, inspect its state, or edit its
 name, slot count, pickup mode, projects, and checkout paths. Review and save the
