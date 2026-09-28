@@ -62,6 +62,35 @@ fn reads_existing_inventory_and_writes_existing_health_configuration() {
 }
 
 #[test]
+fn status_distinguishes_reporting_binary_from_last_scan_build() {
+    let f = Fixture::new("build-status");
+    let store = hey_harvester::health::Store::new(f.0.join("health")).unwrap();
+    let mut state = serde_json::to_value(hey_harvester::health::State::default()).unwrap();
+    state["snapshot"]["scan_build"] = "older-worker-build".into();
+    store.save("state.json", &state).unwrap();
+    let output = f.command().args(["status", "--json"]).output().unwrap();
+    assert!(output.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let build = status["reporting_build"]
+        .as_str()
+        .expect("Reporting build is required");
+    assert_eq!(build.len(), 16);
+    assert!(build.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(status["scan_build"], "older-worker-build");
+    let version = f.command().arg("--version").output().unwrap();
+    assert!(String::from_utf8_lossy(&version.stdout).contains(build));
+    // Pre-upgrade state has no build evidence; never relabel it as the new worker.
+    state["snapshot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("scan_build");
+    store.save("state.json", &state).unwrap();
+    let output = f.command().args(["status", "--json"]).output().unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(status["scan_build"].is_null());
+}
+
+#[test]
 fn installation_preserves_disabled_schedule_and_existing_observations() {
     let f = Fixture::new("install");
     let store = hey_harvester::health::Store::new(f.0.join("health")).unwrap();

@@ -51,7 +51,7 @@ const UPSTREAM: &str = "https://github.com/kamilio/hey-boss.git";
 const MANIFEST: &str = ".hey-boss-source.json";
 // Archives can have older mtimes than artifacts from another snapshot in the
 // shared Cargo target. Refresh every packaged source, including companion crates.
-const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; find \"$upgrade_stage/src\" \"$upgrade_stage/packages/hey-harvester/src\" \"$upgrade_stage/packages/hey-gh/src\" -type f -exec touch {} +";
+const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; if test -f \"$upgrade_stage/packages/hey-harvester/build.rs\"; then touch \"$upgrade_stage/packages/hey-harvester/build.rs\"; fi; find \"$upgrade_stage/src\" \"$upgrade_stage/packages/hey-harvester/src\" \"$upgrade_stage/packages/hey-gh/src\" -type f -exec touch {} +";
 
 #[derive(Args)]
 pub struct Options {

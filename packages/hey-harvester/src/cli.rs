@@ -164,6 +164,16 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
         println!("{}", serde_json::to_string(s)?);
         return Ok(());
     }
+    println!(
+        "Binary build: {}",
+        s.reporting_build.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "Last scan build: {}",
+        s.scan_build
+            .as_deref()
+            .unwrap_or("unknown; awaiting a new scan")
+    );
     let bytes = |n: Option<u64>| {
         n.map(readable_bytes)
             .unwrap_or_else(|| "unavailable".into())

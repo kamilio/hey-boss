@@ -901,6 +901,10 @@ systemd timer names are retained to prevent duplicate schedules; they now invoke
 `hey-harvester run`. Linux user timers require a user manager (login or lingering).
 Disabled automatic maintenance stays disabled during installation.
 `tools/machine-health.sh` runs a one-shot cleanup using the harvester release build.
+`hey-harvester --version` and status expose a content build ID. The dashboard and
+JSON status distinguish the responding binary (`reporting_build`) from the worker
+that began the last scan (`scan_build`); old snapshots retain an unknown scan build
+until a new check runs. Compare both IDs after deployment before trusting telemetry.
 
 With `configure --aggressive true`, clean linked worktrees become eligible after
 4 hours without source or Git activity. Locks, active processes, source changes,
@@ -913,9 +917,10 @@ slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
 See [ownership and recovery](docs/worktree-ownership.md).
 
 Aggressive cache cleanup expires individual files after 24 hours across OS temp,
-npm/Bun/Yarn/Python caches, `~/.cache`, and
-project dependency/build/output directories. New siblings do not protect old
-files. Locked worktrees also protect their cached output and validation receipts.
+npm/Bun/Yarn/Python caches and `~/.cache`. New siblings do not protect old
+files. Git checkouts retain all contents, including tracked build assets,
+dependency links and untracked output; age alone does not prove these disposable.
+The worktree cleaner reclaims unused checkouts after its ownership and safety checks.
 Installed runtimes, application bundles, Sparkle update staging, and macOS
 application data are excluded, including when resuming old traversal cursors.
 Known macOS application caches and Chrome signing copies use the activity-aware
