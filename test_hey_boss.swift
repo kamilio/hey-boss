@@ -2608,6 +2608,11 @@ func auditArtifactEditor() {
     precondition(editor.command("p", shift: false) && !editor.focusMode && editor.sidebar.superview != nil)
     precondition(editor.command("f", shift: true) && editor.focusMode)
     precondition(editor.command("f", shift: false) && editor.scroll.isFindBarVisible)
+    editor.window.makeFirstResponder(editor.text)
+    editor.text.setSelectedRange(NSRange(location: 0, length: 0))
+    let bulletKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: editor.window.windowNumber, context: nil, characters: "*", charactersIgnoringModifiers: "*", isARepeat: false, keyCode: 28)!
+    precondition(editor.window.performKeyEquivalent(with: bulletKey) && editor.text.string.hasPrefix("- "), "Shifted number keys reach list shortcuts")
+    precondition(editor.window.performKeyEquivalent(with: bulletKey) && !editor.text.string.hasPrefix("- "))
     let large = String(repeating: "A line of Markdown text.\n", count: 42000)
     editor.text.string = large; editor.bodyByteCount = large.utf8.count
     editor.text.setSelectedRange(NSRange(location: (large as NSString).length / 2, length: 0))

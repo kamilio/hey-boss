@@ -5866,8 +5866,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         case ("i", false) where window.firstResponder === text: italic()
         case ("k", false) where window.firstResponder === text: link()
         case ("l", true) where window.firstResponder === text: task()
-        case ("7", true) where window.firstResponder === text: text.prefixLines("1. ")
-        case ("8", true) where window.firstResponder === text: text.prefixLines("- ")
+        case ("7", true), ("&", true):
+            guard window.firstResponder === text else { return false }; text.prefixLines("1. ")
+        case ("8", true), ("*", true):
+            guard window.firstResponder === text else { return false }; text.prefixLines("- ")
         case ("`", false) where window.firstResponder === text: text.wrap("`")
         case ("1"..."6", false) where window.firstResponder === text: text.prefixLines(String(repeating: "#", count: Int(key)!) + " ")
         default: return false
