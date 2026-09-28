@@ -10,6 +10,7 @@ use std::{
 
 struct Fixture {
     root: PathBuf,
+    desired: PathBuf,
     owner: hey_boss::database::Owner,
     owner_lock: PathBuf,
 }
@@ -39,6 +40,7 @@ impl Fixture {
             &identity[..24]
         ));
         Self {
+            desired: root.join("desired.json"),
             root,
             owner,
             owner_lock,
@@ -50,7 +52,7 @@ impl Fixture {
             .current_dir(self.root.join("checkout"))
             .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
             .env("HEY_BOSS_FLEET_STATE", self.root.join("state"))
-            .env("HEY_BOSS_FLEET_DESIRED", self.root.join("desired.json"))
+            .env("HEY_BOSS_FLEET_DESIRED", &self.desired)
             .env("HEY_BOSS_FLEET_BINARY", env!("CARGO_BIN_EXE_hey-boss"))
             .env(
                 "HEY_BOSS_CODEX",
@@ -200,16 +202,16 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
     );
     for _ in 0..2 {
         let resumed = f.cli(&["auto-workers", "--json", "run"]);
-        assert_eq!(resumed["workers"][0]["config"]["enabled"], true);
-        assert_eq!(resumed["workers"][0]["intent"], "running");
+        assert_eq!(resumed["workers"][0]["config"]["enabled"], false);
+        assert_eq!(resumed["workers"][0]["intent"], "pause");
         assert_eq!(resumed["workers"][0]["pid"], pid);
         assert_eq!(resumed["workers"][0]["active"], 1);
         assert_eq!(resumed["workers"][0]["config"]["concurrency"], 1);
         assert_eq!(unsafe { libc::kill(agent, 0) }, 0);
     }
     let saved = f.cli(&["auto-workers", "config", "--json"]);
-    assert_eq!(saved["workers"][0]["intent"], "running");
-    assert_eq!(saved["workers"][0]["config"]["enabled"], true);
+    assert_eq!(saved["workers"][0]["intent"], "pause");
+    assert_eq!(saved["workers"][0]["config"]["enabled"], false);
     assert!(saved["workers"][0]["local_revision"].is_i64());
     f.cli(&["auto-workers", "--json", "remove", id]);
     let draining = f.cli(&["auto-workers", "--json", "run"]);
@@ -253,7 +255,7 @@ fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
 }
 
 #[test]
-fn launch_resumes_saved_pauses_but_never_stopped_workers() {
+fn launch_preserves_saved_pauses_and_stopped_workers() {
     let f = Fixture::new("resume-offline");
     fs::write(
         f.root.join("state/auto-workers.json"),
@@ -278,9 +280,9 @@ fn launch_resumes_saved_pauses_but_never_stopped_workers() {
     let started = f.cli(&["auto-workers", "--json", "run"]);
     assert_eq!(started["workers"].as_array().unwrap().len(), 1);
     assert_eq!(started["workers"][0]["id"], "paused");
-    assert!(started["workers"][0]["pid"].is_u64());
-    assert_eq!(started["workers"][0]["config"]["enabled"], true);
-    assert_eq!(started["workers"][0]["intent"], "running");
+    assert!(started["workers"][0]["pid"].is_null());
+    assert_eq!(started["workers"][0]["config"]["enabled"], false);
+    assert_eq!(started["workers"][0]["intent"], "pause");
     assert_eq!(
         f.cli(&["auto-workers", "config", "--json"])["workers"][1]["intent"],
         "stop"
@@ -481,4 +483,148 @@ fn dashboard_owns_only_explicit_workers_and_cannot_control_other_sessions() {
             "Launching auto-workers changed an unrelated worker"
         );
     }
+}
+
+#[test]
+fn yaml_owns_declared_workers_without_an_ownership_file_and_reloads_idempotently() {
+    let mut f = Fixture::new("yaml-live");
+    f.desired = f.root.join("fleet.yaml");
+    let yaml = "# worker fleet\nmachines:\n  local:\n    workers:\n      - id: declared\n        intent: running\n        config: {}\n";
+    fs::write(&f.desired, yaml).unwrap();
+    let first = f.cli(&["auto-workers", "run"]);
+    let pid = first["workers"][0]["pid"].clone();
+    assert!(pid.is_u64(), "{first}");
+    assert!(!f.root.join("state/auto-workers.json").exists());
+    assert_eq!(f.cli(&["auto-workers", "run"])["workers"][0]["pid"], pid);
+    assert_eq!(fs::read_to_string(&f.desired).unwrap(), yaml);
+    fs::write(&f.desired, yaml.replace("intent: running", "intent: pause")).unwrap();
+    for _ in 0..2 {
+        let paused = f.cli(&["auto-workers", "run"]);
+        assert_eq!(paused["workers"][0]["intent"], "pause");
+        assert_eq!(paused["workers"][0]["config"]["enabled"], false);
+        assert_eq!(paused["workers"][0]["pid"], pid);
+    }
+    fs::write(&f.desired, "machines: [").unwrap();
+    assert_eq!(
+        f.cli(&["auto-workers", "run"])["workers"][0]["intent"],
+        "pause"
+    );
+    fs::write(&f.desired, "machines: {local: {workers: []}}\n").unwrap();
+    f.cli(&["auto-workers", "run"]);
+    f.wait(|s| s["workers"].as_array().unwrap().is_empty());
+    assert!(
+        f.cli(&["auto-workers", "run"])["workers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn migration_keeps_existing_ids_and_processes() {
+    let mut f = Fixture::new("yaml-migration");
+    f.cli(&[
+        "auto-workers",
+        "add",
+        "--id",
+        "existing",
+        "--name",
+        "Existing",
+        "-C",
+        f.root.join("checkout").to_str().unwrap(),
+    ]);
+    let before = f.cli(&["auto-workers", "status"]);
+    f.desired = f.root.join("desired.yaml");
+    // The local pending definition has not yet been synchronized to legacy fleet.json.
+    let after = f.cli(&["auto-workers", "run"]);
+    assert_eq!(after["workers"][0]["id"], before["workers"][0]["id"]);
+    assert_eq!(after["workers"][0]["pid"], before["workers"][0]["pid"]);
+    assert!(
+        fs::read_to_string(&f.desired)
+            .unwrap()
+            .contains("id: existing")
+    );
+    assert_eq!(
+        f.cli(&["auto-workers", "run"])["workers"][0]["pid"],
+        before["workers"][0]["pid"]
+    );
+}
+
+#[test]
+fn yaml_add_writes_the_authoritative_file_and_no_ownership_list() {
+    let mut f = Fixture::new("yaml-add");
+    f.desired = f.root.join("fleet.yaml");
+    fs::write(&f.desired, "machines: {local: {workers: []}}\n").unwrap();
+    f.cli(&[
+        "auto-workers",
+        "add",
+        "--id",
+        "added",
+        "--name",
+        "Added",
+        "-C",
+        f.root.join("checkout").to_str().unwrap(),
+    ]);
+    assert!(
+        fs::read_to_string(&f.desired)
+            .unwrap()
+            .contains("id: added")
+    );
+    assert!(!f.root.join("state/auto-workers.json").exists());
+    f.cli(&["worker", "pause", "added"]);
+    assert!(
+        fs::read_to_string(&f.desired)
+            .unwrap()
+            .contains("intent: pause")
+    );
+    assert_eq!(
+        f.cli(&["auto-workers", "run"])["workers"][0]["intent"],
+        "pause"
+    );
+}
+
+#[test]
+fn removal_finishes_even_after_the_old_checkout_is_deleted() {
+    let mut f = Fixture::new("yaml-deleted-checkout");
+    f.desired = f.root.join("fleet.yaml");
+    fs::write(&f.desired, "machines: {local: {workers: []}}\n").unwrap();
+    let checkout = f.root.join("retired-checkout");
+    fs::create_dir(&checkout).unwrap();
+    f.cli(&[
+        "auto-workers",
+        "add",
+        "--id",
+        "retired",
+        "--name",
+        "Retired",
+        "-C",
+        checkout.to_str().unwrap(),
+    ]);
+    fs::remove_dir(&checkout).unwrap();
+    fs::write(&f.desired, "machines: {local: {workers: []}}\n").unwrap();
+    f.cli(&["auto-workers", "run"]);
+    f.cli(&["auto-workers", "run"]);
+    f.wait(|s| s["workers"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn invalid_checkout_does_not_partially_apply_other_worker_changes() {
+    let mut f = Fixture::new("yaml-preflight");
+    f.desired = f.root.join("fleet.yaml");
+    fs::write(
+        &f.desired,
+        "machines: {local: {workers: [{id: valid, intent: running, config: {concurrency: 1}}]}}\n",
+    )
+    .unwrap();
+    f.cli(&["auto-workers", "run"]);
+    fs::write(&f.desired, "machines:\n  local:\n    workers:\n      - id: valid\n        intent: running\n        config: {concurrency: 3}\n      - id: bad\n        intent: running\n        config: {projects: [named:Bad], directory: /missing/checkout/hb688}\n").unwrap();
+    assert!(
+        !f.command(&["auto-workers", "run", "--json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let current = f.cli(&["worker", "--id", "valid", "status"]);
+    assert_eq!(current["workers"][0]["config"]["concurrency"], 1);
 }

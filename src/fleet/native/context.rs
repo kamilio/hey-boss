@@ -38,7 +38,7 @@ impl Context {
             .unwrap_or_else(|| home.join(".local/share/hey-boss"));
         let desired = std::env::var_os("HEY_BOSS_FLEET_DESIRED")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".hey-boss/fleet.json"));
+            .unwrap_or_else(|| home.join(".hey-boss/fleet.yaml"));
         let binary = std::env::var_os("HEY_BOSS_FLEET_BINARY")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_exe()?)
@@ -119,7 +119,17 @@ impl Context {
             }),
             json!({}),
         )?;
+        let retry_db = self.db()?;
         for w in &mut workers {
+            let retry = replica::state_get(
+                &retry_db,
+                &format!("worker_retry:{}", w["id"].as_str().unwrap_or("")),
+                Value::Null,
+            )?;
+            if !retry.is_null() {
+                w["error"] = retry["error"].clone();
+                w["retry_at"] = retry["retry_at"].clone();
+            }
             if let Some(definition) = saved["workers"]
                 .as_array()
                 .into_iter()
@@ -198,13 +208,40 @@ impl Context {
     }
     pub fn read_json(&self, path: &Path, default: Value) -> Result<Value> {
         self.protect_file(path)?;
+        if path == self.desired && super::configuration::is_yaml(path) {
+            return Ok(super::configuration::load(self)?["document"].clone());
+        }
         read_json(path, default)
     }
     pub fn atomic_json(&self, path: &Path, value: &Value) -> Result<()> {
         self.protect_file(path)?;
+        if path == self.desired && super::configuration::is_yaml(path) {
+            return super::configuration::write(self, value);
+        }
         atomic_json(path, value)
     }
     pub fn inventory(&self) -> Result<Vec<Value>> {
+        if super::configuration::is_yaml(&self.desired) {
+            let saved = super::configuration::load(self)?;
+            return Ok(saved["runtime"]["machines"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(host, _)| host.as_str() != "local")
+                .map(|(host, m)| json!({"host":host,"workers":m["workers"]}))
+                .collect());
+        }
+        let mut hosts = self.legacy_inventory()?;
+        let overrides = self.read_json(&self.desired, json!({}))?;
+        for entry in &mut hosts {
+            let host = entry["host"].as_str().unwrap().to_owned();
+            if let Some(m) = overrides["machines"][&host].as_object() {
+                entry.as_object_mut().unwrap().extend(m.clone());
+            }
+        }
+        Ok(hosts)
+    }
+    pub fn legacy_inventory(&self) -> Result<Vec<Value>> {
         let config = std::env::var_os("HEY_BOSS_FLEET_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join(".hey-boss/config.json"));
@@ -236,13 +273,6 @@ impl Context {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
-            }
-        }
-        let overrides = self.read_json(&self.desired, json!({}))?;
-        for entry in &mut hosts {
-            let host = entry["host"].as_str().unwrap().to_owned();
-            if let Some(m) = overrides["machines"][&host].as_object() {
-                entry.as_object_mut().unwrap().extend(m.clone());
             }
         }
         Ok(hosts)
@@ -285,6 +315,18 @@ pub(super) fn read_json(path: &Path, default: Value) -> Result<Value> {
     }
 }
 pub(super) fn atomic_json(path: &Path, value: &Value) -> Result<()> {
+    atomic_write(path, |file| {
+        serde_json::to_writer(file, value)?;
+        Ok(())
+    })
+}
+pub(super) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write(path, |file| {
+        file.write_all(bytes)?;
+        Ok(())
+    })
+}
+fn atomic_write(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -295,7 +337,7 @@ pub(super) fn atomic_json(path: &Path, value: &Value) -> Result<()> {
             .write(true)
             .mode(0o600)
             .open(&temp)?;
-        serde_json::to_writer(&mut file, value)?;
+        write(&mut file)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
         if let Some(parent) = path.parent() {

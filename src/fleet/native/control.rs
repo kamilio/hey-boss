@@ -110,6 +110,25 @@ pub(super) fn control(ctx: &Context, id: &Value, command: &str) -> Result<Value>
     ctx.rpc(json!({"action":"control_worker","worker_id":id,"command":command,"run_id":null}))
 }
 pub(super) fn configure_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<String>> {
+    let mut validation = vec![];
+    for worker in workers
+        .iter()
+        .filter(|w| !matches!(w["intent"].as_str(), Some("stop" | "drain")))
+    {
+        let result = (|| -> Result<()> {
+            let mut settings: crate::issues::worker::Settings =
+                serde_json::from_value(worker["config"].clone())?;
+            settings.enabled = worker["intent"].as_str().unwrap_or("running") == "running";
+            crate::issues::worker::validate_settings(&settings)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            validation.push(format!("{}: {error}", worker["id"]));
+        }
+    }
+    if !validation.is_empty() {
+        return Ok(validation);
+    }
     let db = ctx.db()?;
     let changing = replica::rows(
         &db,
@@ -120,7 +139,7 @@ pub(super) fn configure_workers(ctx: &Context, workers: &[Value]) -> Result<Vec<
     for desired in workers {
         // Stopped definitions are durable tombstones, not new configurations.
         // Their old checkout may no longer exist.
-        if desired["intent"] == "stop" {
+        if matches!(desired["intent"].as_str(), Some("stop" | "drain")) {
             continue;
         }
         if changing.iter().any(|r| r["worker"] == desired["id"]) {
@@ -168,7 +187,7 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
     };
     let previous = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
     let workers = retain_pending_changes(&previous, message)?;
-    let configured = json!({"role":"agent","controller":message["controller"],"revision":message["revision"],"workers":workers});
+    let configured = json!({"role":"agent","controller":message["controller"],"revision":message["revision"],"workers":workers,"declarative":message["declarative"]});
     let failures = configure_workers(
         ctx,
         workers
@@ -274,6 +293,15 @@ fn reconcile_locked(ctx: &Context, config: &Value) -> Result<Vec<String>> {
             continue;
         }
         let worker = known.iter().find(|w| w["id"] == desired["id"]);
+        let retry_key = format!("worker_retry:{}", desired["id"].as_str().unwrap_or(""));
+        let retry = replica::state_get(&db, &retry_key, json!({}))?;
+        let revision = crate::fleet::native::context::hash(desired);
+        if worker.is_none_or(|w| w["pid"].is_null())
+            && retry["revision"] == revision
+            && retry["retry_at"].as_f64().is_some_and(|at| at > now())
+        {
+            continue;
+        }
         let intent =
             desired["intent"]
                 .as_str()
@@ -282,6 +310,7 @@ fn reconcile_locked(ctx: &Context, config: &Value) -> Result<Vec<String>> {
                 } else {
                     "pause"
                 });
+        let starting = intent == "running" && worker.is_none_or(|w| w["pid"].is_null());
         let result = match (intent, worker) {
             ("drain", Some(w)) if !w["pid"].is_null() => {
                 if w["config"]["enabled"] == true {
@@ -308,6 +337,35 @@ fn reconcile_locked(ctx: &Context, config: &Value) -> Result<Vec<String>> {
                 &ctx.state.join("fleet-agent-error.json"),
                 &json!({"worker":desired["id"],"error":e.to_string(),"at":now()}),
             )?;
+            let failures = if retry["revision"] == revision {
+                retry["failures"].as_u64().unwrap_or(0) + 1
+            } else {
+                1
+            };
+            replica::state_set(
+                &db,
+                &retry_key,
+                &json!({"revision":revision,"failures":failures,"retry_at":now()+2u64.pow((failures.min(8)) as u32) as f64,"error":e.to_string()}),
+            )?;
+        } else if starting {
+            // A process that registers and then crashes must also back off.
+            let failures = if retry["revision"] == revision {
+                retry["failures"].as_u64().unwrap_or(0) + 1
+            } else {
+                1
+            };
+            replica::state_set(
+                &db,
+                &retry_key,
+                &json!({"revision":revision,"failures":failures,"started_at":now(),"retry_at":now()+2u64.pow(failures.min(8) as u32) as f64}),
+            )?;
+        } else if !retry.is_null()
+            && retry != json!({})
+            && (intent != "running"
+                || retry["revision"] != revision
+                || retry["started_at"].as_f64().unwrap_or(0.0) + 60.0 <= now())
+        {
+            replica::state_set(&db, &retry_key, &Value::Null)?;
         }
     }
     Ok(failures)
@@ -592,6 +650,40 @@ mod tests {
     use super::super::context::tests::{assert_sqlite_locked, test_context};
     use super::*;
     use std::{fs, io::Write};
+
+    #[test]
+    fn failed_starts_back_off_across_reconciliation_and_config_changes_retry() {
+        let (root, mut ctx, store) = test_context();
+        ctx.binary = root.join("missing-binary");
+        replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
+        let mut config = json!({"workers":[{"id":"retry-test","intent":"running","config":crate::issues::worker::Settings::default()}]});
+        assert_eq!(reconcile_locked(&ctx, &config).unwrap().len(), 1);
+        let db = ctx.db().unwrap();
+        let first = replica::state_get(&db, "worker_retry:retry-test", Value::Null).unwrap();
+        assert_eq!(first["failures"], 1);
+        assert!(first["retry_at"].as_f64().unwrap() > now());
+        assert!(reconcile_locked(&ctx, &config).unwrap().is_empty());
+        assert_eq!(
+            replica::state_get(&db, "worker_retry:retry-test", Value::Null).unwrap(),
+            first
+        );
+        let mut expired = first;
+        expired["retry_at"] = json!(0);
+        replica::state_set(&db, "worker_retry:retry-test", &expired).unwrap();
+        assert_eq!(reconcile_locked(&ctx, &config).unwrap().len(), 1);
+        let second = replica::state_get(&db, "worker_retry:retry-test", Value::Null).unwrap();
+        assert_eq!(second["failures"], 2);
+        assert!(second["retry_at"].as_f64().unwrap() > now() + 3.0);
+        config["workers"][0]["config"]["concurrency"] = json!(2);
+        assert_eq!(reconcile_locked(&ctx, &config).unwrap().len(), 1);
+        assert_eq!(
+            replica::state_get(&db, "worker_retry:retry-test", Value::Null).unwrap()["failures"],
+            1
+        );
+        drop(db);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn worker_log_aliases_are_rejected_before_output_or_lock_loss() {
