@@ -79,4 +79,10 @@ test('fleet YAML editing is paired, guarded and relayed to the supervisor',async
  assert.equal(queue.requests[0].action,'configuration');assert.equal(queue.requests[0].text,'machines: {}');assert.equal(queue.requests[0].revision,'one');assert.equal(queue.requests[0].save,true);
  await call('/api/bridge/agents/'+queue.requests[0].id+'/result',{ok:true,text:'machines: {}',revision:'two'},bridge);
  assert.equal((await(await pending).json()).revision,'two');
+ const update={host:'local',id:'tools',intent:'pause',config:{concurrency:3}};
+ const edit=call('/api/fleet/configuration',{worker_update:update,revision:'two',save:false},headers);
+ for(let n=0;n<30;n++){queue=await(await call('/api/bridge/agents',null,bridge)).json();if(queue.requests.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.deepEqual(queue.requests[0].worker_update,update);
+ await call('/api/bridge/agents/'+queue.requests[0].id+'/result',{ok:true,valid:true,revision:'two'},bridge);
+ assert.equal((await(await edit).json()).valid,true);
 });

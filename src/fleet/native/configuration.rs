@@ -366,6 +366,37 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
     initialize(ctx)?;
     let current = read_text(&ctx.desired)?;
     let revision = context::hash(&json!(current));
+    let mut request = request.clone();
+    if let Some(update) = request
+        .get("worker_update")
+        .cloned()
+        .filter(|u| !u.is_null())
+    {
+        if request.get("text").is_some() {
+            return Err(invalid("Choose a worker edit or YAML text, not both"));
+        }
+        let host = update["host"]
+            .as_str()
+            .ok_or_else(|| invalid("Choose a machine"))?;
+        let id = update["id"]
+            .as_str()
+            .ok_or_else(|| invalid("Choose a worker"))?;
+        let mut doc = parse(&current)?;
+        let worker = doc["machines"][host]["workers"]
+            .as_array_mut()
+            .and_then(|workers| workers.iter_mut().find(|w| w["id"] == id))
+            .ok_or_else(|| {
+                invalid("This worker is no longer in the configuration; reload the page")
+            })?;
+        let config = update["config"]
+            .as_object()
+            .ok_or_else(|| invalid("Expected worker settings"))?;
+        for (key, value) in config {
+            worker["config"][key] = value.clone();
+        }
+        worker["intent"] = update["intent"].clone();
+        request["text"] = json!(serde_yaml_ng::to_string(&compact(&doc))?);
+    }
     if let Some(text) = request.get("text") {
         let text = text.as_str().ok_or_else(|| invalid("Expected YAML text"))?;
         let doc = parse(text)?;
@@ -384,7 +415,7 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
         }
         if request["save"] != true {
             return Ok(
-                json!({"ok":true,"valid":true,"revision":revision,"changes":changes(&parse(&current).unwrap_or(json!({})), &doc)}),
+                json!({"ok":true,"valid":true,"revision":revision,"text":text,"changes":changes(&parse(&current).unwrap_or(json!({})), &doc)}),
             );
         }
     }
@@ -392,7 +423,7 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
     let cached = load_locked(ctx)
         .unwrap_or_else(|e| json!({"revision":context::hash(&json!(text)),"error":e.to_string()}));
     Ok(
-        json!({"ok":true,"source":ctx.desired,"text":text,"revision":cached["revision"],"error":cached["error"]}),
+        json!({"ok":true,"source":ctx.desired,"text":text,"document":parse(&text).ok().map(|doc| compact(&doc)),"revision":cached["revision"],"error":cached["error"]}),
     )
 }
 
@@ -457,6 +488,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.ctx.state);
         }
+    }
+
+    #[test]
+    fn structured_edit_preserves_other_settings_and_checks_revision() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        fs::write(&ctx.desired, "machines:\n  local:\n    workers:\n      - id: tools\n        intent: pause\n        config:\n          name: Tools\n          tags: [review]\n          concurrency: 2\n").unwrap();
+        let first = request(ctx, &json!({})).unwrap();
+        assert_eq!(
+            first["document"]["machines"]["local"]["workers"][0]["config"]["name"],
+            "Tools"
+        );
+        let edit = json!({"host":"local","id":"tools","intent":"pause","config":{"name":"Review","concurrency":3}});
+        let preview = request(
+            ctx,
+            &json!({"worker_update":edit,"revision":first["revision"],"save":false}),
+        )
+        .unwrap();
+        assert_eq!(preview["valid"], true);
+        assert_eq!(
+            request(ctx, &json!({})).unwrap()["revision"],
+            first["revision"]
+        );
+        let saved = request(
+            ctx,
+            &json!({"worker_update":edit,"revision":first["revision"],"save":true}),
+        )
+        .unwrap();
+        let config = &saved["document"]["machines"]["local"]["workers"][0]["config"];
+        assert_eq!(config["name"], "Review");
+        assert_eq!(config["concurrency"], 3);
+        assert_eq!(config["tags"], json!(["review"]));
+        assert!(
+            request(
+                ctx,
+                &json!({"worker_update":edit,"revision":first["revision"],"save":true})
+            )
+            .is_err()
+        );
+        assert!(request(ctx, &json!({"worker_update":{"host":"local","id":"missing","intent":"pause","config":{}},"revision":saved["revision"],"save":true})).is_err());
     }
 
     #[test]
