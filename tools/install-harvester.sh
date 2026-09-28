@@ -23,6 +23,15 @@ find "$stage/packages/hey-harvester/src" -type f -exec touch {} +
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export CARGO_TARGET_DIR="$HOME/.cache/hey-harvester/build"
 export CARGO_BUILD_JOBS=2
+# Noninteractive SSH may omit the environment for an already running user manager.
+# Reuse its bus; do not create a login session or change lingering settings.
+if [ "$(uname -s)" = Linux ]; then
+    task_runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+    if [ -S "$task_runtime/bus" ]; then
+        export XDG_RUNTIME_DIR="$task_runtime"
+        export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$task_runtime/bus}"
+    fi
+fi
 cargo build --locked --release -p hey-harvester --manifest-path "$stage/Cargo.toml"
 "$CARGO_TARGET_DIR/release/hey-harvester" install
 '
