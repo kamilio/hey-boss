@@ -1,6 +1,12 @@
 //! Atomic completion of tasks whose explicitly classified fix PRs have merged.
 use super::*;
 
+pub(crate) struct TrackedPullRequest {
+    pub url: String,
+    pub checked_at: Option<i64>,
+    pub closed: bool,
+}
+
 fn merged_tasks(db: &Connection) -> Result<Vec<(Project, i64)>> {
     if super::super::global_settings::read(db)?["auto_close_merged_prs"] != true {
         return Ok(Vec::new());
@@ -10,10 +16,16 @@ fn merged_tasks(db: &Connection) -> Result<Vec<(Project, i64)>> {
 }
 
 impl Store {
-    pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<String>> {
-        let mut query = self.db.prepare("SELECT DISTINCT pr.url FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND pr.status<>'merged' ORDER BY pr.url")?;
+    pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<TrackedPullRequest>> {
+        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND i.state<>'closed' AND pr.status<>'merged' GROUP BY pr.url ORDER BY pr.url")?;
         Ok(query
-            .query_map([], |r| r.get(0))?
+            .query_map([], |r| {
+                Ok(TrackedPullRequest {
+                    url: r.get(0)?,
+                    checked_at: r.get(1)?,
+                    closed: r.get(2)?,
+                })
+            })?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -126,6 +138,30 @@ mod tests {
         (store, actor, root)
     }
     #[test]
+    fn tracks_distinct_active_issue_prs_and_resumes_when_reopened() {
+        let (store, _, root) = fixture();
+        store.db.execute("UPDATE issue_pull_requests SET url='https://github.com/o/r/pull/99' WHERE issue_number=5", []).unwrap();
+        assert!(
+            !store
+                .tracked_pull_requests()
+                .unwrap()
+                .iter()
+                .any(|p| p.url.ends_with("/99"))
+        );
+        store
+            .db
+            .execute("UPDATE issues SET state='open' WHERE number=5", [])
+            .unwrap();
+        let prs = store.tracked_pull_requests().unwrap();
+        assert_eq!(prs.len(), 4);
+        assert!(
+            prs.iter()
+                .any(|p| p.url.ends_with("/99") && p.checked_at.is_none())
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn idle_pr_completion_does_not_wait_for_a_database_writer() {
         let (mut store, actor, root) = fixture();
         store
@@ -195,7 +231,8 @@ mod tests {
             !store
                 .tracked_pull_requests()
                 .unwrap()
-                .contains(&url.to_string())
+                .iter()
+                .any(|pr| pr.url == url)
         );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();

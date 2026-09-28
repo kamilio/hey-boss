@@ -34,6 +34,7 @@ mod artifacts;
 mod batch;
 #[path = "pr_monitor.rs"]
 mod pr_monitor;
+pub(crate) use pr_monitor::TrackedPullRequest;
 #[path = "project_names.rs"]
 mod project_names;
 #[path = "ready.rs"]
