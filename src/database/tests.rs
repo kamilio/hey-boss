@@ -170,6 +170,59 @@ fn owner_election_does_not_replace_a_live_socket() {
 }
 
 #[test]
+fn replaced_owner_lock_does_not_split_live_transactions_between_services() {
+    let mut fixture = Fixture::new();
+    let path = fixture.directory.join("issues.db");
+    let socket = owner::socket_path(&path);
+    let connection = fixture.connect();
+    connection.execute_batch("CREATE TABLE counter(value INTEGER); INSERT INTO counter VALUES(0); BEGIN IMMEDIATE; UPDATE counter SET value=7").unwrap();
+    // Model temporary-file cleanup unlinking an old but still locked inode.
+    std::fs::remove_file(socket.with_extension("lock")).unwrap();
+    let replacement = Owner::start(&path).unwrap();
+    assert!(
+        replacement.is_none(),
+        "A live service must retain its transactions even after its lock pathname is removed"
+    );
+    connection.execute_batch("COMMIT").unwrap();
+    drop(connection);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut next = loop {
+        if let Some(owner) = Owner::start(&path).unwrap() {
+            break owner;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Displaced owner did not drain"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    fixture.owner.stop();
+    assert_eq!(
+        Connection::connect(&path)
+            .unwrap()
+            .query_row("SELECT value FROM counter", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    next.stop();
+}
+
+#[test]
+fn stopping_displaced_owner_preserves_replacement_socket() {
+    let mut fixture = Fixture::new();
+    let socket = owner::socket_path(&fixture.directory.join("issues.db"));
+    std::fs::remove_file(&socket).unwrap();
+    let replacement = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fixture.owner.stop();
+    assert!(
+        socket.exists(),
+        "Old owner removed a replacement service's socket"
+    );
+    drop(replacement);
+    std::fs::remove_file(socket).unwrap();
+}
+
+#[test]
 fn first_use_below_a_symlinked_directory_elects_one_canonical_owner() {
     let fixture = Fixture::new();
     std::fs::create_dir(fixture.directory.join("real")).unwrap();
@@ -374,13 +427,16 @@ fn graceful_service_shutdown_finishes_an_active_transaction() {
     let path = fixture.directory.join("issues.db");
     std::thread::scope(|scope| {
         let owner = &mut fixture.owner;
-        scope.spawn(move || owner.stop());
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while UnixStream::connect(owner::socket_path(&path)).is_ok() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let (finished, wait) = mpsc::channel();
+        scope.spawn(move || {
+            owner.stop();
+            finished.send(()).unwrap();
+        });
+        // Shutdown retains election ownership until the transaction commits.
+        assert!(wait.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(Owner::start(&path).unwrap().is_none());
         tx.commit().unwrap();
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
     });
     fixture.owner = Owner::start(&path).unwrap().unwrap();
     assert_eq!(
