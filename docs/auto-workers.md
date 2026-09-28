@@ -1,10 +1,11 @@
 # Worker fleet
 
 Open **Agents → Workers** (`/workers`). **Activity** is a compact outline:
-machine → worker → tasks. Each worker row shows occupied slots, its current task,
-and latest activity. Expand a worker for all its tasks and conversation links;
-collapse a machine to hide its workers. Capacity belongs to each machine heading,
-without aggregate number cards.
+machine → project combination → worker → tasks. A combination such as
+**ashby-mcp + hey-gh + hey-proxy** appears once, with its shared workers underneath.
+Groups start collapsed and show their occupied slots and current task. Expand a
+group for its workers, then a worker for task activity and conversation links.
+Shared workers and their capacity are counted once.
 Offline machines show last-known activity and contribute no available capacity.
 Organizers have a separate disclosure because they do not consume issue-agent slots.
 

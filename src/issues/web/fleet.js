@@ -115,7 +115,28 @@ function slotUsage(worker,machine,now=Date.now()) {
   const pickup=worker.config?.enabled&&(!worker.intent||worker.intent==='running');
   return {capacity,occupied,available:pickup?Math.max(0,capacity-occupied):0,paused:pickup?0:Math.max(0,capacity-occupied),online,running};
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState, managedFleet, workerPhase, slotUsage};
+function workerScopeGroups(entries) {
+  const groups=new Map();
+  for(const entry of entries){
+    const projects=[...new Set(entry.worker.config?.projects||[])].sort(),key=JSON.stringify(projects);
+    if(!groups.has(key))groups.set(key,{key,projects,entries:[]});
+    groups.get(key).entries.push(entry);
+  }
+  for(const group of groups.values()){
+    const names=new Map(),shortIds=new Map();group.labels=new Map();
+    for(const {worker:w} of group.entries){
+      const name=w.config?.name||'Worker';
+      names.set(name,(names.get(name)||0)+1);
+      shortIds.set(w.id.slice(0,8),(shortIds.get(w.id.slice(0,8))||0)+1);
+    }
+    for(const {worker:w} of group.entries){
+      const name=w.config?.name||'Worker',id=shortIds.get(w.id.slice(0,8))>1?w.id:w.id.slice(0,8);
+      group.labels.set(w.id,names.get(name)>1||!w.config?.name?name+' · '+id:name);
+    }
+  }
+  return [...groups.values()];
+}
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState, managedFleet, workerPhase, slotUsage, workerScopeGroups};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -220,6 +241,7 @@ if (typeof document !== 'undefined') (() => {
   }
   const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
   const workerLabel=w=>w.config?.name&&!/^Worker(?: \d+)?$/.test(w.config.name)?w.config.name:(w.config?.projects||[]).map(projectLabel).join(' + ')||'Worker '+w.id.slice(0,8);
+  const scopeLabel=group=>group.projects.map(projectLabel).join(' + ')||'All projects';
   function renderFleetActivity(data) {
     const board=$('worker-board'),focus=document.activeElement?.dataset.focus;
     const known=new Set([...board.querySelectorAll('details')].map(d=>d.dataset.key));
@@ -246,18 +268,18 @@ if (typeof document !== 'undefined') (() => {
       const state=element('span','activity-task-state',agentState({run,worker:entry.worker,machine:entry.device.machine,online:entry.device.online}));
       a.append(meta,text,state,element('time','',elapsed(run)),element('span','activity-task-arrow','↗'));return a;
     }
-    function worker(entry){
+    function worker(entry,label){
       const {worker:w,device:d,usage:u,phase}=entry;
       const runs=(w.runs||[]).filter(r=>r.finished_at==null),chiefs=(w.chiefs||[]).filter(r=>r.state==='running');
       const row=element('details','activity-worker');row.dataset.worker=w.id;row.dataset.key=d.machine.host+':worker:'+w.id;row.open=expanded.has(row.dataset.key);
       const summary=element('summary','activity-worker-summary');summary.dataset.focus=row.dataset.key;
-      const identity=element('span','activity-worker-name');identity.append(element('strong','',workerLabel(w)));
+      const identity=element('span','activity-worker-name');identity.append(element('strong','',label));
       const slots=element('span','activity-worker-slots',d.online&&u.running?u.occupied+' / '+u.capacity:!d.online?'—':'0');
       slots.dataset.running=String(u.running);
       slots.title=d.online&&u.running?u.occupied+' occupied of '+u.capacity+' agent slots':!d.online?'Last known state':'Worker is not running';
       const current=element('span','activity-worker-current');
       if(runs.length){current.append(element('span','activity-current-title',(runs[0].number?'#'+runs[0].number+' · ':'')+(runs[0].title||'Working')+(runs.length>1?' · +'+(runs.length-1)+' more':'')),element('span','activity-current-note',activity(runs[0])));}
-      else current.append(element('span','activity-current-note',chiefs.length?'Organizing project queue':u.available?'Waiting for a task':phase.note));
+      else current.append(element('span','activity-current-note',u.occupied?'Working · task details unavailable':chiefs.length?'Organizing project queue':u.available?'Waiting for a task':phase.note));
       summary.append(identity,element('span','worker-state is-'+phase.group,phase.label),slots,current);row.append(summary);
       const detail=element('div','activity-worker-detail');
       if(runs.length){const tasks=element('div','activity-tasks');for(const run of runs)tasks.append(task(run,entry));detail.append(tasks);}
@@ -278,9 +300,18 @@ if (typeof document !== 'undefined') (() => {
       const name=element('h2','',d.machine.host==='local'?'This machine':d.machine.hostname||d.machine.host);
       heading.append(name,element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline'),element('span','activity-machine-usage',d.online?total.occupied+' occupied · '+total.available+' available'+(total.paused?' · '+total.paused+' paused':''):'Last known activity'));section.append(heading);
       if(d.machine.configuration_error){const warning=element('details','activity-machine-error');warning.dataset.key=section.dataset.key+':error';warning.open=expanded.has(warning.dataset.key);warning.append(element('summary','','Some worker settings have not applied'),element('p','',d.machine.configuration_error));section.append(warning);}
-      const labels=element('div','activity-columns');labels.append(element('span','','Worker'),element('span','','Status'),element('span','','Slots used'),element('span','','Current task · latest activity'));section.append(labels);
       shown.sort((a,b)=>b.usage.occupied-a.usage.occupied||Number(b.phase.group==='attention')-Number(a.phase.group==='attention')||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));
-      for(const entry of shown)section.append(worker(entry));
+      for(const group of workerScopeGroups(shown)){
+        const scope=element('details','worker-scope-group');scope.dataset.key=section.dataset.key+':scope:'+group.key;scope.open=expanded.has(scope.dataset.key);
+        const summary=element('summary','worker-scope-heading');summary.dataset.focus=scope.dataset.key;
+        const usage=group.entries.reduce((n,e)=>{n.occupied+=e.usage.occupied;n.capacity+=e.usage.capacity;return n;},{occupied:0,capacity:0});
+        const current=group.entries.flatMap(e=>(e.worker.runs||[]).filter(r=>r.finished_at==null));
+        summary.append(element('h3','',scopeLabel(group)),element('span','scope-worker-count',group.entries.length+' '+(group.entries.length===1?'worker':'workers')),element('span','scope-usage',d.online?usage.occupied+' / '+usage.capacity+' slots occupied':'Last known'));
+        const preview=current.length?(current[0].number?'#'+current[0].number+' · ':'')+(current[0].title||'Working')+(current.length>1?' · +'+(current.length-1)+' more tasks':''):usage.occupied?'Working · task details unavailable':group.entries.some(e=>e.phase.group==='attention')?'Needs attention':group.entries.some(e=>(e.worker.chiefs||[]).some(c=>c.state==='running'))?'Organizing project queue':group.entries.some(e=>e.usage.available)?'Waiting for a task':'Pickup paused';
+        summary.append(element('span','scope-current-task',preview));scope.append(summary);
+        const labels=element('div','activity-columns');labels.append(element('span','','Worker'),element('span','','Status'),element('span','','Slots used'),element('span','','Current task · latest activity'));scope.append(labels);
+        for(const entry of group.entries)scope.append(worker(entry,group.labels.get(entry.worker.id)));section.append(scope);
+      }
       if(!shown.length)section.append(element('p','activity-note','No running workers.'));
       const inactive=own.filter(e=>!relevant.includes(e)).length;
       if(inactive){const a=element('a','activity-inactive',inactive+' paused or stopped workers →');a.href='/workers#view=configuration&find='+encodeURIComponent(d.machine.host);section.append(a);}sections.push(section);
@@ -321,12 +352,12 @@ if (typeof document !== 'undefined') (() => {
     const expanded=new Set([...board.querySelectorAll('details[open]')].map(d=>d.dataset.key));
     const search=workerSearch.trim().toLowerCase();
     const matches=e=>(workerFilter==='all'||workerFilter==='current'&&e.phase.group!=='stopped'||e.phase.group===workerFilter)&&(!search||[workerLabel(e.worker),e.worker.id,e.device.machine.host,e.device.machine.hostname,...(e.worker.config?.projects||[])].join(' ').toLowerCase().includes(search));
-    function row(entry) {
+    function row(entry,label) {
       const {worker:w,device:d,phase}=entry,m=d.machine;
       const active=d.online?(w.active??(w.runs||[]).filter(r=>r.finished_at==null).length):null;
       const r=element('details','worker-record');r.dataset.key=m.host+':'+w.id;r.dataset.worker=w.id;r.open=expanded.has(r.dataset.key);
       const summary=element('summary','worker-record-summary');
-      const identity=element('div','worker-record-identity');identity.append(element('strong','',workerLabel(w)),element('span','',((w.config?.projects||[]).map(projectLabel).join(', ')||'All projects')+' · '+w.id.slice(0,8)));
+      const identity=element('div','worker-record-identity');identity.append(element('strong','',label));
       const state=element('span','worker-state is-'+phase.group,phase.label);
       const slots=element('span','worker-slots',(active===null?'—':active)+' / '+(w.config?.concurrency||1));slots.title='Active agents / configured slots';
       summary.append(identity,state,slots);
@@ -355,11 +386,15 @@ if (typeof document !== 'undefined') (() => {
       const status=element('div','machine-status');status.append(element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline'),element('span','',m.configuration_error?'Configuration needs fixing':m.desired_revision===m.applied_revision?'Configuration applied':d.online?'Applying configuration':'Changes waiting for connection'));heading.append(title,status);section.append(heading);
       const metrics=element('p','machine-metrics',d.online?d.live.length+' running workers · '+d.active+' active agents · '+own.length+' configured '+(own.length===1?'worker':'workers'):own.length+' configured workers · last seen '+(m.heartbeat?new Date(m.heartbeat*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'unknown'));section.append(metrics);
       if(m.configuration_error){const error=element('details','machine-error');error.append(element('summary','','Why configuration has not applied'),element('p','',m.configuration_error));section.append(error);}
-      const labels=element('div','worker-column-labels');labels.append(element('span','','Worker / project'),element('span','','Status'),element('span','','Agents / slots'),element('span','',''));section.append(labels);
       const rank={attention:0,working:1,ready:2,paused:3,stopped:4};shown.sort((a,b)=>rank[a.phase.group]-rank[b.phase.group]||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));
-      for(const entry of shown)section.append(row(entry));
-      if(!shown.length)section.append(element('p','worker-empty',stopped.length?'No current workers.':'No workers configured.'));
-      if(stopped.length){const archive=element('details','stopped-workers');archive.dataset.key=m.host+':stopped';archive.open=expanded.has(archive.dataset.key);archive.append(element('summary','',stopped.length+' stopped '+(stopped.length===1?'worker':'workers')));for(const entry of stopped)archive.append(row(entry));section.append(archive);}
+      for(const group of workerScopeGroups([...shown,...stopped])){
+        const scope=element('details','worker-scope-group settings-scope');scope.dataset.key=m.host+':settings-scope:'+group.key;scope.open=expanded.has(scope.dataset.key)||!!search;
+        const summary=element('summary','worker-scope-heading');summary.dataset.focus=scope.dataset.key;summary.append(element('h3','',scopeLabel(group)),element('span','scope-worker-count',group.entries.length+' '+(group.entries.length===1?'worker':'workers')));scope.append(summary);
+        const current=group.entries.filter(e=>!stopped.includes(e)),archived=group.entries.filter(e=>stopped.includes(e));
+        if(current.length){const labels=element('div','worker-column-labels');labels.append(element('span','','Worker'),element('span','','Status'),element('span','','Agents / slots'),element('span','',''));scope.append(labels);for(const entry of current)scope.append(row(entry,group.labels.get(entry.worker.id)));}
+        if(archived.length){const archive=element('details','stopped-workers');archive.dataset.key=scope.dataset.key+':stopped';archive.open=expanded.has(archive.dataset.key);archive.append(element('summary','',archived.length+' stopped '+(archived.length===1?'worker':'workers')));for(const entry of archived)archive.append(row(entry,group.labels.get(entry.worker.id)));scope.append(archive);}section.append(scope);
+      }
+      if(!shown.length&&!stopped.length)section.append(element('p','worker-empty','No workers configured.'));
       sections.push(section);
     }
     board.replaceChildren(...(sections.length?sections:[element('p','worker-empty','No workers match this filter.')]));
