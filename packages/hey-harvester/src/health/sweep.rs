@@ -370,9 +370,9 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
         }
         let root = &p.projects[0].path;
         if *root != checked_root {
-            // A saved cursor can start inside bare Git refs named build or out.
+            // Saved cursors may start inside a checkout or bare Git metadata.
             match checkout_admin(root) {
-                Ok(Some(admin)) if root.starts_with(&admin) => {
+                Ok(Some(_)) => {
                     p.projects.clear();
                     continue;
                 }
@@ -387,11 +387,9 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
         let Ok(Some(device)) = traversal_device(&mut p.projects) else {
             continue;
         };
-        if let Some(index) = p
-            .projects
-            .iter()
-            .position(|frame| protected_dependency(&frame.path))
-        {
+        if let Some(index) = p.projects.iter().position(|frame| {
+            protected_dependency(&frame.path) || checkout_marker(&frame.path).unwrap_or(true)
+        }) {
             p.projects.truncate(index);
             continue;
         }
@@ -415,6 +413,7 @@ fn discover_projects_until(p: &mut Progress, deadline: Instant) {
             Ok(Some(path)) => {
                 if !fs::symlink_metadata(&path)
                     .is_ok_and(|m| m.is_dir() && m.dev() == device && !filesystem_protected(&m))
+                    || checkout_marker(&path).unwrap_or(true)
                 {
                     continue;
                 }
@@ -463,8 +462,8 @@ fn checkout_marker(path: &std::path::Path) -> io::Result<bool> {
     }
 }
 
-// Project cache roots and saved cursors start below .git. Resolve ownership once
-// per root visit, then cheaply recheck the lock before each entry is unlinked.
+// Project cache roots and saved cursors start below .git. Resolve the checkout
+// once per root visit; age alone cannot prove any of its contents disposable.
 fn checkout_admin(path: &std::path::Path) -> io::Result<Option<PathBuf>> {
     for parent in path.ancestors() {
         if repository_metadata(parent)? {
@@ -474,7 +473,11 @@ fn checkout_admin(path: &std::path::Path) -> io::Result<Option<PathBuf>> {
         match fs::symlink_metadata(&marker) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
-            Ok(m) if m.is_dir() => return Ok(Some(marker)),
+            Ok(m) if m.is_dir() => {
+                if fs::read_dir(&marker)?.next().transpose()?.is_some() {
+                    return Ok(Some(marker));
+                }
+            }
             Ok(m) if m.is_file() => {
                 let value = fs::read_to_string(marker)?;
                 let target = value
@@ -579,17 +582,10 @@ fn advance_with_owners(
             if owner_declared {
                 return Ok(true);
             }
-            if let Some(admin) = &owner_admin {
-                if root.starts_with(admin) {
-                    return Ok(true);
-                }
-                match fs::symlink_metadata(admin.join("locked")) {
-                    Ok(_) => return Ok(true),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(false)
+            // Tracked build assets, workspace links and active output may all be
+            // old. Keep checkouts whole; worktree cleanup separately verifies
+            // ownership, activity, Git state and databases before reclaiming one.
+            Ok(owner_admin.is_some())
         })();
         match ownership {
             Ok(false) => {}
@@ -755,7 +751,7 @@ pub(super) fn clean(
             Some(now().saturating_sub(progress.stats.pass_started_at));
     }
     let detail = format!(
-        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths, owned worktrees or flagged files; {} roots pending; {}; pass age {}s. {}",
+        "Deleted {removed} expired files; inspected {} entries in {} ms; preserved {protected} database paths, checkouts or flagged files; {} roots pending; {}; pass age {}s. {}",
         progress.stats.visited_this_cycle,
         progress.stats.slice_millis,
         progress.stats.roots_pending,
@@ -1106,6 +1102,60 @@ mod tests {
     }
 
     #[test]
+    fn cache_expiration_preserves_unlocked_checkout_assets_and_dependencies() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-checkout-cache-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let work = root.join("work");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "work"]);
+        fs::create_dir_all(work.join("build")).unwrap();
+        fs::create_dir_all(work.join("node_modules")).unwrap();
+        fs::write(work.join("build/tracked.js"), "tracked application asset").unwrap();
+        fs::write(work.join("build/active.js"), "untracked build in use").unwrap();
+        std::os::unix::fs::symlink("../build", work.join("node_modules/workspace")).unwrap();
+        git(&["-C", "work", "add", "build/tracked.js"]);
+        fs::create_dir_all(root.join("cache")).unwrap();
+        fs::write(root.join("cache/expired"), "disposable").unwrap();
+        // Include an already persisted cursor beneath each project cache root.
+        let mut progress = Progress::default();
+        progress.stack.push(Frame::new(work.join("build")));
+        progress
+            .deferred
+            .push_back(vec![Frame::new(work.join("node_modules"))]);
+        progress.roots.push_back(root.join("cache"));
+        let (removed, _, errors) = advance_with_owners(
+            &mut progress,
+            now() + 172800,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+            &BTreeSet::new(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            removed, 1,
+            "Only disposable data outside the checkout may expire"
+        );
+        assert!(work.join("build/tracked.js").is_file());
+        assert!(work.join("build/active.js").is_file());
+        assert!(work.join("node_modules/workspace").is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn resumed_cache_sweep_preserves_declared_issue_work_and_expires_unowned_output() {
         let root =
             std::env::temp_dir().join(format!("harvester-declared-cache-{}", std::process::id()));
@@ -1113,6 +1163,7 @@ mod tests {
         let cache = work.join("out");
         let other = root.join("unowned-out");
         fs::create_dir_all(work.join(".git")).unwrap();
+        fs::write(work.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
         fs::create_dir_all(&cache).unwrap();
         fs::create_dir_all(&other).unwrap();
         fs::write(cache.join("receipt"), "active validation").unwrap();
@@ -1148,7 +1199,7 @@ mod tests {
                 &BTreeSet::new()
             )
             .0,
-            1
+            0
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1185,7 +1236,7 @@ mod tests {
             fs::read_to_string(cache.join("receipt")).unwrap(),
             "validation pending"
         );
-        // Completion is explicit; a later sweep may reclaim this fixture's output.
+        // Removing a lock does not prove old checkout contents are disposable.
         fs::remove_file(root.join("admin/locked")).unwrap();
         p.stack.push(Frame::new(cache.canonicalize().unwrap()));
         assert_eq!(
@@ -1197,7 +1248,7 @@ mod tests {
                 100
             )
             .0,
-            1
+            0
         );
         fs::remove_dir_all(root).unwrap();
     }
