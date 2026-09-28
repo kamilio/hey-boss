@@ -5,6 +5,10 @@ and issue database on IPv4 loopback ports 4781 and 80. It never redirects URLs:
 paths, queries, and browser fragments stay intact. The old address remains
 `http://127.0.0.1:4781/`; the short address is `http://hey-boss.test/`.
 
+The desktop app and workers alone do not keep this web service running. For saved
+links to work after startup or a server exit, provision the launchd job below on
+each Mac. Normal CLI and companion upgrades do not perform this administrator step.
+
 For example:
 
 ```text
@@ -76,6 +80,10 @@ sudo launchctl print system/local.hey-boss.web
 Both bootstrap responses must identify the same project and CSRF token. Open
 both URLs in a browser, create a disposable issue at one address, and verify it
 at the other. Check the deep link above and the configured Tailscale URL.
+To verify recovery, record the web job's PID from `launchctl print`, terminate
+that specific user-owned process, and confirm launchd starts a new PID serving
+both URLs. Reload a saved artifact link without opening Issues from the desktop
+menu. Re-running setup must preserve the healthy listener rather than replace it.
 An alias lookup failure means the local hosts entry is missing; it is not a
 reason to change the application's allowed hosts. A permission-denied warning
 means the process has no activated socket and cannot bind 80 itself. An
