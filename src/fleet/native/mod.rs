@@ -5,6 +5,7 @@ mod companion;
 mod context;
 mod control;
 mod conversation;
+mod handshake;
 mod mobile;
 mod pr_monitor;
 mod pull;
@@ -57,6 +58,16 @@ fn save_upgrade_source(ctx: &Context, source: &std::path::Path) -> Result<()> {
     Ok(())
 }
 fn run_inner(action: &super::Action) -> Result<()> {
+    let startup = matches!(
+        action,
+        super::Action::Companion { stdio: true, .. }
+            | super::Action::Companion { install: true, .. }
+    )
+    .then(|| {
+        handshake::Progress::start(std::sync::Arc::new(
+            std::sync::Mutex::new(std::io::stdout()),
+        ))
+    });
     let _database_owner = if matches!(
         action,
         super::Action::Supervisor
@@ -93,9 +104,10 @@ fn run_inner(action: &super::Action) -> Result<()> {
         super::Action::Supervisor => supervisor::run(ctx),
         super::Action::Companion { stdio, install } => {
             if *install {
+                startup.as_ref().unwrap().phase("service");
                 service::ensure_companion(&ctx)
             } else if *stdio {
-                companion::stdio(ctx)
+                companion::stdio(ctx, startup.unwrap())
             } else {
                 companion::daemon(ctx)
             }

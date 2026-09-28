@@ -533,6 +533,9 @@ Verified installations remain current while reconnecting; a stale runtime build
 cannot trigger repeated installs or terminate a replacement connection before hello.
 Companions keep reporting liveness while database work delays configuration,
 heartbeat collection, or sync; revision and cursor acknowledgments still wait for application.
+Startup reports its current phase while preparing the service and initial snapshot.
+A silent handshake fails after 15 seconds; progress permits up to two minutes total.
+See [handshake recovery](docs/fleet-handshake-recovery.md) for diagnostics and verification.
 
 Each machine queues installers behind its installation lock, then checks source
 ancestry against its last verified installation. Older or unrelated commits are

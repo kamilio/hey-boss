@@ -518,7 +518,7 @@ impl Supervisor {
     }
     fn channel(&self, host: &str) -> Result<()> {
         self.update(host, json!({"state":"connecting"}))?;
-        let script = "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; hey-boss fleet agent --install >&2 && exec hey-boss fleet agent --stdio";
+        let script = "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; command -v hey-boss >/dev/null 2>&1 || { echo 'Companion binary is missing: hey-boss not found on PATH' >&2; exit 127; }; hey-boss fleet agent --install && exec hey-boss fleet agent --stdio";
         let mut child = Command::new("ssh")
             .args([
                 "-T",
@@ -585,9 +585,23 @@ impl Supervisor {
             .unwrap()
             .connections
             .insert(host.into(), (child.id(), outgoing));
-        let hello = match rx.recv_timeout(Duration::from_secs(15)) {
-            Ok(Ok(Some(hello))) => hello,
-            result => {
+        let hello = match super::handshake::receive(
+            &rx,
+            || self.ctx.stopped(),
+            |frame| {
+                self.event(
+                    host,
+                    "starting",
+                    &format!(
+                        "Companion startup: {} ({} ms)",
+                        frame["phase"].as_str().unwrap_or("unknown"),
+                        frame["elapsed_ms"].as_u64().unwrap_or(0)
+                    ),
+                );
+            },
+        ) {
+            Ok(hello) => hello,
+            Err(error) => {
                 // stdout and stderr are read independently. Allow stderr to
                 // catch up after EOF, without waiting for a descendant that
                 // might retain the pipe after the SSH process exits.
@@ -599,14 +613,7 @@ impl Supervisor {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("\n");
-                let reason = match result {
-                    Ok(Ok(None)) => "Companion closed before hello".to_owned(),
-                    Ok(Err(error)) => format!("Companion hello failed: {error}"),
-                    Err(_) => {
-                        "Companion is missing or has an incompatible fleet protocol".to_owned()
-                    }
-                    Ok(Ok(Some(_))) => unreachable!(),
-                };
+                let reason = error.to_string();
                 return Err(invalid(&if detail.is_empty() {
                     reason
                 } else {
@@ -2367,6 +2374,26 @@ mod tests {
         let loaded = app.state.lock().unwrap().build.clone();
         assert!(loaded.contains(env!("HEY_BOSS_BUILD_ID")), "{loaded}");
         assert!(!loaded.contains("replacement-on-disk"));
+    }
+
+    #[test]
+    fn startup_progress_is_not_mistaken_for_an_incompatible_hello() {
+        let (_directory, app) = test_supervisor();
+        let mut child = Command::new("sh")
+            .args(["-c", "printf '%s\\n' '{\"version\":1,\"kind\":\"starting\",\"phase\":\"database\"}'; printf '%s\\n' 'database unavailable' >&2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let error = app
+            .channel_inner("test-host", &mut child)
+            .unwrap_err()
+            .to_string();
+        child.wait().unwrap();
+        assert!(error.contains("Companion closed before hello"), "{error}");
+        assert!(error.contains("database unavailable"), "{error}");
+        assert!(error.contains("database"), "{error}");
     }
 
     #[test]
