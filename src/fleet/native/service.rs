@@ -3,6 +3,18 @@ use serde_json::json;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 use std::{fs, path::PathBuf, process::Command};
+#[cfg(any(target_os = "linux", test))]
+#[path = "user_bus.rs"]
+mod user_bus;
+#[cfg(target_os = "linux")]
+fn systemctl() -> Command {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
+    let address = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+    user_bus::command(&runtime, address.as_deref())
+}
 #[cfg(target_os = "linux")]
 fn checked(command: &mut Command) -> Result<()> {
     let output = command.output()?;
@@ -126,17 +138,13 @@ pub(super) fn install(ctx: &Context, role: &str) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
+        checked(systemctl().arg("daemon-reload"))?;
         checked(
-            Command::new("systemctl")
-                .args(["--user", "enable", "--now"])
+            systemctl()
+                .args(["enable", "--now"])
                 .arg(path.file_name().unwrap()),
         )?;
-        checked(
-            Command::new("systemctl")
-                .args(["--user", "restart"])
-                .arg(path.file_name().unwrap()),
-        )?;
+        checked(systemctl().arg("restart").arg(path.file_name().unwrap()))?;
         return Ok(());
     }
     #[allow(unreachable_code)]
