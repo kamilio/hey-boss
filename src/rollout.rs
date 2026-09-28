@@ -174,6 +174,7 @@ pub fn configure_gemini(base_url: &str, model: &str, home: Option<&Path>) -> Res
 }
 /// The provider id Pi uses for this proxy. Only this entry is ever rewritten.
 const PI_PROVIDER: &str = "hey-proxy";
+use crate::model_registry::DEFAULT_BUDGET;
 
 /// Every model this proxy serves by name: each overwrite plus the models it
 /// routes to. A reasoning overwrite is marked so Pi sends an effort level, which
@@ -240,16 +241,75 @@ fn pi_tokens(value: Option<&Value>, default: u64, location: &str) -> Result<u64>
     }
 }
 
+fn pi_registry(
+    settings: &mut Value,
+    catalog: &mut Value,
+    config: &Config,
+    registry: &crate::model_registry::ModelRegistry,
+) -> Result<()> {
+    let provider = &mut catalog["providers"][PI_PROVIDER];
+    if let Some(overrides) = provider.get("modelOverrides")
+        && !overrides.is_object()
+    {
+        bail!("Pi models.json hey-proxy modelOverrides must be an object; left unchanged");
+    }
+    pi_object(settings, "compaction", "settings.json compaction")?;
+    let compaction = &mut settings["compaction"];
+    pi_object(
+        compaction,
+        "modelOverrides",
+        "settings.json compaction.modelOverrides",
+    )?;
+    for id in pi_response_models(config) {
+        let budget = registry.resolve(config, &id);
+        // Model definitions are the generated copy. Remove competing limit
+        // overrides, but keep costs, compatibility and other user metadata.
+        if let Some(overrides) = provider["modelOverrides"].as_object_mut()
+            && let Some(entry) = overrides.get_mut(&id)
+        {
+            let entry = entry
+                .as_object_mut()
+                .context("Pi model override must be an object; left unchanged")?;
+            entry.remove("contextWindow");
+            entry.remove("maxTokens");
+            if entry.is_empty() {
+                overrides.remove(&id);
+            }
+        }
+        let model = provider["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["id"] == id)
+            .unwrap();
+        model["contextWindow"] = json!(budget.context_window);
+        model["maxTokens"] = json!(budget.max_tokens);
+        let key = format!("{PI_PROVIDER}/{id}");
+        let entry = pi_object(
+            &mut compaction["modelOverrides"],
+            &key,
+            "Pi compaction model override",
+        )?;
+        entry.insert("keepRecentTokens".into(), json!(budget.keep_recent_tokens));
+        entry.insert("reserveTokens".into(), json!(budget.reserve_tokens));
+    }
+    Ok(())
+}
+
 fn pi_compaction(settings: &mut Value, config: &Config, catalog: &Value) -> Result<()> {
     for id in pi_response_models(config) {
         pi_object(settings, "compaction", "settings.json compaction")?;
         let compaction = &mut settings["compaction"];
         let keep = pi_tokens(
             compaction.get("keepRecentTokens"),
-            20000,
+            DEFAULT_BUDGET.keep_recent_tokens,
             "keepRecentTokens",
         )?;
-        let reserve = pi_tokens(compaction.get("reserveTokens"), 16384, "reserveTokens")?;
+        let reserve = pi_tokens(
+            compaction.get("reserveTokens"),
+            DEFAULT_BUDGET.reserve_tokens,
+            "reserveTokens",
+        )?;
         let provider = &catalog["providers"][PI_PROVIDER];
         let model = provider["models"]
             .as_array()
@@ -258,7 +318,7 @@ fn pi_compaction(settings: &mut Value, config: &Config, catalog: &Value) -> Resu
             provider["modelOverrides"][&id]
                 .get("contextWindow")
                 .or_else(|| model.and_then(|m| m.get("contextWindow"))),
-            128000,
+            DEFAULT_BUDGET.context_window,
             "contextWindow",
         )?;
         if context < 4 {
@@ -289,12 +349,12 @@ fn pi_compaction(settings: &mut Value, config: &Config, catalog: &Value) -> Resu
         let repaired_keep = if explicit_keep.is_some() {
             effective_keep
         } else {
-            keep.min(20000).min(context / 4)
+            keep.min(DEFAULT_BUDGET.keep_recent_tokens).min(context / 4)
         };
         let repaired_reserve = if explicit_reserve.is_some() {
             effective_reserve
         } else {
-            reserve.min(16384).min(context / 4)
+            reserve.min(DEFAULT_BUDGET.reserve_tokens).min(context / 4)
         };
         if unsafe_budget(repaired_keep, repaired_reserve) {
             bail!(
@@ -413,10 +473,18 @@ pub fn configure_pi(config: &Config, api_key: &str, home: Option<&Path>) -> Resu
     let mut settings = pi_document(&settings_path, "settings.json")?;
     settings["defaultProvider"] = json!(PI_PROVIDER);
     settings["defaultModel"] = json!(default);
-    pi_compaction(&mut settings, config, &catalog)?;
+    if let Some(registry) = &config.model_registry {
+        registry.validate()?;
+        pi_registry(&mut settings, &mut catalog, config, registry)?;
+    } else {
+        pi_compaction(&mut settings, config, &catalog)?;
+    }
     // Both documents parse and validate before either file is changed.
     write_json(&models_path, &catalog)?;
     write_json(&settings_path, &settings)?;
+    if config.model_registry.is_some() {
+        println!("Model limits and compaction generated from proxy config model_registry.");
+    }
     println!(
         "Pi configured: {} → {base_url} ({} models, default {default})",
         models_path.display(),

@@ -36,6 +36,19 @@ An alias may include `api_shape`: `responses`, `chat_completions`, or legacy `co
 
 Shapes are identified from the endpoint, not payload fields. Responses includes HTTP, streaming, WebSockets, and `/v1/responses/compact`. Chat Completions includes `/v1/chat/completions` and the custom adapter at `/v1/custom/chat/completions`. Scoped rules do not affect model metadata, audio, Realtime, or native Gemini endpoints. Matching ignores a trailing slash and query parameters. Alias targets are still resolved only once.
 
+## Model budget registry
+
+`model_registry` is the single source for Pi context limits, output limits, retained history, and compaction reserve. `configure-pi` reads it from this config; edit it here rather than editing the generated Pi files. See the [complete example](../README.md#configure-pi--optional).
+
+- `defaults` requires all four fields: `context_window`, `max_tokens`, `keep_recent_tokens`, `reserve_tokens` (integer token counts).
+- `models` maps upstream model names to overrides of any of those fields. Omitted fields inherit `defaults`. Use `gemini/` for Gemini and omit the optional `openai/` prefix for OpenAI.
+- Keys describe backend models, not frontend aliases. Resolution follows one alias rewrite, all reasoning routes, and all fallback destinations. It takes the minimum of each budget so switching routes remains safe. A direct target follows its own routing rule if one exists.
+- Limits must be positive; output must fit within the reserve; reserve and retention must each fit within half the context; their sum must be smaller than context. All values must fit JavaScript's safe integer range. Invalid registry entries fail validation, including entries not currently served.
+
+For Responses models, `configure-pi` writes `contextWindow` / `maxTokens` into `models.json` and `keepRecentTokens` / `reserveTokens` into `settings.json` under `compaction.modelOverrides["hey-proxy/MODEL"]`. It removes competing context/output fields from this provider's `modelOverrides`, preserving other metadata. Registry changes therefore replace earlier generated values on every run. Without a registry, the previous preservation and inherited-budget repair behavior remains available.
+
+The registry configures Pi; it does not clamp arbitrary proxy requests or discover upstream limits. Defaults are conservative client budgets, not claims about an unknown backend's maximum. Verified experimental-model limits should be revisited when the backend changes. Run `hey-proxy configure-pi` after registry/routing changes, then restart Pi. Project-level `.pi/settings.json` can still override user-level settings and should not duplicate registry-managed budgets.
+
 ## Applying edits
 
 Routing, providers, credentials, and fallback rules reload for new requests. In-flight requests keep their original snapshot. Invalid changes keep the previous configuration active and print an error. Changing `listen` or persistent logging options requires a restart.

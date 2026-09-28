@@ -12,6 +12,7 @@ use std::{
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "ConfigFile")]
 pub struct Config {
+    pub model_registry: Option<crate::model_registry::ModelRegistry>,
     pub fallbacks: hey_proxy::fallback::Fallbacks,
     #[serde(default)]
     pub ssh_hosts: Vec<SshHost>,
@@ -48,6 +49,8 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_registry: Option<crate::model_registry::ModelRegistry>,
     #[serde(default)]
     fallbacks: hey_proxy::fallback::Fallbacks,
     #[serde(default)]
@@ -126,6 +129,7 @@ impl TryFrom<ConfigFile> for Config {
             file.gemini = Some(gemini);
         }
         Ok(Self {
+            model_registry: file.model_registry,
             fallbacks: file.fallbacks,
             ssh_hosts: file.ssh_hosts,
             mode: file.mode,
@@ -170,6 +174,10 @@ impl Serialize for Config {
             }
             value["providers"] =
                 serde_json::to_value(providers).map_err(serde::ser::Error::custom)?;
+        }
+        if let Some(registry) = &self.model_registry {
+            value["model_registry"] =
+                serde_json::to_value(registry).map_err(serde::ser::Error::custom)?;
         }
         if !self.ssh_hosts.is_empty() {
             value["ssh_hosts"] =
@@ -378,6 +386,7 @@ impl Default for Retry {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            model_registry: None,
             fallbacks: BTreeMap::new(),
             gemini: None,
             credential_cache_seconds: 2400,
@@ -468,6 +477,9 @@ impl Config {
         config
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(registry) = &self.model_registry {
+            registry.validate()?;
+        }
         if !(128..=1_048_576).contains(&self.logging.queue_capacity)
             || !(1..=4096).contains(&self.logging.batch_size)
             || self.logging.batch_size > self.logging.queue_capacity

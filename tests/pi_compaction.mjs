@@ -93,6 +93,40 @@ try {
     }
     assert(checked >= 3, `Expected at least three regression cases, found ${checked}`);
     console.log(`Passed ${checked} Pi compaction regression cases`);
+
+    // Validate the registry's generated files through real Pi composition and
+    // settings resolution, including replacing previously generated budgets.
+    const registry = {
+        defaults: { context_window: 128000, max_tokens: 16384, keep_recent_tokens: 20000, reserve_tokens: 16384 },
+        models: { "gemini/gemini-early-exp": {
+            context_window: 1048576, max_tokens: 65536, keep_recent_tokens: 100000, reserve_tokens: 200000,
+        } },
+    };
+    for (const max of [65536, 32768]) {
+        registry.models["gemini/gemini-early-exp"].max_tokens = max;
+        writeFileSync(join(agent, "proxy.json"), JSON.stringify({
+            listen: "127.0.0.1:8080", model_registry: registry,
+            aliases: [{ from: "gemini-test", to: "gemini/gemini-early-exp" },
+                { from: "coding", to: "unknown" }],
+        }));
+        execFileSync(resolve("target/debug/hey-proxy"), ["--config", join(agent, "proxy.json"), "configure-pi"], {
+            env: { ...process.env, PI_CODING_AGENT_DIR: agent },
+        });
+        const generated = JSON.parse(readFileSync(join(agent, "models.json")));
+        const runtime = composeModelProvider("hey-proxy", undefined, { getProvider: (id) => generated.providers[id] });
+        const manager = SettingsManager.inMemory(JSON.parse(readFileSync(join(agent, "settings.json"))));
+        for (const id of ["gemini-test", "gemini/gemini-early-exp", "coding", "unknown"]) {
+            const model = runtime.getModels().find((m) => m.id === id);
+            const gemini = id.startsWith("gemini");
+            assert.equal(model.contextWindow, gemini ? 1048576 : 128000);
+            assert.equal(model.maxTokens, gemini ? max : 16384);
+            assert.deepEqual(manager.getCompactionSettings(model), {
+                enabled: true, keepRecentTokens: gemini ? 100000 : 20000, reserveTokens: gemini ? 200000 : 16384,
+            });
+            assert.equal(clampMaxTokensToContext(model, { messages: [] }, model.maxTokens), model.maxTokens);
+        }
+    }
+    console.log("Passed registry propagation and update checks through installed Pi");
 } finally {
     rmSync(agent, { recursive: true, force: true });
 }

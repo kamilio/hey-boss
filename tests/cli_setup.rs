@@ -356,3 +356,176 @@ fn configure_pi_rejects_malformed_tuning_before_writing_either_file() {
         assert_eq!(std::fs::read_dir(agent.path()).unwrap().count(), 2);
     }
 }
+
+fn registry_fixture() -> Value {
+    json!({
+        "defaults": {"context_window":128000, "max_tokens":16384,
+            "keep_recent_tokens":20000, "reserve_tokens":16384},
+        "models": {"gemini/gemini-early-exp": {
+            "context_window":1048576, "max_tokens":65536,
+            "keep_recent_tokens":100000, "reserve_tokens":200000}}
+    })
+}
+
+#[test]
+fn configure_pi_registry_updates_aliases_routes_fallbacks_and_removes_competing_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let agent = home.join("pi");
+    std::fs::create_dir(&agent).unwrap();
+    let config_path = home.join("proxy.json");
+    let mut config = json!({
+        "listen":"127.0.0.1:18080",
+        "model_registry":registry_fixture(),
+        "aliases":[
+            {"from":"gemini-test","to":"gemini/gemini-early-exp"},
+            {"from":"second-alias","to":"gemini/gemini-early-exp"},
+            {"from":"coding","to":"unknown"},
+            {"from":"mixed","to":"gemini/gemini-early-exp","reasoning_routes":{"low":{"to":"unknown"}}},
+            {"from":"with-fallback","to":"openai/large"},
+            {"from":"direct"}
+        ],
+        "fallbacks":{"large":["unknown"]}
+    });
+    config["model_registry"]["models"]["large"] =
+        config["model_registry"]["models"]["gemini/gemini-early-exp"].clone();
+    // Registry keys describe backends, even if a key is also a frontend alias.
+    config["model_registry"]["models"]["coding"] =
+        config["model_registry"]["models"]["large"].clone();
+    std::fs::write(agent.join("models.json"), json!({"providers":{
+        "other":{"models":[{"id":"mine","contextWindow":42}]},
+        "hey-proxy":{"models":[{"id":"gemini-test","contextWindow":100,"maxTokens":2,"name":"Mine"}],
+            "modelOverrides":{"gemini-test":{"contextWindow":200,"maxTokens":1,"reasoning":true},
+                "second-alias":{"contextWindow":10,"maxTokens":1}}}
+    }}).to_string()).unwrap();
+    std::fs::write(agent.join("settings.json"), json!({"theme":"light","compaction":{
+        "enabled":true,"keepRecentTokens":100000,"reserveTokens":200000,
+        "modelOverrides":{"hey-proxy/gemini-test":{"reserveTokens":1},"other/model":{"reserveTokens":8}}
+    }}).to_string()).unwrap();
+    let run = || {
+        let result = cli(home)
+            .env("PI_CODING_AGENT_DIR", &agent)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("configure-pi")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    for (context, output, keep, reserve) in [
+        (1048576, 65536, 100000, 200000),
+        (524288, 32768, 50000, 100000),
+    ] {
+        config["model_registry"]["models"]["gemini/gemini-early-exp"] = json!({
+            "context_window":context,"max_tokens":output,"keep_recent_tokens":keep,"reserve_tokens":reserve});
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        run();
+        let catalog: Value =
+            serde_json::from_slice(&std::fs::read(agent.join("models.json")).unwrap()).unwrap();
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(agent.join("settings.json")).unwrap()).unwrap();
+        let provider = &catalog["providers"]["hey-proxy"];
+        for id in ["gemini-test", "second-alias", "gemini/gemini-early-exp"] {
+            let model = provider["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap();
+            assert_eq!(model["contextWindow"], context);
+            assert_eq!(model["maxTokens"], output);
+            assert_eq!(
+                settings["compaction"]["modelOverrides"][format!("hey-proxy/{id}")],
+                json!({"keepRecentTokens":keep,"reserveTokens":reserve})
+            );
+        }
+        for id in [
+            "coding",
+            "unknown",
+            "mixed",
+            "with-fallback",
+            "openai/large",
+            "direct",
+        ] {
+            let model = provider["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap();
+            assert_eq!(model["contextWindow"], 128000, "{id}");
+            assert_eq!(model["maxTokens"], 16384, "{id}");
+            assert_eq!(
+                settings["compaction"]["modelOverrides"][format!("hey-proxy/{id}")],
+                json!({"keepRecentTokens":20000,"reserveTokens":16384}),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            provider["modelOverrides"]["gemini-test"],
+            json!({"reasoning":true})
+        );
+        assert!(provider["modelOverrides"].get("second-alias").is_none());
+        assert_eq!(
+            catalog["providers"]["other"]["models"][0]["contextWindow"],
+            42
+        );
+        assert_eq!(settings["theme"], "light");
+        assert_eq!(
+            settings["compaction"]["modelOverrides"]["other/model"]["reserveTokens"],
+            8
+        );
+        assert_eq!(settings["compaction"]["reserveTokens"], 200000);
+        let before: Vec<_> = ["models.json", "settings.json"]
+            .map(|f| std::fs::read(agent.join(f)).unwrap())
+            .into();
+        let files = std::fs::read_dir(&agent).unwrap().count();
+        run();
+        for (i, f) in ["models.json", "settings.json"].iter().enumerate() {
+            assert_eq!(std::fs::read(agent.join(f)).unwrap(), before[i]);
+        }
+        assert_eq!(std::fs::read_dir(&agent).unwrap().count(), files);
+    }
+}
+
+#[test]
+fn configure_pi_registry_rejects_invalid_budgets_before_writes() {
+    for (field, bad) in [
+        ("context_window", json!(0)),
+        ("context_window", json!(9007199254740992u64)),
+        ("max_tokens", json!(0)),
+        ("max_tokens", json!(2000000)),
+        ("max_tokens", json!(65536.5)),
+        ("keep_recent_tokens", json!(800000)),
+        ("reserve_tokens", json!(100)),
+        ("reserve_tokens", json!(600000)),
+        ("reserve_tokens", json!(-1)),
+        ("typo", json!(10)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config_path = home.join("proxy.json");
+        let mut config = json!({"listen":"127.0.0.1:18080","aliases":[{"from":"gemini-test","to":"gemini/gemini-early-exp"}],"model_registry":registry_fixture()});
+        config["model_registry"]["models"]["gemini/gemini-early-exp"][field] = bad;
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        for f in ["models.json", "settings.json"] {
+            std::fs::write(home.join(f), b"{}\n").unwrap();
+        }
+        let result = cli(home)
+            .env("PI_CODING_AGENT_DIR", home)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("configure-pi")
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{field}");
+        for f in ["models.json", "settings.json"] {
+            assert_eq!(std::fs::read(home.join(f)).unwrap(), b"{}\n");
+        }
+        assert_eq!(std::fs::read_dir(home).unwrap().count(), 3);
+    }
+}

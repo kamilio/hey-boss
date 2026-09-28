@@ -2,6 +2,7 @@ mod access;
 mod config;
 #[cfg(test)]
 mod mode_tests;
+mod model_registry;
 mod proxy;
 mod rollout;
 
