@@ -90,6 +90,7 @@ impl Api {
             .route("/v1/pr-status", get(pr_status))
             .route("/v1/prs/{owner}/{repo}", get(my_prs))
             .route("/v1/prs/{owner}/{repo}/{number}", get(pr))
+            .route("/v1/prs/{owner}/{repo}/{number}/metadata", get(pr_metadata))
             .route("/v1/prs/{owner}/{repo}/{number}/ci", get(ci))
             .route(
                 "/v1/prs/{owner}/{repo}/{number}/required-checks",
@@ -620,6 +621,28 @@ async fn pr(
                 api.0
                     .client
                     .pr_report(&format!("{owner}/{repo}"), number, query.freshness()?),
+            )
+            .await?,
+    ))
+}
+async fn pr_metadata(
+    State(api): State<Api>,
+    Path((owner, repo, number)): Path<(String, String, u64)>,
+    Query(query): Query<ReadQuery>,
+) -> ApiResult<Json<crate::Response>> {
+    // Background lane, bounded queue lifetime even if the caller disconnects.
+    Ok(Json(
+        crate::client::BACKGROUND_READ
+            .scope(
+                (),
+                crate::client::REQUEST_DEADLINE.scope(
+                    Some(tokio::time::Instant::now() + Duration::from_secs(15)),
+                    api.0.client.pull_request(
+                        &format!("{owner}/{repo}"),
+                        number,
+                        query.freshness()?,
+                    ),
+                ),
             )
             .await?,
     ))
