@@ -733,8 +733,8 @@ class FleetTests(unittest.TestCase):
             signal = command('worker', '--json', 'restart', identifier)
             self.assertEqual(signal['state'], 'pending')
             def completed():
-                overview = command('fleet', 'status')
-                return next((s for s in overview['signals'] if s['id'] == signal['id'] and s['state'] == 'acknowledged'), None)
+                overview = command('fleet', 'status', '--records', 'signals')
+                return next((s for s in overview['records'] if s['id'] == signal['id'] and s['state'] == 'acknowledged'), None)
             until(completed)
             current = command('worker', '--json', 'status')['workers']
             replacement = next(w['pid'] for w in current if w['id'] == identifier)
