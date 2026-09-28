@@ -353,6 +353,16 @@ fn rows(d: &Dashboard) -> Vec<String> {
             };
             let mut rows = vec![
                 format!(
+                    "Binary build: {}",
+                    s.reporting_build.as_deref().unwrap_or("unknown")
+                ),
+                format!(
+                    "Last scan build: {}",
+                    s.scan_build
+                        .as_deref()
+                        .unwrap_or("unknown; awaiting a new scan")
+                ),
+                format!(
                     "Disk: {} available / {}",
                     bytes(s.metrics.disk_available_bytes),
                     bytes(s.metrics.disk_total_bytes)
@@ -438,6 +448,7 @@ fn detail_limit(d: &Dashboard, area: Rect) -> u16 {
 }
 fn render(frame: &mut ratatui::Frame, d: &Dashboard) {
     let chunks = sections(frame.area());
+    let compact = frame.area().width < 80;
     let titles = d
         .machines
         .iter()
@@ -459,17 +470,26 @@ fn render(frame: &mut ratatui::Frame, d: &Dashboard) {
         Tabs::new(titles)
             .select(d.selected)
             .highlight_style(Style::default().fg(Color::Cyan))
-            .block(Block::bordered().title("hey-harvester · Tab / Shift-Tab switches machines")),
+            .block(Block::bordered().title(if compact {
+                "hey-harvester · Tab switches machines"
+            } else {
+                "hey-harvester · Tab / Shift-Tab switches machines"
+            })),
         chunks[0],
     );
     frame.render_widget(
-        Tabs::new([
-            "1 Overview",
-            "2 Processes",
-            "3 Worktrees",
-            "4 Caches",
-            "5 Activity",
-        ])
+        Tabs::new(if compact {
+            ["1 Home", "2 Proc", "3 Git", "4 Cache", "5 Log"]
+        } else {
+            [
+                "1 Overview",
+                "2 Processes",
+                "3 Worktrees",
+                "4 Caches",
+                "5 Activity",
+            ]
+        })
+        .divider(if compact { " " } else { "│" })
         .select(d.page)
         .highlight_style(Style::default().fg(Color::Cyan))
         .block(Block::bordered()),
@@ -495,7 +515,13 @@ fn render(frame: &mut ratatui::Frame, d: &Dashboard) {
         );
     }
     let status = if d.detail_scroll.is_some() {
-        "↑/↓ or PgUp/PgDn Scroll details · Esc Back · q Quit"
+        if compact {
+            "↑/↓ Scroll · Esc Back · q Quit"
+        } else {
+            "↑/↓ or PgUp/PgDn Scroll details · Esc Back · q Quit"
+        }
+    } else if compact && d.confirmation.is_none() && d.machines[d.selected].error.is_none() {
+        "↑/↓ Select · Enter Details · q Quit\n1–5 Pages · Tab Machine · r Refresh"
     } else {
         d.confirmation.as_ref().map(|(_, _, text)| text.as_str()).or(d.machines[d.selected].error.as_deref()).unwrap_or("Enter Details · r Refresh · s Scan · c Clean · a Automatic · x Remove worktree\np Processes · w Worktrees · b Caches · l Log trimming · ↑/↓ Scroll · q Quit")
     };
@@ -546,6 +572,39 @@ mod tests {
         assert!(rendered.contains("devbox"));
         assert!(rendered.contains("Automatic: false"));
         assert!(rendered.contains("Tab / Shift-Tab"));
+    }
+
+    #[test]
+    fn dashboard_distinguishes_new_binary_from_legacy_and_old_scan_evidence() {
+        for scan in [None, Some("0123456789abcdef".to_owned())] {
+            let mut d = Dashboard::new(vec![], None);
+            d.complete(
+                0,
+                Ok(Snapshot {
+                    reporting_build: Some("fedcba9876543210".into()),
+                    scan_build: scan.clone(),
+                    ..Snapshot::default()
+                }),
+            );
+            for (width, height) in [(120, 24), (80, 24), (48, 20)] {
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                terminal.draw(|f| render(f, &d)).unwrap();
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>();
+                assert!(text.contains("Binary build: fedcba9876543210"));
+                assert!(text.contains(&format!(
+                    "Last scan build: {}",
+                    scan.as_deref().unwrap_or("unknown")
+                )));
+            }
+        }
     }
 
     #[test]

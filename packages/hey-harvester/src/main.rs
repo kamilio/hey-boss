@@ -2,7 +2,7 @@ use clap::Parser;
 use hey_harvester::cli::{Action, run, run_remote};
 
 #[derive(Parser)]
-#[command(version, about = "Machine maintenance — Tab switches between machines")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("HEY_HARVESTER_BUILD_ID"), ")"), about = "Machine maintenance — Tab switches between machines")]
 struct Options {
     /// Select a machine from the existing Hey Boss SSH inventory.
     #[arg(long, global = true)]

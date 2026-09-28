@@ -183,6 +183,12 @@ pub struct Activity {
 }
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// The binary answering this request; does not relabel stored scan evidence.
+    #[serde(default)]
+    pub reporting_build: Option<String>,
+    /// The worker which began the latest scan, absent for pre-upgrade snapshots.
+    #[serde(default)]
+    pub scan_build: Option<String>,
     pub observed_at: u64,
     #[serde(default)]
     pub cycle_duration_seconds: u64,
@@ -371,6 +377,7 @@ impl Store {
     pub fn status(&self) -> io::Result<Snapshot> {
         let mut s = self.state()?.snapshot;
         self.reconcile_running_snapshot(&mut s)?;
+        s.reporting_build = Some(crate::BUILD_ID.into());
         s.config = self.config()?;
         s.metrics = system::metrics();
         s.refresh_process_inventory();
@@ -450,6 +457,8 @@ impl Store {
         let mut state = self.state()?;
         let observation_config = config.for_observations(&state.snapshot);
         let mut snapshot = Snapshot {
+            reporting_build: Some(crate::BUILD_ID.into()),
+            scan_build: Some(crate::BUILD_ID.into()),
             observed_at: now(),
             metrics: system::metrics(),
             config: config.clone(),
