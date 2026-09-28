@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 fn local_config(ctx: &Context) -> Result<Vec<Value>> {
     Ok(
@@ -29,6 +29,44 @@ fn local_config(ctx: &Context) -> Result<Vec<Value>> {
 }
 fn reply(output: &Arc<Mutex<std::io::Stdout>>, value: Value) -> Result<()> {
     send(&mut *output.lock().unwrap(), value)
+}
+
+// Transport observation must not wait for database or worker collection. Keep
+// last_sync separate: receiving a ping is not evidence that a pull was applied.
+struct ConnectionStatus {
+    ctx: Context,
+    value: Value,
+    written: Option<Instant>,
+}
+impl ConnectionStatus {
+    fn new(ctx: Context, last_sync: Value) -> Self {
+        Self {
+            ctx,
+            value: json!({"connected_at":0,"last_sync":last_sync}),
+            written: None,
+        }
+    }
+    fn observe(&mut self, connected: bool) -> Result<()> {
+        self.value["connected_at"] = json!(if connected { now() } else { 0.0 });
+        if !connected
+            || self
+                .written
+                .is_none_or(|time| time.elapsed() >= Duration::from_secs(1))
+        {
+            self.write()?;
+        }
+        Ok(())
+    }
+    fn synced(&mut self) -> Result<()> {
+        self.value["last_sync"] = json!(now());
+        self.write()
+    }
+    fn write(&mut self) -> Result<()> {
+        self.ctx
+            .atomic_json(&self.ctx.state.join("fleet-agent-status.json"), &self.value)?;
+        self.written = Some(Instant::now());
+        Ok(())
+    }
 }
 
 // Database work can outlast a heartbeat interval. Report transport liveness
@@ -110,6 +148,7 @@ impl Incoming {
         input: R,
         replies: mpsc::SyncSender<Value>,
         stop: Arc<AtomicBool>,
+        mut observe: impl FnMut(bool) -> Result<()> + Send + 'static,
     ) -> Self {
         let (messages, received) = mpsc::sync_channel(4);
         let ping = Arc::new(AtomicBool::new(false));
@@ -127,6 +166,9 @@ impl Incoming {
                     if message.as_ref().is_some_and(|m| m["version"] != 1) {
                         Err(invalid("Unsupported fleet protocol version"))
                     } else {
+                        if message.is_some() {
+                            observe(true)?;
+                        }
                         Ok(message)
                     }
                 });
@@ -144,6 +186,7 @@ impl Incoming {
                     break;
                 }
             }
+            let _ = observe(false);
         });
         Self {
             messages: Some(received),
@@ -175,12 +218,15 @@ impl Drop for Incoming {
         let _ = self.thread.take().unwrap().join();
     }
 }
-pub(super) fn stdio(ctx: Context) -> Result<()> {
+pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result<()> {
     // Register fleet identity before journaling and exporting the first hello.
+    startup.phase("identity");
     ctx.rpc(json!({"action":"whoami"}))?;
+    startup.phase("capture");
     let db = ctx.db()?;
     let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     if role == "standalone" {
+        startup.phase("bootstrap");
         db.backup(
             "main",
             ctx.state
@@ -216,14 +262,19 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
         replica::state_set(&db, "bootstrap_last_seq", &json!(max))?;
         tx.commit()?;
     }
+    startup.phase("capture");
     replica::install_capture(&db, "agent", &ctx.node)?;
     let output = Arc::new(Mutex::new(std::io::stdout()));
+    startup.phase("relay");
     let relay = authority::Relay::start(&ctx, output.clone())?;
+    startup.phase("workers");
+    let workers = ctx.workers()?;
+    startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    reply(
-        &output,
-        json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":ctx.workers()?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
-    )?;
+    let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    // Join the reporter before hello so startup frames cannot leak into the session.
+    drop(startup);
+    reply(&output, hello)?;
     let (tx, rx) = mpsc::sync_channel::<Value>(100);
     let signals = ctx.clone();
     let signal_output = output.clone();
@@ -242,7 +293,14 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     let input = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mut input = Incoming::start(input, relay.replies(), ctx.stop.clone());
+    let status = Arc::new(Mutex::new(ConnectionStatus::new(
+        ctx.clone(),
+        replica::state_get(&db, "last_sync", Value::Null)?,
+    )));
+    let observed = status.clone();
+    let mut input = Incoming::start(input, relay.replies(), ctx.stop.clone(), move |connected| {
+        observed.lock().unwrap().observe(connected)
+    });
     let mut pulls = pull::PullReader::default();
     while !ctx.stopped() {
         let Some(message) = input.next()? else {
@@ -276,10 +334,7 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
                         .unwrap_or(&[]),
                 )?;
                 crate::chief_ownership::stop_unassigned(&db)?;
-                ctx.atomic_json(
-                    &ctx.state.join("fleet-agent-status.json"),
-                    &json!({"connected_at":now(),"last_sync":now()}),
-                )?;
+                status.lock().unwrap().synced()?;
                 control::reconcile(
                     &ctx,
                     &ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?,
@@ -315,10 +370,6 @@ pub(super) fn stdio(ctx: Context) -> Result<()> {
             Some("ping") => {
                 // Acknowledgment precedes observation of the stopped Chief.
                 let chief_ownership = crate::chief_ownership::read(&db)?;
-                ctx.atomic_json(
-                    &ctx.state.join("fleet-agent-status.json"),
-                    &json!({"connected_at":now(),"last_sync":replica::state_get(&db,"last_sync",Value::Null)?}),
-                )?;
                 reply(
                     &output,
                     json!({"kind":"heartbeat","at":now(),"chief_ownership":chief_ownership,"workers":ctx.workers()?,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
@@ -377,10 +428,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn received_pings_refresh_status_while_work_is_blocked_without_advancing_sync() {
+        let (_root, ctx, _store) = super::super::context::tests::test_context();
+        let status = Arc::new(Mutex::new(ConnectionStatus::new(ctx.clone(), json!(123))));
+        let writer_db = ctx.db().unwrap();
+        writer_db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replies, _) = mpsc::sync_channel(2);
+        let (observations, received) = mpsc::channel();
+        let observed = status.clone();
+        let input = Incoming::start(reader, replies, ctx.stop.clone(), move |connected| {
+            observed.lock().unwrap().observe(connected)?;
+            let _ = observations.send(connected);
+            Ok(())
+        });
+        // The main consumer is deliberately idle, as during a slow pull.
+        send(&mut writer, json!({"kind":"ping"})).unwrap();
+        assert!(received.recv_timeout(Duration::from_secs(2)).unwrap());
+        let saved = ctx
+            .read_json(&ctx.state.join("fleet-agent-status.json"), Value::Null)
+            .unwrap();
+        assert!(now() - saved["connected_at"].as_f64().unwrap() < 2.0);
+        assert_eq!(saved["last_sync"], 123);
+        // Even coalesced pings remain observations of the live supervisor.
+        send(&mut writer, json!({"kind":"ping"})).unwrap();
+        assert!(received.recv_timeout(Duration::from_secs(2)).unwrap());
+        drop(writer);
+        assert!(!received.recv_timeout(Duration::from_secs(2)).unwrap());
+        drop(input);
+        let saved = ctx
+            .read_json(&ctx.state.join("fleet-agent-status.json"), Value::Null)
+            .unwrap();
+        assert_eq!(saved["connected_at"], 0.0);
+        assert_eq!(saved["last_sync"], 123);
+        writer_db.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
     fn input_delivers_authority_replies_ahead_of_work_and_coalesces_pings() {
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (replies, received) = mpsc::sync_channel(2);
-        let mut input = Incoming::start(reader, replies, Arc::new(AtomicBool::new(false)));
+        let mut input =
+            Incoming::start(
+                reader,
+                replies,
+                Arc::new(AtomicBool::new(false)),
+                |_| Ok(()),
+            );
         send(&mut writer, json!({"kind":"pull"})).unwrap();
         for _ in 0..100 {
             send(&mut writer, json!({"kind":"ping"})).unwrap();
@@ -408,7 +502,13 @@ mod tests {
         ] {
             let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
             let (replies, _) = mpsc::sync_channel(2);
-            let input = Incoming::start(reader, replies, Arc::new(AtomicBool::new(false)));
+            let input =
+                Incoming::start(
+                    reader,
+                    replies,
+                    Arc::new(AtomicBool::new(false)),
+                    |_| Ok(()),
+                );
             writer.write_all(&bytes).unwrap();
             let started = std::time::Instant::now();
             drop(input);
@@ -420,7 +520,13 @@ mod tests {
     fn input_rejects_incompatible_replies_before_routing_them() {
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (replies, received) = mpsc::sync_channel(2);
-        let mut input = Incoming::start(reader, replies, Arc::new(AtomicBool::new(false)));
+        let mut input =
+            Incoming::start(
+                reader,
+                replies,
+                Arc::new(AtomicBool::new(false)),
+                |_| Ok(()),
+            );
         writeln!(
             writer,
             "{}",

@@ -135,6 +135,60 @@ impl Drop for Service {
 }
 
 #[test]
+fn startup_reports_database_contention_before_hello_and_recovers() {
+    use std::sync::mpsc;
+    let fixture = Fixture::new();
+    fixture.issue();
+    let db = hey_boss::database::Connection::connect(&fixture.root.join("issues.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut child = Service(
+        fixture
+            .command(&["fleet", "companion", "--stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let input = child.0.stdin.take().unwrap();
+    let output = child.0.stdout.take().unwrap();
+    let (frames, received) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if frames
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let progress = received.recv_timeout(Duration::from_secs(8));
+    db.execute_batch("ROLLBACK").unwrap();
+    let progress = progress.expect("Database contention suppressed startup liveness");
+    assert_eq!(progress["kind"], "starting", "{progress}");
+    assert!(
+        matches!(
+            progress["phase"].as_str(),
+            Some("database" | "identity" | "capture" | "bootstrap")
+        ),
+        "{progress}"
+    );
+    assert!(progress.get("workers").is_none());
+    assert!(progress.get("cursor").is_none());
+    loop {
+        let frame = received.recv_timeout(Duration::from_secs(15)).unwrap();
+        if frame["kind"] != "starting" {
+            assert_eq!(frame["kind"], "hello", "{frame}");
+            break;
+        }
+    }
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
+#[test]
 fn configuration_reports_liveness_while_waiting_for_the_writer() {
     use serde_json::json;
     use std::sync::mpsc;
