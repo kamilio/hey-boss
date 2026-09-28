@@ -86,10 +86,10 @@ pub(super) fn run(ctx: Context) {
 
 fn ensure_daemon(ctx: &Context, child: &mut Option<std::process::Child>) -> Result<()> {
     use std::process::{Command, Stdio};
-    if let Some(process) = child.as_mut() {
-        if process.try_wait()?.is_some() {
-            *child = None;
-        }
+    if let Some(process) = child.as_mut()
+        && process.try_wait()?.is_some()
+    {
+        *child = None;
     }
     if std::net::TcpStream::connect_timeout(&"127.0.0.1:8787".parse()?, Duration::from_millis(200))
         .is_ok()
