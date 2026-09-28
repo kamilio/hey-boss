@@ -272,6 +272,10 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
     let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let status = Arc::new(Mutex::new(ConnectionStatus::new(
+        ctx.clone(),
+        replica::state_get(&db, "last_sync", Value::Null)?,
+    )));
     // Join the reporter before hello so startup frames cannot leak into the session.
     drop(startup);
     reply(&output, hello)?;
@@ -293,10 +297,6 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         return Err(std::io::Error::last_os_error().into());
     }
     let input = unsafe { std::fs::File::from_raw_fd(fd) };
-    let status = Arc::new(Mutex::new(ConnectionStatus::new(
-        ctx.clone(),
-        replica::state_get(&db, "last_sync", Value::Null)?,
-    )));
     let observed = status.clone();
     let mut input = Incoming::start(input, relay.replies(), ctx.stop.clone(), move |connected| {
         observed.lock().unwrap().observe(connected)
