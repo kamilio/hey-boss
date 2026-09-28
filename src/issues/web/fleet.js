@@ -83,25 +83,27 @@ async function resolveAssignedAgent(data, query, read) {
   if(recent)return recent;
   return read('/api/fleet/assignment?'+new URLSearchParams({project:query.get('project'),issue:query.get('issue'),agent:query.get('agent')}));
 }
+function managedFleet(data) {return {...data,machines:(data.machines||[]).map(m=>({...m,workers:(m.workers||[]).filter(w=>w.managed!==false&&(!w.retiring||w.pid>0))}))};}
 function deviceView(data, project, now = Date.now()) {
   return (data.machines || []).map(machine => {
     const workers = (machine.workers || []).filter(w => !project || !w.config?.projects?.length || w.config.projects.includes(project));
     const online = machine.state === 'connected' && now / 1000 - (machine.heartbeat || 0) <= 15;
     const live = workers.filter(w => w.pid > 0), saved = workers.filter(w => !(w.pid > 0));
     return {machine, online, live, saved,
-      active: online ? live.reduce((n,w) => n + (w.runs || []).filter(r => r.finished_at == null).length, 0) : 0,
+      active: online ? live.reduce((n,w) => n + (w.active ?? (w.runs || []).filter(r => r.finished_at == null).length), 0) : 0,
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState, managedFleet};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
   const mobile = document.documentElement.dataset.agentMobile === 'true';
   const detail = location.pathname.endsWith('/session');
   const base = '/agents';
-  const route = () => new URLSearchParams(location.hash.slice(1));
+  const route = () => {const query=new URLSearchParams(location.hash.slice(1));if(location.pathname==='/workers')query.set('workers','');return query;};
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
+  let configRevision, configOriginal='', configPreview, configBusy=false;
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical, assignmentLoading=false;
   const seen = new Set();
   let takeoverBusy=false, takeoverTarget;
@@ -118,7 +120,7 @@ if (typeof document !== 'undefined') (() => {
   HeyBossUI.icons();
   const picker = new HeyBossUI.ProjectPicker({onSelect(project){location.href=base+'#'+new URLSearchParams({project});}});
   function context() {
-    if(!defaultProject)return;
+    if(!defaultProject){if(last)render(last);return;}
     const id=route().get('project')||defaultProject.id;
     picker.update(projects, projects.find(p=>p.id===id)||defaultProject);
     if(last)render(last);
@@ -136,6 +138,26 @@ if (typeof document !== 'undefined') (() => {
     a.append(top,title,preview,bottom);return a;
   }
   function renderOverview(data) {
+    const workersPage=route().has('workers');
+    $('worker-config').hidden=!workersPage;
+    $('projects').hidden=workersPage;
+    $('workers-tab').setAttribute('aria-current',workersPage?'page':'false');
+    document.querySelector('.page-heading h1').textContent=workersPage?'Workers':'Agents';
+    document.title=(workersPage?'Workers':'Agents')+' · Hey Boss';
+    if(workersPage){
+      const devices=deviceView(managedFleet(data)),workers=devices.flatMap(d=>[...d.live,...d.saved]).filter(w=>w.managed!==false);
+      $('overview-note').textContent='One configuration. Every machine. Live progress.';
+      $('show-all').hidden=true;
+      $('fleet-summary').replaceChildren(...[
+        [devices.filter(d=>d.online).length+' / '+devices.length,'machines connected'],
+        [workers.length,'configured workers'],
+        [devices.reduce((n,d)=>n+d.active,0),'active agents'],
+        [workers.reduce((n,w)=>n+(w.config?.concurrency||1),0),'configured slots'],
+      ].map(([value,label])=>{const card=element('div','fleet-stat');card.append(element('strong','',String(value)),element('span','',label));return card;}));
+      if(data.configuration?.error){$('config-status').textContent='File error: '+data.configuration.error+' The last valid configuration is still active.';}
+      else if(configRevision&&data.configuration?.revision&&configRevision!==data.configuration.revision&&!configBusy){$('config-status').textContent='The file changed elsewhere. Reload before saving; your edits are still here.';configPreview=undefined;$('config-save').disabled=true;}
+      renderDevices(data);return;
+    }
     const focus=document.activeElement?.dataset.focus;
     const open=new Set([...$('projects').querySelectorAll('details[open]')].map(d=>d.dataset.section));
     const filter=route().get('project');
@@ -179,23 +201,24 @@ if (typeof document !== 'undefined') (() => {
     renderDevices(data);
   }
   function renderDevices(data) {
-    const open=$('device-settings').open;
+    const workersPage=route().has('workers');
+    const open=workersPage||$('device-settings').open;
     const savedOpen=new Set([...$('device-list').querySelectorAll('details[open]')].map(d=>d.dataset.host));
-    const project=route().get('project');
-    const devices=deviceView(data,project);
+    const project=workersPage?null:route().get('project');
+    const devices=deviceView(workersPage?managedFleet(data):data,project);
     const projectName=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'');
     $('device-help').textContent=(project?'Workers that can pick up tasks for '+projectName(project)+'.':'Workers across all projects.')+' Each worker manages its own agent slots. Controls below affect that worker, including all its projects.';
     const controls=[];
     function workerRow(worker,device) {
       const {machine,online}=device, running=worker.pid>0;
-      const active=(worker.runs||[]).filter(r=>r.finished_at==null).length;
+      const active=worker.active??(worker.runs||[]).filter(r=>r.finished_at==null).length;
       const name=worker.config?.name;
       const label=name&&!/^Worker \d+$/.test(name)?name:'Worker '+worker.id.slice(0,8);
       const row=element('div','device-row');row.dataset.worker=worker.id;
       const info=element('div','worker-info');
       const heading=element('div','worker-heading');heading.append(element('strong','worker-name',label));
       if(name&&!/^Worker \d+$/.test(name))heading.append(element('span','worker-id',worker.id.slice(0,8)));
-      const state=!online?(running?'Last seen running':'Last seen stopped'):!running?'Stopped':!worker.config?.enabled?(active?'Draining':'Paused'):(active?'Working':'Idle');
+      const state=!online?(running?'Last seen running':'Offline'):!running&&worker.retry_at>Date.now()/1000?'Retrying':worker.intent==='drain'?'Draining':worker.intent==='pause'?'Paused':!running?(worker.intent==='running'?'Starting':'Stopped'):!worker.config?.enabled?(active?'Draining':'Paused'):(active?'Working':'Idle');
       heading.append(element('span','worker-state',state));info.append(heading);
       const ids=worker.config?.projects||[];
       info.append(element('p','worker-projects',ids.length?ids.map(projectName).join(', '):'All projects'));
@@ -210,12 +233,22 @@ if (typeof document !== 'undefined') (() => {
       info.append(element('p','worker-capacity',running?(online?'':'Last known: ')+active+' active '+(active===1?'agent':'agents')+' · '+(worker.config?.concurrency||1)+' '+((worker.config?.concurrency||1)===1?'slot':'slots'):'No running agents'));
       row.append(info);
       const buttons=element('div','device-actions');
-      const actions=running?[[worker.config?.enabled?'pause':'resume',worker.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']];
+      const actions=worker.retiring?[]:running?[[worker.config?.enabled?'pause':'resume',worker.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']];
       const hints={pause:'Finish current agents, then pause new task pickup.',resume:'Enable task pickup and start this worker if needed.',restart:'Stop this worker’s current agents and restart the worker.',stop:'Stop this worker and its current agents. It stays stopped until started again.'};
       for(const [action,text] of actions){
         const b=element('button','button small',text);b.type='button';b.title=hints[action];Object.assign(b.dataset,{signal:action,host:machine.host,worker:worker.id,focus:machine.host+':'+worker.id+':'+action});b.setAttribute('aria-label',text+' · '+label+' on '+(machine.hostname||machine.host));buttons.append(b);
       }
       row.append(buttons);
+      if(workersPage){
+        if(worker.error)row.append(element('p','device-note',worker.error));
+        if(online&&running&&!active&&worker.config?.enabled&&worker.eligible===0)row.append(element('p','device-note','Waiting for eligible issues.'));
+        const tasks=element('div','worker-tasks');
+        for(const run of [...(worker.runs||[]),...(worker.chiefs||[])].filter(r=>r.kind==='chief'?r.state==='running':r.finished_at==null)){
+          const task=element('a','worker-task');task.href=link({machine,run});
+          task.append(element('strong','',run.title||run.project_name||'Chief'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(task);
+        }
+        if(tasks.childNodes.length)row.append(tasks);
+      }
       if(!online)row.append(element('p','device-note','Device disconnected. Actions will wait for it to reconnect.'));
       for(const signal of (data.signals||[]).filter(s=>s.host===machine.host&&s.worker===worker.id&&s.state!=='acknowledged'))row.append(element('p','device-note',`${signal.signal}: ${signal.state}${machine.state==='connected'?'':' · waiting for connection'}`));
       return row;
@@ -225,15 +258,18 @@ if (typeof document !== 'undefined') (() => {
       const section=element('section','device-group');section.dataset.host=machine.host;
       const heading=element('div','device-heading');heading.append(element('h3','',machine.hostname||machine.host),element('span','device-connection',online?'Connected':'Disconnected'));section.append(heading);
       section.append(element('p','device-summary',online?live.length+' running '+(live.length===1?'worker':'workers')+' · '+active+' active '+(active===1?'agent':'agents')+' / '+capacity+' slots':'Showing last known worker state'));
+      if(machine.configuration_error)section.append(element('p','error','Configuration: '+machine.configuration_error));
+      else if(machine.desired_revision)section.append(element('p','device-summary',machine.desired_revision===machine.applied_revision?'Configuration applied':online?'Applying saved configuration…':'Saved · waiting for connection'));
       for(const worker of live)section.append(workerRow(worker,device));
-      if(saved.length){const past=element('details','saved-workers');past.dataset.host=machine.host;past.open=savedOpen.has(machine.host);past.append(element('summary','',saved.length+' '+(online?'stopped':'last seen stopped')+' '+(saved.length===1?'worker':'workers')));for(const worker of saved)past.append(workerRow(worker,device));section.append(past);}
+      if(workersPage){for(const worker of saved)section.append(workerRow(worker,device));}
+      else if(saved.length){const past=element('details','saved-workers');past.dataset.host=machine.host;past.open=savedOpen.has(machine.host);past.append(element('summary','',saved.length+' '+(online?'stopped':'last seen stopped')+' '+(saved.length===1?'worker':'workers')));for(const worker of saved)past.append(workerRow(worker,device));section.append(past);}
       if(!live.length&&!saved.length)section.append(element('p','device-note','No workers configured.'));
       controls.push(section);
     }
     const focus=document.activeElement?.dataset.focus;
     $('device-list').replaceChildren(...controls);$('device-settings').open=open;
     if(focus)[...$('device-list').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
-    $('device-settings').hidden=mobile||!controls.length;
+    $('device-settings').hidden=!workersPage&&(mobile||!controls.length);
   }
   function renderDetail(data) {
     const assignment = route().get('agent');
@@ -448,6 +484,30 @@ if (typeof document !== 'undefined') (() => {
   };
   $('resume-copy').onclick=async()=>{const command=$('resume-command').textContent;try{await navigator.clipboard.writeText(command);$('copy-status').textContent='Command copied.';}catch{$('copy-status').textContent='Select the command and copy it with your keyboard.';const range=document.createRange();range.selectNodeContents($('resume-command'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}};
   $('refresh').onclick=async()=>{await refresh();if(detail)await loadConversation();};
+  async function configRequest(body) {
+    const response=await fetch('/api/fleet/configuration',{cache:'no-store',...(body?{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify(body)}:{})});
+    const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not load configuration.');return data;
+  }
+  function configButtons(){const loaded=configRevision!==undefined;$('config-text').disabled=configBusy||!loaded;$('config-reload').disabled=configBusy;$('config-validate').disabled=configBusy||!loaded;$('config-save').disabled=configBusy||configPreview!==$('config-text').value||configOriginal===$('config-text').value;}
+  async function loadConfig(){
+    if(configBusy)return;
+    if(configRevision&&$('config-text').value!==configOriginal&&!confirm('Discard your unsaved YAML edits and reload the file?'))return;
+    configBusy=true;configButtons();$('config-status').textContent='Loading configuration…';
+    try{const data=await configRequest();configRevision=data.revision;configOriginal=data.text;$('config-text').value=data.text;configPreview=undefined;$('config-source').textContent=data.source;$('config-changes').replaceChildren();$('config-status').textContent=data.error?'File error: '+data.error:'Loaded from the supervisor. Changes are applied after saving.';}catch(error){$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
+  }
+  $('config-editor').addEventListener('toggle',()=>{if($('config-editor').open&&configRevision===undefined)loadConfig();});
+  $('config-reload').onclick=loadConfig;
+  $('config-text').oninput=()=>{configPreview=undefined;$('config-changes').replaceChildren();$('config-status').textContent=$('config-text').value===configOriginal?'No unsaved changes.':'Unsaved changes. Preview before saving.';configButtons();};
+  async function submitConfig(save){
+    if(configBusy||!configRevision)return;const text=$('config-text').value;
+    configBusy=true;configButtons();$('config-status').textContent=save?'Saving configuration…':'Checking configuration…';
+    try{const data=await configRequest({text,revision:configRevision,save});
+      if(save){configRevision=data.revision;configOriginal=data.text;configPreview=undefined;$('config-changes').replaceChildren();$('config-status').textContent='Saved. Machines will apply this configuration automatically.';await refresh();}
+      else{configPreview=text;$('config-changes').replaceChildren(...(data.changes||[]).map(change=>element('li','',({add:'Add',update:'Update',drain:'Drain and remove'})[change.action]+' '+change.worker+' on '+change.host)));$('config-status').textContent=data.changes?.length?'Valid YAML. Review the changes below.':'Valid YAML. No worker changes.';}
+    }catch(error){configPreview=undefined;$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
+  }
+  $('config-validate').onclick=()=>submitConfig(false);$('config-save').onclick=()=>submitConfig(true);
+  addEventListener('beforeunload',event=>{if(configRevision&&$('config-text').value!==configOriginal){event.preventDefault();event.returnValue='';}});
   $('device-list').onclick=async event=>{
     const b=event.target.closest('button[data-signal]');if(!b)return;
     if(b.dataset.signal==='stop'&&!confirm('Stop agents on this device? Their saved conversations will remain available.'))return;

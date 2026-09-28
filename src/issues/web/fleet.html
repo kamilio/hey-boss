@@ -19,6 +19,20 @@
       <div id="error" class="error" role="alert" hidden></div>
       <div id="overview-page">
         <div class="page-heading"><div><div class="eyebrow"><span data-icon="spark"></span>Making things happen</div><h1>Agents</h1><p id="overview-note" class="page-description">Your projects, and the work behind them.</p></div><a class="button" id="show-all" href="/agents" hidden>All projects</a></div>
+        <nav class="fleet-tabs" aria-label="Agent views"><a class="button" href="/agents">Conversations</a><a class="button" id="workers-tab" href="/workers">Workers</a></nav>
+        <section id="worker-config" hidden aria-label="Worker configuration">
+          <div id="fleet-summary" class="fleet-summary" aria-live="polite"></div>
+          <details id="config-editor" class="config-editor">
+            <summary>Edit fleet configuration <span>YAML · all machines</span></summary>
+            <p class="device-help">Changes apply automatically. Removing a worker lets its current work finish.</p>
+            <p id="config-source" class="config-source"></p>
+            <label for="config-text">Fleet YAML</label>
+            <textarea id="config-text" spellcheck="false" autocapitalize="off" autocomplete="off" rows="18" aria-describedby="config-status" disabled></textarea>
+            <p id="config-status" role="status">Open the editor to load your configuration.</p>
+            <ul id="config-changes" class="config-changes"></ul>
+            <div class="config-actions"><button id="config-reload" class="button" type="button">Reload file</button><button id="config-validate" class="button" type="button" disabled>Preview changes</button><button id="config-save" class="button primary" type="button" disabled>Save configuration</button></div>
+          </details>
+        </section>
         <section id="projects" aria-label="Agents by project"><p class="loading-note">Finding your conversations…</p></section>
         <details id="device-settings" class="device-settings"><summary>Manage workers</summary><p id="device-help" class="device-help"></p><p class="device-help">Pause pickup lets current agents finish. Restart worker and Stop worker stop its current agents. Enabled workers keep running in the background after you close their terminal.</p><div id="device-list"></div></details>
       </div>
