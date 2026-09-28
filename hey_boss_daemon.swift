@@ -1544,13 +1544,25 @@ final class NativeMarkdownRenderer {
             append("\n",inherited,node)
         case "table":
             newline(attributes,node); tableID += 1
-            let table = NSTextTable(); table.numberOfColumns = max(1,node.align?.count ?? 1)
-            table.layoutAlgorithm = .automaticLayoutAlgorithm; table.collapsesBorders = true
+            let rows = node.children ?? []
+            let table = NSTextTable(); table.numberOfColumns = max(1, node.align?.count ?? rows.map { $0.children?.count ?? 0 }.max() ?? 1)
+            func length(_ node: NativeMarkdownNode) -> Int { (node.value?.utf16.count ?? 0) + (node.children ?? []).reduce(0) { $0 + length($1) } }
+            let weights = (0..<table.numberOfColumns).map { column -> Double in
+                let counts = rows.compactMap { row -> Int? in
+                    guard let cells = row.children, cells.indices.contains(column) else { return nil }; return length(cells[column])
+                }
+                return Double(min(512, max(16, counts.reduce(0, +) / max(1, counts.count))))
+            }
+            let total = weights.reduce(0, +)
+            table.layoutAlgorithm = .fixedLayoutAlgorithm; table.collapsesBorders = true
             table.setValue(100,type:.percentageValueType,for:.width)
-            for (rowIndex,row) in (node.children ?? []).enumerated() {
+            for (rowIndex,row) in rows.enumerated() {
                 for (column,cell) in (row.children ?? []).enumerated() {
                     let block = NSTextTableBlock(table:table,startingRow:rowIndex,rowSpan:1,startingColumn:column,columnSpan:1)
-                    block.setWidth(7,type:.absoluteValueType,for:.padding); block.setWidth(0.5,type:.absoluteValueType,for:.border)
+                    let share = 0.35 / Double(table.numberOfColumns) + 0.65 * weights[min(column, weights.count - 1)] / total
+                    block.setValue(100 * share,type:.percentageValueType,for:.width)
+                    block.setWidth(10,type:.absoluteValueType,for:.padding); block.setWidth(0.5,type:.absoluteValueType,for:.border)
+                    block.verticalAlignment = .topAlignment
                     block.setBorderColor(.separatorColor)
                     if row.checked == true { block.backgroundColor = .controlBackgroundColor }
                     let cellParagraph = paragraph.mutableCopy() as! NSMutableParagraphStyle
@@ -3448,7 +3460,6 @@ final class SecretPrompt: NSObject, NSWindowDelegate {
     func complete(_ outcome: SecretOutcome) {
         guard let done = completion else { return }; completion = nil; timer?.invalidate(); timer = nil
         window.makeFirstResponder(nil); entries.forEach { $0.clear() }; window.orderOut(nil); done(outcome)
-        if !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) { NSApp.setActivationPolicy(.accessory) }
     }
 }
 final class SecretPrompts {
@@ -4474,9 +4485,6 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if present { NSApplication.shared.setActivationPolicy(.regular) }
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
-    }
-    func windowWillClose(_ notification: Notification) {
-        if present { NSApplication.shared.setActivationPolicy(.accessory) }
     }
     @objc func show() {
         presentWindow()
@@ -5528,6 +5536,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let status = NSTextField(labelWithString: "Loading…")
     let outline = NSMenuToolbarItem(itemIdentifier: .init("outline"))
     let modes = NSToolbarItem(itemIdentifier: .init("reading"))
+    let modeControl = NSSegmentedControl(labels: ["Edit", "Read"], trackingMode: .selectOne, target: nil, action: nil)
     let recovery = NSButton(title: "Save Copy…", target: nil, action: nil)
     var documents: [(String, String)] = []
     var headings: [(String, NSRange)] = []
@@ -5555,9 +5564,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         window.title = "Artifacts"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .none; window.backgroundColor = .textBackgroundColor
         window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 720, height: 460)
-        window.delegate = self; window.setFrameAutosaveName("hey-boss-artifact-editor"); window.center()
         window.command = { [weak self] key, shift in self?.command(key, shift: shift) ?? false }
         buildUI()
+        if !window.setFrameUsingName("hey-boss-artifact-editor") { window.center() }
+        window.delegate = self
         session.changed = { [weak self] in self?.updateStatus() }
         session.writer = { [weak self] request, completion in self?.write(request, completion: completion) }
         load()
@@ -5608,10 +5618,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         status.font = .systemFont(ofSize: 11); status.textColor = .tertiaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         page.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(page)
-        let preferredWidth = page.widthAnchor.constraint(equalTo: paper.widthAnchor); preferredWidth.priority = .defaultHigh
         NSLayoutConstraint.activate([
             page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
-            page.widthAnchor.constraint(lessThanOrEqualToConstant: 760), page.widthAnchor.constraint(lessThanOrEqualTo: paper.widthAnchor), preferredWidth
+            page.widthAnchor.constraint(equalTo: paper.widthAnchor)
         ])
         [scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
         configureText(text, scroll: scroll); configureText(reader, scroll: readerScroll)
@@ -5662,15 +5671,17 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             item.menu = NSMenu(title: "Format")
             // The native toolbar pull-down reserves its first item as the button title.
             item.menu.addItem(withTitle: "Format", action: nil, keyEquivalent: "")
-            let commands: [(String, String, Bool)] = [("Bold", "b", false), ("Italic", "i", false), ("Link…", "k", false), ("Inline Code", "`", false), ("Heading 1", "1", false), ("Heading 2", "2", false), ("Heading 3", "3", false), ("Bullet List", "8", true), ("Numbered List", "7", true), ("Task List", "l", true)]
+            let commands: [(String, String, Bool)] = [("Bold", "b", false), ("Italic", "i", false), ("Link…", "k", false), ("Inline Code", "c", true), ("Heading 1", "1", false), ("Heading 2", "2", false), ("Heading 3", "3", false), ("Bullet List", "8", true), ("Numbered List", "7", true), ("Task List", "l", true)]
             for (label, key, shift) in commands {
                 let entry = NSMenuItem(title: label, action: #selector(formatCommand(_:)), keyEquivalent: key)
                 entry.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; entry.target = self; item.menu.addItem(entry)
             }
             return item
         case "reading":
-            modes.label = "Reading view"; modes.image = NSImage(systemSymbolName: "book", accessibilityDescription: "Reading view")
-            modes.target = self; modes.action = #selector(modeChanged); modes.toolTip = "Reading view (⌘E)"
+            modes.label = "View"; modes.view = modeControl
+            modeControl.selectedSegment = 0; modeControl.target = self; modeControl.action = #selector(modeChanged)
+            modeControl.setAccessibilityLabel("Document view"); modes.toolTip = "Switch editing and reading (⌘E)"
+            if #available(macOS 26.0, *) { modes.isBordered = false }
             return modes
         default: return nil
         }
@@ -5729,7 +5740,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         updateStatus(); updateOutline(); highlightVisible()
         if present { window.makeFirstResponder(text) }
     }
-    func show() { closed = false; if present { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) } }
+    func show() {
+        closed = false
+        if present {
+            NSApp.setActivationPolicy(.regular)
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        }
+    }
     func write(_ request: ArtifactSave, completion: @escaping (Result<ArtifactDocument, Error>) -> Void) {
         if let file = session.launch.file {
             let baseline = originalFile ?? Data(session.savedBody.utf8)
@@ -5805,13 +5822,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             ("(?m)^# .+$", .labelColor, .systemFont(ofSize: 30, weight: .bold)),
             ("(?m)^## .+$", .labelColor, .systemFont(ofSize: 22, weight: .semibold)),
             ("(?m)^#{3,6} .+$", .labelColor, .systemFont(ofSize: 18, weight: .semibold)),
-            ("`[^`\\n]+`", .systemPurple, nil),
+            ("`[^`\\n]+`", .secondaryLabelColor, .monospacedSystemFont(ofSize: 14, weight: .regular)),
             ("\\*\\*[^*\\n]+\\*\\*", .labelColor, .systemFont(ofSize: 16, weight: .semibold)),
             ("\\[[^]\\n]+\\]\\([^)\\n]+\\)", .linkColor, nil),
-            ("(?m)^[ \\t]*(?:#{1,6} |[-*+] |[0-9]+\\. |>|```)", .tertiaryLabelColor, nil)
+            ("(?m)^#{1,6} ", .tertiaryLabelColor, .monospacedSystemFont(ofSize: 14, weight: .regular)),
+            ("(?m)^[ \\t]*(?:[-*+] |[0-9]+\\. |>|```)|\\*{2}|\\|", .tertiaryLabelColor, nil)
         ]
         let visibleSource = source.substring(with: range)
-        let desired = NSMutableAttributedString(string: visibleSource, attributes: [.font: NSFont.systemFont(ofSize: 16)])
+        let desired = NSMutableAttributedString(string: visibleSource, attributes: [.font: NSFont.systemFont(ofSize: 16), .paragraphStyle: text.defaultParagraphStyle ?? NSParagraphStyle.default])
         for (pattern, color, font) in rules {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             for match in regex.matches(in: visibleSource, range: NSRange(location: 0, length: (visibleSource as NSString).length)) {
@@ -5820,17 +5838,29 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 if let font { desired.addAttribute(.font, value: font, range: match.range) }
             }
         }
-        var updates: [(NSRange, NSFont)] = []
-        desired.enumerateAttribute(.font, in: NSRange(location: 0, length: desired.length)) { value, localRange, _ in
-            guard let font = value as? NSFont else { return }
-            let absolute = NSRange(location: range.location + localRange.location, length: localRange.length)
-            storage.enumerateAttribute(.font, in: absolute) { existing, run, _ in
-                if (existing as? NSFont) != font { updates.append((run, font)) }
+        let tableRows = try! NSRegularExpression(pattern: "(?m)^\\|[^\\n]*\\|[ \\t]*$")
+        for row in tableRows.matches(in: visibleSource, range: NSRange(location: 0, length: desired.length)) {
+            let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 5; paragraph.paragraphSpacing = 12
+            desired.addAttributes([.font: NSFont.systemFont(ofSize: 15), .paragraphStyle: paragraph], range: row.range)
+            let value = (visibleSource as NSString).substring(with: row.range) as NSString
+            let divider = value.range(of: "|", range: NSRange(location: 1, length: max(0, value.length - 1)))
+            if divider.location != NSNotFound {
+                desired.addAttribute(.font, value: NSFont.systemFont(ofSize: 15, weight: .semibold), range: NSRange(location: row.range.location + 1, length: divider.location - 1))
+            }
+        }
+        var updates: [(NSAttributedString.Key, NSRange, Any)] = []
+        for key in [NSAttributedString.Key.font, .paragraphStyle] {
+            desired.enumerateAttribute(key, in: NSRange(location: 0, length: desired.length)) { value, localRange, _ in
+                guard let value else { return }
+                let absolute = NSRange(location: range.location + localRange.location, length: localRange.length)
+                storage.enumerateAttribute(key, in: absolute) { existing, run, _ in
+                    if (existing as? NSObject)?.isEqual(value) != true { updates.append((key, run, value)) }
+                }
             }
         }
         if !updates.isEmpty {
             storage.beginEditing()
-            for (run, font) in updates { storage.addAttribute(.font, value: font, range: run) }
+            for (key, run, value) in updates { storage.addAttribute(key, value: value, range: run) }
             storage.endEditing()
         }
         text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor, .paragraphStyle: text.defaultParagraphStyle ?? NSParagraphStyle.default]
@@ -5865,11 +5895,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         guard headings.indices.contains(index) else { return }
         if previewing { togglePreview() }; text.setSelectedRange(headings[index].1); text.scrollRangeToVisible(headings[index].1); window.makeFirstResponder(text)
     }
-    @objc func modeChanged() { togglePreview() }
+    @objc func modeChanged() { if (modeControl.selectedSegment == 1) != previewing { togglePreview() } }
     func togglePreview() {
         guard session.ready else { return }; previewing.toggle()
-        modes.image = NSImage(systemSymbolName: previewing ? "square.and.pencil" : "book", accessibilityDescription: previewing ? "Write" : "Read")
-        modes.label = previewing ? "Writing view" : "Reading view"; modes.toolTip = modes.label + " (⌘E)"
+        modeControl.selectedSegment = previewing ? 1 : 0
         scroll.isHidden = previewing; readerScroll.isHidden = !previewing
         if previewing { renderPreview(); window.makeFirstResponder(reader) } else { window.makeFirstResponder(text); highlightVisible() }
     }
@@ -5986,7 +6015,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             guard window.firstResponder === text else { return false }; text.prefixLines("1. ")
         case ("8", true), ("*", true):
             guard window.firstResponder === text else { return false }; text.prefixLines("- ")
-        case ("`", false) where window.firstResponder === text: text.wrap("`")
+        case ("c", true) where window.firstResponder === text: text.wrap("`")
+        case ("`", false), ("`", true), ("~", true): ArtifactEditors.shared.cycleWindow(from: window, backwards: shift)
         case ("1"..."6", false) where window.firstResponder === text: text.prefixLines(String(repeating: "#", count: Int(key)!) + " ")
         default: return false
         }
@@ -6000,7 +6030,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         let groups: [(String, [(String, String, Bool)])] = [
             ("File", [("New note", "n", false), ("Open Markdown…", "o", false), ("Export Markdown…", "s", true), ("Close", "w", false)]),
             ("Edit", [("Undo", "z", false), ("Redo", "z", true), ("Cut", "x", false), ("Copy", "c", false), ("Paste", "v", false), ("Select All", "a", false), ("Find…", "f", false), ("Find Next", "g", false), ("Find Previous", "g", true)]),
-            ("Format", [("Bold", "b", false), ("Italic", "i", false), ("Link", "k", false), ("Inline Code", "`", false), ("Task List", "l", true), ("Bullet List", "8", true), ("Numbered List", "7", true)] + (1...6).map { ("Heading \($0)", String($0), false) }),
+            ("Format", [("Bold", "b", false), ("Italic", "i", false), ("Link", "k", false), ("Inline Code", "c", true), ("Task List", "l", true), ("Bullet List", "8", true), ("Numbered List", "7", true)] + (1...6).map { ("Heading \($0)", String($0), false) }),
             ("View", [("Toggle Focus", "f", true), ("Quick Switch…", "p", false), ("Toggle Reading View", "e", false)])
         ]
         for (title, commands) in groups {
@@ -6011,7 +6041,17 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 item.target = self; menu.addItem(item)
             }
         }
-        NSApp.mainMenu = bar
+        let windowsItem = NSMenuItem(); let windowsMenu = NSMenu(title: "Window")
+        windowsItem.submenu = windowsMenu; bar.addItem(windowsItem)
+        for (title, shift) in [("Next Window", false), ("Previous Window", true)] {
+            let item = NSMenuItem(title: title, action: #selector(menuCommand(_:)), keyEquivalent: "`")
+            item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; item.target = self; windowsMenu.addItem(item)
+        }
+        windowsMenu.addItem(.separator())
+        windowsMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowsMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowsMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        NSApp.mainMenu = bar; NSApp.windowsMenu = windowsMenu
     }
     @objc func menuCommand(_ sender: NSMenuItem) {
         let key = sender.keyEquivalent, shift = sender.keyEquivalentModifierMask.contains(.shift)
@@ -6027,6 +6067,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
     func windowDidResignKey(_ notification: Notification) { session.flush() }
+    func windowDidResize(_ notification: Notification) { window.saveFrame(usingName: "hey-boss-artifact-editor") }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         session.flush()
         if session.dirty {
@@ -6035,6 +6076,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         return true
     }
     func windowWillClose(_ notification: Notification) {
+        window.saveFrame(usingName: "hey-boss-artifact-editor")
         closed = true
         if !session.dirty { session.timer?.invalidate() }
         searchTimer?.invalidate(); renderTimer?.invalidate(); renderGeneration += 1
@@ -6046,11 +6088,18 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
 final class ArtifactEditors: NSObject, NSApplicationDelegate {
     static let shared = ArtifactEditors()
     var windows: [NativeArtifactEditor] = []
+    var lastContext: ArtifactLaunch? = {
+        guard let project = UserDefaults.standard.string(forKey: "artifact-last-project") else { return nil }
+        return ArtifactLaunch(project: project, host: UserDefaults.standard.string(forKey: "artifact-last-host"))
+    }()
     var root: URL {
         let state = ProcessInfo.processInfo.environment["HEY_BOSS_STATE_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/hey-boss")
         return state.appendingPathComponent("artifact-drafts")
     }
     func open(_ launch: ArtifactLaunch) {
+        lastContext = launch
+        UserDefaults.standard.set(launch.project, forKey: "artifact-last-project")
+        UserDefaults.standard.set(launch.host, forKey: "artifact-last-host")
         if let existing = windows.first(where: { editor in
             let previous = editor.session.launch
             return launch.file != nil ? previous.file == launch.file : launch.id != nil && previous.id == launch.id && previous.project == launch.project && previous.host == launch.host
@@ -6059,6 +6108,19 @@ final class ArtifactEditors: NSObject, NSApplicationDelegate {
         editor.onOpen = { [weak self] launch in self?.open(launch) }
         editor.onClose = { [weak self, weak editor] in self?.windows.removeAll { $0 === editor && !$0.session.dirty } }
         windows.append(editor); editor.show()
+    }
+    @discardableResult func cycleWindow(from window: NSWindow, backwards: Bool) -> NativeArtifactEditor? {
+        let editors = windows.filter { !$0.closed }
+        guard !editors.isEmpty else { return nil }
+        let current = editors.firstIndex { $0.window === window } ?? 0
+        let next = editors[(current + (backwards ? editors.count - 1 : 1)) % editors.count]
+        if next.window.isMiniaturized { next.window.deminiaturize(nil) }
+        next.show(); return next
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let editor = windows.last(where: { !$0.closed }) { editor.show() }
+        else if let context = lastContext { open(ArtifactLaunch(project: context.project, host: context.host)) }
+        return true
     }
     func handle(_ request: Request, _ reply: Reply) {
         do {
@@ -6106,7 +6168,7 @@ struct Daemon {
         #else
         signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(.regular)
         app.delegate = ArtifactEditors.shared
         ArtifactEditors.shared.restoreDrafts()
         let ui = Interface(present: true)
