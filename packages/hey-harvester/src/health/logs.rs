@@ -1,4 +1,4 @@
-//! Fleet stdout/stderr logs are diagnostics; durable progress lives in the issue DB.
+//! Bound known worker diagnostics without replacing files held by active writers.
 use super::Item;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -45,7 +45,19 @@ fn trim(path: &Path, maximum: u64, keep: u64) -> io::Result<bool> {
 }
 
 pub(super) fn clean(home: &Path, apply: bool) -> io::Result<(Vec<Item>, usize)> {
-    let directory = home.join(".local/share/hey-boss");
+    let (mut items, mut count) = clean_directory(&home.join(".local/share/hey-boss"), None, apply)?;
+    let (hermes, trimmed) =
+        clean_directory(&home.join(".hermes/logs"), Some("gateway.error.log"), apply)?;
+    items.extend(hermes);
+    count += trimmed;
+    Ok((items, count))
+}
+
+fn clean_directory(
+    directory: &Path,
+    exact_name: Option<&str>,
+    apply: bool,
+) -> io::Result<(Vec<Item>, usize)> {
     if !directory.exists() {
         return Ok((vec![], 0));
     }
@@ -63,13 +75,14 @@ pub(super) fn clean(home: &Path, apply: bool) -> io::Result<(Vec<Item>, usize)> 
     for entry in fs::read_dir(directory)?.take(1000) {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(id) = name
-            .strip_prefix("fleet-worker-")
-            .and_then(|s| s.strip_suffix(".log"))
-        else {
-            continue;
+        let recognized = if let Some(expected) = exact_name {
+            name == expected
+        } else {
+            name.strip_prefix("fleet-worker-")
+                .and_then(|s| s.strip_suffix(".log"))
+                .is_some_and(|id| id.len() == 24 && id.bytes().all(|b| b.is_ascii_hexdigit()))
         };
-        if id.len() != 24 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !recognized {
             continue;
         }
         let m = fs::symlink_metadata(entry.path())?;
@@ -106,6 +119,30 @@ pub(super) fn clean(home: &Path, apply: bool) -> io::Result<(Vec<Item>, usize)> 
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn oversized_hermes_gateway_stderr_is_bounded_without_touching_other_files() {
+        let home =
+            std::env::temp_dir().join(format!("hb-health-hermes-log-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let directory = home.join(".hermes/logs");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("gateway.error.log");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_BYTES + 1).unwrap();
+        let database = directory.join("state.sqlite");
+        fs::write(&database, b"SQLite format 3\0preserve").unwrap();
+        let unknown = directory.join("unknown.log");
+        fs::write(&unknown, b"unrecognized diagnostic").unwrap();
+        assert_eq!(clean(&home, false).unwrap().0.len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_BYTES + 1);
+        assert_eq!(clean(&home, true).unwrap().1, 1);
+        assert_eq!(fs::metadata(&path).unwrap().len(), KEEP_BYTES);
+        assert_eq!(fs::read(database).unwrap(), b"SQLite format 3\0preserve");
+        assert_eq!(fs::read(unknown).unwrap(), b"unrecognized diagnostic");
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn disguised_sqlite_log_is_never_truncated() {
