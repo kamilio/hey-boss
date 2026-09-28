@@ -75,6 +75,58 @@ fn prepare_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn same_inode(metadata: &fs::Metadata, path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|current| current.dev() == metadata.dev() && current.ino() == metadata.ino())
+}
+
+fn listening(socket: &Path) -> std::io::Result<bool> {
+    // Do not wait for a SQL handshake (or a full accept queue) during election.
+    let probe = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    probe.set_nonblocking(true)?;
+    match probe.connect(&socket2::SockAddr::unix(socket)?) {
+        Ok(()) => Ok(true),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.raw_os_error() == Some(libc::EINPROGRESS) =>
+        {
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+struct Ownership {
+    lock: File,
+    lock_path: PathBuf,
+    socket: PathBuf,
+    socket_identity: fs::Metadata,
+}
+impl Ownership {
+    fn current(&self) -> bool {
+        self.lock
+            .metadata()
+            .is_ok_and(|m| same_inode(&m, &self.lock_path))
+            && same_inode(&self.socket_identity, &self.socket)
+    }
+}
+impl Drop for Ownership {
+    fn drop(&mut self) {
+        // An obsolete owner must never unlink its successor's listener.
+        if same_inode(&self.socket_identity, &self.socket) {
+            let _ = fs::remove_file(&self.socket);
+        }
+    }
+}
+
 pub struct Owner {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -139,6 +191,18 @@ impl Owner {
                 Err(error(e.to_string()))
             };
         }
+        let socket = socket_path(path);
+        let eligible = || -> Result<bool> {
+            Ok(same_inode(
+                &lock.metadata().map_err(|e| error(e.to_string()))?,
+                &lock_path,
+            ) && !listening(&socket).map_err(|e| error(e.to_string()))?)
+        };
+        // A removed flock inode can still be held by a live service. Respect its
+        // listener until it finishes draining, even though this lock succeeded.
+        if !eligible()? {
+            return Ok(None);
+        }
         let writer = local(|| crate::issues::Store::open(path))
             .map_err(|e| {
                 eprintln!("database startup: {}", serde_json::to_string(&e).unwrap());
@@ -147,7 +211,9 @@ impl Owner {
             .into_database()
             .into_local();
         let path = path.canonicalize().map_err(|e| error(e.to_string()))?;
-        let socket = socket_path(&path);
+        if !eligible()? {
+            return Ok(None);
+        }
         match fs::symlink_metadata(&socket) {
             Ok(metadata)
                 if metadata.file_type().is_socket()
@@ -165,11 +231,17 @@ impl Owner {
         listener
             .set_nonblocking(true)
             .map_err(|e| error(e.to_string()))?;
+        let ownership = Ownership {
+            lock,
+            lock_path,
+            socket_identity: fs::symlink_metadata(&socket).map_err(|e| error(e.to_string()))?,
+            socket,
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let thread = std::thread::Builder::new()
             .name("sqlite-owner".into())
-            .spawn(move || serve(listener, socket, path, writer, lock, stopping))
+            .spawn(move || serve(listener, path, writer, ownership, stopping))
             .map_err(|e| error(e.to_string()))?;
         Ok(Some(Self {
             stop,
@@ -191,10 +263,9 @@ impl Drop for Owner {
 
 fn serve(
     listener: UnixListener,
-    socket: PathBuf,
     path: PathBuf,
     writer: rusqlite::Connection,
-    lock: File,
+    ownership: Ownership,
     stop: Arc<AtomicBool>,
 ) {
     let generation = Arc::new(AtomicI64::new(
@@ -211,6 +282,10 @@ fn serve(
     let clients = Arc::new(AtomicUsize::new(0));
     let mut sessions = Vec::new();
     while !stop.load(Ordering::Acquire) {
+        if !ownership.current() {
+            eprintln!("Database owner runtime paths changed; draining existing transactions");
+            break;
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 if clients.load(Ordering::Acquire) >= 128 {
@@ -245,13 +320,15 @@ fn serve(
         }
         sessions.retain(|thread| !thread.is_finished());
     }
-    drop(listener);
+    stop.store(true, Ordering::Release);
     for thread in sessions {
         let _ = thread.join();
     }
-    let _ = fs::remove_file(socket);
+    // Keep the listener present throughout draining so another election cannot
+    // open a second writer while old sessions are still committing.
+    drop(listener);
     drop(writer);
-    drop(lock);
+    drop(ownership);
 }
 
 struct Writer {

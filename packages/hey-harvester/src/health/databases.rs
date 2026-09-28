@@ -8,6 +8,17 @@ use std::{
 };
 
 pub(super) fn protected(path: &Path) -> io::Result<bool> {
+    // These temporary-directory files coordinate live SQLite owners. Their
+    // age is unrelated to use: unlinking a held flock permits a second owner.
+    // Check ancestors too, for cleanup cursors saved inside the runtime tree.
+    if path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .and_then(|name| name.strip_prefix("hey-boss-db-"))
+            .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+    }) {
+        return Ok(true);
+    }
     if path.components().any(|c| {
         c.as_os_str()
             .to_string_lossy()
@@ -133,6 +144,26 @@ mod tests {
         let p = root.join("cache.bin");
         fs::write(&p, b"ordinary disposable content").unwrap();
         assert!(!protected(&p).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preserves_database_service_runtime_files_during_recursive_cleanup() {
+        let root = fixture();
+        let runtime = root.join("hey-boss-db-501");
+        fs::create_dir_all(&runtime).unwrap();
+        for name in ["owner.lock", "owner.startup", "owner.log"] {
+            fs::write(runtime.join(name), b"").unwrap();
+        }
+        // Also exercise a saved cleanup cursor starting inside the directory.
+        assert!(protected(&runtime.join("owner.lock")).unwrap());
+        assert!(remove_tree(&root).is_err());
+        for name in ["owner.lock", "owner.startup", "owner.log"] {
+            assert!(
+                runtime.join(name).exists(),
+                "Removed database runtime {name}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
