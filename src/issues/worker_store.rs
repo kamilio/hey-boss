@@ -590,6 +590,7 @@ impl Store {
                             force: false,
                             guard: None,
                             clear_manual_hold: false,
+                            keep_draft: false,
                         }
                     } else {
                         Operation::AssignBoss {
@@ -1591,6 +1592,7 @@ mod tests {
             force: false,
             guard: None,
             clear_manual_hold: false,
+            keep_draft: false,
         });
         assert!(!f.store.worker_cancelled(&f.job).unwrap());
         f.store

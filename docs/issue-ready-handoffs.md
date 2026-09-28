@@ -21,8 +21,18 @@ Reusing that ID for a different operation fails.
 For a reconciled manual hold, add `--clear-manual-hold` to the guarded Ready
 command. The hold clears only if the entire handoff succeeds. Dependency links
 remain and unfinished dependencies still prevent Ready. Closed issues require an
-explicit reopen; drafts require undrafting. An attached fix or unspecified PR and
+explicit reopen. An attached fix or unspecified PR and
 project PR support remain required.
+
+For a useful draft source, add `--keep-draft` to the guarded Ready command. This
+records a development handoff, assigns Boss, and unblocks eligible dependents
+while retaining the source's draft flag and no-worker scope. It requires an
+unreserved draft with no unfinished worker attempt. It never undrafts, launches
+workers, releases reservations, or approves CI, review, merge or production.
+Ordinary drafts and draft dependents remain unschedulable. Reopening the source
+withdraws its Ready handoff while preserving its draft flag; dependent pickups
+pause again. This path does not sync a linked plan or assert its completion.
+Companions require the `issue_ready_keep_draft` capability; upgrade older peers.
 
 A changed version, assignee, allocation, or worker attempt rejects the handoff.
 Even a matching guard or `--force` cannot release another worker's unfinished
@@ -56,4 +66,5 @@ Verification: `cargo test --test issue_ready_guards`, focused Ready worker and
 explicit dependency regressions, and `tools/issue_ready_browser_checks.js` through
 Playwright CLI against `tools/serve_issue_reopen_fixture.mjs`. Browser checks use
 synthetic native and paired stores, cover concurrent changes and retry recovery,
-and inspect desktop/tablet/phone layouts in light and dark modes.
+and inspect desktop/tablet/phone layouts in light and dark modes. Draft-preserving
+handoffs use `tools/issue_draft_handoff_browser_checks.js` against the same fixture.

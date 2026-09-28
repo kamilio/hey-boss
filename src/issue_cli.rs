@@ -354,6 +354,9 @@ enum Action {
         force: bool,
     },
     /// Hand an attached PR to Boss and unblock dependents; caller assesses usability.
+    #[command(
+        after_help = "Ready records development usability, not passing CI, merge, completion, or production approval.\nFor a draft source, --keep-draft preserves its no-worker scope while unblocking eligible dependents.\nIt requires an unreserved draft and all three guards from the same fresh issue view, plus --request-id.\nIt never undrafts or launches a worker. Ordinary drafts remain unschedulable.\nReopen the source to withdraw its handoff; the draft flag is retained."
+    )]
     Ready {
         number: i64,
         /// Legacy flag; never overrides a Ready ownership or reservation guard.
@@ -371,6 +374,9 @@ enum Action {
         /// Reconcile a manual hold atomically; guards required, dependencies retained.
         #[arg(long, requires = "if_version")]
         clear_manual_hold: bool,
+        /// Record a development handoff while retaining draft/no-worker scope.
+        #[arg(long, requires = "if_version")]
+        keep_draft: bool,
     },
     /// Assign an open issue to Boss.
     #[command(visible_alias = "assign-boss")]
@@ -876,6 +882,7 @@ impl Options {
                 expected_assignee,
                 expected_reservation,
                 clear_manual_hold,
+                keep_draft,
             } => Operation::Ready {
                 number: *number,
                 force: *force,
@@ -885,6 +892,7 @@ impl Options {
                     expected_reservation: expected_reservation.clone().unwrap(),
                 }),
                 clear_manual_hold: *clear_manual_hold,
+                keep_draft: *keep_draft,
             },
             Action::AssignToBoss { number, force } => Operation::AssignBoss {
                 number: *number,
@@ -1691,6 +1699,11 @@ fn print_issue_line(issue: &Value) {
         println!(
             "  Origin unavailable: {}",
             line(&issue["origin_error"]["message"])
+        );
+    }
+    if issue["draft"] == true && issue["state"] == "ready" {
+        println!(
+            "  Development handoff · draft retained · no worker pickup. Eligible dependents can start; CI, merge and production approval remain separate."
         );
     }
     if let Some(status) = issue["status"].as_object() {
