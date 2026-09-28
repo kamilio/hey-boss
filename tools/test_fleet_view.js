@@ -100,3 +100,20 @@ assert.equal(slotUsage({...working,active:4,config:{enabled:true,concurrency:2}}
 assert.equal(slotUsage(working,{...machine,state:'disconnected'},now).occupied,0);
 assert.equal(slotUsage({...working,pid:null},machine,now).capacity,0);
 console.log('Live slot occupancy and paused/offline capacity checks passed');
+
+const {workerScopeGroups}=require('../src/issues/web/fleet.js');
+const scoped=[
+ {worker:{id:'one',config:{projects:['ashby-mcp','hey-gh','hey-proxy']}}},
+ {worker:{id:'two',config:{projects:['hey-proxy','ashby-mcp','hey-gh']}}},
+ {worker:{id:'three',config:{projects:['hey-gh']}}},
+ {worker:{id:'four',config:{projects:[]}}},
+];
+const scopes=workerScopeGroups(scoped);
+assert.equal(scopes.length,3,'One group per complete project set, never one copy per project');
+assert.deepEqual(scopes[0].projects,['ashby-mcp','hey-gh','hey-proxy']);
+assert.deepEqual(scopes[0].entries.map(e=>e.worker.id),['one','two']);
+assert.equal(scopes.flatMap(g=>g.entries).length,scoped.length,'Shared workers occur exactly once');
+assert.equal(workerScopeGroups([scoped[1]])[0].key,scopes[0].key,'Project order does not change group identity');
+const duplicateNames=workerScopeGroups([{worker:{id:'first-id',config:{name:'Worker',projects:['one']}}},{worker:{id:'second-id',config:{name:'Worker',projects:['one']}}}])[0];
+assert.notEqual(duplicateNames.labels.get('first-id'),duplicateNames.labels.get('second-id'),'Identical saved names remain distinguishable within a group');
+console.log('Worker project-set grouping checks passed');

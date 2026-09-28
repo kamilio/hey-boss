@@ -2,6 +2,7 @@
 import {createServer} from 'node:http';
 import {readFileSync} from 'node:fs';
 const source=new URL('../src/issues/web/',import.meta.url);
+let missingDetails=false;
 let revision='1',text='machines:\n  local:\n    workers:\n      - id: poe-code\n        intent: running\n        config:\n          concurrency: 2\n          projects: [github.com/poe-platform/poe-code]\n          directory: /Users/kamil/Workspace/poe-code\n  devbox:\n    workers: []\n';
 const config={name:'Poe Code',concurrency:2,enabled:true,projects:['github.com/poe-platform/poe-code'],directory:'/Users/kamil/Workspace/poe-code'};
 const run={id:'run-1',project_id:config.projects[0],project_name:'Poe Code',number:688,title:'Keep workers synchronized',state:'running',started_at:Date.now()-240000,finished_at:null,last_event:'Checking recovery after a disconnected machine returns.'};
@@ -10,10 +11,16 @@ const snapshot=()=>({ok:true,configuration:{revision,source:'~/.hey-boss/fleet.y
  {host:'devbox',hostname:'Devbox',state:'disconnected',heartbeat:Date.now()/1000-180,desired_revision:revision,applied_revision:'old',workers:[{id:'remote',managed:true,intent:'running',pid:42,config:{...config,name:'Remote worker',directory:'/home/kamil/Workspace/poe-code'},runs:[{...run,id:'offline-run',title:'Verify reconnect behavior',last_event:'Last seen checking machine connectivity.'}],chiefs:[]}]},
  {host:'studio',hostname:'Studio Mac',state:'connected',heartbeat:Date.now()/1000,desired_revision:revision,applied_revision:revision,workers:[{id:'paused',managed:true,intent:'pause',pid:43,config:{...config,name:'Review queue',enabled:false},active:1,runs:[{...run,id:'paused-run',title:'Finish the current review',last_event:'Wrapping up the review before pickup pauses.'}],chiefs:[]}]}
 ],signals:[],conflicts:[]});
+const groupedSnapshot=()=>{const data=snapshot();data.machines[0].workers.push(...Array.from({length:3},(_,n)=>({id:'shared-'+n,managed:true,intent:'running',pid:100+n,config:{...config,name:'Worker '+(n+1),concurrency:3,projects:['github.com/kamilio/ashby-mcp','github.com/kamilio/hey-gh','github.com/kamilio/hey-proxy']},active:0,runs:[],chiefs:[]})));return data;};
 const server=createServer(async(req,res)=>{
  const path=new URL(req.url,'http://localhost').pathname;const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
  if(path==='/api/bootstrap'||path==='/api/agent-bootstrap')return json({csrf:'fixture',project:{id:config.projects[0],name:'Poe Code'},projects:[{id:config.projects[0],name:'Poe Code'}]});
- if(path==='/api/fleet/status')return json(snapshot());
+ if(path==='/api/fleet/status'){
+  const data=groupedSnapshot();
+  if(missingDetails)for(const w of data.machines[0].workers.filter(w=>w.id.startsWith('shared-'))){w.config.name='Worker';w.active=1;}
+  return json(data);
+ }
+ if(path==='/fixture/missing-details'){missingDetails=true;return json({ok:true});}
  if(path==='/api/fleet/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('event: connected\ndata: {}\n\n');return;}
  if(path==='/fixture/change'){revision=String(Number(revision)+1);return json({ok:true});}
  if(path==='/api/fleet/configuration'){
