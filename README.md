@@ -889,6 +889,7 @@ Build with `cargo build --locked --release -p hey-harvester`, then run
 Use `tools/install-harvester.sh HOST` for each SSH client. This builds only the
 harvester, installs `~/.local/bin/hey-harvester` atomically under the maintenance
 lock, and migrates an already enabled schedule without restarting Hey Boss services.
+Installation waits up to five minutes for an active maintenance check to finish.
 Add `~/.local/bin` to your shell's PATH. The host needs Rust, a C compiler and Git
 (and lsof on macOS); Linux inspects procfs directly. Builds reuse
 `~/.cache/hey-harvester/build` with two compiler jobs. Set

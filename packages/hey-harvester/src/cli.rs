@@ -242,7 +242,28 @@ pub fn run(action: &Action) -> io::Result<()> {
     let store = Store::standard()?;
     match action {
         Action::Install => {
-            let _lock = store.lock()?;
+            // Wait for the in-flight scan instead of stopping it or racing its
+            // next scheduled run. Never wait through an actual filesystem error.
+            let started = std::time::Instant::now();
+            let mut waiting = false;
+            let _lock = loop {
+                match store.lock() {
+                    Ok(lock) => break lock,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(300) =>
+                    {
+                        if !waiting {
+                            eprintln!(
+                                "Waiting for running maintenance to finish before installation…"
+                            );
+                            waiting = true;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             let config = store.config()?;
             let home = PathBuf::from(
                 std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?,
