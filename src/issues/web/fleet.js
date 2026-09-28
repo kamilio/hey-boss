@@ -94,7 +94,28 @@ function deviceView(data, project, now = Date.now()) {
       capacity: online ? live.reduce((n,w) => n + (w.config?.concurrency || 1), 0) : 0};
   }).filter(d => !project || d.live.length || d.saved.length);
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState, managedFleet};
+function workerPhase(worker,machine,now=Date.now()) {
+  const active=worker.active??(worker.runs||[]).filter(r=>r.finished_at==null).length;
+  const error=worker.error||(machine.configuration_error||'').split('; ').find(s=>s.startsWith('"'+worker.id+'":')||s.startsWith(worker.id+':'));
+  if(machine.state!=='connected'||now/1000-(machine.heartbeat||0)>15)return {group:'attention',label:'Offline',note:'Showing last known state. Reconnect this machine to apply changes.'};
+  if(error)return {group:'attention',label:'Configuration error',note:error.replace(/^"?[^:]+"?:\s*/, '')};
+  if(worker.retry_at>now/1000&&!worker.pid)return {group:'attention',label:'Retrying',note:retryLabel({retry_at:worker.retry_at*1000},now)};
+  if((worker.intent==='pause'||worker.intent==='drain'||worker.config?.enabled===false)&&worker.pid&&active)return {group:'working',label:'Finishing work',note:'Current agents can finish. No new tasks will start.'};
+  if(worker.intent==='pause')return {group:'paused',label:'Paused',note:'Not picking up new tasks.'};
+  if(worker.intent==='drain')return {group:'paused',label:'Draining',note:'Will stop after current work finishes.'};
+  if(!worker.pid)return worker.intent==='running'?{group:'attention',label:'Starting',note:'Waiting for the worker to start.'}:{group:'stopped',label:'Stopped',note:'Saved configuration. Start it to pick up tasks.'};
+  if(worker.config?.enabled===false)return {group:'paused',label:'Paused',note:'Not picking up new tasks.'};
+  return active?{group:'working',label:'Working',note:active+' active '+(active===1?'agent':'agents')}:{group:'ready',label:'Ready',note:'Waiting for eligible issues.'};
+}
+function slotUsage(worker,machine,now=Date.now()) {
+  const online=machine.state==='connected'&&now/1000-(machine.heartbeat||0)<=15;
+  const running=online&&worker.pid>0;
+  const capacity=running?(worker.config?.concurrency||1):0;
+  const occupied=running?(worker.active??(worker.runs||[]).filter(r=>r.finished_at==null).length):0;
+  const pickup=worker.config?.enabled&&(!worker.intent||worker.intent==='running');
+  return {capacity,occupied,available:pickup?Math.max(0,capacity-occupied):0,paused:pickup?0:Math.max(0,capacity-occupied),online,running};
+}
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState, managedFleet, workerPhase, slotUsage};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -104,6 +125,8 @@ if (typeof document !== 'undefined') (() => {
   const route = () => {const query=new URLSearchParams(location.hash.slice(1));if(location.pathname==='/workers')query.set('workers','');return query;};
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
   let configRevision, configOriginal='', configPreview, configBusy=false;
+  let workerFilter='current', workerSearch=route().get('find')||'', workerEdit, workerEditRevision, workerEditPreview, workerEditBusy=false;
+  let activityFilter='all';
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical, assignmentLoading=false;
   const seen = new Set();
   let takeoverBusy=false, takeoverTarget;
@@ -139,25 +162,20 @@ if (typeof document !== 'undefined') (() => {
   }
   function renderOverview(data) {
     const workersPage=route().has('workers');
+    document.querySelector('.fleet-tabs').hidden=workersPage;
     $('worker-config').hidden=!workersPage;
     $('projects').hidden=workersPage;
     $('workers-tab').setAttribute('aria-current',workersPage?'page':'false');
     document.querySelector('.page-heading h1').textContent=workersPage?'Workers':'Agents';
     document.title=(workersPage?'Workers':'Agents')+' · Hey Boss';
     if(workersPage){
-      const devices=deviceView(managedFleet(data)),workers=devices.flatMap(d=>[...d.live,...d.saved]).filter(w=>w.managed!==false);
-      $('overview-note').textContent='One configuration. Every machine. Live progress.';
-      $('show-all').hidden=true;
-      $('fleet-summary').replaceChildren(...[
-        [devices.filter(d=>d.online).length+' / '+devices.length,'machines connected'],
-        [workers.length,'configured workers'],
-        [devices.reduce((n,d)=>n+d.active,0),'active agents'],
-        [workers.reduce((n,w)=>n+(w.config?.concurrency||1),0),'configured slots'],
-      ].map(([value,label])=>{const card=element('div','fleet-stat');card.append(element('strong','',String(value)),element('span','',label));return card;}));
+      $('overview-note').textContent='Running agents, occupied slots, and the work happening right now.';
+      $('show-all').hidden=false;$('show-all').textContent='All conversations';$('show-all').href='/agents';
       if(data.configuration?.error){$('config-status').textContent='File error: '+data.configuration.error+' The last valid configuration is still active.';}
       else if(configRevision&&data.configuration?.revision&&configRevision!==data.configuration.revision&&!configBusy){$('config-status').textContent='The file changed elsewhere. Reload before saving; your edits are still here.';configPreview=undefined;$('config-save').disabled=true;}
-      renderDevices(data);return;
+      renderWorkerBoard(data);$('device-settings').hidden=true;return;
     }
+    $('show-all').textContent='All projects';
     const focus=document.activeElement?.dataset.focus;
     const open=new Set([...$('projects').querySelectorAll('details[open]')].map(d=>d.dataset.section));
     const filter=route().get('project');
@@ -200,6 +218,142 @@ if (typeof document !== 'undefined') (() => {
     if(focus)[...$('projects').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
     renderDevices(data);
   }
+  const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
+  const workerLabel=w=>w.config?.name&&!/^Worker(?: \d+)?$/.test(w.config.name)?w.config.name:(w.config?.projects||[]).map(projectLabel).join(' + ')||'Worker '+w.id.slice(0,8);
+  function renderFleetActivity(data) {
+    const focus=document.activeElement?.dataset.focus;
+    const devices=deviceView(managedFleet(data));
+    const entries=devices.flatMap(device=>[...device.live,...device.saved].map(worker=>({device,worker,usage:slotUsage(worker,device.machine),phase:workerPhase(worker,device.machine)})));
+    const total=entries.reduce((n,e)=>{for(const k of ['capacity','occupied','available','paused'])n[k]+=e.usage[k];return n;},{capacity:0,occupied:0,available:0,paused:0});
+    $('fleet-summary').replaceChildren(...[
+      [total.occupied+' / '+total.capacity,'slots occupied'],[total.available,'slots available'],[total.paused,'slots paused'],[devices.filter(d=>d.online).length+' / '+devices.length,'machines connected'],
+    ].map(([value,label])=>{const stat=element('div','fleet-stat');stat.append(element('strong','',String(value)),element('span','',label));return stat;}));
+    const problems=devices.filter(d=>!d.online||d.machine.configuration_error);
+    const health=element('div','fleet-health '+(problems.length||data.configuration?.error?'needs-attention':'is-healthy'));
+    health.append(element('strong','',data.configuration?.error?'Configuration file needs attention':problems.length?'Needs attention':'Fleet is connected'));
+    health.append(element('span','',data.configuration?.error||problems.map(d=>(d.machine.hostname||d.machine.host)+': '+(!d.online?'offline — activity is last known':'new configuration has not applied')).join(' · ')||'Occupied slots are running agents. Available slots can pick up a task.'));
+    $('fleet-attention').replaceChildren(health);
+    $('worker-view-help').textContent='Live work, grouped by machine and worker. Open any task to read its conversation. Paused and offline capacity is not counted as available.';
+    const relevant=entries.filter(e=>e.worker.pid>0||e.worker.intent==='running'||e.worker.intent==='drain');
+    const filters=[['all','All activity',relevant.length],['busy','Busy',relevant.filter(e=>e.usage.occupied>0).length],['available','Available',relevant.filter(e=>e.usage.available>0).length],['attention','Needs attention',relevant.filter(e=>e.phase.group==='attention').length]];
+    $('worker-filters').replaceChildren(...filters.map(([value,label,count])=>{const b=element('button','worker-filter',label+' '+count);b.type='button';b.dataset.activityFilter=value;b.setAttribute('aria-pressed',String(activityFilter===value));return b;}));
+    const search=workerSearch.trim().toLowerCase();
+    const matches=e=>(activityFilter==='all'||activityFilter==='busy'&&e.usage.occupied>0||activityFilter==='available'&&e.usage.available>0||activityFilter==='attention'&&e.phase.group==='attention')&&(!search||[workerLabel(e.worker),e.worker.id,e.device.machine.host,e.device.machine.hostname,...(e.worker.config?.projects||[]),...(e.worker.runs||[]).filter(r=>r.finished_at==null).flatMap(r=>[r.title,r.summary,r.last_event])].join(' ').toLowerCase().includes(search));
+    function meter(usage){const bar=element('div','slot-meter');bar.setAttribute('role','img');bar.setAttribute('aria-label',usage.occupied+' occupied, '+usage.available+' available, '+usage.paused+' paused slots');const capacity=Math.max(usage.capacity,usage.occupied,1);for(const [key,label] of [['occupied','Occupied'],['available','Available'],['paused','Paused']]){if(!usage[key])continue;const part=element('span','slot-meter-'+key);part.style.width=(usage[key]/capacity*100)+'%';part.title=usage[key]+' '+label.toLowerCase();bar.append(part);}return bar;}
+    function task(run,entry){
+      const {worker:w,device:d}=entry,a=element('a','live-task');a.href=link({machine:d.machine,run});a.dataset.focus=d.machine.host+':task:'+run.id;
+      const state=agentState({run,worker:w,machine:d.machine,online:d.online});
+      const meta=element('div','live-task-meta');meta.append(element('span','live-task-state',state),element('span','',run.project_name||projectLabel(run.project_id||'')),element('span','',run.number?'#'+run.number:'Organizer'),element('time','',elapsed(run)));
+      const title=element('strong','live-task-title',run.title||run.project_name||'Organizing project');
+      let activity=(run.last_event||run.summary||'').replace(/\s+/g,' ').trim();if(/^(\/bin\/|.* -lc )/.test(activity))activity='Running a command';else if(/^(Goal:|Codex session|\/goal)/.test(activity))activity=run.summary||'Working on this task';
+      a.append(meta,title,element('p','live-task-activity',activity||'Waiting for the next activity update.'),element('span','live-task-link','Open conversation ↗'));return a;
+    }
+    function worker(entry){const {worker:w,device:d,usage:u,phase}=entry;const card=element('section','live-worker'+(u.occupied?' has-work':''));card.dataset.worker=w.id;
+      const header=element('div','live-worker-heading');const identity=element('div');identity.append(element('h3','',workerLabel(w)),element('span','live-worker-projects',(w.config?.projects||[]).map(projectLabel).join(', ')||'All projects'));
+      const capacity=element('div','live-worker-capacity');capacity.append(element('strong','',!d.online?'Last known state':u.running?u.occupied+' / '+u.capacity+' slots occupied':'Not running'),element('span','worker-state is-'+phase.group,phase.label));header.append(identity,capacity);card.append(header);
+      if(u.running)card.append(meter(u));
+      if(phase.group==='attention')card.append(element('p','live-worker-problem',phase.note));
+      const runs=(w.runs||[]).filter(r=>r.finished_at==null),chiefs=(w.chiefs||[]).filter(r=>r.state==='running');
+      if(runs.length){const tasks=element('div','live-tasks');for(const run of runs)tasks.append(task(run,entry));card.append(tasks);}
+      if(u.occupied>runs.length)card.append(element('p','slot-note',(u.occupied-runs.length)+' occupied '+(u.occupied-runs.length===1?'slot':'slots')+' · task details are not available in this view.'));
+      if(u.available)card.append(element('p','slot-note is-available',u.available+' '+(u.available===1?'slot available':'slots available')+' · ready for the next eligible task'));
+      if(u.paused)card.append(element('p','slot-note',u.paused+' '+(u.paused===1?'slot paused':'slots paused')+' · not picking up new tasks'));
+      if(u.occupied>u.capacity)card.append(element('p','slot-note','Above the configured limit while existing tasks finish.'));
+      if(chiefs.length){card.append(element('h4','organizer-label','Organizers · outside agent slots'));for(const chief of chiefs)card.append(task(chief,entry));}
+      const more=element('a','worker-manage-link','Worker settings →');more.href='/workers#view=configuration&find='+encodeURIComponent(w.id);more.dataset.focus=d.machine.host+':settings:'+w.id;card.append(more);return card;
+    }
+    const sections=[];
+    for(const d of devices.sort((a,b)=>b.active-a.active||Number(b.online)-Number(a.online))){
+      const own=entries.filter(e=>e.device===d),shown=relevant.filter(e=>e.device===d&&matches(e));
+      if(!shown.length&&(search||activityFilter!=='all'))continue;
+      const machineTotal=own.reduce((n,e)=>{for(const k of ['capacity','occupied','available','paused'])n[k]+=e.usage[k];return n;},{capacity:0,occupied:0,available:0,paused:0});
+      const section=element('section','activity-machine');section.dataset.host=d.machine.host;
+      const heading=element('div','activity-machine-heading');const title=element('div');title.append(element('h2','',d.machine.hostname||d.machine.host),element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline · last seen '+(d.machine.heartbeat?new Date(d.machine.heartbeat*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'unknown')));
+      const capacity=element('div','activity-machine-capacity');capacity.append(element('strong','',d.online?machineTotal.occupied+' / '+machineTotal.capacity+' slots occupied':'Capacity unavailable'),element('span','',d.online?machineTotal.available+' available · '+machineTotal.paused+' paused':'Reconnect to see current activity'));heading.append(title,capacity);section.append(heading);
+      if(d.machine.configuration_error){const note=element('p','machine-configuration-warning','New settings have not applied. Current work is shown below. ');const fix=element('a','','Review worker settings →');fix.href='/workers#view=configuration&find='+encodeURIComponent(d.machine.host);note.append(fix);section.append(note);}
+      const grid=element('div','live-worker-grid');shown.sort((a,b)=>b.usage.occupied-a.usage.occupied||Number(b.phase.group==='attention')-Number(a.phase.group==='attention')||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));for(const e of shown)grid.append(worker(e));section.append(grid);
+      if(!shown.length)section.append(element('p','worker-empty','No running workers on this machine.'));
+      const inactive=own.filter(e=>!relevant.includes(e)).length;
+      if(inactive){const a=element('a','inactive-workers-link',inactive+' paused or stopped definitions · Manage workers →');a.href='/workers#view=configuration&find='+encodeURIComponent(d.machine.host);section.append(a);}sections.push(section);
+    }
+    $('worker-board').replaceChildren(...(sections.length?sections:[element('p','worker-empty','No activity matches this filter.')]));
+    if(focus)[...$('worker-board').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
+  }
+
+  function renderWorkerBoard(data) {
+    const configuring=route().get('view')==='configuration';
+    document.querySelector('.page-heading h1').textContent=configuring?'Workers & settings':'Worker activity';
+    document.title=(configuring?'Worker settings':'Worker activity')+' · Hey Boss';
+    $('overview-note').textContent=configuring?'Manage saved workers across your machines.':'Live agents and slot capacity across your machines.';
+    $('worker-view-help').hidden=!configuring;
+    document.body.classList.add('workers-page');
+    $('worker-status-view').setAttribute('aria-current',configuring?'false':'page');
+    $('worker-config-view').setAttribute('aria-current',configuring?'page':'false');
+    $('config-editor').hidden=!configuring;
+    if(!configuring){renderFleetActivity(data);return;}
+    const devices=deviceView(managedFleet(data));
+    const entries=devices.flatMap(device=>[...device.live,...device.saved].map(worker=>({device,worker,phase:workerPhase(worker,device.machine)})));
+    const count=group=>entries.filter(e=>e.phase.group===group).length;
+    const problems=devices.filter(d=>!d.online||d.machine.configuration_error);
+    $('fleet-summary').replaceChildren(...[
+      [entries.length,'configured workers'],[entries.filter(e=>e.device.online&&e.worker.pid>0).length,'workers running'],[count('paused'),'workers paused'],[count('stopped'),'workers stopped'],
+    ].map(([value,label])=>{const card=element('div','fleet-stat');card.append(element('strong','',String(value)),element('span','',label));return card;}));
+    const health=element('div','fleet-health '+(problems.length||data.configuration?.error?'needs-attention':'is-healthy'));
+    health.append(element('strong','',data.configuration?.error?'Configuration file needs attention':problems.length?problems.length+' '+(problems.length===1?'machine needs':'machines need')+' attention':devices.filter(d=>d.online).length+' '+(devices.filter(d=>d.online).length===1?'machine connected':'machines connected')));
+    health.append(element('span','',data.configuration?.error||problems.map(d=>(d.machine.hostname||d.machine.host)+': '+(!d.online?'offline':'configuration not applied')).join(' · ')||'Worker status refreshes automatically.'));
+    $('fleet-attention').replaceChildren(health);
+    $('worker-view-help').textContent=configuring?'Edit a worker’s settings below. Changes save to the supervisor’s fleet.yaml and apply automatically.':'Workers are grouped by machine. Expand a row for its tasks and controls. Stopped workers are kept out of the way.';
+    const filters=[['current','Current',entries.length-count('stopped')],['attention','Needs attention',count('attention')],['paused','Paused',count('paused')],['stopped','Stopped',count('stopped')],['all','All',entries.length]];
+    $('worker-filters').replaceChildren(...filters.map(([value,label,total])=>{const b=element('button','worker-filter',label+' '+total);b.type='button';b.dataset.filter=value;b.setAttribute('aria-pressed',String(workerFilter===value));return b;}));
+    const board=$('worker-board'),focus=document.activeElement?.dataset.focus;
+    const expanded=new Set([...board.querySelectorAll('details[open]')].map(d=>d.dataset.key));
+    const search=workerSearch.trim().toLowerCase();
+    const matches=e=>(workerFilter==='all'||workerFilter==='current'&&e.phase.group!=='stopped'||e.phase.group===workerFilter)&&(!search||[workerLabel(e.worker),e.worker.id,e.device.machine.host,e.device.machine.hostname,...(e.worker.config?.projects||[])].join(' ').toLowerCase().includes(search));
+    function row(entry) {
+      const {worker:w,device:d,phase}=entry,m=d.machine;
+      const active=d.online?(w.active??(w.runs||[]).filter(r=>r.finished_at==null).length):null;
+      const r=element('details','worker-record');r.dataset.key=m.host+':'+w.id;r.dataset.worker=w.id;r.open=expanded.has(r.dataset.key);
+      const summary=element('summary','worker-record-summary');
+      const identity=element('div','worker-record-identity');identity.append(element('strong','',workerLabel(w)),element('span','',((w.config?.projects||[]).map(projectLabel).join(', ')||'All projects')+' · '+w.id.slice(0,8)));
+      const state=element('span','worker-state is-'+phase.group,phase.label);
+      const slots=element('span','worker-slots',(active===null?'—':active)+' / '+(w.config?.concurrency||1));slots.title='Active agents / configured slots';
+      summary.append(identity,state,slots);
+      if(configuring&&!w.retiring){const b=element('button','button small','Edit');b.type='button';Object.assign(b.dataset,{editWorker:w.id,host:m.host,focus:m.host+':'+w.id+':edit'});b.setAttribute('aria-label','Edit '+workerLabel(w)+' on '+(m.hostname||m.host));summary.append(b);}
+      else summary.append(element('span','worker-expand','Details'));
+      r.append(summary);
+      const body=element('div','worker-record-body');body.append(element('p',phase.group==='attention'?'worker-problem':'device-note',phase.note));
+      const facts=element('dl','worker-facts');
+      for(const [key,value] of [['Desired state',({running:'Pick up tasks',pause:'Paused',stop:'Stopped',drain:'Drain and stop'})[w.intent]||'Unknown'],['Worker ID',w.id],['Working directory',w.config?.directory||'Discovered per project'],...Object.entries(w.config?.directories||{}).map(([p,v])=>[projectLabel(p),v])]){facts.append(element('dt','',key),element('dd','',value));}body.append(facts);
+      const tasks=element('div','worker-tasks');
+      for(const run of [...(w.runs||[]),...(w.chiefs||[])].filter(r=>r.kind==='chief'?r.state==='running':r.finished_at==null)){const a=element('a','worker-task');a.href=link({machine:m,run});a.append(element('strong','',run.title||run.project_name||'Chief'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(a);}
+      if(tasks.childNodes.length)body.append(element('h4','','Current tasks'),tasks);
+      const actions=element('div','device-actions');
+      for(const [signal,label] of w.retiring?[]:w.pid>0?[[w.config?.enabled?'pause':'resume',w.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']]){const b=element('button','button small',label);b.type='button';Object.assign(b.dataset,{signal,worker:w.id,host:m.host,focus:m.host+':'+w.id+':'+signal});actions.append(b);}
+      if(!w.retiring&&!configuring){const b=element('button','button small','Edit settings');b.type='button';Object.assign(b.dataset,{editWorker:w.id,host:m.host});actions.append(b);}body.append(actions);
+      for(const signal of (data.signals||[]).filter(s=>s.host===m.host&&s.worker===w.id&&!['acknowledged','superseded'].includes(s.state)))body.append(element('p','device-note',signal.signal+': '+signal.state));
+      r.append(body);return r;
+    }
+    const sections=[];
+    for(const d of devices.sort((a,b)=>Number(!b.online||!!b.machine.configuration_error)-Number(!a.online||!!a.machine.configuration_error))){
+      const own=entries.filter(e=>e.device===d),shown=own.filter(matches);
+      const stopped=workerFilter==='current'&&!search?own.filter(e=>e.phase.group==='stopped'):[];
+      if(!shown.length&&!stopped.length&&(search||workerFilter!=='current'))continue;
+      const m=d.machine,section=element('section','worker-machine');section.dataset.host=m.host;
+      const heading=element('div','worker-machine-heading');const title=element('div');title.append(element('h2','',m.hostname||m.host),element('p','',m.host==='local'?'Supervisor · owns fleet.yaml':m.host));
+      const status=element('div','machine-status');status.append(element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline'),element('span','',m.configuration_error?'Configuration needs fixing':m.desired_revision===m.applied_revision?'Configuration applied':d.online?'Applying configuration':'Changes waiting for connection'));heading.append(title,status);section.append(heading);
+      const metrics=element('p','machine-metrics',d.online?d.live.length+' running workers · '+d.active+' active agents · '+own.length+' configured '+(own.length===1?'worker':'workers'):own.length+' configured workers · last seen '+(m.heartbeat?new Date(m.heartbeat*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'unknown'));section.append(metrics);
+      if(m.configuration_error){const error=element('details','machine-error');error.append(element('summary','','Why configuration has not applied'),element('p','',m.configuration_error));section.append(error);}
+      const labels=element('div','worker-column-labels');labels.append(element('span','','Worker / project'),element('span','','Status'),element('span','','Agents / slots'),element('span','',''));section.append(labels);
+      const rank={attention:0,working:1,ready:2,paused:3,stopped:4};shown.sort((a,b)=>rank[a.phase.group]-rank[b.phase.group]||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));
+      for(const entry of shown)section.append(row(entry));
+      if(!shown.length)section.append(element('p','worker-empty',stopped.length?'No current workers.':'No workers configured.'));
+      if(stopped.length){const archive=element('details','stopped-workers');archive.dataset.key=m.host+':stopped';archive.open=expanded.has(archive.dataset.key);archive.append(element('summary','',stopped.length+' stopped '+(stopped.length===1?'worker':'workers')));for(const entry of stopped)archive.append(row(entry));section.append(archive);}
+      sections.push(section);
+    }
+    board.replaceChildren(...(sections.length?sections:[element('p','worker-empty','No workers match this filter.')]));
+    if(focus)[...board.querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
+  }
+
   function renderDevices(data) {
     const workersPage=route().has('workers');
     const open=workersPage||$('device-settings').open;
@@ -495,6 +649,58 @@ if (typeof document !== 'undefined') (() => {
     configBusy=true;configButtons();$('config-status').textContent='Loading configuration…';
     try{const data=await configRequest();configRevision=data.revision;configOriginal=data.text;$('config-text').value=data.text;configPreview=undefined;$('config-source').textContent=data.source;$('config-changes').replaceChildren();$('config-status').textContent=data.error?'File error: '+data.error:'Loaded from the supervisor. Changes are applied after saving.';}catch(error){$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
   }
+  $('worker-filters').onclick=event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.activityFilter)activityFilter=b.dataset.activityFilter;else if(b.dataset.filter)workerFilter=b.dataset.filter;if(last)renderWorkerBoard(last);};
+  $('worker-search').value=workerSearch;if(workerSearch)workerFilter='all';
+  $('worker-search').oninput=event=>{workerSearch=event.target.value;if(last)renderWorkerBoard(last);};
+  function workerEditButtons(){for(const input of $('worker-form').querySelectorAll('input,textarea,select'))input.disabled=workerEditBusy;$('worker-editor-preview').disabled=workerEditBusy;$('worker-editor-save').disabled=workerEditBusy||!workerEditPreview;$('worker-editor-cancel').disabled=workerEditBusy;}
+  const editFields=['name','slots','intent','projects','directory','directories'];
+  let workerEditOriginal='';
+  const editFingerprint=()=>JSON.stringify(editFields.map(field=>$('worker-'+field).value));
+  async function openWorkerEditor(host,id){
+    if(workerEditBusy)return;
+    if(configRevision&&$('config-text').value!==configOriginal){fail(Error('Save or reload your unsaved YAML changes before editing a worker.'));return;}
+    workerEditBusy=true;
+    try{
+      const data=await configRequest();
+      const worker=data.document?.machines?.[host]?.workers?.find(w=>w.id===id);
+      if(!worker)throw Error(data.error||'This worker is no longer configured. Reload the page.');
+      workerEdit={host,id,worker};$('worker-scope').open=!!last?.machines?.find(m=>m.host===host)?.configuration_error?.includes(id);workerEditRevision=data.revision;workerEditPreview=undefined;
+      $('worker-editor-title').textContent='Edit '+workerLabel(worker);
+      $('worker-editor-context').textContent=host+' · '+id;
+      $('worker-name').value=worker.config?.name||'Worker';$('worker-slots').value=worker.config?.concurrency||1;$('worker-intent').value=worker.intent;
+      $('worker-projects').value=(worker.config?.projects||[]).join('\n');$('worker-directory').value=worker.config?.directory||'';$('worker-directories').value=Object.entries(worker.config?.directories||{}).map(([p,d])=>p+' = '+d).join('\n');
+      workerEditOriginal=editFingerprint();$('worker-editor-status').textContent='Other settings are preserved. Structured edits may reformat the YAML file.';$('worker-editor-changes').replaceChildren();$('worker-editor').showModal();
+    }catch(error){fail(error);}finally{workerEditBusy=false;workerEditButtons();}
+  }
+  function closeWorkerEditor(event){if(workerEditBusy||editFingerprint()!==workerEditOriginal&&!confirm('Discard your unsaved worker changes?')){event?.preventDefault();return;}workerEdit=null;$('worker-editor').close();}
+  $('worker-editor-cancel').onclick=closeWorkerEditor;$('worker-editor').addEventListener('cancel',closeWorkerEditor);
+  $('worker-form').oninput=()=>{workerEditPreview=undefined;$('worker-editor-status').textContent='Unsaved changes. Review before saving.';$('worker-editor-changes').replaceChildren();workerEditButtons();};
+  function workerUpdate(){
+    const directories={};
+    for(const line of $('worker-directories').value.split('\n').map(s=>s.trim()).filter(Boolean)){const at=line.indexOf('=');if(at<1||!line.slice(at+1).trim())throw Error('Use project ID = /absolute/path for each per-project path.');const project=line.slice(0,at).trim();if(Object.hasOwn(directories,project))throw Error('Only one path is allowed per project.');directories[project]=line.slice(at+1).trim();}
+    return {host:workerEdit.host,id:workerEdit.id,intent:$('worker-intent').value,config:{name:$('worker-name').value.trim(),concurrency:Number($('worker-slots').value),projects:$('worker-projects').value.split('\n').map(s=>s.trim()).filter(Boolean),directory:$('worker-directory').value.trim(),directories}};
+  }
+  $('worker-form').onsubmit=async event=>{
+    event.preventDefault();if(workerEditBusy)return;workerEditBusy=true;workerEditButtons();
+    try{const update=workerUpdate();const data=await configRequest({worker_update:update,revision:workerEditRevision,save:false});workerEditPreview=update;
+      const before=workerEdit.worker;const changes=[];for(const [key,label] of [['name','Name'],['concurrency','Agent slots'],['projects','Projects'],['directory','Working directory'],['directories','Per-project paths']]){const defaults={name:'Worker',concurrency:1,projects:[],directory:'',directories:{}};const old=before.config?.[key]??defaults[key];if(JSON.stringify(old)!==JSON.stringify(update.config[key]))changes.push(label+': '+(typeof old==='object'?JSON.stringify(old):old||'Automatic')+' → '+(typeof update.config[key]==='object'?JSON.stringify(update.config[key]):update.config[key]||'Automatic'));}if(before.intent!==update.intent)changes.unshift('Pickup mode: '+before.intent+' → '+update.intent);
+      $('worker-editor-changes').replaceChildren(...changes.map(text=>element('li','',text)));$('worker-editor-status').textContent=changes.length?(update.intent==='stop'&&before.intent!=='stop'?'Saving will stop this worker and its current agents.':'Ready to save to fleet.yaml. Machines will apply these settings automatically.'):'No changes to save.';if(!changes.length)workerEditPreview=undefined;$('worker-editor-changes').scrollIntoView({block:'nearest'});
+    }catch(error){workerEditPreview=undefined;$('worker-editor-status').textContent=error.message;}finally{workerEditBusy=false;workerEditButtons();}
+  };
+  $('worker-editor-save').onclick=async()=>{
+    if(workerEditBusy||!workerEditPreview)return;workerEditBusy=true;workerEditButtons();
+    try{const saved=await configRequest({worker_update:workerEditPreview,revision:workerEditRevision,save:true});workerEditOriginal=editFingerprint();workerEditPreview=undefined;
+      if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
+      $('worker-save-note').textContent='Worker saved. Check its machine below for application status.';$('worker-save-note').hidden=false;await refresh();$('worker-editor').close();workerEdit=null;
+    }catch(error){workerEditPreview=undefined;$('worker-editor-status').textContent=error.message;}finally{workerEditBusy=false;workerEditButtons();}
+  };
+  $('worker-board').onclick=async event=>{
+    const edit=event.target.closest('[data-edit-worker]');if(edit){event.preventDefault();await openWorkerEditor(edit.dataset.host,edit.dataset.editWorker);return;}
+    const b=event.target.closest('button[data-signal]');if(!b)return;
+    if(['stop','restart'].includes(b.dataset.signal)&&!confirm((b.dataset.signal==='stop'?'Stop':'Restart')+' this worker and its current agents?'))return;
+    b.disabled=true;try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(error){fail(error);}finally{b.disabled=false;}
+  };
+
   $('config-editor').addEventListener('toggle',()=>{if($('config-editor').open&&configRevision===undefined)loadConfig();});
   $('config-reload').onclick=loadConfig;
   $('config-text').oninput=()=>{configPreview=undefined;$('config-changes').replaceChildren();$('config-status').textContent=$('config-text').value===configOriginal?'No unsaved changes.':'Unsaved changes. Preview before saving.';configButtons();};
@@ -507,14 +713,14 @@ if (typeof document !== 'undefined') (() => {
     }catch(error){configPreview=undefined;$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
   }
   $('config-validate').onclick=()=>submitConfig(false);$('config-save').onclick=()=>submitConfig(true);
-  addEventListener('beforeunload',event=>{if(configRevision&&$('config-text').value!==configOriginal){event.preventDefault();event.returnValue='';}});
+  addEventListener('beforeunload',event=>{if(configRevision&&$('config-text').value!==configOriginal||workerEdit&&editFingerprint()!==workerEditOriginal){event.preventDefault();event.returnValue='';}});
   $('device-list').onclick=async event=>{
     const b=event.target.closest('button[data-signal]');if(!b)return;
     if(b.dataset.signal==='stop'&&!confirm('Stop agents on this device? Their saved conversations will remain available.'))return;
     b.disabled=true;
     try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
   };
-  addEventListener('hashchange',()=>{if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('hashchange',()=>{if(route().has('find')){workerSearch=route().get('find');$('worker-search').value=workerSearch;workerFilter='all';}if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{
