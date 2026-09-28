@@ -5418,7 +5418,13 @@ final class ArtifactMarkdownText: NSTextView {
     }
     func wrap(_ marker: String) {
         let selection = selectedRange(), source = string as NSString, width = (marker as NSString).length
-        if selection.location >= width, NSMaxRange(selection) + width <= source.length,
+        // A pair of stars is bold, not two independently toggled italics.
+        var starRun = 0
+        if marker == "*" {
+            var cursor = selection.location
+            while cursor > 0 && source.substring(with: NSRange(location: cursor - 1, length: 1)) == "*" { starRun += 1; cursor -= 1 }
+        }
+        if (marker != "*" || starRun % 2 == 1), selection.location >= width, NSMaxRange(selection) + width <= source.length,
            source.substring(with: NSRange(location: selection.location - width, length: width)) == marker,
            source.substring(with: NSRange(location: NSMaxRange(selection), length: width)) == marker {
             replace(NSRange(location: selection.location - width, length: selection.length + 2 * width), with: source.substring(with: selection), selection: NSRange(location: selection.location - width, length: selection.length))
@@ -5433,9 +5439,31 @@ final class ArtifactMarkdownText: NSTextView {
         let value = source.substring(with: range), trailing = value.hasSuffix("\n")
         var lines = value.components(separatedBy: "\n")
         if trailing { lines.removeLast() }
-        let removing = lines.allSatisfy { $0.hasPrefix(prefix) }
-        let result = lines.map { removing ? String($0.dropFirst(prefix.count)) : prefix + $0 }.joined(separator: "\n") + (trailing ? "\n" : "")
-        replace(range, with: result, selection: NSRange(location: range.location, length: (result as NSString).length))
+        let heading = prefix.hasPrefix("#"), numbered = prefix == "1. ", task = prefix == "- [ ] "
+        let pattern = heading ? "^#{1,6} " : "^(?:[-*+] |[0-9]+\\. )(?:\\[[ xX]\\] )?"
+        let regex = try! NSRegularExpression(pattern: pattern)
+        let markers = lines.map { line -> String in
+            guard let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) else { return "" }
+            return (line as NSString).substring(with: match.range)
+        }
+        let removing = markers.allSatisfy { marker in
+            if heading { return marker == prefix }
+            if task { return marker.contains("[") }
+            if numbered { return marker.first?.isNumber == true && !marker.contains("[") }
+            return ["- ", "* ", "+ "].contains(marker)
+        }
+        let replacements = lines.enumerated().map { index, line -> String in
+            let marker = removing ? "" : numbered ? "\(index + 1). " : prefix
+            return marker + String(line.dropFirst(markers[index].count))
+        }
+        let result = replacements.joined(separator: "\n") + (trailing ? "\n" : "")
+        let nextSelection: NSRange
+        if selection.length == 0 {
+            let oldWidth = (markers[0] as NSString).length
+            let newWidth = (replacements[0] as NSString).length - (lines[0] as NSString).length + oldWidth
+            nextSelection = NSRange(location: range.location + max(newWidth, selection.location - range.location - oldWidth + newWidth), length: 0)
+        } else { nextSelection = NSRange(location: range.location, length: (result as NSString).length) }
+        replace(range, with: result, selection: nextSelection)
     }
     override func insertNewline(_ sender: Any?) {
         guard !hasMarkedText(), selectedRange().length == 0 else { super.insertNewline(sender); return }
@@ -5477,7 +5505,7 @@ final class ArtifactEditorWindow: NSWindow {
     }
 }
 
-final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     let window: ArtifactEditorWindow
     let session: ArtifactEditingSession
     let backend: ArtifactBackend
@@ -5486,27 +5514,27 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let scroll = NSScrollView()
     let readerScroll = NSScrollView()
     let split = NSSplitView()
-    let sidebar = Surface(frame: .zero)
+    let sidebar = NSVisualEffectView(frame: .zero)
     let paper = NSView()
     let page = NSView()
     let reload = NSButton(title: "Reload", target: nil, action: nil)
-    let libraryButton = NSButton()
+    let libraryButton = NSToolbarItem(itemIdentifier: .init("library"))
     var focusMode = false
     let titleField = NSTextField(string: "")
     let search = NSSearchField()
     let table = NSTableView()
     let libraryScroll = NSScrollView()
     let status = NSTextField(labelWithString: "Loading…")
-    let outline = NSPopUpButton(frame: .zero, pullsDown: false)
-    let modes = NSSegmentedControl(labels: ["Write", "Read"], trackingMode: .selectOne, target: nil, action: nil)
+    let outline = NSMenuToolbarItem(itemIdentifier: .init("outline"))
+    let modes = NSToolbarItem(itemIdentifier: .init("reading"))
     let recovery = NSButton(title: "Save Copy…", target: nil, action: nil)
-    let toolbarSurface = Surface(frame: .zero)
     var documents: [(String, String)] = []
     var headings: [(String, NSRange)] = []
     var searchTimer: Timer?
     var renderTimer: Timer?
     var renderGeneration = 0
     var outlineGeneration = 0
+    var highlighting = false
     var listGeneration = 0
     var previewing = false
     var loading = true
@@ -5521,9 +5549,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         session = ArtifactEditingSession(launch: launch, journalRoot: journalRoot)
         backend = ArtifactBackend(launch, cli: cli)
         self.present = present
-        window = ArtifactEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window = ArtifactEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         super.init()
-        window.title = "Artifacts"; window.titlebarAppearsTransparent = true
+        window.title = "Artifacts"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .none; window.backgroundColor = .textBackgroundColor
         window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 720, height: 460)
         window.delegate = self; window.setFrameAutosaveName("hey-boss-artifact-editor"); window.center()
         window.command = { [weak self] key, shift in self?.command(key, shift: shift) ?? false }
@@ -5534,52 +5563,56 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         refreshLibrary()
     }
     func buildUI() {
+        let toolbar = NSToolbar(identifier: "artifact-writing")
+        toolbar.delegate = self; toolbar.displayMode = .iconOnly
+        window.toolbar = toolbar
         let content = window.contentView!
         split.isVertical = true; split.dividerStyle = .thin; split.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(split)
-        NSLayoutConstraint.activate([split.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), split.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), split.topAnchor.constraint(equalTo: content.topAnchor, constant: 42), split.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)])
+        NSLayoutConstraint.activate([
+            split.leadingAnchor.constraint(equalTo: content.leadingAnchor), split.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            split.topAnchor.constraint(equalTo: (window.contentLayoutGuide as! NSLayoutGuide).topAnchor), split.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        ])
         split.addArrangedSubview(sidebar); split.addArrangedSubview(paper)
-        sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        sidebar.material = .sidebar; sidebar.blendingMode = .behindWindow
+        sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
         sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
         paper.widthAnchor.constraint(greaterThanOrEqualToConstant: 460).isActive = true
-        let libraryTitle = NSTextField(labelWithString: "Artifacts")
-        libraryTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        let project = NSTextField(labelWithString: session.launch.project.components(separatedBy: "/").last ?? session.launch.project)
-        project.textColor = .secondaryLabelColor; project.lineBreakMode = .byTruncatingMiddle
-        search.placeholderString = "Quick switch · ⌘P"; search.delegate = self
-        let new = NSButton(title: "New note", target: self, action: #selector(newDocument))
-        new.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
-        new.imagePosition = .imageLeading
-        new.toolTip = "New artifact (⌘N)"
-        let open = NSButton(title: "Open file…", target: self, action: #selector(openFile)); open.toolTip = "Open Markdown (⌘O)"
-        let column = NSTableColumn(identifier: .init("title")); column.width = 200; table.addTableColumn(column)
-        table.headerView = nil; table.rowHeight = 38; table.style = .sourceList; table.backgroundColor = .clear
+        let libraryTitle = NSTextField(labelWithString: "Library")
+        libraryTitle.font = .systemFont(ofSize: 12, weight: .semibold); libraryTitle.textColor = .secondaryLabelColor
+        search.placeholderString = "Search notes"; search.delegate = self; search.controlSize = .regular
+        search.toolTip = "Quick switch (⌘P)"
+        let new = NSButton(image: NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New note")!, target: self, action: #selector(newDocument))
+        new.isBordered = false; new.toolTip = "New note (⌘N)"
+        let header = NSStackView(views: [libraryTitle, NSView(), new]); header.spacing = 8
+        let open = NSButton(title: "Open Markdown…", target: self, action: #selector(openFile))
+        open.bezelStyle = .accessoryBar; open.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); open.imagePosition = .imageLeading
+        open.toolTip = "Open Markdown (⌘O)"
+        let column = NSTableColumn(identifier: .init("title")); column.width = 208; table.addTableColumn(column)
+        table.headerView = nil; table.rowHeight = 36; table.style = .sourceList; table.backgroundColor = .clear
         table.dataSource = self; table.delegate = self; table.target = self; table.doubleAction = #selector(openSelection)
-        table.setAccessibilityLabel("Artifacts")
-        libraryScroll.documentView = table; libraryScroll.hasVerticalScroller = true; libraryScroll.drawsBackground = false
-        let side = NSStackView(views: [libraryTitle, project, search, new, open, libraryScroll])
-        side.orientation = .vertical; side.alignment = .leading; side.spacing = 12; side.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.content.addSubview(side)
-        NSLayoutConstraint.activate([side.leadingAnchor.constraint(equalTo: sidebar.content.leadingAnchor, constant: 14), side.trailingAnchor.constraint(equalTo: sidebar.content.trailingAnchor, constant: -14), side.topAnchor.constraint(equalTo: sidebar.content.topAnchor, constant: 20), side.bottomAnchor.constraint(equalTo: sidebar.content.bottomAnchor, constant: -12), search.widthAnchor.constraint(equalTo: side.widthAnchor), libraryScroll.widthAnchor.constraint(equalTo: side.widthAnchor)])
-        titleField.font = .systemFont(ofSize: 28, weight: .semibold); titleField.isBezeled = false; titleField.drawsBackground = false; titleField.delegate = self
-        titleField.placeholderString = "Untitled artifact"; titleField.setAccessibilityLabel("Document title")
-        modes.selectedSegment = 0; modes.target = self; modes.action = #selector(modeChanged); modes.toolTip = "Toggle reading view (⌘E)"
-        outline.addItem(withTitle: "Outline"); outline.target = self; outline.action = #selector(jumpHeading); outline.setAccessibilityLabel("Document outline")
-        libraryButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Show library")
-        libraryButton.target = self; libraryButton.action = #selector(toggleFocus); libraryButton.bezelStyle = .texturedRounded
-        libraryButton.toolTip = "Show or hide the library (⌘⇧F)"; libraryButton.setAccessibilityLabel("Toggle focus")
-        let tools = NSStackView(views: [libraryButton, outline, modes]); tools.spacing = 8
-        tools.translatesAutoresizingMaskIntoConstraints = false; toolbarSurface.content.addSubview(tools)
-        NSLayoutConstraint.activate([tools.leadingAnchor.constraint(equalTo: toolbarSurface.content.leadingAnchor, constant: 12), tools.trailingAnchor.constraint(equalTo: toolbarSurface.content.trailingAnchor, constant: -12), tools.topAnchor.constraint(equalTo: toolbarSurface.content.topAnchor, constant: 8), tools.bottomAnchor.constraint(equalTo: toolbarSurface.content.bottomAnchor, constant: -8)])
+        table.setAccessibilityLabel("Notes")
+        libraryScroll.documentView = table; libraryScroll.hasVerticalScroller = true; libraryScroll.autohidesScrollers = true; libraryScroll.drawsBackground = false
+        let side = NSStackView(views: [search, header, libraryScroll, open])
+        side.orientation = .vertical; side.alignment = .leading; side.spacing = 16; side.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(side)
+        NSLayoutConstraint.activate([
+            side.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16), side.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -16),
+            side.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 16), side.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -16),
+            search.widthAnchor.constraint(equalTo: side.widthAnchor), header.widthAnchor.constraint(equalTo: side.widthAnchor), libraryScroll.widthAnchor.constraint(equalTo: side.widthAnchor)
+        ])
         recovery.target = self; recovery.action = #selector(exportCopy); recovery.toolTip = "Export your current text as Markdown (⌘⇧S)"
         reload.target = self; reload.action = #selector(reloadDocument); reload.toolTip = "Load the latest saved revision; a recovery copy keeps unsent edits"
-        let footer = NSStackView(views: [status, reload, recovery]); footer.spacing = 10
-        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
+        let footer = NSStackView(views: [status, NSView(), reload, recovery]); footer.spacing = 10
+        status.font = .systemFont(ofSize: 11); status.textColor = .tertiaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         page.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(page)
         let preferredWidth = page.widthAnchor.constraint(equalTo: paper.widthAnchor); preferredWidth.priority = .defaultHigh
-        NSLayoutConstraint.activate([page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor), page.widthAnchor.constraint(lessThanOrEqualToConstant: 800), page.widthAnchor.constraint(lessThanOrEqualTo: paper.widthAnchor), preferredWidth])
-        [titleField, toolbarSurface, scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
+        NSLayoutConstraint.activate([
+            page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
+            page.widthAnchor.constraint(lessThanOrEqualToConstant: 760), page.widthAnchor.constraint(lessThanOrEqualTo: paper.widthAnchor), preferredWidth
+        ])
+        [scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
         configureText(text, scroll: scroll); configureText(reader, scroll: readerScroll)
         text.isRichText = false; text.isEditable = false; text.allowsUndo = true; text.delegate = self
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
@@ -5589,26 +5622,68 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         reader.isEditable = false; reader.usesFindBar = true; reader.setAccessibilityLabel("Markdown preview")
         readerScroll.isHidden = true
         NSLayoutConstraint.activate([
-            titleField.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 32), titleField.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -24), titleField.topAnchor.constraint(equalTo: page.topAnchor, constant: 14),
-            toolbarSurface.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 24), toolbarSurface.trailingAnchor.constraint(lessThanOrEqualTo: page.trailingAnchor, constant: -16), toolbarSurface.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 16),
-            scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 8), scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor), scroll.topAnchor.constraint(equalTo: toolbarSurface.bottomAnchor, constant: 12), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
-            readerScroll.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), readerScroll.trailingAnchor.constraint(equalTo: scroll.trailingAnchor), readerScroll.topAnchor.constraint(equalTo: scroll.topAnchor), readerScroll.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
-            footer.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 28), footer.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -16), footer.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -8)
+            scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: page.topAnchor), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+            readerScroll.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), readerScroll.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            readerScroll.topAnchor.constraint(equalTo: scroll.topAnchor), readerScroll.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            footer.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 36), footer.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -36), footer.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -12)
         ])
-        window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0)
+        window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(250, ofDividerAt: 0)
         toggleFocus()
         scroll.contentView.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in self?.highlightVisible() }
     }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.init("library"), .init("document-title"), .flexibleSpace, .init("outline"), .init("format"), .init("reading")]
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        switch identifier.rawValue {
+        case "library":
+            libraryButton.label = "Library"; libraryButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle library")
+            libraryButton.target = self; libraryButton.action = #selector(toggleFocus); libraryButton.toolTip = "Show or hide library (⌘⇧F)"
+            return libraryButton
+        case "document-title":
+            titleField.font = .systemFont(ofSize: 13, weight: .semibold); titleField.isBezeled = false; titleField.drawsBackground = false; titleField.delegate = self
+            titleField.placeholderString = "Untitled"; titleField.lineBreakMode = .byTruncatingTail; titleField.setAccessibilityLabel("Document title")
+            titleField.toolTip = "Document title"; titleField.translatesAutoresizingMaskIntoConstraints = false
+            titleField.widthAnchor.constraint(equalToConstant: 280).isActive = true
+            let item = NSToolbarItem(itemIdentifier: identifier); item.label = "Document title"; item.view = titleField; item.visibilityPriority = .high
+            if #available(macOS 26.0, *) { item.isBordered = false }
+            return item
+        case "outline":
+            outline.label = "Outline"; outline.image = NSImage(systemSymbolName: "list.bullet", accessibilityDescription: "Document outline")
+            outline.showsIndicator = false; outline.toolTip = "Jump to a heading"; outline.menu = NSMenu(title: "Outline")
+            return outline
+        case "format":
+            let item = NSMenuToolbarItem(itemIdentifier: identifier); item.label = "Format"
+            item.image = NSImage(systemSymbolName: "textformat", accessibilityDescription: "Format"); item.showsIndicator = false
+            item.menu = NSMenu(title: "Format")
+            // The native toolbar pull-down reserves its first item as the button title.
+            item.menu.addItem(withTitle: "Format", action: nil, keyEquivalent: "")
+            let commands: [(String, String, Bool)] = [("Bold", "b", false), ("Italic", "i", false), ("Link…", "k", false), ("Inline Code", "`", false), ("Heading 1", "1", false), ("Heading 2", "2", false), ("Heading 3", "3", false), ("Bullet List", "8", true), ("Numbered List", "7", true), ("Task List", "l", true)]
+            for (label, key, shift) in commands {
+                let entry = NSMenuItem(title: label, action: #selector(formatCommand(_:)), keyEquivalent: key)
+                entry.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; entry.target = self; item.menu.addItem(entry)
+            }
+            return item
+        case "reading":
+            modes.label = "Reading view"; modes.image = NSImage(systemSymbolName: "book", accessibilityDescription: "Reading view")
+            modes.target = self; modes.action = #selector(modeChanged); modes.toolTip = "Reading view (⌘E)"
+            return modes
+        default: return nil
+        }
+    }
+    @objc func formatCommand(_ sender: NSMenuItem) { writeMode(); _ = command(sender.keyEquivalent, shift: sender.keyEquivalentModifierMask.contains(.shift)) }
     func configureText(_ view: NSTextView, scroll: NSScrollView) {
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.borderType = .noBorder
         view.frame = NSRect(x: 0, y: 0, width: 750, height: 600)
         view.isVerticallyResizable = true; view.isHorizontallyResizable = false; view.autoresizingMask = [.width]
         view.textContainer?.widthTracksTextView = true; view.textContainer?.containerSize = NSSize(width: 750, height: CGFloat.greatestFiniteMagnitude)
         view.layoutManager?.allowsNonContiguousLayout = true
-        view.textContainerInset = NSSize(width: 24, height: 22)
-        view.font = .systemFont(ofSize: 17)
-        let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 5
+        view.textContainerInset = NSSize(width: 32, height: 44)
+        view.font = .systemFont(ofSize: 16)
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 6
         view.defaultParagraphStyle = paragraph
         view.textColor = .textColor; view.backgroundColor = .textBackgroundColor
         scroll.documentView = view
@@ -5682,12 +5757,11 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     func updateStatus() {
         window.title = session.title
-        let count = session.body.utf16.count
         recovery.isHidden = session.failure == nil; reload.isHidden = session.failure == nil
         if let failure = session.failure { status.stringValue = failure; status.textColor = .systemRed }
         else {
-            status.textColor = .secondaryLabelColor
-            status.stringValue = (loading ? "Loading…" : session.saving ? "Saving…" : session.dirty ? "Saving shortly…" : "All changes saved") + (focusMode ? "" : "  ·  \(count.formatted()) characters")
+            status.textColor = .tertiaryLabelColor
+            status.stringValue = loading ? "Loading…" : session.saving || session.dirty ? "Saving…" : "Saved"
         }
         status.toolTip = status.stringValue
         if closed, !session.dirty, !session.saving { onClose() }
@@ -5714,7 +5788,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         } else if notification.object as? NSTextField === titleField { session.change(title: titleField.stringValue, body: text.string) }
     }
     func highlightVisible() {
-        guard !loading, let manager = text.layoutManager, let container = text.textContainer else { return }
+        guard !loading, !highlighting, let manager = text.layoutManager, let container = text.textContainer, let storage = text.textStorage else { return }
+        highlighting = true; defer { highlighting = false }
         var rect = text.visibleRect; rect.origin.x -= text.textContainerOrigin.x; rect.origin.y -= text.textContainerOrigin.y
         let glyphs = manager.glyphRange(forBoundingRect: rect, in: container)
         let visible = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
@@ -5722,25 +5797,42 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         guard visible.location <= source.length else { return }
         let range = source.paragraphRange(for: visible)
         guard range.length <= 65536 else { return }
-        // Temporary layout attributes keep highlighting out of undo and source text.
+        // Colors are temporary. Fonts must live in storage for TextKit to measure headings.
+        // Attribute-only edits never enter the plain-text undo or autosave stream.
         manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
-        manager.removeTemporaryAttribute(.font, forCharacterRange: range)
         let rules: [(String, NSColor, NSFont?)] = [
-            ("(?m)^#{1,6} .+$", .labelColor, .systemFont(ofSize: 21, weight: .semibold)),
+            ("(?m)^# .+$", .labelColor, .systemFont(ofSize: 30, weight: .bold)),
+            ("(?m)^## .+$", .labelColor, .systemFont(ofSize: 22, weight: .semibold)),
+            ("(?m)^#{3,6} .+$", .labelColor, .systemFont(ofSize: 18, weight: .semibold)),
             ("`[^`\\n]+`", .systemPurple, nil),
-            ("\\*\\*[^*\\n]+\\*\\*", .labelColor, .monospacedSystemFont(ofSize: 15, weight: .bold)),
+            ("\\*\\*[^*\\n]+\\*\\*", .labelColor, .systemFont(ofSize: 16, weight: .semibold)),
             ("\\[[^]\\n]+\\]\\([^)\\n]+\\)", .linkColor, nil),
-            ("(?m)^\\s*(?:[-*+] |[0-9]+\\. |>|```).*$", .secondaryLabelColor, nil)
+            ("(?m)^[ \\t]*(?:#{1,6} |[-*+] |[0-9]+\\. |>|```)", .tertiaryLabelColor, nil)
         ]
         let visibleSource = source.substring(with: range)
+        let desired = NSMutableAttributedString(string: visibleSource, attributes: [.font: NSFont.systemFont(ofSize: 16)])
         for (pattern, color, font) in rules {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             for match in regex.matches(in: visibleSource, range: NSRange(location: 0, length: (visibleSource as NSString).length)) {
                 let matchRange = NSRange(location: range.location + match.range.location, length: match.range.length)
                 manager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: matchRange)
-                if let font { manager.addTemporaryAttribute(.font, value: font, forCharacterRange: matchRange) }
+                if let font { desired.addAttribute(.font, value: font, range: match.range) }
             }
         }
+        var updates: [(NSRange, NSFont)] = []
+        desired.enumerateAttribute(.font, in: NSRange(location: 0, length: desired.length)) { value, localRange, _ in
+            guard let font = value as? NSFont else { return }
+            let absolute = NSRange(location: range.location + localRange.location, length: localRange.length)
+            storage.enumerateAttribute(.font, in: absolute) { existing, run, _ in
+                if (existing as? NSFont) != font { updates.append((run, font)) }
+            }
+        }
+        if !updates.isEmpty {
+            storage.beginEditing()
+            for (run, font) in updates { storage.addAttribute(.font, value: font, range: run) }
+            storage.endEditing()
+        }
+        text.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor, .paragraphStyle: text.defaultParagraphStyle ?? NSParagraphStyle.default]
     }
     func updateOutline() {
         outlineGeneration += 1
@@ -5757,19 +5849,26 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             onMain {
                 guard let self, generation == self.outlineGeneration, !self.closed else { return }
                 self.headings = headings
-                self.outline.removeAllItems(); self.outline.addItem(withTitle: "Outline")
-                for (title, _) in headings { self.outline.addItem(withTitle: title) }
+                self.outline.menu.removeAllItems()
+                self.outline.menu.addItem(withTitle: "Outline", action: nil, keyEquivalent: "")
+                if headings.isEmpty { self.outline.menu.addItem(withTitle: "No headings", action: nil, keyEquivalent: "") }
+                for (index, heading) in headings.enumerated() {
+                    let item = NSMenuItem(title: heading.0, action: #selector(self.jumpHeading(_:)), keyEquivalent: "")
+                    item.tag = index; item.target = self; self.outline.menu.addItem(item)
+                }
             }
         }
     }
-    @objc func jumpHeading() {
-        let index = outline.indexOfSelectedItem - 1
+    @objc func jumpHeading(_ sender: NSMenuItem) {
+        let index = sender.tag
         guard headings.indices.contains(index) else { return }
         if previewing { togglePreview() }; text.setSelectedRange(headings[index].1); text.scrollRangeToVisible(headings[index].1); window.makeFirstResponder(text)
     }
-    @objc func modeChanged() { if (modes.selectedSegment == 1) != previewing { togglePreview() } }
+    @objc func modeChanged() { togglePreview() }
     func togglePreview() {
-        guard session.ready else { return }; previewing.toggle(); modes.selectedSegment = previewing ? 1 : 0
+        guard session.ready else { return }; previewing.toggle()
+        modes.image = NSImage(systemSymbolName: previewing ? "square.and.pencil" : "book", accessibilityDescription: previewing ? "Write" : "Read")
+        modes.label = previewing ? "Writing view" : "Reading view"; modes.toolTip = modes.label + " (⌘E)"
         scroll.isHidden = previewing; readerScroll.isHidden = !previewing
         if previewing { renderPreview(); window.makeFirstResponder(reader) } else { window.makeFirstResponder(text); highlightVisible() }
     }
@@ -5827,7 +5926,6 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         focusMode.toggle()
         if focusMode { split.removeArrangedSubview(sidebar); sidebar.removeFromSuperview() }
         else { split.insertArrangedSubview(sidebar, at: 0); window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0) }
-        libraryButton.state = focusMode ? .off : .on
         if session.ready { window.makeFirstResponder(previewing ? reader : text) }
         updateStatus()
     }
