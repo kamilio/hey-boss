@@ -486,7 +486,9 @@ function emptyState() {
 }
 function prStatus(pr, label = false) {
   const status = ["open", "closed", "merged"].includes(pr.status) ? pr.status : "unknown";
-  const stale = status !== "merged" && (!!pr.error || (pr.checked_at && Date.now() - pr.checked_at > 180000));
+  // Allow the normal refresh interval plus two minutes for the bounded queue.
+  const staleAfter = (status === "closed" ? 32 : 7) * 60_000;
+  const stale = status !== "merged" && (!!pr.error || (pr.checked_at && Date.now() - pr.checked_at > staleAfter));
   const name = {open:"Open",closed:"Closed without merge",merged:"Merged",unknown:"Status pending"}[status];
   const title = name + (stale ? " · Update delayed" : "") + (pr.checked_at ? " · Checked " + new Date(pr.checked_at).toLocaleString() : "");
   return `<span class="pr-status pr-status-${status}${stale ? " pr-status-stale" : ""}" role="img" aria-label="${esc(title)}" title="${esc(title)}">${icon(stale ? "clock" : {open:"pull-request",closed:"pr-closed",merged:"pr-merged",unknown:"clock"}[status])}${label ? `<span>${esc(name)}${stale ? " · Update delayed" : ""}</span>` : ""}</span>`;
