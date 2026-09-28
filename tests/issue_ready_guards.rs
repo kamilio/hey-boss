@@ -1,5 +1,6 @@
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Fixture {
     root: std::path::PathBuf,
@@ -20,13 +21,15 @@ impl Fixture {
         request
     }
     fn new() -> Self {
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "hey-boss-ready-{}-{}",
+            "hey-boss-ready-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
         let store = Store::open(&root.join("issues.db")).unwrap();
