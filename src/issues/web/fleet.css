@@ -255,6 +255,9 @@
 .activity-worker-summary .worker-state {font-size:11px;padding:0;background:transparent;border:0;white-space:normal;line-height:1.4}
 .activity-worker-slots {font-size:12px;font-variant-numeric:tabular-nums;text-align:right}
 .activity-worker-current {display:flex;flex-direction:column;gap:4px;min-width:0;line-height:1.4}
+.activity-current-line,.scope-current-task {display:flex;align-items:baseline;gap:10px;min-width:0}
+.activity-current-line .activity-current-title,.scope-current-title {flex:1;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.agent-runtime {flex-shrink:0;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
 .activity-current-title {font-size:12px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 .activity-current-note {font-size:11px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;color:var(--muted)}
 .activity-worker-detail {margin:0 12px 10px 20px;padding-left:16px;border-left:2px solid var(--line)}

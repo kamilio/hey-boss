@@ -18,9 +18,13 @@ function fleetView(data, now = Date.now()) {
     capacity: live.reduce((n, {worker}) => n + (worker.config?.concurrency || 1), 0)};
 }
 function elapsed(run, now = Date.now()) {
-  const seconds = Math.max(0, Math.floor(((run.finished_at ?? now) - (run.started_at ?? now)) / 1000));
-  const hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds / 60) % 60;
-  return `${hours ? hours + "h" : ""}${hours ? String(minutes).padStart(2, "0") : minutes}m${String(seconds % 60).padStart(2, "0")}s`;
+  if(!Number.isFinite(run.started_at))return '';
+  const seconds = Math.max(0, Math.floor(((run.finished_at ?? now) - run.started_at) / 1000));
+  const pad=n=>String(n).padStart(2,'0');
+  if(seconds<60)return seconds+'s';
+  if(seconds<3600)return Math.floor(seconds/60)+'m '+pad(seconds%60)+'s';
+  if(seconds<86400)return Math.floor(seconds/3600)+'h '+pad(Math.floor(seconds/60)%60)+'m';
+  return Math.floor(seconds/86400)+'d '+pad(Math.floor(seconds/3600)%24)+'h';
 }
 // An agent belongs to its task's project, regardless of its machine or scheduler.
 function projectView(data, now = Date.now()) {
@@ -242,6 +246,11 @@ if (typeof document !== 'undefined') (() => {
   const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
   const workerLabel=w=>w.config?.name&&!/^Worker(?: \d+)?$/.test(w.config.name)?w.config.name:(w.config?.projects||[]).map(projectLabel).join(' + ')||'Worker '+w.id.slice(0,8);
   const scopeLabel=group=>group.projects.map(projectLabel).join(' + ')||'All projects';
+  function runtime(run){
+    const time=element('time','agent-runtime',elapsed(run));time.hidden=!time.textContent;time.title='Agent runtime';
+    if(!time.hidden&&run.finished_at==null)time.dataset.startedAt=run.started_at;
+    return time;
+  }
   function renderFleetActivity(data) {
     const board=$('worker-board'),focus=document.activeElement?.dataset.focus;
     const known=new Set([...board.querySelectorAll('details')].map(d=>d.dataset.key));
@@ -266,7 +275,7 @@ if (typeof document !== 'undefined') (() => {
       const meta=element('span','activity-task-meta');meta.append(element('span','',run.project_name||projectLabel(run.project_id||'')),element('span','',run.number?'#'+run.number:'Organizer'));
       const text=element('span','activity-task-copy');text.append(element('strong','',run.title||'Organizing project'),element('span','',activity(run)));
       const state=element('span','activity-task-state',agentState({run,worker:entry.worker,machine:entry.device.machine,online:entry.device.online}));
-      a.append(meta,text,state,element('time','',elapsed(run)),element('span','activity-task-arrow','↗'));return a;
+      a.append(meta,text,state,runtime(run),element('span','activity-task-arrow','↗'));return a;
     }
     function worker(entry,label){
       const {worker:w,device:d,usage:u,phase}=entry;
@@ -278,7 +287,7 @@ if (typeof document !== 'undefined') (() => {
       slots.dataset.running=String(u.running);
       slots.title=d.online&&u.running?u.occupied+' occupied of '+u.capacity+' agent slots':!d.online?'Last known state':'Worker is not running';
       const current=element('span','activity-worker-current');
-      if(runs.length){current.append(element('span','activity-current-title',(runs[0].number?'#'+runs[0].number+' · ':'')+(runs[0].title||'Working')+(runs.length>1?' · +'+(runs.length-1)+' more':'')),element('span','activity-current-note',activity(runs[0])));}
+      if(runs.length){const line=element('span','activity-current-line');line.append(element('span','activity-current-title',(runs[0].number?'#'+runs[0].number+' · ':'')+(runs[0].title||'Working')+(runs.length>1?' · +'+(runs.length-1)+' more':'')),runtime(runs[0]));current.append(line,element('span','activity-current-note',activity(runs[0])));}
       else current.append(element('span','activity-current-note',u.occupied?'Working · task details unavailable':chiefs.length?'Organizing project queue':u.available?'Waiting for a task':phase.note));
       summary.append(identity,element('span','worker-state is-'+phase.group,phase.label),slots,current);row.append(summary);
       const detail=element('div','activity-worker-detail');
@@ -308,7 +317,7 @@ if (typeof document !== 'undefined') (() => {
         const current=group.entries.flatMap(e=>(e.worker.runs||[]).filter(r=>r.finished_at==null));
         summary.append(element('h3','',scopeLabel(group)),element('span','scope-worker-count',group.entries.length+' '+(group.entries.length===1?'worker':'workers')),element('span','scope-usage',d.online?usage.occupied+' / '+usage.capacity+' slots occupied':'Last known'));
         const preview=current.length?(current[0].number?'#'+current[0].number+' · ':'')+(current[0].title||'Working')+(current.length>1?' · +'+(current.length-1)+' more tasks':''):usage.occupied?'Working · task details unavailable':group.entries.some(e=>e.phase.group==='attention')?'Needs attention':group.entries.some(e=>(e.worker.chiefs||[]).some(c=>c.state==='running'))?'Organizing project queue':group.entries.some(e=>e.usage.available)?'Waiting for a task':'Pickup paused';
-        summary.append(element('span','scope-current-task',preview));scope.append(summary);
+        const taskPreview=element('span','scope-current-task');taskPreview.append(element('span','scope-current-title',preview));if(current.length)taskPreview.append(runtime(current[0]));summary.append(taskPreview);scope.append(summary);
         const labels=element('div','activity-columns');labels.append(element('span','','Worker'),element('span','','Status'),element('span','','Slots used'),element('span','','Current task · latest activity'));scope.append(labels);
         for(const entry of group.entries)scope.append(worker(entry,group.labels.get(entry.worker.id)));section.append(scope);
       }
@@ -777,5 +786,6 @@ if (typeof document !== 'undefined') (() => {
     if(!mobile){const events=new EventSource('/api/fleet/events');events.addEventListener('connected',()=>refresh());events.onmessage=()=>refresh();events.onerror=()=>{$('connection').classList.add('offline');$('connection').querySelector('span').textContent='Reconnecting…';};events.onopen=()=>{$('connection').classList.remove('offline');$('connection').querySelector('span').textContent='Connected';};}
   }catch(e){fail(e);}})();
   setInterval(()=>{if(!document.hidden&&!disposed){refresh();if(detail){if(!route().has('at'))loadConversation();const state=selected&&savedTakeover(selected);if(selected?.online&&state?.pending&&!state.error)takeOver(selected);}}},3000);
+  setInterval(()=>{if(!document.hidden&&!disposed){const now=Date.now();for(const time of document.querySelectorAll('.agent-runtime[data-started-at]'))time.textContent=elapsed({started_at:Number(time.dataset.startedAt)},now);}},1000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();if(detail)loadConversation();}});
 })();

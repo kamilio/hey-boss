@@ -5,6 +5,8 @@ machine → project combination → worker → tasks. A combination such as
 **ashby-mcp + hey-gh + hey-proxy** appears once, with its shared workers underneath.
 Groups start collapsed and show their occupied slots and current task. Expand a
 group for its workers, then a worker for task activity and conversation links.
+The current task shows its agent runtime beside its title, even when collapsed;
+durations tick each second and use the same compact units as the TUI.
 Shared workers and their capacity are counted once.
 Offline machines show last-known activity and contribute no available capacity.
 Organizers have a separate disclosure because they do not consume issue-agent slots.
