@@ -1,0 +1,20 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+const calls=[];
+let response={ok:true,json:async()=>({ok:true})};
+const context={document:{querySelector:()=>null,documentElement:{dataset:{}}},window:{addEventListener(){}},fetch:async(...args)=>{calls.push(args);return response;},AbortSignal,URLSearchParams,console};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync('src/issues/web/artifacts.js','utf8')+'\nglobalThis.artifacts=HeyBossArtifacts;',context);
+(async()=>{
+ await context.artifacts.openNative({project:'named:Plan',host:'devbox',csrf:'fixture-csrf'},{id:'doc-1'});
+ const [url,request]=calls[0];
+ assert.equal(url,'/api/inbox');
+ assert.equal(request.headers['X-Hey-Boss-CSRF'],'fixture-csrf');
+ assert.deepEqual(JSON.parse(request.body),{action:'open_artifact',project:'named:Plan',host:'devbox',id:'doc-1'});
+ response={ok:false,json:async()=>({error:{message:'Desktop app unavailable'}})};
+ await assert.rejects(context.artifacts.openNative({project:'named:Plan',csrf:'fixture'}),/Desktop app unavailable/);
+ response={ok:true,json:async()=>{throw new Error('bad JSON')}};
+ await assert.rejects(context.artifacts.openNative({project:'named:Plan',csrf:'fixture'}),/Could not confirm/);
+ console.log('PASS native editor launch context, CSRF and error reporting');
+})().catch(error=>{console.error(error);process.exitCode=1;});

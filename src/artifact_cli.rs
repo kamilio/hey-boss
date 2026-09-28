@@ -70,6 +70,8 @@ struct Target {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Execute one artifact operation read as JSON from stdin.
+    Rpc,
     List {
         #[arg(long)]
         query: Option<String>,
@@ -96,6 +98,22 @@ enum Action {
         #[command(flatten)]
         target: Target,
     },
+    /// Open the native Liquid Glass Artifact and Markdown editor on macOS.
+    Open {
+        /// Artifact ID to open (omit to open the library or create with --new).
+        id: Option<String>,
+        /// Start a new artifact in the native editor.
+        #[arg(long, conflicts_with_all = ["id", "file"])]
+        new: bool,
+        /// Initial title for a new artifact.
+        #[arg(long)]
+        title: Option<String>,
+        /// Local Markdown file path to open in the native editor.
+        #[arg(long, conflicts_with_all = ["id", "new", "title", "issue", "node"])]
+        file: Option<PathBuf>,
+        #[command(flatten)]
+        target: Target,
+    },
     Edit {
         id: String,
         #[arg(long)]
@@ -103,7 +121,10 @@ enum Action {
         #[command(flatten)]
         text: Text,
         #[arg(long)]
-        if_version: i64,
+        if_version: Option<i64>,
+        /// Open this artifact in the native Liquid Glass editor on macOS.
+        #[arg(long, conflicts_with_all = ["title", "body", "file", "if_version"])]
+        native: bool,
     },
     Archive {
         id: String,
@@ -152,7 +173,93 @@ enum Action {
     },
 }
 pub fn run(options: &Options) -> Result<()> {
+    let open_native = match &options.action {
+        Action::Open {
+            id,
+            new,
+            title,
+            file,
+            target,
+        } => Some((
+            id.clone(),
+            *new,
+            title.clone(),
+            file.clone(),
+            target.issue,
+            target.node.clone(),
+        )),
+        Action::Edit {
+            id,
+            title,
+            text,
+            if_version,
+            native,
+        } if *native
+            || (if_version.is_none()
+                && title.is_none()
+                && text.body.is_none()
+                && text.file.is_none()) =>
+        {
+            Some((
+                Some(id.clone()),
+                false,
+                title.clone(),
+                text.file.clone(),
+                None,
+                None,
+            ))
+        }
+        _ => None,
+    };
+    if let Some((id, new, title, file, issue, node)) = open_native {
+        let cwd = std::env::current_dir()?.canonicalize()?;
+        let machine = issues::identity::machine()?;
+        let default_project = issues::identity::project(&cwd, &machine)?;
+        let project = options
+            .project
+            .clone()
+            .or_else(|| std::env::var("HEY_BOSS_ISSUE_PROJECT").ok())
+            .unwrap_or(default_project.id);
+        let host = options.host.clone().or_else(|| {
+            std::env::var("HEY_BOSS_ISSUE_HOST")
+                .ok()
+                .filter(|h| !h.is_empty())
+        });
+        let file_path = file.map(|p| {
+            if p.is_absolute() { p } else { cwd.join(p) }
+                .to_string_lossy()
+                .into_owned()
+        });
+        let value = hey_boss::notices::execute(&hey_boss::notices::Action::OpenArtifact {
+            project,
+            id: if new { None } else { id },
+            host,
+            title: title.or_else(|| new.then(|| String::from("Untitled artifact"))),
+            body: None,
+            issue,
+            node,
+            file: file_path,
+        })?;
+        if options.json {
+            println!("{}", serde_json::to_string(&value)?);
+        } else {
+            println!("Opened native Artifact & Markdown editor");
+        }
+        return Ok(());
+    }
     let op = match &options.action {
+        Action::Rpc => {
+            use std::io::Read;
+            let mut raw = String::new();
+            std::io::stdin()
+                .take(issues::WIRE_LIMIT as u64 + 1)
+                .read_to_string(&mut raw)?;
+            if raw.len() > issues::WIRE_LIMIT {
+                return Err(issues::Error::invalid("Artifact request is too large"));
+            }
+            serde_json::from_str(&raw)?
+        }
+        Action::Open { .. } => unreachable!(),
         Action::List {
             query,
             archived,
@@ -178,11 +285,13 @@ pub fn run(options: &Options) -> Result<()> {
             title,
             text,
             if_version,
+            ..
         } => Operation::Edit {
             id: id.clone(),
             title: title.clone(),
             body: text.read()?,
-            if_version: *if_version,
+            if_version: if_version
+                .ok_or_else(|| Error::invalid("Editing text requires --if-version"))?,
         },
         Action::Archive { id, if_version } | Action::Restore { id, if_version } => {
             Operation::Archive {
@@ -243,7 +352,7 @@ pub fn run(options: &Options) -> Result<()> {
         } => Some(body),
         _ => None,
     };
-    let files = if let Some(source) = source {
+    let files = if let Some(source) = source.filter(|_| !matches!(options.action, Action::Rpc)) {
         let cwd = std::env::current_dir()?;
         let base = text
             .and_then(|text| text.file.as_deref())

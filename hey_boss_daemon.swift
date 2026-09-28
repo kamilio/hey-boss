@@ -1,4 +1,6 @@
 import AppKit
+import CryptoKit
+import UniformTypeIdentifiers
 import Foundation
 import SQLite3
 import ImageIO
@@ -7,6 +9,7 @@ import Darwin
 import QuartzCore
 import IOKit
 import Carbon
+import CryptoKit
 
 /// Only aggregate input idle time is sampled. No keys, cursor positions or app
 /// contents are recorded or sent to the hub.
@@ -5229,6 +5232,739 @@ func applicationIcon() -> NSImage {
     return image
 }
 
+// MARK: - Artifact and Markdown editor
+
+struct ArtifactLaunch: Codable {
+    var project: String
+    var id: String? = nil
+    var host: String? = nil
+    var title: String? = nil
+    var body: String? = nil
+    var issue: Int? = nil
+    var node: String? = nil
+    var file: String? = nil
+    var recoveryID: String? = nil
+}
+struct ArtifactDocument: Codable {
+    var id: String
+    var title: String
+    var body: String
+    var version: Int
+}
+struct ArtifactSave: Codable {
+    var title: String
+    var body: String
+    var version: Int
+    var requestID = UUID().uuidString
+}
+struct ArtifactRecovery: Codable {
+    var launch: ArtifactLaunch
+    var title: String
+    var body: String
+    var savedTitle: String
+    var savedBody: String
+    var version: Int
+    var pending: ArtifactSave?
+}
+
+/// All transitions run on the main queue. A durable pending snapshot is written
+/// before an RPC; an uncertain reply retries exactly that snapshot and request ID.
+final class ArtifactEditingSession {
+    var launch: ArtifactLaunch
+    let journal: URL
+    var title = "Untitled artifact"
+    var body = ""
+    var savedTitle = ""
+    var savedBody = ""
+    var version = 0
+    var pending: ArtifactSave?
+    var saving = false
+    var ready = false
+    var timer: Timer?
+    var failure: String?
+    var changed: () -> Void = {}
+    var writer: ((ArtifactSave, @escaping (Result<ArtifactDocument, Error>) -> Void) -> Void)?
+    var dirty: Bool { title != savedTitle || body != savedBody || pending != nil }
+    init(launch: ArtifactLaunch, journalRoot: URL) {
+        self.launch = launch
+        // Stable, filesystem-safe key without exposing document titles in filenames.
+        let key = [launch.project, launch.host ?? "", launch.file ?? launch.id ?? UUID().uuidString].joined(separator: "\0")
+        let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        let recoveryID = launch.recoveryID ?? digest
+        self.launch.recoveryID = recoveryID
+        journal = journalRoot.appendingPathComponent(recoveryID + ".json")
+        if let data = try? Data(contentsOf: journal), let recovery = try? JSONDecoder().decode(ArtifactRecovery.self, from: data) {
+            self.launch = recovery.launch; title = recovery.title; body = recovery.body
+            savedTitle = recovery.savedTitle; savedBody = recovery.savedBody; version = recovery.version; pending = recovery.pending
+            ready = true
+        }
+    }
+    func adopt(_ document: ArtifactDocument) {
+        launch.id = document.id; title = document.title; body = document.body
+        savedTitle = title; savedBody = body; version = document.version; ready = true; failure = nil
+        do { try persist() } catch { failure = error.localizedDescription }
+        changed()
+    }
+    func change(title: String, body: String) {
+        guard ready else { return }
+        self.title = title; self.body = body; failure = nil
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in self?.flush() }
+        changed()
+    }
+    func persist() throws {
+        let root = journal.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let record = ArtifactRecovery(launch: launch, title: title, body: body, savedTitle: savedTitle, savedBody: savedBody, version: version, pending: pending)
+        try JSONEncoder().encode(record).write(to: journal, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journal.path)
+    }
+    func flush() {
+        timer?.invalidate(); timer = nil
+        guard ready, dirty else { return }
+        if !saving, writer != nil, pending == nil { pending = ArtifactSave(title: title, body: body, version: version) }
+        do { try persist() } catch { failure = "Cannot preserve draft: " + error.localizedDescription; changed(); return }
+        guard !saving, let writer else { return }
+        let request = pending!
+        saving = true; failure = nil; changed()
+        writer(request) { [weak self] result in
+            guard let self else { return }
+            self.saving = false
+            switch result {
+            case .success(let document):
+                self.launch.id = document.id; self.version = document.version
+                self.savedTitle = request.title; self.savedBody = request.body; self.pending = nil
+                do { try self.persist() } catch { self.failure = error.localizedDescription }
+                if self.dirty { self.flush() }
+            case .failure(let error):
+                self.failure = error.localizedDescription
+                // Automatic, bounded retry cadence. Version conflicts never force a write.
+                self.timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in self?.flush() }
+            }
+            self.changed()
+        }
+    }
+}
+
+final class ArtifactBackend {
+    let launch: ArtifactLaunch
+    let cli: String
+    init(_ launch: ArtifactLaunch, cli: String? = nil) {
+        self.launch = launch
+        self.cli = cli ?? ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"] ?? "/opt/homebrew/bin/hey-boss"
+    }
+    func request(_ arguments: [String], body: String? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+        let executable = cli, context = launch
+        DispatchQueue.global(qos: .userInitiated).async {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-artifact-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            do {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                let input = root.appendingPathComponent("input.md"), output = root.appendingPathComponent("output.json")
+                try Data((body ?? "").utf8).write(to: input)
+                FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600])
+                let stdin = try FileHandle(forReadingFrom: input), stdout = try FileHandle(forWritingTo: output)
+                defer { try? stdin.close(); try? stdout.close() }
+                let process = Process(); process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = ["artifact", "--json", "--agent", "human:boss", "--project", context.project] + (context.host.map { ["--host", $0] } ?? []) + arguments
+                process.currentDirectoryURL = root
+                var env = ProcessInfo.processInfo.environment
+                for key in ["HEY_BOSS_ISSUE_HOST", "HEY_BOSS_ISSUE_PROJECT", "HEY_BOSS_AGENT_ID", "CODEX_THREAD_ID"] { env.removeValue(forKey: key) }
+                process.environment = env; process.standardInput = stdin; process.standardOutput = stdout; process.standardError = FileHandle.nullDevice
+                let done = DispatchSemaphore(value: 0); process.terminationHandler = { _ in done.signal() }
+                try process.run()
+                if done.wait(timeout: .now() + 30) != .success {
+                    process.terminate()
+                    if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }
+                    throw StorageError(description: "Connection timed out. Draft is preserved; retrying…")
+                }
+                let data = try Data(contentsOf: output)
+                if process.terminationStatus != 0 {
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    throw StorageError(description: (json?["error"] as? [String: Any])?["message"] as? String ?? "Could not save. Draft is preserved; retrying…")
+                }
+                onMain { completion(.success(data)) }
+            } catch { onMain { completion(.failure(error)) } }
+        }
+    }
+    static func document(_ data: Data) throws -> ArtifactDocument {
+        struct Response: Decodable { let artifact: ArtifactDocument }
+        return try JSONDecoder().decode(Response.self, from: data).artifact
+    }
+}
+
+final class ArtifactMarkdownText: NSTextView {
+    func replace(_ range: NSRange, with replacement: String, selection: NSRange) {
+        guard isEditable, shouldChangeText(in: range, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: range, with: replacement)
+        didChangeText(); setSelectedRange(selection); scrollRangeToVisible(selection)
+    }
+    func wrap(_ marker: String) {
+        let selection = selectedRange(), source = string as NSString, width = (marker as NSString).length
+        if selection.location >= width, NSMaxRange(selection) + width <= source.length,
+           source.substring(with: NSRange(location: selection.location - width, length: width)) == marker,
+           source.substring(with: NSRange(location: NSMaxRange(selection), length: width)) == marker {
+            replace(NSRange(location: selection.location - width, length: selection.length + 2 * width), with: source.substring(with: selection), selection: NSRange(location: selection.location - width, length: selection.length))
+        } else {
+            replace(selection, with: marker + source.substring(with: selection) + marker, selection: NSRange(location: selection.location + width, length: selection.length))
+        }
+    }
+    func prefixLines(_ prefix: String) {
+        let source = string as NSString, selection = selectedRange()
+        let effective = NSRange(location: selection.location, length: max(0, selection.length - (selection.length > 0 ? 1 : 0)))
+        let range = source.lineRange(for: effective)
+        let value = source.substring(with: range), trailing = value.hasSuffix("\n")
+        var lines = value.components(separatedBy: "\n")
+        if trailing { lines.removeLast() }
+        let removing = lines.allSatisfy { $0.hasPrefix(prefix) }
+        let result = lines.map { removing ? String($0.dropFirst(prefix.count)) : prefix + $0 }.joined(separator: "\n") + (trailing ? "\n" : "")
+        replace(range, with: result, selection: NSRange(location: range.location, length: (result as NSString).length))
+    }
+    override func insertNewline(_ sender: Any?) {
+        guard !hasMarkedText(), selectedRange().length == 0 else { super.insertNewline(sender); return }
+        let source = string as NSString, selection = selectedRange()
+        let line = source.substring(with: source.lineRange(for: selection))
+        let regex = try! NSRegularExpression(pattern: "^(\\s*)([-*+] |[0-9]+\\. )(\\[[ xX]\\] )?")
+        guard let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) else { super.insertNewline(sender); return }
+        let prefix = (line as NSString).substring(with: match.range)
+        if line.trimmingCharacters(in: .whitespacesAndNewlines) == prefix.trimmingCharacters(in: .whitespacesAndNewlines) {
+            let start = source.lineRange(for: selection).location
+            replace(NSRange(location: start, length: selection.location - start), with: "", selection: NSRange(location: start, length: 0)); return
+        }
+        var next = prefix.replacingOccurrences(of: "[x]", with: "[ ]").replacingOccurrences(of: "[X]", with: "[ ]")
+        let marker = (line as NSString).substring(with: match.range(at: 2))
+        if let number = Int(marker.dropLast(2)) { next = (line as NSString).substring(with: match.range(at: 1)) + "\(number + 1). " + (match.range(at: 3).location == NSNotFound ? "" : "[ ] ") }
+        replace(selection, with: "\n" + next, selection: NSRange(location: selection.location + 1 + (next as NSString).length, length: 0))
+    }
+}
+
+final class ArtifactEditorWindow: NSWindow {
+    var command: ((String, Bool) -> Bool)?
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command), !flags.contains(.option), !flags.contains(.control),
+           let key = event.charactersIgnoringModifiers?.lowercased() {
+            if command?(key, flags.contains(.shift)) == true { return true }
+            if let text = firstResponder as? NSTextView {
+                switch key {
+                case "a": text.selectAll(nil); return true
+                case "c": text.copy(nil); return true
+                case "v": text.pasteAsPlainText(nil); return true
+                case "x": text.cut(nil); return true
+                case "z": if flags.contains(.shift) { text.undoManager?.redo() } else { text.undoManager?.undo() }; return true
+                default: break
+                }
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    let window: ArtifactEditorWindow
+    let session: ArtifactEditingSession
+    let backend: ArtifactBackend
+    let text = ArtifactMarkdownText()
+    let reader = NSTextView()
+    let scroll = NSScrollView()
+    let readerScroll = NSScrollView()
+    let split = NSSplitView()
+    let sidebar = Surface(frame: .zero)
+    let paper = NSView()
+    let page = NSView()
+    let reload = NSButton(title: "Reload", target: nil, action: nil)
+    let libraryButton = NSButton()
+    var focusMode = false
+    let titleField = NSTextField(string: "")
+    let search = NSSearchField()
+    let table = NSTableView()
+    let libraryScroll = NSScrollView()
+    let status = NSTextField(labelWithString: "Loading…")
+    let outline = NSPopUpButton(frame: .zero, pullsDown: false)
+    let modes = NSSegmentedControl(labels: ["Write", "Read"], trackingMode: .selectOne, target: nil, action: nil)
+    let recovery = NSButton(title: "Save Copy…", target: nil, action: nil)
+    let toolbarSurface = Surface(frame: .zero)
+    var documents: [(String, String)] = []
+    var headings: [(String, NSRange)] = []
+    var searchTimer: Timer?
+    var renderTimer: Timer?
+    var renderGeneration = 0
+    var outlineGeneration = 0
+    var listGeneration = 0
+    var previewing = false
+    var loading = true
+    var bodyByteCount = 0
+    var closed = false
+    var originalFile: Data?
+    var onClose: () -> Void = {}
+    var onOpen: (ArtifactLaunch) -> Void = { _ in }
+    var scrollObserver: NSObjectProtocol?
+    let present: Bool
+    init(launch: ArtifactLaunch, journalRoot: URL, cli: String? = nil, present: Bool = true) {
+        session = ArtifactEditingSession(launch: launch, journalRoot: journalRoot)
+        backend = ArtifactBackend(launch, cli: cli)
+        self.present = present
+        window = ArtifactEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        super.init()
+        window.title = "Artifacts"; window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 720, height: 460)
+        window.delegate = self; window.setFrameAutosaveName("hey-boss-artifact-editor"); window.center()
+        window.command = { [weak self] key, shift in self?.command(key, shift: shift) ?? false }
+        buildUI()
+        session.changed = { [weak self] in self?.updateStatus() }
+        session.writer = { [weak self] request, completion in self?.write(request, completion: completion) }
+        load()
+        refreshLibrary()
+    }
+    func buildUI() {
+        let content = window.contentView!
+        split.isVertical = true; split.dividerStyle = .thin; split.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(split)
+        NSLayoutConstraint.activate([split.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12), split.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12), split.topAnchor.constraint(equalTo: content.topAnchor, constant: 42), split.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)])
+        split.addArrangedSubview(sidebar); split.addArrangedSubview(paper)
+        sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
+        paper.widthAnchor.constraint(greaterThanOrEqualToConstant: 460).isActive = true
+        let libraryTitle = NSTextField(labelWithString: "Artifacts")
+        libraryTitle.font = .systemFont(ofSize: 20, weight: .semibold)
+        let project = NSTextField(labelWithString: session.launch.project.components(separatedBy: "/").last ?? session.launch.project)
+        project.textColor = .secondaryLabelColor; project.lineBreakMode = .byTruncatingMiddle
+        search.placeholderString = "Quick switch · ⌘P"; search.delegate = self
+        let new = NSButton(title: "New note", target: self, action: #selector(newDocument))
+        new.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
+        new.imagePosition = .imageLeading
+        new.toolTip = "New artifact (⌘N)"
+        let open = NSButton(title: "Open file…", target: self, action: #selector(openFile)); open.toolTip = "Open Markdown (⌘O)"
+        let column = NSTableColumn(identifier: .init("title")); column.width = 200; table.addTableColumn(column)
+        table.headerView = nil; table.rowHeight = 38; table.style = .sourceList; table.backgroundColor = .clear
+        table.dataSource = self; table.delegate = self; table.target = self; table.doubleAction = #selector(openSelection)
+        table.setAccessibilityLabel("Artifacts")
+        libraryScroll.documentView = table; libraryScroll.hasVerticalScroller = true; libraryScroll.drawsBackground = false
+        let side = NSStackView(views: [libraryTitle, project, search, new, open, libraryScroll])
+        side.orientation = .vertical; side.alignment = .leading; side.spacing = 12; side.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.content.addSubview(side)
+        NSLayoutConstraint.activate([side.leadingAnchor.constraint(equalTo: sidebar.content.leadingAnchor, constant: 14), side.trailingAnchor.constraint(equalTo: sidebar.content.trailingAnchor, constant: -14), side.topAnchor.constraint(equalTo: sidebar.content.topAnchor, constant: 20), side.bottomAnchor.constraint(equalTo: sidebar.content.bottomAnchor, constant: -12), search.widthAnchor.constraint(equalTo: side.widthAnchor), libraryScroll.widthAnchor.constraint(equalTo: side.widthAnchor)])
+        titleField.font = .systemFont(ofSize: 28, weight: .semibold); titleField.isBezeled = false; titleField.drawsBackground = false; titleField.delegate = self
+        titleField.placeholderString = "Untitled artifact"; titleField.setAccessibilityLabel("Document title")
+        modes.selectedSegment = 0; modes.target = self; modes.action = #selector(modeChanged); modes.toolTip = "Toggle reading view (⌘E)"
+        outline.addItem(withTitle: "Outline"); outline.target = self; outline.action = #selector(jumpHeading); outline.setAccessibilityLabel("Document outline")
+        libraryButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Show library")
+        libraryButton.target = self; libraryButton.action = #selector(toggleFocus); libraryButton.bezelStyle = .texturedRounded
+        libraryButton.toolTip = "Show or hide the library (⌘⇧F)"; libraryButton.setAccessibilityLabel("Toggle focus")
+        let tools = NSStackView(views: [libraryButton, outline, modes]); tools.spacing = 8
+        tools.translatesAutoresizingMaskIntoConstraints = false; toolbarSurface.content.addSubview(tools)
+        NSLayoutConstraint.activate([tools.leadingAnchor.constraint(equalTo: toolbarSurface.content.leadingAnchor, constant: 12), tools.trailingAnchor.constraint(equalTo: toolbarSurface.content.trailingAnchor, constant: -12), tools.topAnchor.constraint(equalTo: toolbarSurface.content.topAnchor, constant: 8), tools.bottomAnchor.constraint(equalTo: toolbarSurface.content.bottomAnchor, constant: -8)])
+        recovery.target = self; recovery.action = #selector(exportCopy); recovery.toolTip = "Export your current text as Markdown (⌘⇧S)"
+        reload.target = self; reload.action = #selector(reloadDocument); reload.toolTip = "Load the latest saved revision; a recovery copy keeps unsent edits"
+        let footer = NSStackView(views: [status, reload, recovery]); footer.spacing = 10
+        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        page.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(page)
+        let preferredWidth = page.widthAnchor.constraint(equalTo: paper.widthAnchor); preferredWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor), page.widthAnchor.constraint(lessThanOrEqualToConstant: 800), page.widthAnchor.constraint(lessThanOrEqualTo: paper.widthAnchor), preferredWidth])
+        [titleField, toolbarSurface, scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
+        configureText(text, scroll: scroll); configureText(reader, scroll: readerScroll)
+        text.isRichText = false; text.isEditable = false; text.allowsUndo = true; text.delegate = self
+        text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
+        text.isAutomaticTextReplacementEnabled = false; text.isAutomaticSpellingCorrectionEnabled = false
+        text.isAutomaticLinkDetectionEnabled = false; text.isContinuousSpellCheckingEnabled = true
+        text.usesFindBar = true; text.isIncrementalSearchingEnabled = true; text.setAccessibilityLabel("Markdown editor")
+        reader.isEditable = false; reader.usesFindBar = true; reader.setAccessibilityLabel("Markdown preview")
+        readerScroll.isHidden = true
+        NSLayoutConstraint.activate([
+            titleField.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 32), titleField.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -24), titleField.topAnchor.constraint(equalTo: page.topAnchor, constant: 14),
+            toolbarSurface.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 24), toolbarSurface.trailingAnchor.constraint(lessThanOrEqualTo: page.trailingAnchor, constant: -16), toolbarSurface.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 16),
+            scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 8), scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor), scroll.topAnchor.constraint(equalTo: toolbarSurface.bottomAnchor, constant: 12), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+            readerScroll.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), readerScroll.trailingAnchor.constraint(equalTo: scroll.trailingAnchor), readerScroll.topAnchor.constraint(equalTo: scroll.topAnchor), readerScroll.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            footer.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 28), footer.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -16), footer.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -8)
+        ])
+        window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0)
+        toggleFocus()
+        scroll.contentView.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in self?.highlightVisible() }
+    }
+    func configureText(_ view: NSTextView, scroll: NSScrollView) {
+        scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.borderType = .noBorder
+        view.frame = NSRect(x: 0, y: 0, width: 750, height: 600)
+        view.isVerticallyResizable = true; view.isHorizontallyResizable = false; view.autoresizingMask = [.width]
+        view.textContainer?.widthTracksTextView = true; view.textContainer?.containerSize = NSSize(width: 750, height: CGFloat.greatestFiniteMagnitude)
+        view.layoutManager?.allowsNonContiguousLayout = true
+        view.textContainerInset = NSSize(width: 24, height: 22)
+        view.font = .systemFont(ofSize: 17)
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 5
+        view.defaultParagraphStyle = paragraph
+        view.textColor = .textColor; view.backgroundColor = .textBackgroundColor
+        scroll.documentView = view
+    }
+    func load() {
+        if session.ready { loaded(); session.flush(); return }
+        if let file = session.launch.file {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    let url = URL(fileURLWithPath: file).resolvingSymlinksInPath()
+                    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                    guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 64 * 1024 * 1024 else { throw StorageError(description: "Open a regular Markdown file up to 64 MiB.") }
+                    let data = try Data(contentsOf: url)
+                    guard let body = String(data: data, encoding: .utf8) else { throw StorageError(description: "Markdown files must use UTF-8.") }
+                    onMain {
+                        guard let self else { return }; self.originalFile = data
+                        self.session.launch.file = url.path
+                        self.session.adopt(ArtifactDocument(id: "", title: url.deletingPathExtension().lastPathComponent, body: body, version: 0)); self.loaded()
+                    }
+                } catch { onMain { self?.showFailure(error) } }
+            }
+        } else if let id = session.launch.id {
+            backend.request(["view", id]) { [weak self] result in
+                guard let self else { return }
+                do { self.session.adopt(try ArtifactBackend.document(result.get())); self.loaded() } catch { self.showFailure(error) }
+            }
+        } else if session.launch.title != nil || session.launch.body != nil {
+            session.adopt(ArtifactDocument(id: "", title: session.launch.title ?? "Untitled artifact", body: session.launch.body ?? "", version: 0))
+            session.launch.id = nil; session.savedTitle = ""; session.savedBody = ""
+            loaded(); session.flush()
+        } else {
+            loading = false; titleField.stringValue = "Your writing space"; titleField.isEditable = false
+            if focusMode { toggleFocus() }
+            status.stringValue = "Choose a note, open Markdown, or start with ⌘N."
+        }
+    }
+    func loaded() {
+        loading = false; titleField.stringValue = session.title; titleField.isEditable = session.launch.file == nil
+        text.string = session.body; bodyByteCount = session.body.utf8.count; text.isEditable = true; text.undoManager?.removeAllActions()
+        text.setSelectedRange(NSRange(location: 0, length: 0)); text.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        if let file = session.launch.file { if originalFile == nil { originalFile = Data(session.savedBody.utf8) }; window.representedURL = URL(fileURLWithPath: file) }
+        updateStatus(); updateOutline(); highlightVisible()
+        if present { window.makeFirstResponder(text) }
+    }
+    func show() { closed = false; if present { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) } }
+    func write(_ request: ArtifactSave, completion: @escaping (Result<ArtifactDocument, Error>) -> Void) {
+        if let file = session.launch.file {
+            let baseline = originalFile ?? Data(session.savedBody.utf8)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    let url = URL(fileURLWithPath: file), data = Data(request.body.utf8)
+                    let current = try Data(contentsOf: url)
+                    guard current == baseline || current == data else { throw StorageError(description: "This file changed elsewhere. Save Copy or Reload; your draft is preserved.") }
+                    try data.write(to: url, options: .atomic)
+                    onMain { self?.originalFile = data; completion(.success(ArtifactDocument(id: "", title: request.title, body: request.body, version: request.version + 1))) }
+                } catch { onMain { completion(.failure(error)) } }
+            }
+        } else {
+            var operation: [String: Any] = ["title": request.title, "body": request.body]
+            if let id = session.launch.id, !id.isEmpty { operation["command"] = "edit"; operation["id"] = id; operation["if_version"] = request.version }
+            else {
+                operation["command"] = "create"
+                if let issue = session.launch.issue { operation["issue"] = issue }
+                if let node = session.launch.node { operation["node"] = node }
+            }
+            do {
+                let body = String(decoding: try JSONSerialization.data(withJSONObject: operation), as: UTF8.self)
+                backend.request(["--request-id", request.requestID, "rpc"], body: body) { result in completion(result.flatMap { data in Result { try ArtifactBackend.document(data) } }) }
+            } catch { completion(.failure(error)) }
+        }
+    }
+    func updateStatus() {
+        window.title = session.title
+        let count = session.body.utf16.count
+        recovery.isHidden = session.failure == nil; reload.isHidden = session.failure == nil
+        if let failure = session.failure { status.stringValue = failure; status.textColor = .systemRed }
+        else {
+            status.textColor = .secondaryLabelColor
+            status.stringValue = (loading ? "Loading…" : session.saving ? "Saving…" : session.dirty ? "Saving shortly…" : "All changes saved") + (focusMode ? "" : "  ·  \(count.formatted()) characters")
+        }
+        status.toolTip = status.stringValue
+        if closed, !session.dirty, !session.saving { onClose() }
+    }
+    func showFailure(_ error: Error) { session.failure = error.localizedDescription; updateStatus() }
+    func textDidChange(_ notification: Notification) {
+        guard notification.object as? NSTextView === text else { return }
+        session.change(title: titleField.stringValue, body: text.string)
+        outlineGeneration += 1
+        highlightVisible(); renderTimer?.invalidate()
+        renderTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in self?.updateOutline() }
+    }
+    func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        guard textView === text, let replacementString else { return true }
+        let bytes = bodyByteCount - (text.string as NSString).substring(with: affectedCharRange).utf8.count + replacementString.utf8.count
+        let limit = session.launch.file == nil ? 1024 * 1024 : 64 * 1024 * 1024
+        if bytes > limit { status.stringValue = "This document has reached its size limit."; NSSound.beep(); return false }
+        bodyByteCount = bytes
+        return true
+    }
+    func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSSearchField === search {
+            searchTimer?.invalidate(); searchTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in self?.refreshLibrary() }
+        } else if notification.object as? NSTextField === titleField { session.change(title: titleField.stringValue, body: text.string) }
+    }
+    func highlightVisible() {
+        guard !loading, let manager = text.layoutManager, let container = text.textContainer else { return }
+        var rect = text.visibleRect; rect.origin.x -= text.textContainerOrigin.x; rect.origin.y -= text.textContainerOrigin.y
+        let glyphs = manager.glyphRange(forBoundingRect: rect, in: container)
+        let visible = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        let source = text.string as NSString
+        guard visible.location <= source.length else { return }
+        let range = source.paragraphRange(for: visible)
+        guard range.length <= 65536 else { return }
+        // Temporary layout attributes keep highlighting out of undo and source text.
+        manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
+        manager.removeTemporaryAttribute(.font, forCharacterRange: range)
+        let rules: [(String, NSColor, NSFont?)] = [
+            ("(?m)^#{1,6} .+$", .labelColor, .systemFont(ofSize: 21, weight: .semibold)),
+            ("`[^`\\n]+`", .systemPurple, nil),
+            ("\\*\\*[^*\\n]+\\*\\*", .labelColor, .monospacedSystemFont(ofSize: 15, weight: .bold)),
+            ("\\[[^]\\n]+\\]\\([^)\\n]+\\)", .linkColor, nil),
+            ("(?m)^\\s*(?:[-*+] |[0-9]+\\. |>|```).*$", .secondaryLabelColor, nil)
+        ]
+        let visibleSource = source.substring(with: range)
+        for (pattern, color, font) in rules {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: visibleSource, range: NSRange(location: 0, length: (visibleSource as NSString).length)) {
+                let matchRange = NSRange(location: range.location + match.range.location, length: match.range.length)
+                manager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: matchRange)
+                if let font { manager.addTemporaryAttribute(.font, value: font, forCharacterRange: matchRange) }
+            }
+        }
+    }
+    func updateOutline() {
+        outlineGeneration += 1
+        let generation = outlineGeneration, value = text.string
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let source = value as NSString
+            let regex = try! NSRegularExpression(pattern: "(?m)^(#{1,6}) (.+)$")
+            var headings: [(String, NSRange)] = []
+            regex.enumerateMatches(in: value, range: NSRange(location: 0, length: source.length)) { match, _, stop in
+                guard let match else { return }
+                headings.append((source.substring(with: match.range(at: 2)), match.range))
+                if headings.count >= 500 { stop.pointee = true }
+            }
+            onMain {
+                guard let self, generation == self.outlineGeneration, !self.closed else { return }
+                self.headings = headings
+                self.outline.removeAllItems(); self.outline.addItem(withTitle: "Outline")
+                for (title, _) in headings { self.outline.addItem(withTitle: title) }
+            }
+        }
+    }
+    @objc func jumpHeading() {
+        let index = outline.indexOfSelectedItem - 1
+        guard headings.indices.contains(index) else { return }
+        if previewing { togglePreview() }; text.setSelectedRange(headings[index].1); text.scrollRangeToVisible(headings[index].1); window.makeFirstResponder(text)
+    }
+    @objc func modeChanged() { if (modes.selectedSegment == 1) != previewing { togglePreview() } }
+    func togglePreview() {
+        guard session.ready else { return }; previewing.toggle(); modes.selectedSegment = previewing ? 1 : 0
+        scroll.isHidden = previewing; readerScroll.isHidden = !previewing
+        if previewing { renderPreview(); window.makeFirstResponder(reader) } else { window.makeFirstResponder(text); highlightVisible() }
+    }
+    func renderPreview() {
+        renderGeneration += 1; let generation = renderGeneration, source = session.body, executable = backend.cli
+        reader.string = "Rendering…"
+        NativeMarkdownRenderer.queue.addOperation { [weak self] in
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-editor-preview-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            do {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                let input = root.appendingPathComponent("input.md"), output = root.appendingPathComponent("output.json")
+                try Data(source.utf8).write(to: input)
+                let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = ["render-markdown", input.path, output.path, "--native"]
+                process.standardError = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice
+                let done = DispatchSemaphore(value: 0); process.terminationHandler = { _ in done.signal() }; try process.run()
+                if done.wait(timeout: .now() + 15) != .success { process.terminate(); if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }; throw StorageError(description: "Preview timed out") }
+                guard process.terminationStatus == 0 else { throw StorageError(description: "Preview unavailable") }
+                let node = try JSONDecoder().decode(NativeMarkdownNode.self, from: Data(contentsOf: output))
+                onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.textStorage?.setAttributedString(NativeMarkdownRenderer.render(node)); self.reader.setSelectedRange(NSRange(location: 0, length: 0)); self.reader.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
+            } catch { onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.string = source; self.status.stringValue = "Preview unavailable · showing source" } }
+        }
+    }
+    func refreshLibrary() {
+        listGeneration += 1; let generation = listGeneration
+        backend.request(["list", "--query", search.stringValue]) { [weak self] result in
+            guard let self, generation == self.listGeneration else { return }
+            do {
+                let json = try JSONSerialization.jsonObject(with: result.get()) as? [String: Any]
+                self.documents = (json?["artifacts"] as? [[String: Any]] ?? []).compactMap { row in guard let id = row["id"] as? String, let title = row["title"] as? String else { return nil }; return (id, title) }
+                self.table.reloadData()
+            } catch { self.search.toolTip = error.localizedDescription }
+        }
+    }
+    func numberOfRows(in tableView: NSTableView) -> Int { documents.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("artifact-row")
+        let label = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField ?? NSTextField(labelWithString: "")
+        label.identifier = identifier; label.stringValue = documents[row].1; label.lineBreakMode = .byTruncatingTail; label.font = .systemFont(ofSize: 13)
+        return label
+    }
+    func tableViewSelectionDidChange(_ notification: Notification) { if table.selectedRow >= 0 { openSelection() } }
+    @objc func openSelection() {
+        guard documents.indices.contains(table.selectedRow) else { return }
+        let doc = documents[table.selectedRow]
+        if doc.0 == session.launch.id { window.makeFirstResponder(text); return }
+        session.flush(); onOpen(ArtifactLaunch(project: session.launch.project, id: doc.0, host: session.launch.host))
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if control === search, selector == #selector(NSResponder.insertNewline(_:)), !documents.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); openSelection(); return true }
+        if control === search, selector == #selector(NSResponder.moveDown(_:)), !documents.isEmpty { window.makeFirstResponder(table); table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); return true }
+        return false
+    }
+    @objc func toggleFocus() {
+        focusMode.toggle()
+        if focusMode { split.removeArrangedSubview(sidebar); sidebar.removeFromSuperview() }
+        else { split.insertArrangedSubview(sidebar, at: 0); window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0) }
+        libraryButton.state = focusMode ? .off : .on
+        if session.ready { window.makeFirstResponder(previewing ? reader : text) }
+        updateStatus()
+    }
+    @objc func newDocument() { onOpen(ArtifactLaunch(project: session.launch.project, host: session.launch.host, title: "Untitled artifact")) }
+    @objc func openFile() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.plainText]; panel.allowsOtherFileTypes = true; panel.allowsMultipleSelection = true
+        panel.beginSheetModal(for: window) { [weak self] result in
+            guard result == .OK, let self else { return }
+            for url in panel.urls { self.onOpen(ArtifactLaunch(project: self.session.launch.project, file: url.resolvingSymlinksInPath().path)) }
+        }
+    }
+    @objc func exportCopy() {
+        let panel = NSSavePanel(); panel.nameFieldStringValue = (session.title.isEmpty ? "Untitled" : session.title) + ".md"
+        panel.beginSheetModal(for: window) { [weak self] result in
+            guard let self, result == .OK, let url = panel.url else { return }
+            do { try Data(self.session.body.utf8).write(to: url, options: .atomic) } catch { self.showFailure(error) }
+        }
+    }
+    @objc func reloadDocument() {
+        guard !session.saving else { return }
+        do {
+            try session.persist()
+            if session.dirty { try FileManager.default.copyItem(at: session.journal, to: session.journal.deletingPathExtension().appendingPathExtension("conflict-" + UUID().uuidString + ".json")) }
+            session.timer?.invalidate(); session.pending = nil; session.ready = false; originalFile = nil; loading = true; text.isEditable = false
+            load()
+        } catch { showFailure(error) }
+    }
+    @objc func bold() { writeMode(); text.wrap("**") }
+    @objc func italic() { writeMode(); text.wrap("*") }
+    @objc func link() {
+        writeMode(); let range = text.selectedRange(), selected = (text.string as NSString).substring(with: range)
+        text.replace(range, with: "[" + selected + "](https://)", selection: NSRange(location: range.location + range.length + 3, length: 8))
+    }
+    @objc func task() { writeMode(); text.prefixLines("- [ ] ") }
+    func writeMode() { if previewing { togglePreview() }; window.makeFirstResponder(text) }
+    func command(_ key: String, shift: Bool) -> Bool {
+        if (window.firstResponder as? NSTextView)?.hasMarkedText() == true { return false }
+        switch (key, shift) {
+        case ("n", false): newDocument()
+        case ("o", false): openFile()
+        case ("p", false): if focusMode { toggleFocus() }; window.makeFirstResponder(search); search.selectText(nil)
+        case ("f", true): toggleFocus()
+        case ("e", false): togglePreview()
+        case ("s", false): session.flush()
+        case ("s", true): exportCopy()
+        case ("w", false): window.performClose(nil)
+        case ("f", false), ("g", false), ("g", true):
+            let target = previewing ? reader : text
+            window.makeFirstResponder(target)
+            let item = NSMenuItem(); item.tag = key == "f" ? NSTextFinder.Action.showFindInterface.rawValue : shift ? NSTextFinder.Action.previousMatch.rawValue : NSTextFinder.Action.nextMatch.rawValue
+            target.performTextFinderAction(item)
+        case ("b", false) where window.firstResponder === text: bold()
+        case ("i", false) where window.firstResponder === text: italic()
+        case ("k", false) where window.firstResponder === text: link()
+        case ("l", true) where window.firstResponder === text: task()
+        case ("7", true) where window.firstResponder === text: text.prefixLines("1. ")
+        case ("8", true) where window.firstResponder === text: text.prefixLines("- ")
+        case ("`", false) where window.firstResponder === text: text.wrap("`")
+        case ("1"..."6", false) where window.firstResponder === text: text.prefixLines(String(repeating: "#", count: Int(key)!) + " ")
+        default: return false
+        }
+        return true
+    }
+    func windowDidBecomeKey(_ notification: Notification) {
+        let bar = NSMenu()
+        let appItem = NSMenuItem(); let appMenu = NSMenu(title: "Hey Boss")
+        appMenu.addItem(withTitle: "Quit Hey Boss", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu; bar.addItem(appItem)
+        let groups: [(String, [(String, String, Bool)])] = [
+            ("File", [("New note", "n", false), ("Open Markdown…", "o", false), ("Export Markdown…", "s", true), ("Close", "w", false)]),
+            ("Edit", [("Undo", "z", false), ("Redo", "z", true), ("Cut", "x", false), ("Copy", "c", false), ("Paste", "v", false), ("Select All", "a", false), ("Find…", "f", false), ("Find Next", "g", false), ("Find Previous", "g", true)]),
+            ("Format", [("Bold", "b", false), ("Italic", "i", false), ("Link", "k", false), ("Inline Code", "`", false), ("Task List", "l", true), ("Bullet List", "8", true), ("Numbered List", "7", true)] + (1...6).map { ("Heading \($0)", String($0), false) }),
+            ("View", [("Toggle Focus", "f", true), ("Quick Switch…", "p", false), ("Toggle Reading View", "e", false)])
+        ]
+        for (title, commands) in groups {
+            let parent = NSMenuItem(); let menu = NSMenu(title: title); parent.submenu = menu; bar.addItem(parent)
+            for (label, key, shift) in commands {
+                let item = NSMenuItem(title: label, action: #selector(menuCommand(_:)), keyEquivalent: key)
+                item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]
+                item.target = self; menu.addItem(item)
+            }
+        }
+        NSApp.mainMenu = bar
+    }
+    @objc func menuCommand(_ sender: NSMenuItem) {
+        let key = sender.keyEquivalent, shift = sender.keyEquivalentModifierMask.contains(.shift)
+        if command(key, shift: shift) { return }
+        guard let view = window.firstResponder as? NSTextView else { return }
+        switch key {
+        case "z": if shift { view.undoManager?.redo() } else { view.undoManager?.undo() }
+        case "x": view.cut(nil)
+        case "c": view.copy(nil)
+        case "v": view.pasteAsPlainText(nil)
+        case "a": view.selectAll(nil)
+        default: break
+        }
+    }
+    func windowDidResignKey(_ notification: Notification) { session.flush() }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        session.flush()
+        if session.dirty {
+            do { try session.persist() } catch { showFailure(error); return false }
+        }
+        return true
+    }
+    func windowWillClose(_ notification: Notification) {
+        closed = true
+        if !session.dirty { session.timer?.invalidate() }
+        searchTimer?.invalidate(); renderTimer?.invalidate(); renderGeneration += 1
+        onClose()
+    }
+    deinit { if let observer = scrollObserver { NotificationCenter.default.removeObserver(observer) } }
+}
+
+final class ArtifactEditors: NSObject, NSApplicationDelegate {
+    static let shared = ArtifactEditors()
+    var windows: [NativeArtifactEditor] = []
+    var root: URL {
+        let state = ProcessInfo.processInfo.environment["HEY_BOSS_STATE_DIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/hey-boss")
+        return state.appendingPathComponent("artifact-drafts")
+    }
+    func open(_ launch: ArtifactLaunch) {
+        if let existing = windows.first(where: { editor in
+            let previous = editor.session.launch
+            return launch.file != nil ? previous.file == launch.file : launch.id != nil && previous.id == launch.id && previous.project == launch.project && previous.host == launch.host
+        }) { existing.show(); return }
+        let editor = NativeArtifactEditor(launch: launch, journalRoot: root)
+        editor.onOpen = { [weak self] launch in self?.open(launch) }
+        editor.onClose = { [weak self, weak editor] in self?.windows.removeAll { $0 === editor && !$0.session.dirty } }
+        windows.append(editor); editor.show()
+    }
+    func handle(_ request: Request, _ reply: Reply) {
+        do {
+            let launch = try JSONDecoder().decode(ArtifactLaunch.self, from: Data((request.question ?? "{}").utf8))
+            guard !launch.project.isEmpty else { throw StorageError(description: "Select an artifact project") }
+            open(launch)
+            reply.send(["task_id": "artifact-editor", "status": "ok", "result": "{\"ok\":true}"])
+        } catch { reply.send(["task_id": "artifact-editor", "status": "error", "error": error.localizedDescription]) }
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for editor in windows { editor.session.flush() }
+        // Durable drafts survive a quit even when the authority is offline.
+        do { for editor in windows where editor.session.dirty { try editor.session.persist() }; return .terminateNow }
+        catch { NSSound.beep(); return .terminateCancel }
+    }
+    func restoreDrafts() {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for file in files where file.pathExtension == "json" && !file.lastPathComponent.contains(".conflict-") {
+            guard let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(ArtifactRecovery.self, from: data), saved.pending != nil || saved.title != saved.savedTitle || saved.body != saved.savedBody else { continue }
+            open(saved.launch)
+        }
+    }
+}
+
 @main
 struct Daemon {
     static func main() {
@@ -5253,6 +5989,8 @@ struct Daemon {
         signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+        app.delegate = ArtifactEditors.shared
+        ArtifactEditors.shared.restoreDrafts()
         let ui = Interface(present: true)
         let overview = AgentsOverview()
         _ = overview.quickIssueShortcut
@@ -5308,6 +6046,8 @@ struct Daemon {
                         onMain { secrets.handle(request, reply) }
                     } else if request.command == "action" {
                         actions.handle(request) { reply.send($0) }
+                    } else if request.command == "artifact_editor" {
+                        onMain { ArtifactEditors.shared.handle(request, reply) }
                     } else if request.command == "overview" {
                         onMain { overview.show() }
                         reply.send(["task_id": "overview", "status": "ok"])
