@@ -466,7 +466,7 @@ fn draft_handoff_rejects_stale_version_claim_and_reservation_atomically() {
             "version",
         ),
         (
-            "UPDATE issues SET assignee='codex:new-owner' WHERE number=1",
+            "UPDATE issues SET assignee='codex:owner' WHERE number=1",
             "assignee",
         ),
         (
