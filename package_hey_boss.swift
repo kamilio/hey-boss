@@ -32,7 +32,6 @@ let info: [String: Any] = [
     "CFBundleVersion": version,
     "CFBundleIconFile": "hey-boss.icns",
     "LSMinimumSystemVersion": "26.0",
-    "LSUIElement": true,
     "NSHighResolutionCapable": true,
 ]
 try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)

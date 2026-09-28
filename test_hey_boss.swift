@@ -16,6 +16,7 @@ func audit() {
         app.setActivationPolicy(.regular)
         let launch = ArtifactLaunch(project: "named:Editor visual test", file: path)
         let editor = NativeArtifactEditor(launch: launch, journalRoot: URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("drafts"))
+        ArtifactEditors.shared.windows = [editor]; app.delegate = ArtifactEditors.shared
         editor.onOpen = { ArtifactEditors.shared.open($0) }
         editor.show()
         withExtendedLifetime(editor) { app.run() }
@@ -1210,7 +1211,7 @@ func auditAgentOverview() -> AgentsOverview {
     precondition(NSApplication.shared.activationPolicy() == .regular)
     precondition(closedOverview.window.isVisible)
     closedOverview.window.close()
-    precondition(NSApplication.shared.activationPolicy() == .accessory)
+    precondition(NSApplication.shared.activationPolicy() == .regular, "Closing a worker window must not remove the app from the Dock")
     precondition(!closedOverview.window.isVisible && !closedOverview.scanning && closedOverview.hostScans.isEmpty)
     let ghostData = Data(#"{"host":"test","observed_at":1,"agents":[{"id":"ghost","pid":42,"kind":"Codex","state":"Unknown","evidence":"Live process only"},{"id":"empty","pid":43,"kind":"Codex","session_id":"known-empty-session","state":"Idle","evidence":"Session metadata"}],"warnings":[]}"#.utf8)
     let ghostSnapshot = AgentSnapshot.decode(ghostData)!
@@ -2663,11 +2664,29 @@ func auditArtifactEditor() {
     try! Data("first revision".utf8).write(to: cleanFile)
     let cleanLaunch = ArtifactLaunch(project: "named:Editor tests", file: cleanFile.path)
     let firstOpen = NativeArtifactEditor(launch: cleanLaunch, journalRoot: root, cli: "/usr/bin/false", present: false)
-    wait { firstOpen.session.ready }; firstOpen.window.close()
+    wait { firstOpen.session.ready }
+    firstOpen.window.setFrame(NSRect(x: 80, y: 80, width: 900, height: 680), display: false)
+    firstOpen.window.close()
     try! Data("edited elsewhere".utf8).write(to: cleanFile)
     let nextOpen = NativeArtifactEditor(launch: cleanLaunch, journalRoot: root, cli: "/usr/bin/false", present: false)
     wait { nextOpen.session.ready }
     precondition(nextOpen.text.string == "edited elsewhere", "Reopening a saved file reads external changes, not a clean recovery journal")
+    precondition(abs(nextOpen.window.frame.width - 900) < 1, "New editor windows restore the last window width")
+    nextOpen.window.contentView?.layoutSubtreeIfNeeded()
+    precondition(abs(nextOpen.page.frame.width - nextOpen.paper.frame.width) < 1, "Writing uses the available window width")
+    let second = NativeArtifactEditor(launch: cleanLaunch, journalRoot: root, cli: "/usr/bin/false", present: false)
+    wait { second.session.ready }
+    let third = NativeArtifactEditor(launch: cleanLaunch, journalRoot: root, cli: "/usr/bin/false", present: false)
+    wait { third.session.ready }
+    let manager = ArtifactEditors(); manager.windows = [nextOpen, second, third]
+    precondition(manager.cycleWindow(from: nextOpen.window, backwards: false) === second)
+    precondition(manager.cycleWindow(from: nextOpen.window, backwards: true) === third)
+    precondition(manager.cycleWindow(from: third.window, backwards: false) === nextOpen)
+    let beforeCycle = nextOpen.text.string
+    precondition(nextOpen.command("`", shift: false) && nextOpen.text.string == beforeCycle, "Command-backtick cycles windows instead of inserting code marks")
+    second.window.close()
+    precondition(manager.cycleWindow(from: nextOpen.window, backwards: false) === third, "Closed windows are skipped")
+    third.window.close()
     nextOpen.window.close()
     print("PASS focus, quick switch, find, undo/redo, automatic disk save and external-edit protection")
 }
