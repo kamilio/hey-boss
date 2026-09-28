@@ -5289,7 +5289,7 @@ final class ArtifactEditingSession {
     var failure: String?
     var changed: () -> Void = {}
     var writer: ((ArtifactSave, @escaping (Result<ArtifactDocument, Error>) -> Void) -> Void)?
-    var dirty: Bool { title != savedTitle || body != savedBody || pending != nil }
+    var dirty: Bool { ready && (title != savedTitle || body != savedBody || pending != nil) }
     init(launch: ArtifactLaunch, journalRoot: URL) {
         self.launch = launch
         // Stable, filesystem-safe key without exposing document titles in filenames.
