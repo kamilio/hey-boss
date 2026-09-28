@@ -118,7 +118,7 @@ fn all_user_examples_validate_without_resolving_credentials_or_changing_files() 
 }
 
 #[test]
-fn configure_pi_preserves_tuning_and_scopes_compaction_to_gemini() {
+fn configure_pi_preserves_tuning_and_repairs_unsafe_compaction_for_all_responses_models() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let agent = home.join("pi");
@@ -209,7 +209,13 @@ fn configure_pi_preserves_tuning_and_scopes_compaction_to_gemini() {
     assert_eq!(compaction["keepRecentTokens"], 100000);
     assert_eq!(compaction["reserveTokens"], 200000);
     let overrides = &compaction["modelOverrides"];
-    for id in ["gemini-test", "gemini/gemini-early-exp", "gemini/direct"] {
+    for id in [
+        "gemini-test",
+        "gemini/gemini-early-exp",
+        "gemini/direct",
+        "coding",
+        "unknown-model",
+    ] {
         assert_eq!(
             overrides[format!("hey-proxy/{id}")],
             json!({"keepRecentTokens":20000,"reserveTokens":16384})
@@ -227,7 +233,7 @@ fn configure_pi_preserves_tuning_and_scopes_compaction_to_gemini() {
         overrides["other/gemini-test"],
         original_settings["compaction"]["modelOverrides"]["other/gemini-test"]
     );
-    for id in ["coding", "unknown-model", "chat-only", "gemini/chat"] {
+    for id in ["chat-only", "gemini/chat"] {
         assert!(overrides.get(format!("hey-proxy/{id}")).is_none());
     }
     let files_before = std::fs::read_dir(&agent).unwrap().count();
@@ -236,6 +242,65 @@ fn configure_pi_preserves_tuning_and_scopes_compaction_to_gemini() {
     assert_eq!(read("models.json"), models);
     assert_eq!(read("settings.json"), settings);
     assert_eq!(std::fs::read_dir(&agent).unwrap().count(), files_before);
+}
+
+#[test]
+fn configure_pi_keeps_large_budgets_when_the_resolved_model_window_supports_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("proxy.json");
+    std::fs::write(
+        &config,
+        json!({"listen":"127.0.0.1:8080", "aliases":[
+            {"from":"large-inline"}, {"from":"large-override"}, {"from":"small"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let agent = dir.path().join("pi");
+    std::fs::create_dir(&agent).unwrap();
+    std::fs::write(agent.join("models.json"), json!({"providers":{"hey-proxy":{
+        "models":[{"id":"large-inline","contextWindow":1048576}, {"id":"large-override","contextWindow":128000}],
+        "modelOverrides":{"large-override":{"contextWindow":1048576}}
+    }}}).to_string()).unwrap();
+    std::fs::write(
+        agent.join("settings.json"),
+        json!({"compaction":{
+            "keepRecentTokens":100000,"reserveTokens":200000
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let output = cli(dir.path())
+        .env("PI_CODING_AGENT_DIR", &agent)
+        .arg("--config")
+        .arg(config)
+        .arg("configure-pi")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settings: Value =
+        serde_json::from_slice(&std::fs::read(agent.join("settings.json")).unwrap()).unwrap();
+    let compaction = &settings["compaction"];
+    assert_eq!(compaction["keepRecentTokens"], 100000);
+    assert_eq!(compaction["reserveTokens"], 200000);
+    assert!(
+        compaction["modelOverrides"]
+            .get("hey-proxy/large-inline")
+            .is_none()
+    );
+    assert!(
+        compaction["modelOverrides"]
+            .get("hey-proxy/large-override")
+            .is_none()
+    );
+    assert_eq!(
+        compaction["modelOverrides"]["hey-proxy/small"],
+        json!({"keepRecentTokens":20000,"reserveTokens":16384})
+    );
 }
 
 #[test]
@@ -259,6 +324,11 @@ fn configure_pi_rejects_malformed_tuning_before_writing_either_file() {
         (
             json!({}),
             json!({"compaction":{"modelOverrides":{"hey-proxy/gemini-test":null}}}),
+        ),
+        (json!({}), json!({"compaction":{"reserveTokens":-1}})),
+        (
+            json!({}),
+            json!({"compaction":{"modelOverrides":{"hey-proxy/gemini-test":{"reserveTokens":200000}}}}),
         ),
     ] {
         let agent = tempfile::tempdir().unwrap();

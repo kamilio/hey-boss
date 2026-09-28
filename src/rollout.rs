@@ -194,27 +194,20 @@ fn pi_models(config: &Config) -> BTreeMap<String, bool> {
     }
     models
 }
-/// Apply Pi's conservative compaction defaults only to names that can route to
-/// Gemini. These are retention/output budgets, not claims about upstream limits.
-fn pi_gemini_models(config: &Config) -> BTreeSet<String> {
+/// Names usable by Pi's Responses transport, including direct destinations.
+fn pi_response_models(config: &Config) -> BTreeSet<String> {
     let mut models = BTreeSet::new();
     for alias in &config.aliases {
         if !alias.matches_shape("/v1/responses") {
             continue;
         }
-        let mut gemini = alias.to.is_none() && alias.from.starts_with("gemini/");
+        models.insert(alias.from.clone());
         for destination in alias
             .to
             .iter()
             .chain(alias.reasoning_routes.values().map(|r| &r.to))
         {
-            if destination.starts_with("gemini/") {
-                models.insert(destination.clone());
-                gemini = true;
-            }
-        }
-        if gemini {
-            models.insert(alias.from.clone());
+            models.insert(destination.clone());
         }
     }
     models
@@ -235,24 +228,90 @@ fn pi_object<'a>(
         .with_context(|| format!("Pi {location} must be an object; left unchanged"))
 }
 
-fn pi_compaction(settings: &mut Value, config: &Config) -> Result<()> {
-    for id in pi_gemini_models(config) {
+fn pi_tokens(value: Option<&Value>, default: u64, location: &str) -> Result<u64> {
+    match value {
+        None => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .filter(|n| *n <= 9_007_199_254_740_991)
+            .with_context(|| {
+                format!("Pi {location} must be a non-negative safe integer; left unchanged")
+            }),
+    }
+}
+
+fn pi_compaction(settings: &mut Value, config: &Config, catalog: &Value) -> Result<()> {
+    for id in pi_response_models(config) {
         pi_object(settings, "compaction", "settings.json compaction")?;
         let compaction = &mut settings["compaction"];
+        let keep = pi_tokens(
+            compaction.get("keepRecentTokens"),
+            20000,
+            "keepRecentTokens",
+        )?;
+        let reserve = pi_tokens(compaction.get("reserveTokens"), 16384, "reserveTokens")?;
+        let provider = &catalog["providers"][PI_PROVIDER];
+        let model = provider["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|m| m["id"] == id));
+        let context = pi_tokens(
+            provider["modelOverrides"][&id]
+                .get("contextWindow")
+                .or_else(|| model.and_then(|m| m.get("contextWindow"))),
+            128000,
+            "contextWindow",
+        )?;
+        if context < 4 {
+            bail!("Pi model {id} contextWindow is too small for compaction; left unchanged");
+        }
         pi_object(
             compaction,
             "modelOverrides",
             "settings.json compaction.modelOverrides",
         )?;
         let key = format!("{PI_PROVIDER}/{id}");
+        // Pi uses reported tokens to trigger compaction, but a separate text
+        // estimate to choose its cut point. Keep headroom for that discrepancy.
+        let unsafe_budget = |keep: u64, reserve: u64| {
+            keep > context / 2 || reserve > context / 2 || keep.saturating_add(reserve) >= context
+        };
+        let existing = compaction["modelOverrides"].get(&key);
+        if existing.is_some_and(|entry| !entry.is_object()) {
+            bail!("Pi compaction.modelOverrides[{key}] must be an object; left unchanged");
+        }
+        let explicit_keep = existing.and_then(|entry| entry.get("keepRecentTokens"));
+        let explicit_reserve = existing.and_then(|entry| entry.get("reserveTokens"));
+        let effective_keep = pi_tokens(explicit_keep, keep, "keepRecentTokens")?;
+        let effective_reserve = pi_tokens(explicit_reserve, reserve, "reserveTokens")?;
+        if !unsafe_budget(effective_keep, effective_reserve) {
+            continue;
+        }
+        let repaired_keep = if explicit_keep.is_some() {
+            effective_keep
+        } else {
+            keep.min(20000).min(context / 4)
+        };
+        let repaired_reserve = if explicit_reserve.is_some() {
+            effective_reserve
+        } else {
+            reserve.min(16384).min(context / 4)
+        };
+        if unsafe_budget(repaired_keep, repaired_reserve) {
+            bail!(
+                "Pi model {id} has explicit compaction budgets too large for its {context}-token context; adjust compaction.modelOverrides[{key}] or verified model limits; left unchanged"
+            );
+        }
         let entry = pi_object(
             &mut compaction["modelOverrides"],
             &key,
             &format!("settings.json compaction.modelOverrides[{key}]"),
         )?;
-        // Fill each absent field independently; explicit per-model choices win.
-        entry.entry("keepRecentTokens").or_insert(json!(20000));
-        entry.entry("reserveTokens").or_insert(json!(16384));
+        entry
+            .entry("keepRecentTokens")
+            .or_insert(json!(repaired_keep));
+        entry
+            .entry("reserveTokens")
+            .or_insert(json!(repaired_reserve));
     }
     Ok(())
 }
@@ -354,7 +413,7 @@ pub fn configure_pi(config: &Config, api_key: &str, home: Option<&Path>) -> Resu
     let mut settings = pi_document(&settings_path, "settings.json")?;
     settings["defaultProvider"] = json!(PI_PROVIDER);
     settings["defaultModel"] = json!(default);
-    pi_compaction(&mut settings, config)?;
+    pi_compaction(&mut settings, config, &catalog)?;
     // Both documents parse and validate before either file is changed.
     write_json(&models_path, &catalog)?;
     write_json(&settings_path, &settings)?;
@@ -363,6 +422,7 @@ pub fn configure_pi(config: &Config, api_key: &str, home: Option<&Path>) -> Resu
         models_path.display(),
         models.len()
     );
+    println!("Restart running Pi sessions to reload model limits and compaction settings.");
     Ok(())
 }
 #[cfg(test)]
