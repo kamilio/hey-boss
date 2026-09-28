@@ -518,7 +518,7 @@ mod tests {
             run(
                 candidates,
                 &mut observations,
-                &[binary.clone()],
+                std::slice::from_ref(&binary),
                 at,
                 &config(),
                 true,

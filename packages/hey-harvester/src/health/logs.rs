@@ -61,7 +61,7 @@ fn clean_directory(
     if !directory.exists() {
         return Ok((vec![], 0));
     }
-    let m = fs::symlink_metadata(&directory)?;
+    let m = fs::symlink_metadata(directory)?;
     if !m.is_dir()
         || m.uid() != unsafe { libc::geteuid() }
         || directory.canonicalize()? != directory

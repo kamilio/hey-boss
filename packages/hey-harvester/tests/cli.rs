@@ -91,6 +91,38 @@ fn status_distinguishes_reporting_binary_from_last_scan_build() {
 }
 
 #[test]
+fn installation_waits_for_running_maintenance_without_changing_settings() {
+    use std::{io::BufRead, process::Stdio};
+    let f = Fixture::new("install-queued");
+    let store = hey_harvester::health::Store::new(f.0.join("health")).unwrap();
+    let lock = store.lock().unwrap();
+    let mut child = f
+        .command()
+        .arg("install")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut waiting = String::new();
+    std::io::BufReader::new(child.stderr.take().unwrap())
+        .read_line(&mut waiting)
+        .unwrap();
+    let early_exit = child.try_wait().unwrap();
+    drop(lock);
+    let result = child.wait().unwrap();
+    assert!(
+        waiting.starts_with("Waiting for running maintenance"),
+        "{waiting}"
+    );
+    assert!(
+        early_exit.is_none(),
+        "An active scan must queue installation, not fail it"
+    );
+    assert!(result.success());
+    assert!(f.0.join(".local/bin/hey-harvester").is_file());
+    assert!(!store.config().unwrap().automatic);
+}
+
+#[test]
 fn installation_preserves_disabled_schedule_and_existing_observations() {
     let f = Fixture::new("install");
     let store = hey_harvester::health::Store::new(f.0.join("health")).unwrap();
