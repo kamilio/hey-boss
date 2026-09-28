@@ -5301,7 +5301,8 @@ final class ArtifactEditingSession {
         if let data = try? Data(contentsOf: journal), let recovery = try? JSONDecoder().decode(ArtifactRecovery.self, from: data) {
             self.launch = recovery.launch; title = recovery.title; body = recovery.body
             savedTitle = recovery.savedTitle; savedBody = recovery.savedBody; version = recovery.version; pending = recovery.pending
-            ready = true
+            // Only unsent work takes precedence over the current server/file revision.
+            ready = pending != nil || title != savedTitle || body != savedBody
         }
     }
     func adopt(_ document: ArtifactDocument) {
