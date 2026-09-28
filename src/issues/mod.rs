@@ -22,6 +22,7 @@ pub mod worktree_ownership;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 pub use store::Store;
+pub(crate) use store::TrackedPullRequest;
 
 pub const BODY_LIMIT: usize = 1024 * 1024;
 pub const WIRE_LIMIT: usize = 16 * 1024 * 1024;

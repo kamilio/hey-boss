@@ -1181,10 +1181,14 @@ Issues, mindmap nodes and artifacts also support disk-backed files, drag-and-dro
 
 ### PR status and automatic completion
 
-The fleet supervisor checks attached GitHub PRs every minute using the embedded
-[hey-gh package](packages/hey-gh). It reads only PR metadata, deduplicates shared
-URLs, and uses conditional requests with rate-limit backoff. Merged PRs retain
-their final status without further polling; closed PRs are checked for reopening.
+The fleet supervisor shares the [hey-gh daemon](packages/hey-gh)'s metadata cache,
+conditional requests and quota queue. It starts the local daemon if absent.
+Each minute it selects at most 20 due PRs attached to active issues, prioritizing
+never-checked links and then the oldest attempts. Known open PRs wait five minutes
+between checks; closed PRs wait 30 minutes to detect reopening. Closed/deleted
+issues and confirmed merges need no polling. Failures back off, and a rate limit
+stops the batch until GitHub's retry deadline, persisted across supervisor restarts.
+Metadata checks do not fetch CI, comments or reviews or create extra watches.
 The PR list and task index show status icons, with delayed updates marked stale.
 
 **Settings → Close tasks when their fix PRs merge** is enabled by default. A task
