@@ -71,10 +71,23 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
                 _ => vec![],
             };
             if let Some(object) = worker.as_object_mut() {
-                object.retain(|k, _| matches!(k.as_str(), "id" | "pid" | "config"));
+                object.retain(|k, _| {
+                    matches!(
+                        k.as_str(),
+                        "id" | "pid"
+                            | "config"
+                            | "managed"
+                            | "retiring"
+                            | "intent"
+                            | "active"
+                            | "free"
+                            | "eligible"
+                            | "retry_at"
+                            | "error"
+                    )
+                });
             }
-            // Retain the compact task list after dropping internal process counters.
-            // The config is needed only for the collapsed device controls.
+            // Keep bounded worker health alongside the compact task list.
             worker["runs"] = Value::Array(runs_for_project(&runs, projects));
             worker["chiefs"] = Value::Array(runs_for_project(&chiefs, projects));
         }
@@ -82,7 +95,14 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
             object.retain(|k, _| {
                 matches!(
                     k.as_str(),
-                    "host" | "hostname" | "state" | "heartbeat" | "workers"
+                    "host"
+                        | "hostname"
+                        | "state"
+                        | "heartbeat"
+                        | "workers"
+                        | "desired_revision"
+                        | "applied_revision"
+                        | "configuration_error"
                 )
             });
         }
@@ -1171,6 +1191,27 @@ mod tests {
             "large private event"
         );
         assert!(result["conflicts"][0].get("saved_change").is_none());
+    }
+
+    #[test]
+    fn compact_overview_preserves_worker_configuration_status() {
+        let original = json!({"machines":[{"host":"local","desired_revision":"new","applied_revision":"old","configuration_error":"Checkout unavailable","workers":[{"id":"worker","managed":true,"retiring":false,"intent":"pause","active":1,"free":1,"eligible":0,"retry_at":123,"error":"Retrying","runs":[]}]}]});
+        let result = compact(original.clone(), &HashSet::new()).unwrap();
+        for key in [
+            "desired_revision",
+            "applied_revision",
+            "configuration_error",
+        ] {
+            assert_eq!(result["machines"][0][key], original["machines"][0][key]);
+        }
+        for key in [
+            "managed", "retiring", "intent", "active", "free", "eligible", "retry_at", "error",
+        ] {
+            assert_eq!(
+                result["machines"][0]["workers"][0][key],
+                original["machines"][0]["workers"][0][key]
+            );
+        }
     }
     #[test]
     fn compact_overview_retains_assignment_identity() {

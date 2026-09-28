@@ -64,3 +64,19 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal((await historical).status,503,'The supervisor must confirm the saved origin before serving history');
  store.setIssueProjects([]);assert.equal((await call('/api/fleet/conversation?host=local&run=run',null,headers)).status,404);
 });
+
+test('fleet YAML editing is paired, guarded and relayed to the supervisor',async t=>{
+ const store=new HubStore(),key='k'.repeat(64);const app=createApp({store,hubToken:key,secure:false,origin:'http://localhost'}),server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
+ t.after(()=>{app.locals.close();server.close();store.close();});const base='http://127.0.0.1:'+server.address().port;
+ const call=(path,body,headers={})=>fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
+ assert.equal((await call('/api/fleet/configuration')).status,401);
+ const pair=await call('/api/pair',{code:store.pairing()}),headers={Cookie:pair.headers.get('set-cookie').split(';')[0]},bridge={Authorization:'Bearer '+key};
+ assert.equal((await call('/api/fleet/configuration',null,headers)).status,503);
+ await call('/api/bridge/agents/status',{machines:[]},bridge);
+ assert.equal((await call('/api/fleet/configuration',{text:'machines: {}',revision:'one',save:true},{...headers,Origin:'https://evil.example'})).status,403);
+ const pending=call('/api/fleet/configuration',{text:'machines: {}',revision:'one',save:true},headers);
+ let queue;for(let n=0;n<30;n++){queue=await(await call('/api/bridge/agents',null,bridge)).json();if(queue.requests.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(queue.requests[0].action,'configuration');assert.equal(queue.requests[0].text,'machines: {}');assert.equal(queue.requests[0].revision,'one');assert.equal(queue.requests[0].save,true);
+ await call('/api/bridge/agents/'+queue.requests[0].id+'/result',{ok:true,text:'machines: {}',revision:'two'},bridge);
+ assert.equal((await(await pending).json()).revision,'two');
+});

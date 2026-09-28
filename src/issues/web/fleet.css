@@ -1,5 +1,26 @@
 /* Project overview and a quiet, readable conversation surface. */
 #main { max-width:1120px }
+.fleet-tabs { display:flex; gap:10px; margin:0 0 24px }
+.fleet-tabs [aria-current="page"] { background:var(--accent-soft); color:var(--accent); border-color:var(--accent) }
+.fleet-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:24px }
+.fleet-stat { border:1px solid var(--line); border-radius:16px; background:var(--surface); padding:20px; display:flex; flex-direction:column; gap:8px }
+.fleet-stat strong { font-size:28px; letter-spacing:-.04em; color:var(--text) }
+.fleet-stat span { font-size:12px; color:var(--muted) }
+.config-editor { border:1px solid var(--line); border-radius:16px; background:var(--surface); padding:20px; margin-bottom:24px }
+.config-editor>summary { cursor:pointer; font-weight:600; min-height:30px }
+.config-editor>summary span { color:var(--muted); font-size:12px; font-weight:400; margin-left:8px }
+.config-editor label { display:block; font-size:13px; font-weight:600; margin:16px 0 8px }
+.config-source { color:var(--muted); overflow-wrap:anywhere; font:12px/1.5 ui-monospace,monospace }
+#config-text { box-sizing:border-box; width:100%; min-height:280px; max-height:70vh; resize:vertical; border:1px solid var(--line); border-radius:10px; background:var(--input); color:var(--text); padding:16px; tab-size:2; font:13px/1.65 ui-monospace,SFMono-Regular,monospace; white-space:pre; overflow:auto }
+#config-text:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+#config-status { font-size:13px; line-height:1.6; overflow-wrap:anywhere }
+.config-actions { display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:18px }
+.config-changes { padding-left:20px; font-size:13px; line-height:1.8; color:var(--muted) }
+.worker-tasks { flex-basis:100%; display:grid; gap:8px }
+.worker-task { display:grid; grid-template-columns:1fr auto; gap:5px 16px; padding:12px; background:var(--input); border-radius:10px; text-decoration:none; color:var(--text) }
+.worker-task span { grid-column:1; font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.worker-task small { grid-column:2; grid-row:1; color:var(--muted) }
+@media(max-width:600px){.fleet-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.fleet-stat{padding:16px}.config-editor{padding:16px}.config-actions>.button{flex:1 1 auto}#config-text{font-size:12px;padding:10px}.config-editor>summary span{display:block;margin:8px 0}}
 .page-heading h1 { letter-spacing:-.045em }
 .project-section { margin:36px 0 42px }
 .project-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:20px; margin-bottom:18px }

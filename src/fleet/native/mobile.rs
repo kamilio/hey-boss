@@ -424,17 +424,28 @@ impl Mobile {
         let status = super::local_request(&self.ctx, json!({"kind":"overview"}))?;
         let mut machines = vec![];
         for m in status["machines"].as_array().into_iter().flatten() {
-            let workers=m["workers"].as_array().into_iter().flatten().map(|w|json!({"id":w["id"],"pid":w["pid"],"config":{"name":w["config"]["name"],"enabled":w["config"]["enabled"]},"chiefs":w["chiefs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>(),"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})).collect::<Vec<_>>();
-            machines.push(json!({"host":m["host"],"hostname":m["hostname"],"state":m["state"],"heartbeat":m["heartbeat"],"workers":workers}));
+            let workers=m["workers"].as_array().into_iter().flatten().map(|w|json!({"id":w["id"],"pid":w["pid"],"managed":w["managed"],"retiring":w["retiring"],"intent":w["intent"],"active":w["active"],"free":w["free"],"eligible":w["eligible"],"error":w["error"],"retry_at":w["retry_at"],"config":{"name":w["config"]["name"],"enabled":w["config"]["enabled"],"concurrency":w["config"]["concurrency"],"projects":w["config"]["projects"],"directory":w["config"]["directory"],"directories":w["config"]["directories"]},"chiefs":w["chiefs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>(),"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})).collect::<Vec<_>>();
+            machines.push(json!({"host":m["host"],"hostname":m["hostname"],"state":m["state"],"heartbeat":m["heartbeat"],"desired_revision":m["desired_revision"],"applied_revision":m["applied_revision"],"configuration_error":m["configuration_error"],"workers":workers}));
         }
         self.call(
             "/api/bridge/agents/status",
-            Some(&json!({"ok":true,"machines":machines})),
+            Some(&json!({"ok":true,"machines":machines,"configuration":status["configuration"],"signals":status["signals"]})),
         )?;
         let queue = self.call("/api/bridge/agents", None)?;
         for request in queue["requests"].as_array().into_iter().flatten() {
             let identifier = transport_id(&request["id"])?;
             let result = (|| -> Result<Value> {
+                if matches!(request["action"].as_str(), Some("configuration" | "signal")) {
+                    let mut action = request.clone();
+                    action["kind"] = request["action"].clone();
+                    if request["action"] == "signal" {
+                        action["id"] = request["signal_id"].clone();
+                    }
+                    if action["text"].is_null() {
+                        action.as_object_mut().unwrap().remove("text");
+                    }
+                    return super::local_request(&self.ctx, action);
+                }
                 if !visible.contains(request["project"].as_str().unwrap_or("")) {
                     return Err(invalid("This project is no longer available"));
                 }

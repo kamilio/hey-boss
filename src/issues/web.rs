@@ -781,6 +781,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         if path == "/api/fleet/status" {
             return json_response(crate::agent_conversations::overview()?);
         }
+        if path == "/api/fleet/configuration" {
+            return json_response(crate::fleet::call(&json!({"kind":"configuration"}))?);
+        }
         if path == "/api/bootstrap" {
             let mut result = app.execute(
                 None,
@@ -806,6 +809,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet",
             "/api/fleet/takeover",
             "/api/fleet/steer",
+            "/api/fleet/configuration",
             "/api/mm",
             "/api/admin/preview",
         ]
@@ -864,6 +868,14 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             if value["kind"] != "signal" {
                 return Err(Error::invalid("Expected a worker signal"));
             }
+            return json_response(crate::fleet::call(&value)?);
+        }
+        if path == "/api/fleet/configuration" {
+            let mut value: Value = serde_json::from_slice(&bytes)?;
+            if !value.is_object() {
+                return Err(Error::invalid("Expected configuration object"));
+            }
+            value["kind"] = json!("configuration");
             return json_response(crate::fleet::call(&value)?);
         }
         if path == "/api/fleet/takeover" || path == "/api/fleet/steer" {
