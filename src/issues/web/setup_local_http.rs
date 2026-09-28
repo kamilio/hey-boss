@@ -119,8 +119,8 @@ fn plist(user: &str, home: &str, binary: &str, origin: Option<&str>) -> String {
 <key>SockType</key><string>stream</string>
 <key>SockProtocol</key><string>TCP</string>
 </dict></dict>
-<key>StandardOutPath</key><string>/var/log/hey-boss-web.log</string>
-<key>StandardErrorPath</key><string>/var/log/hey-boss-web.log</string>
+<key>StandardOutPath</key><string>{home}/.hey-boss-web.log</string>
+<key>StandardErrorPath</key><string>{home}/.hey-boss-web.log</string>
 </dict></plist>
 "#,
         user = xml(user),
@@ -379,5 +379,24 @@ mod tests {
             "<string>--mobile-origin</string><string>https://mac.example.ts.net</string>"
         ));
         assert!(!definition.contains("<string>root</string>"));
+    }
+
+    #[test]
+    fn launchd_logs_are_creatable_by_the_service_user() {
+        let definition = plist(
+            "test-user",
+            "/Users/Test & User",
+            "/opt/homebrew/bin/hey-boss",
+            None,
+        );
+        for key in ["StandardOutPath", "StandardErrorPath"] {
+            assert!(
+                definition.contains(&format!(
+                    "<key>{key}</key><string>/Users/Test &amp; User/.hey-boss-web.log</string>"
+                )),
+                "launchd drops privileges before opening logs; the parent must be user-writable"
+            );
+        }
+        assert!(!definition.contains("/var/log/"));
     }
 }
