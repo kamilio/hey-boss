@@ -5257,6 +5257,11 @@ struct ArtifactSave: Codable {
     var version: Int
     var requestID = UUID().uuidString
 }
+struct ArtifactWriteFailure: LocalizedError {
+    let code: String
+    let message: String
+    var errorDescription: String? { message }
+}
 struct ArtifactRecovery: Codable {
     var launch: ArtifactLaunch
     var title: String
@@ -5338,8 +5343,17 @@ final class ArtifactEditingSession {
                 if self.dirty { self.flush() }
             case .failure(let error):
                 self.failure = error.localizedDescription
-                // Automatic, bounded retry cadence. Version conflicts never force a write.
-                self.timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in self?.flush() }
+                if let rejection = error as? ArtifactWriteFailure, rejection.code == "invalid_input" {
+                    // A definite validation rejection was never committed. Let corrected
+                    // text form a new request rather than replaying an invalid snapshot.
+                    self.pending = nil
+                    do { try self.persist() } catch { self.failure = error.localizedDescription }
+                    if self.title != request.title || self.body != request.body { self.flush() }
+                } else if let rejection = error as? ArtifactWriteFailure, ["conflict", "not_found"].contains(rejection.code) {
+                    self.timer?.invalidate(); self.timer = nil
+                } else {
+                    self.timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in self?.flush() }
+                }
             }
             self.changed()
         }
@@ -5381,7 +5395,10 @@ final class ArtifactBackend {
                 let data = try Data(contentsOf: output)
                 if process.terminationStatus != 0 {
                     let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    throw StorageError(description: (json?["error"] as? [String: Any])?["message"] as? String ?? "Could not save. Draft is preserved; retrying…")
+                    if let error = json?["error"] as? [String: Any], let code = error["code"] as? String, let message = error["message"] as? String {
+                        throw ArtifactWriteFailure(code: code, message: message)
+                    }
+                    throw StorageError(description: "Could not save. Draft is preserved; retrying…")
                 }
                 onMain { completion(.success(data)) }
             } catch { onMain { completion(.failure(error)) } }
@@ -5644,7 +5661,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 do {
                     let url = URL(fileURLWithPath: file), data = Data(request.body.utf8)
                     let current = try Data(contentsOf: url)
-                    guard current == baseline || current == data else { throw StorageError(description: "This file changed elsewhere. Save Copy or Reload; your draft is preserved.") }
+                    guard current == baseline || current == data else { throw ArtifactWriteFailure(code: "conflict", message: "This file changed elsewhere. Save Copy or Reload; your draft is preserved.") }
                     try data.write(to: url, options: .atomic)
                     onMain { self?.originalFile = data; completion(.success(ArtifactDocument(id: "", title: request.title, body: request.body, version: request.version + 1))) }
                 } catch { onMain { completion(.failure(error)) } }
