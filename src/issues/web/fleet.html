@@ -22,8 +22,14 @@
         <nav class="fleet-tabs" aria-label="Agent views"><a class="button" href="/agents">Conversations</a><a class="button" id="workers-tab" href="/workers">Workers</a></nav>
         <section id="worker-config" hidden aria-label="Worker configuration">
           <div id="fleet-summary" class="fleet-summary" aria-live="polite"></div>
+          <nav class="worker-views" aria-label="Worker views"><a id="worker-status-view" href="/workers">Activity</a><a id="worker-config-view" href="/workers#view=configuration">Workers &amp; settings</a></nav>
+          <section id="fleet-attention" class="fleet-attention" aria-label="Fleet health"></section>
+          <p id="worker-save-note" class="worker-save-note" role="status" hidden></p>
+          <div class="worker-toolbar"><div id="worker-filters" class="worker-filters" aria-label="Filter workers"></div><label class="worker-search">Find a worker<input id="worker-search" type="search" placeholder="Task, project, worker or machine"></label></div>
+          <p id="worker-view-help" class="device-help"></p>
+          <div id="worker-board"></div>
           <details id="config-editor" class="config-editor">
-            <summary>Edit fleet configuration <span>YAML · all machines</span></summary>
+            <summary>Advanced: edit YAML <span>Full configuration · all machines</span></summary>
             <p class="device-help">Changes apply automatically. Removing a worker lets its current work finish.</p>
             <p id="config-source" class="config-source"></p>
             <label for="config-text">Fleet YAML</label>
@@ -57,6 +63,24 @@
       </div>
       <footer class="page-footer"><span data-icon="spark"></span><span>Good work, in good company.</span><button id="refresh" class="button small" type="button"><span data-icon="refresh"></span>Refresh</button></footer>
     </main>
+    <dialog id="worker-editor" class="takeover-dialog worker-editor" aria-labelledby="worker-editor-title">
+      <form id="worker-form">
+        <h2 id="worker-editor-title">Edit worker</h2><p id="worker-editor-context"></p>
+        <div class="worker-form-grid">
+          <label>Name<input id="worker-name" required maxlength="128"></label>
+          <label>Agent slots<input id="worker-slots" type="number" min="1" max="1024" required></label>
+          <label class="full">Pickup mode<select id="worker-intent"><option value="running">Running — pick up tasks</option><option value="pause">Paused — finish current tasks</option><option value="drain">Drain — finish tasks, then stop</option><option value="stop">Stopped — stop current tasks</option></select></label>
+          <details id="worker-scope" class="worker-scope full"><summary>Projects &amp; checkout paths</summary><div class="worker-scope-fields">
+          <label class="full">Projects<textarea id="worker-projects" rows="3" placeholder="One project ID per line; empty means all projects"></textarea></label>
+          <label class="full">Working directory<input id="worker-directory" placeholder="Empty: discover per project"><small>For a single project. Use per-project paths below for a shared worker.</small></label>
+          <label class="full">Per-project paths<textarea id="worker-directories" rows="3" placeholder="project ID = /absolute/path"></textarea><small>One project ID = path per line.</small></label>
+          </div></details>
+        </div>
+        <p id="worker-editor-status" role="status">Changes are written to fleet.yaml after review.</p>
+        <ul id="worker-editor-changes" class="config-changes"></ul>
+        <div class="takeover-dialog-actions"><button id="worker-editor-cancel" type="button" class="button">Cancel</button><button id="worker-editor-preview" type="submit" class="button">Review changes</button><button id="worker-editor-save" type="button" class="button primary" disabled>Save worker</button></div>
+      </form>
+    </dialog>
     <dialog id="takeover-dialog" class="takeover-dialog" aria-labelledby="takeover-title"><h2 id="takeover-title">Take over this task?</h2><p>Stop this agent and assign its issue to you. You can continue its saved session in your terminal.</p><p id="takeover-task" class="takeover-task"></p><div class="takeover-dialog-actions"><button id="takeover-cancel" class="button" type="button">Keep agent working</button><button id="takeover-confirm" class="button primary" type="button">Take over</button></div></dialog>
     <dialog id="steer-dialog" class="takeover-dialog steer-dialog" aria-labelledby="steer-title">
       <form id="steer-form">

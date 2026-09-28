@@ -1,9 +1,17 @@
 # Worker fleet
 
-Open **Agents → Workers** (`/workers`) to see every machine, worker, active task,
-and configuration status. Expand **Edit fleet configuration** to edit YAML,
-preview the changes, and save. The local web app and paired web app edit the
-same file on the supervisor.
+Open **Agents → Workers** (`/workers`). **Activity** shows occupied, available,
+and paused slots, grouped by machine and worker. Running tasks show their title,
+project, elapsed time, and latest activity; open one to read its conversation.
+Offline machines show last-known activity and contribute no available capacity.
+Organizers are shown separately because they do not consume issue-agent slots.
+
+Use **Workers & settings** to find a saved worker, inspect its state, or edit its
+name, slot count, pickup mode, projects, and checkout paths. Review and save the
+changes directly to the supervisor's YAML. Other settings are preserved; structured
+edits may reformat the file. Stopped workers are collapsed by default. **Advanced:
+edit YAML** exposes the whole file, including adding and removing definitions.
+The local web app and paired web app edit the same supervisor file.
 
 ## One configuration
 

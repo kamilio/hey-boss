@@ -82,3 +82,21 @@ assert.equal(chiefGroups[0].active.length,1,'Chief does not consume an issue slo
 assert.equal(chiefGroups[0].history.length,0,'Chief has a separate last-pass presentation');
 
 assert.match(agentState(retrying), /^Retry in /);
+
+const {workerPhase} = require('../src/issues/web/fleet.js');
+const machine={state:'connected',heartbeat:now/1000};
+const working={id:'a',intent:'running',pid:1,active:1,config:{enabled:true}};
+assert.equal(workerPhase(working,machine,now).group,'working');
+assert.equal(workerPhase({...working,intent:'pause'},machine,now).label,'Finishing work');
+assert.equal(workerPhase({...working,pid:null,active:0,intent:'stop'},machine,now).group,'stopped');
+assert.equal(workerPhase(working,{...machine,state:'disconnected'},now).label,'Offline');
+assert.equal(workerPhase(working,{...machine,configuration_error:'"a": Missing checkout; "b": Missing checkout'},now).group,'attention');
+assert.equal(workerPhase({...working,id:'c'}, {...machine,configuration_error:'"a": Missing checkout'},now).group,'working');
+console.log('Worker status classification checks passed');
+const {slotUsage}=require('../src/issues/web/fleet.js');
+assert.deepEqual(slotUsage({...working,config:{enabled:true,concurrency:3}},machine,now),{capacity:3,occupied:1,available:2,paused:0,online:true,running:true});
+assert.equal(slotUsage({...working,intent:'pause',config:{enabled:false,concurrency:3}},machine,now).paused,2);
+assert.equal(slotUsage({...working,active:4,config:{enabled:true,concurrency:2}},machine,now).available,0);
+assert.equal(slotUsage(working,{...machine,state:'disconnected'},now).occupied,0);
+assert.equal(slotUsage({...working,pid:null},machine,now).capacity,0);
+console.log('Live slot occupancy and paused/offline capacity checks passed');
