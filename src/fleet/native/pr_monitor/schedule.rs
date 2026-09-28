@@ -42,12 +42,13 @@ impl Schedule {
         due.into_iter().take(20).map(|(_, url)| url).collect()
     }
 
-    pub fn success(&mut self, url: &str, now: i64, closed: bool) {
+    pub fn success(&mut self, url: &str, now: i64, validated_at: i64, closed: bool) {
         self.entries.insert(
             url.into(),
             Entry {
                 attempted_at: now,
-                next_at: now.saturating_add(interval(closed)),
+                // A shared cache hit is only as fresh as its upstream validation.
+                next_at: validated_at.saturating_add(interval(closed)).max(now),
                 failures: 0,
             },
         );
@@ -109,7 +110,7 @@ mod tests {
         assert_eq!(due[0], "new");
         assert!(!due.iter().any(|u| u == "fresh" || u == "closed"));
         for url in &due {
-            schedule.success(url, now, false);
+            schedule.success(url, now, now, false);
         }
         let next = schedule.due(&prs, now + 60_000);
         assert_eq!(next.len(), 11);
@@ -119,6 +120,17 @@ mod tests {
                 .due(&[pr("new", None, false)], now + 300_000)
                 .contains(&"new".into())
         );
+    }
+
+    #[test]
+    fn cached_reads_do_not_extend_the_validation_interval() {
+        let mut schedule = Schedule::default();
+        let now = 10_000_000;
+        let validated_at = now - 240_000;
+        schedule.success("cached", now, validated_at, false);
+        let prs = [pr("cached", Some(validated_at), false)];
+        assert!(schedule.due(&prs, now + 59_999).is_empty());
+        assert_eq!(schedule.due(&prs, now + 60_000), vec!["cached"]);
     }
 
     #[test]
