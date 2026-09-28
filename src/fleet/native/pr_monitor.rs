@@ -181,7 +181,12 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
                     },
                 )?;
                 if let Some(status) = status {
-                    schedule.success(&url, crate::issues::worker::now(), status == "closed");
+                    schedule.success(
+                        &url,
+                        crate::issues::worker::now(),
+                        checked_at,
+                        status == "closed",
+                    );
                 } else {
                     schedule.failure(
                         &url,
