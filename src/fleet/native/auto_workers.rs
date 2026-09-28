@@ -18,7 +18,7 @@ fn definitions(value: &Value) -> Result<Vec<Value>> {
             if !ids.insert(id) {
                 return Err(replica::invalid(&format!("Duplicate worker id: {id}")));
             }
-            let settings: Settings = serde_json::from_value(row["config"].clone())?;
+            let mut settings: Settings = serde_json::from_value(row["config"].clone())?;
             let intent = row["intent"].as_str().unwrap_or(if settings.enabled {
                 "running"
             } else {
@@ -29,6 +29,7 @@ fn definitions(value: &Value) -> Result<Vec<Value>> {
                     "Invalid worker intent: {intent}"
                 )));
             }
+            settings.enabled = intent == "running";
             // Retired checkouts may have been deleted; tombstones still prevent
             // their workers from being resurrected after reconnecting.
             if !matches!(intent, "stop" | "drain") {
@@ -53,6 +54,17 @@ fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'sta
     let (source, config, role) = if role == "agent" {
         (agent_path, agent["workers"].clone(), "agent")
     } else {
+        if super::configuration::is_yaml(&ctx.desired) {
+            let saved = super::configuration::load(ctx)?;
+            return Ok((
+                ctx.desired.clone(),
+                saved["runtime"]["machines"]["local"]["workers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+                "controller",
+            ));
+        }
         let saved = ctx.read_json(&ctx.desired, Value::Null)?;
         let workers = saved["machines"]["local"]["workers"].clone();
         let main_path = ctx.state.join("fleet-main.json");
@@ -83,6 +95,19 @@ fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'sta
 // Ownership is local and explicit. Fleet discovery must never enroll workers in
 // this dashboard, including workers added later from a separate terminal.
 fn owned_ids(ctx: &Context) -> Result<HashSet<String>> {
+    let role: String = ctx
+        .db()?
+        .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    let companion = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
+    if (role != "agent" && super::configuration::is_yaml(&ctx.desired))
+        || companion["declarative"] == true
+    {
+        return Ok(configuration(ctx)?
+            .1
+            .iter()
+            .filter_map(|w| w["id"].as_str().map(str::to_owned))
+            .collect());
+    }
     let saved = ctx.read_json(
         &ctx.state.join("auto-workers.json"),
         json!({"worker_ids":[]}),
@@ -91,6 +116,15 @@ fn owned_ids(ctx: &Context) -> Result<HashSet<String>> {
     Ok(ids.into_iter().collect())
 }
 fn save_owned_ids(ctx: &Context, ids: &HashSet<String>) -> Result<()> {
+    let role: String = ctx
+        .db()?
+        .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    if role != "agent" && super::configuration::is_yaml(&ctx.desired) {
+        return Ok(());
+    }
+    if ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?["declarative"] == true {
+        return Ok(());
+    }
     let mut ids: Vec<_> = ids.iter().collect();
     ids.sort();
     ctx.atomic_json(
@@ -108,42 +142,21 @@ pub(super) fn run(apply: bool, config_only: bool) -> Result<Value> {
     } else {
         None
     };
-    let (fleet_source, mut all_definitions, role) = configuration(&ctx)?;
+    let (fleet_source, all_definitions, role) = configuration(&ctx)?;
     let ids = owned_ids(&ctx)?;
     let selected: Vec<_> = all_definitions
         .iter()
         .filter(|w| w["id"].as_str().is_some_and(|id| ids.contains(id)))
         .cloned()
         .collect();
-    let mut definitions = definitions(&json!(selected))?;
-    let source = ctx.state.join("auto-workers.json");
+    let definitions = definitions(&json!(selected))?;
+    let source = fleet_source.clone();
     if config_only {
         return Ok(
             json!({"ok":true,"machine":ctx.node,"source":source,"fleet_source":fleet_source,"workers":definitions}),
         );
     }
     if apply {
-        let mut resumed = Vec::new();
-        for worker in &mut definitions {
-            if worker["intent"] == "pause" {
-                worker["intent"] = json!("running");
-                worker["config"]["enabled"] = json!(true);
-                // Enabling pickup also requires an available agent executable.
-                validate_settings(&serde_json::from_value(worker["config"].clone())?)?;
-                resumed.push(worker["id"].as_str().unwrap().to_owned());
-            }
-        }
-        if !resumed.is_empty() {
-            for selected in &definitions {
-                if let Some(existing) = all_definitions
-                    .iter_mut()
-                    .find(|w| w["id"] == selected["id"])
-                {
-                    *existing = selected.clone();
-                }
-            }
-            save_changes(&ctx, role, all_definitions, &resumed)?;
-        }
         let failures = control::apply_workers_locked(&ctx, &definitions)?;
         if !failures.is_empty() {
             return Err(replica::invalid(&failures.join("; ")));
@@ -285,6 +298,27 @@ pub(super) fn remove(id: &str) -> Result<Value> {
 }
 
 fn save_changes(ctx: &Context, role: &str, workers: Vec<Value>, changed: &[String]) -> Result<()> {
+    if role != "agent" && super::configuration::is_yaml(&ctx.desired) {
+        return super::configuration::edit(ctx, |document| {
+            if !document["machines"]["local"]["workers"].is_array() {
+                document["machines"]["local"]["workers"] = json!([]);
+            }
+            let current = document["machines"]["local"]["workers"]
+                .as_array_mut()
+                .unwrap();
+            for changed in workers
+                .iter()
+                .filter(|w| changed.iter().any(|id| w["id"] == *id))
+            {
+                if let Some(old) = current.iter_mut().find(|w| w["id"] == changed["id"]) {
+                    *old = changed.clone();
+                } else {
+                    current.push(changed.clone());
+                }
+            }
+            Ok(())
+        });
+    }
     let path = ctx.state.join(if role == "agent" {
         "fleet-agent.json"
     } else {

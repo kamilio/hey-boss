@@ -206,6 +206,9 @@ pub fn record_local_worker(
     if std::env::var("HEY_BOSS_FLEET_MANAGED").as_deref() == Ok("1") {
         return Ok(());
     }
+    if native::record_local_worker(id, config, intent)? {
+        return Ok(());
+    }
     let mut found = None;
     for name in ["fleet-agent.json", "fleet-main.json"] {
         let path = socket_path()?.with_file_name(name);
@@ -225,10 +228,14 @@ pub fn record_local_worker(
         return Ok(());
     };
     let base = value["revision"].clone();
+    let declarative = value["declarative"] == true;
     let Some(workers) = value["workers"].as_array_mut() else {
         return Ok(());
     };
     if !workers.iter().any(|w| w["id"] == id) {
+        if declarative {
+            return Ok(());
+        }
         if let Some(config) = config {
             workers.push(serde_json::json!({"id":id,"config":config}));
         } else {

@@ -2,6 +2,7 @@
 mod authority;
 mod auto_workers;
 mod companion;
+mod configuration;
 mod context;
 mod control;
 mod conversation;
@@ -20,6 +21,13 @@ pub(super) use authority::numbers;
 pub(super) use authority::resource;
 use context::Context;
 pub(super) use context::read_control_body;
+pub(super) fn record_local_worker(
+    id: &str,
+    config: Option<&crate::issues::worker::Settings>,
+    intent: &str,
+) -> std::io::Result<bool> {
+    configuration::record_local(id, config, intent).map_err(std::io::Error::other)
+}
 pub(super) fn request(value: Value) -> crate::issues::Result<Value> {
     let ctx = Context::new()
         .map_err(|e| crate::issues::Error::new("fleet_unavailable", e.to_string()))?;
@@ -164,13 +172,16 @@ fn run_inner(action: &super::Action) -> Result<()> {
     }
 }
 
-fn local_request(ctx: &Context, value: Value) -> Result<Value> {
+fn local_request(ctx: &Context, mut value: Value) -> Result<Value> {
     let companion: bool =
         ctx.db()?
             .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
                 r.get(0)
             })?;
     if companion {
+        if value["kind"] == "signal" {
+            value["kind"] = json!("worker_signal");
+        }
         return Ok(authority::call(&ctx.state, &ctx.path, value)?);
     }
     if value["kind"] == "capabilities" {

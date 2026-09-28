@@ -11,7 +11,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    about = "Manage this machine's saved workers. Use run to start or resume, status for one snapshot, and watch for a live view.",
+    about = "Manage this machine's saved workers. Use run to apply configuration, status for one snapshot, and watch for a live view.",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -24,7 +24,7 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Start or resume saved workers, print their status, and leave them running.
+    /// Apply saved configuration without changing paused or stopped intent.
     Run,
     /// Watch saved workers without starting or resuming them.
     Watch {

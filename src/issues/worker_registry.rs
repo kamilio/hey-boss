@@ -591,7 +591,9 @@ pub(super) fn execute(
             match command.as_str() {
                 "start" | "pause" | "stop_worker" => {
                     c.enabled = command == "start";
-                    worker::validate_settings(&c)?;
+                    if c.enabled {
+                        worker::validate_settings(&c)?;
+                    }
                     db.execute("UPDATE issue_workers SET config=?2,version=?3,stop_requested=?4,updated_at=?5 WHERE id=?1",params![worker_id,serde_json::to_string(&c)?,v+1,command=="stop_worker",now()])?;
                     if command == "stop_worker" {
                         db.execute("UPDATE worker_runs SET stop_requested=1 WHERE worker_id=?1 AND finished_at IS NULL",[worker_id])?;

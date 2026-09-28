@@ -1,6 +1,6 @@
 use super::{
-    Result, authority,
-    context::{Context, encode_frame, hash, id, now, read_frame, send},
+    Result, authority, configuration,
+    context::{Context, encode_frame, id, now, read_frame, send},
     control, conversation, pull,
     replica::{self, invalid},
     takeover,
@@ -60,7 +60,7 @@ impl Supervisor {
         }
         let chief_ownership = crate::chief_ownership::read(&db)?;
         let local = ctx.workers()?;
-        if !ctx.state.join("fleet-main.json").exists() {
+        if !ctx.state.join("fleet-main.json").exists() && !configuration::is_yaml(&ctx.desired) {
             ctx.atomic_json(
                 &ctx.state.join("fleet-main.json"),
                 &json!({"role":"controller","workers":definitions(&local)}),
@@ -170,6 +170,11 @@ impl Supervisor {
     // A visible-project scope selects the compact projection. Project before
     // cloning: discarded event arrays must never enter the response allocation.
     fn snapshot(&self, visible: Option<&BTreeSet<String>>) -> Result<Value> {
+        let config = if configuration::is_yaml(&self.ctx.desired) {
+            Some(configuration::load(&self.ctx).unwrap_or_else(|e| json!({"error":e.to_string()})))
+        } else {
+            None
+        };
         let db = self.ctx.db()?;
         let signals = replica::rows(
             &db,
@@ -240,6 +245,57 @@ impl Supervisor {
         });
         result["signals"] = Value::Array(signals);
         result["conflicts"] = Value::Array(conflicts);
+        drop(state);
+        if let Some(config) = config {
+            result["configuration"] = json!({"source":self.ctx.desired,"revision":config["revision"],"error":config["error"]});
+            let applied = self
+                .ctx
+                .read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?;
+            let machines = result["machines"].as_array_mut().unwrap();
+            for machine in &mut *machines {
+                for worker in machine["workers"].as_array_mut().into_iter().flatten() {
+                    worker["managed"] = json!(false);
+                }
+            }
+            for (host, desired) in config["runtime"]["machines"]
+                .as_object()
+                .into_iter()
+                .flatten()
+            {
+                if !machines.iter().any(|m| m["host"] == *host) {
+                    machines.push(json!({"host":host,"state":"disconnected","workers":[]}));
+                }
+                let machine = machines.iter_mut().find(|m| m["host"] == *host).unwrap();
+                machine["desired_workers"] = desired["workers"].clone();
+                machine["desired_revision"] =
+                    json!(control::revision(&self.ctx.node, &desired["workers"]));
+                if host == "local" {
+                    machine["applied_revision"] = applied["revision"].clone();
+                    machine["configuration_error"] = applied["error"].clone();
+                }
+                if !machine["workers"].is_array() {
+                    machine["workers"] = json!([]);
+                }
+                for definition in desired["workers"].as_array().into_iter().flatten() {
+                    let workers = machine["workers"].as_array_mut().unwrap();
+                    if let Some(worker) = workers.iter_mut().find(|w| w["id"] == definition["id"]) {
+                        worker["managed"] = json!(true);
+                        worker["intent"] = definition["intent"].clone();
+                    } else {
+                        workers.push(json!({"id":definition["id"],"intent":definition["intent"],"config":definition["config"],"managed":true,"pid":null,"runs":[],"chiefs":[]}));
+                    }
+                    if let Some(worker) = workers.iter_mut().find(|w| w["id"] == definition["id"]) {
+                        worker["retiring"] = json!(
+                            !config["document"]["machines"][host]["workers"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|w| w["id"] == definition["id"])
+                        );
+                    }
+                }
+            }
+        }
         Ok(result)
     }
     fn conversation(&self, request: &Value) -> Result<Value> {
@@ -384,6 +440,7 @@ impl Supervisor {
             }
             return Ok(json!({"ok":true,"id":identifier,"state":old["state"]}));
         }
+        let tx = db.unchecked_transaction()?;
         replica::execute(
             &db,
             "INSERT INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)",
@@ -395,37 +452,55 @@ impl Supervisor {
                 json!(now()),
             ],
         )?;
-        let mut saved = self.ctx.read_json(&self.ctx.desired, json!({}))?;
-        let default = if host == "local" {
-            self.ctx
-                .read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?["workers"]
-                .clone()
-        } else {
-            self.state
-                .lock()
-                .unwrap()
-                .machines
-                .get(host)
-                .map(|m| m["desired_workers"].clone())
-                .unwrap_or(json!([]))
-        };
-        if !saved["machines"][host]["workers"].is_array() {
-            saved["machines"][host]["workers"] = default;
-        }
-        for w in saved["machines"][host]["workers"]
-            .as_array_mut()
-            .into_iter()
-            .flatten()
-        {
-            if w["id"] == worker {
-                w["intent"] = json!(if matches!(action, "resume" | "restart") {
+        if configuration::is_yaml(&self.ctx.desired) {
+            configuration::edit(&self.ctx, |doc| {
+                let definition = doc["machines"][host]["workers"]
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                    .find(|w| w["id"] == worker)
+                    .ok_or_else(|| invalid("Worker is not declared in the fleet configuration"))?;
+                definition["intent"] = json!(if matches!(action, "resume" | "restart") {
                     "running"
                 } else {
                     action
                 });
+                Ok(())
+            })?;
+        } else {
+            let mut saved = self.ctx.read_json(&self.ctx.desired, json!({}))?;
+            let default = if host == "local" {
+                self.ctx
+                    .read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?["workers"]
+                    .clone()
+            } else {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .machines
+                    .get(host)
+                    .map(|m| m["desired_workers"].clone())
+                    .unwrap_or(json!([]))
+            };
+            if !saved["machines"][host]["workers"].is_array() {
+                saved["machines"][host]["workers"] = default;
             }
+            for w in saved["machines"][host]["workers"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+            {
+                if w["id"] == worker {
+                    w["intent"] = json!(if matches!(action, "resume" | "restart") {
+                        "running"
+                    } else {
+                        action
+                    });
+                }
+            }
+            self.ctx.atomic_json(&self.ctx.desired, &saved)?;
         }
-        self.ctx.atomic_json(&self.ctx.desired, &saved)?;
+        tx.commit()?;
         self.event(host, "signal", &format!("{action} queued for {worker}"));
         Ok(json!({"ok":true,"id":identifier,"state":"pending"}))
     }
@@ -434,6 +509,9 @@ impl Supervisor {
             return Ok(workers.clone());
         }
         let _configuration = self.configuration.lock().unwrap();
+        if configuration::is_yaml(&self.ctx.desired) {
+            return self.local_yaml_config(host, changes, workers);
+        }
         let previous = self.machine(host);
         let current = control::revision(&self.ctx.node, workers);
         let mut updated = workers.clone();
@@ -482,6 +560,69 @@ impl Supervisor {
         self.ctx.atomic_json(&self.ctx.desired, &saved)?;
         self.event(host, "configuration", "Local worker settings synchronized");
         Ok(updated)
+    }
+    fn local_yaml_config(&self, host: &str, changes: &[Value], workers: &Value) -> Result<Value> {
+        let db = self.ctx.db()?;
+        let tx = db.unchecked_transaction()?;
+        configuration::edit(&self.ctx, |doc| {
+            let effective = configuration::retain_removals(
+                &json!({"machines":{host:{"workers":workers}}}),
+                doc,
+            );
+            let current =
+                control::revision(&self.ctx.node, &effective["machines"][host]["workers"]);
+            for change in changes {
+                let key = format!("config:{host}:{}", change["id"].as_str().unwrap_or(""));
+                if replica::state_get(&db, &key, json!(0))?
+                    .as_i64()
+                    .unwrap_or(0)
+                    >= change["local_revision"].as_i64().unwrap_or(0)
+                {
+                    continue;
+                }
+                let retired = workers
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|w| w["id"] == change["id"])
+                    && !doc["machines"][host]["workers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|w| w["id"] == change["id"]);
+                if change["base_revision"] != current || retired {
+                    replica::execute(
+                        &db,
+                        "INSERT OR IGNORE INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at) VALUES(?,?,?,'worker_configuration',?,?,?)",
+                        &[
+                            json!(format!("{key}:{}", change["local_revision"])),
+                            json!(host),
+                            change["local_revision"].clone(),
+                            json!(change.to_string()),
+                            json!(
+                                "The YAML configuration changed; the offline edit was not applied"
+                            ),
+                            json!(crate::issues::worker::now()),
+                        ],
+                    )?;
+                } else {
+                    if !doc["machines"][host]["workers"].is_array() {
+                        doc["machines"][host]["workers"] = json!([]);
+                    }
+                    let list = doc["machines"][host]["workers"].as_array_mut().unwrap();
+                    let definition = json!({"id":change["id"],"config":change["config"],"intent":change["intent"]});
+                    if let Some(old) = list.iter_mut().find(|w| w["id"] == change["id"]) {
+                        *old = definition;
+                    } else {
+                        list.push(definition);
+                    }
+                }
+                replica::state_set(&db, &key, &change["local_revision"])?;
+            }
+            Ok(())
+        })?;
+        tx.commit()?;
+        self.configured(host, workers)
     }
     fn configured(&self, host: &str, fallback: &Value) -> Result<Value> {
         Ok(self
@@ -679,7 +820,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut input,
-            json!({"kind":"configure","capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
@@ -733,7 +874,12 @@ impl Supervisor {
                             .unwrap_or(&[]),
                         &self.configured(host, &workers)?,
                     )?;
-                    for discovered in message["workers"].as_array().into_iter().flatten() {
+                    for discovered in message["workers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|_| !configuration::is_yaml(&self.ctx.desired))
+                    {
                         if !workers
                             .as_array()
                             .unwrap()
@@ -845,7 +991,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut input,
-                            json!({"kind":"configure","capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1019,6 +1165,8 @@ impl Supervisor {
                 .store(true, std::sync::atomic::Ordering::Release);
             return Ok(());
         }
+        // Configuration failures are recoverable; an incompatible store is not.
+        drop(crate::issues::Store::open(&self.ctx.path)?);
         let hosts = self.ctx.inventory()?;
         let Some(worker_configuration) = self.ctx.lock("fleet-worker-control.lock", false)? else {
             return Ok(());
@@ -1034,7 +1182,12 @@ impl Supervisor {
         let main = self
             .ctx
             .read_json(&self.ctx.state.join("fleet-main.json"), json!({}))?;
-        let mut desired = {
+        let mut desired = if configuration::is_yaml(&self.ctx.desired) {
+            configuration::load(&self.ctx)?["runtime"]["machines"]["local"]
+                .get("workers")
+                .cloned()
+                .unwrap_or(json!([]))
+        } else {
             let _configuration = self.configuration.lock().unwrap();
             let mut saved = self.ctx.read_json(&self.ctx.desired, json!({}))?;
             if main["workers"]
@@ -1061,7 +1214,10 @@ impl Supervisor {
         if !desired.is_array() {
             desired = json!([]);
         }
-        for discovered in &observed {
+        for discovered in observed
+            .iter()
+            .filter(|_| !configuration::is_yaml(&self.ctx.desired))
+        {
             if !desired
                 .as_array()
                 .unwrap()
@@ -1071,15 +1227,19 @@ impl Supervisor {
                 desired.as_array_mut().unwrap().push(discovered.clone());
             }
         }
-        let main = json!({"role":"controller","workers":desired,"revision":hash(&desired)});
-        self.ctx
-            .atomic_json(&self.ctx.state.join("fleet-main.json"), &main)?;
+        let mut main = json!({"role":"controller","workers":desired,"declarative":configuration::is_yaml(&self.ctx.desired),"revision":control::revision(&self.ctx.node, &desired)});
         let failures = control::configure_workers(&self.ctx, desired.as_array().unwrap())?;
         if !failures.is_empty() {
             self.event("local", "configuration", &failures.join("; "));
+            main["revision"] = Value::Null;
+            main["error"] = json!(failures.join("; "));
         }
+        self.ctx
+            .atomic_json(&self.ctx.state.join("fleet-main.json"), &main)?;
         drop(worker_configuration);
-        control::reconcile(&self.ctx, &main)?;
+        if failures.is_empty() {
+            control::reconcile(&self.ctx, &main)?;
+        }
         replica::prune_journal(&self.ctx.db()?)?;
         for pending in replica::rows(
             &self.ctx.db()?,
@@ -1289,6 +1449,12 @@ impl Supervisor {
             Some("overview") => self
                 .overview()
                 .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
+            Some("configuration") => self
+                .configuration_request(value)
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
+            Some("worker_signal") => self
+                .signal(value)
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
             _ => Err(crate::issues::Error::invalid(
                 "Unsupported authority request",
             )),
@@ -1334,6 +1500,7 @@ impl Supervisor {
             Some("overview") => self.overview(),
             Some("conversation" | "takeover" | "steer") => self.conversation(&request),
             Some("signal") => self.signal(&request),
+            Some("configuration") => self.configuration_request(&request),
             _ => Err(invalid("Unknown supervisor request")),
         };
         let result = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
@@ -1345,6 +1512,10 @@ impl Supervisor {
         };
         stream.write_all(&bytes)?;
         Ok(())
+    }
+    fn configuration_request(&self, request: &Value) -> Result<Value> {
+        let _configuration = self.configuration.lock().unwrap();
+        configuration::request(&self.ctx, request)
     }
 }
 fn overview_worker(worker: &Value, visible: &BTreeSet<String>) -> Value {
@@ -1670,6 +1841,74 @@ mod tests {
             app.authoritative(&json!({"kind":"status"})).unwrap()["ok"],
             true
         );
+    }
+
+    #[test]
+    fn yaml_offline_edits_cannot_resurrect_removed_workers() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(
+            &app.ctx.desired,
+            "machines: {peer: {workers: [{id: remote, intent: running, config: {}}]}}\n",
+        )
+        .unwrap();
+        let old = app.configured("peer", &json!([])).unwrap();
+        let mut change = old[0].clone();
+        change["local_revision"] = json!(1);
+        change["base_revision"] = json!(control::revision(&app.ctx.node, &old));
+        let removed = "# Removed on the supervisor\nmachines: {peer: {workers: []}}\n";
+        std::fs::write(&app.ctx.desired, removed).unwrap();
+        let current = app.configured("peer", &old).unwrap();
+        let updated = app
+            .local_config("peer", &[change.clone()], &current)
+            .unwrap();
+        assert_eq!(updated[0]["intent"], "drain");
+        assert_eq!(std::fs::read_to_string(&app.ctx.desired).unwrap(), removed);
+        change["base_revision"] = json!(control::revision(&app.ctx.node, &current));
+        change["local_revision"] = json!(2);
+        assert_eq!(
+            app.local_config("peer", &[change], &current).unwrap()[0]["intent"],
+            "drain"
+        );
+        let count: i64 = app
+            .ctx
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM fleet_conflicts WHERE table_name='worker_configuration'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn yaml_signals_update_the_same_document_and_reject_unknown_workers() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(&app.ctx.desired, "machines: {local: {workers: [{id: one, intent: pause, config: {}}]}, peer: {workers: []}}\n").unwrap();
+        app.signal(&json!({"id":"resume-one","host":"local","worker":"one","signal":"resume"}))
+            .unwrap();
+        let saved = app.ctx.read_json(&app.ctx.desired, Value::Null).unwrap();
+        assert_eq!(
+            saved["machines"]["local"]["workers"][0]["intent"],
+            "running"
+        );
+        assert_eq!(saved["machines"]["peer"]["workers"], json!([]));
+        assert!(
+            app.signal(
+                &json!({"id":"unknown","host":"local","worker":"unknown","signal":"resume"})
+            )
+            .is_err()
+        );
+        let count: i64 = app
+            .ctx
+            .db()
+            .unwrap()
+            .query_row("SELECT count(*) FROM fleet_signals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
