@@ -3,6 +3,8 @@ use crate::health::{Snapshot, Store, readable_bytes};
 use clap::Subcommand;
 use std::io;
 use std::path::PathBuf;
+#[cfg(any(target_os = "macos", test))]
+use std::process::Command;
 use std::time::Duration;
 
 #[derive(Subcommand)]
@@ -238,32 +240,45 @@ fn print(s: &Snapshot, json: bool) -> io::Result<()> {
     }
     Ok(())
 }
+fn installation_lock(store: &Store) -> io::Result<std::fs::File> {
+    // Wait for the in-flight scan instead of stopping it or racing its next run.
+    let started = std::time::Instant::now();
+    let mut waiting = false;
+    loop {
+        match store.lock() {
+            Ok(lock) => return Ok(lock),
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && started.elapsed() < Duration::from_secs(300) =>
+            {
+                if !waiting {
+                    eprintln!("Waiting for running maintenance to finish before installation…");
+                    waiting = true;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Refresh an enabled schedule after binary publication or rollback, without
+/// copying executables or changing the user's maintenance configuration.
+pub fn refresh_schedule(binary: &std::path::Path) -> io::Result<()> {
+    let store = Store::standard()?;
+    let _lock = installation_lock(&store)?;
+    let config = store.config()?;
+    if config.automatic {
+        schedule_binary(&store, true, config.interval_seconds, binary)?;
+    }
+    Ok(())
+}
+
 pub fn run(action: &Action) -> io::Result<()> {
     let store = Store::standard()?;
     match action {
         Action::Install => {
-            // Wait for the in-flight scan instead of stopping it or racing its
-            // next scheduled run. Never wait through an actual filesystem error.
-            let started = std::time::Instant::now();
-            let mut waiting = false;
-            let _lock = loop {
-                match store.lock() {
-                    Ok(lock) => break lock,
-                    Err(error)
-                        if error.kind() == io::ErrorKind::WouldBlock
-                            && started.elapsed() < Duration::from_secs(300) =>
-                    {
-                        if !waiting {
-                            eprintln!(
-                                "Waiting for running maintenance to finish before installation…"
-                            );
-                            waiting = true;
-                        }
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
+            let _lock = installation_lock(&store)?;
             let config = store.config()?;
             let home = PathBuf::from(
                 std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?,
@@ -475,26 +490,35 @@ fn schedule_binary(
         escape(&exe.to_string_lossy()),
         escape(&store.directory.to_string_lossy())
     );
-    // Callers hold the maintenance lock, so no cycle is running. Keep a matching
-    // registration; replace a stale one (old priority or binary path) in place.
-    let registered = Command::new("/bin/launchctl")
-        .args(["print", &service])
-        .output()?
+    register_launch_agent(&domain, &path, &plist, |command| command.output())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn register_launch_agent(
+    domain: &str,
+    path: &std::path::Path,
+    plist: &str,
+    mut run: impl FnMut(&mut Command) -> io::Result<std::process::Output>,
+) -> io::Result<()> {
+    let service = format!("{domain}/local.hey-boss.health");
+    // Callers hold the maintenance lock, so no cycle is running. Even an unchanged
+    // plist must be re-registered: launchd caches the executable's code identity
+    // and can reject an atomically replaced binary with EX_CONFIG / stale LWCR.
+    let registered = run(Command::new("/bin/launchctl").args(["print", &service]))?
         .status
         .success();
     if registered {
-        if fs::read_to_string(&path).is_ok_and(|current| current == plist) {
-            return Ok(());
+        let out = run(Command::new("/bin/launchctl").args(["bootout", &service]))?;
+        if !out.status.success() {
+            return Err(io::Error::other(
+                String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            ));
         }
-        let _ = Command::new("/bin/launchctl")
-            .args(["bootout", &service])
-            .output()?;
     }
-    fs::write(&path, plist)?;
-    let out = Command::new("/bin/launchctl")
-        .args(["bootstrap", &domain])
-        .arg(&path)
-        .output()?;
+    std::fs::write(path, plist)?;
+    let out = run(Command::new("/bin/launchctl")
+        .args(["bootstrap", domain])
+        .arg(path))?;
     if !out.status.success() {
         return Err(io::Error::other(
             String::from_utf8_lossy(&out.stderr).trim().to_owned(),
@@ -584,4 +608,64 @@ pub(crate) fn executable() -> io::Result<PathBuf> {
 
 fn schedule(store: &Store, enable: bool, interval: u64) -> io::Result<()> {
     schedule_binary(store, enable, interval, &executable()?)
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn unchanged_plist_refreshes_cached_code_identity_and_reports_registration_failures() {
+        let root =
+            std::env::temp_dir().join(format!("harvester-registration-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("health.plist");
+        for failure in [None, Some("bootout"), Some("bootstrap")] {
+            std::fs::write(&path, "unchanged plist").unwrap();
+            let mut commands = Vec::new();
+            let result =
+                register_launch_agent("gui/fixture", &path, "unchanged plist", |command| {
+                    assert_eq!(command.get_program(), "/bin/launchctl");
+                    let args = command.get_args().collect::<Vec<_>>();
+                    let action = args[0].to_str().unwrap();
+                    if action == "bootstrap" {
+                        assert_eq!(args[1], "gui/fixture");
+                        assert_eq!(args[2], path.as_os_str());
+                        assert_eq!(std::fs::read_to_string(&path).unwrap(), "unchanged plist");
+                    } else {
+                        assert_eq!(args[1], "gui/fixture/local.hey-boss.health");
+                    }
+                    commands.push(action.to_owned());
+                    Ok(std::process::Output {
+                        status: std::process::ExitStatus::from_raw(if failure == Some(action) {
+                            256
+                        } else {
+                            0
+                        }),
+                        stdout: Vec::new(),
+                        stderr: b"registration denied".to_vec(),
+                    })
+                });
+            if failure.is_some() {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("registration denied")
+                );
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(
+                commands,
+                if failure == Some("bootout") {
+                    vec!["print", "bootout"]
+                } else {
+                    vec!["print", "bootout", "bootstrap"]
+                }
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

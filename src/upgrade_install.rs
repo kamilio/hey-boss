@@ -123,7 +123,18 @@ pub(super) fn publish(
             companion,
             skills,
             companion_bins: companion_bins(binary, &home()?),
+            harvester: if cfg!(target_os = "macos") {
+                let standalone = home()?.join(".local/bin/hey-harvester");
+                Some(if standalone.exists() {
+                    standalone
+                } else {
+                    binary.with_file_name("hey-harvester")
+                })
+            } else {
+                None
+            },
         },
+        hey_harvester::cli::refresh_schedule,
     )
 }
 
@@ -132,6 +143,7 @@ struct Services {
     companion: bool,
     skills: Vec<PathBuf>,
     companion_bins: Vec<PathBuf>,
+    harvester: Option<PathBuf>,
 }
 
 fn publish_to(
@@ -141,12 +153,14 @@ fn publish_to(
     state: &Path,
     receipt: &Receipt,
     services: &Services,
+    mut refresh_harvester: impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let Services {
         app,
         companion,
         skills,
         companion_bins,
+        harvester,
     } = services;
     let companion = *companion;
     let temp = Temp::new()?;
@@ -275,6 +289,9 @@ fn publish_to(
                 atomic_copy(&skill_source.join(relative), &skill.join(relative), 0o644)?;
             }
         }
+        if let Some(harvester) = harvester {
+            refresh_harvester(harvester)?;
+        }
         // The durable receipt is the last publication step. Failed installations
         // leave the previous generation authoritative.
         write_json(&state.join("upgrade-receipt.json"), receipt)
@@ -302,6 +319,14 @@ fn publish_to(
             && adjacent.exists()
         {
             let _ = fs::remove_dir_all(adjacent);
+        }
+        if replaced_binary
+            && let Some(harvester) = harvester
+            && let Err(rollback) = refresh_harvester(harvester)
+        {
+            return Err(error(format!(
+                "{e}; binaries restored but harvester schedule recovery failed: {rollback}"
+            )));
         }
         return Err(e);
     }
@@ -390,8 +415,10 @@ mod tests {
                 app: None,
                 companion: false,
                 companion_bins: vec![],
+                harvester: None,
                 skills: Vec::new(),
             },
+            |_| panic!("No harvester schedule in this fixture"),
         );
         assert!(result.unwrap_err().to_string().contains("migration-failed"));
         assert_eq!(fs::read(&bin).unwrap(), original);
@@ -446,7 +473,9 @@ mod tests {
                     bin.with_file_name("hey-harvester"),
                 ],
                 skills: Vec::new(),
+                harvester: None,
             },
+            |_| panic!("No harvester schedule in this fixture"),
         );
         assert!(
             result
@@ -468,6 +497,96 @@ mod tests {
             "old-receipt"
         );
     }
+    #[test]
+    fn harvester_schedule_refresh_precedes_receipt_and_failure_rolls_back() {
+        for failure in ["none", "refresh", "receipt", "recovery"] {
+            let temp = Temp::new().unwrap();
+            let bin = temp.0.join("installed/hey-boss");
+            let built = temp.0.join("built/hey-boss");
+            let harvester = bin.with_file_name("hey-harvester");
+            script(&bin, "echo previous");
+            script(&harvester, "echo previous-harvester");
+            script(
+                &built,
+                "if [ \"$1\" = --version ]; then echo 'hey-boss (build 1234567890abcdef)'; fi",
+            );
+            script(&built.with_file_name("hey-harvester"), "echo new-harvester");
+            let state = temp.0.join("state");
+            fs::create_dir_all(&state).unwrap();
+            fs::write(state.join("upgrade-receipt.json"), "old-receipt").unwrap();
+            let mut registrations = Vec::new();
+            let result = publish_to(
+                &temp.0,
+                &bin,
+                &built,
+                &state,
+                &receipt(),
+                &Services {
+                    app: None,
+                    companion: false,
+                    companion_bins: vec![harvester.clone()],
+                    skills: Vec::new(),
+                    harvester: Some(harvester.clone()),
+                },
+                |path| {
+                    assert_eq!(path, harvester);
+                    registrations.push(fs::read_to_string(path).unwrap());
+                    if registrations.len() == 1 {
+                        assert_eq!(
+                            fs::read_to_string(state.join("upgrade-receipt.json")).unwrap(),
+                            "old-receipt"
+                        );
+                        if failure == "receipt" {
+                            fs::remove_file(state.join("upgrade-receipt.json")).unwrap();
+                            fs::create_dir(state.join("upgrade-receipt.json")).unwrap();
+                        }
+                        if matches!(failure, "refresh" | "recovery") {
+                            return Err(error("registration failed"));
+                        }
+                    } else if failure == "recovery" {
+                        return Err(error("recovery failed"));
+                    }
+                    Ok(())
+                },
+            );
+            assert_eq!(
+                registrations.first().map(String::as_str),
+                Some("#!/bin/sh\necho new-harvester\n"),
+                "The new binary must be registered before publication"
+            );
+            if failure != "none" {
+                let error = result.unwrap_err().to_string();
+                if failure == "recovery" {
+                    assert!(error.contains("registration failed"));
+                    assert!(error.contains("schedule recovery failed: recovery failed"));
+                }
+                if failure != "receipt" {
+                    assert_eq!(
+                        fs::read_to_string(state.join("upgrade-receipt.json")).unwrap(),
+                        "old-receipt"
+                    );
+                }
+                assert_eq!(registrations.len(), 2);
+                assert_eq!(registrations[1], "#!/bin/sh\necho previous-harvester\n");
+                assert_eq!(
+                    fs::read_to_string(&harvester).unwrap(),
+                    "#!/bin/sh\necho previous-harvester\n"
+                );
+                assert_eq!(
+                    fs::read_to_string(&bin).unwrap(),
+                    "#!/bin/sh\necho previous\n"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(registrations.len(), 1);
+                assert_eq!(
+                    json::<Receipt>(&state.join("upgrade-receipt.json")).unwrap(),
+                    receipt()
+                );
+            }
+        }
+    }
+
     #[test]
     fn successful_install_publishes_verified_receipt_shortcut_and_skill() {
         let temp = Temp::new().unwrap();
@@ -509,7 +628,9 @@ mod tests {
                     bin.with_file_name("hey-harvester"),
                 ],
                 skills: vec![skill.clone()],
+                harvester: None,
             },
+            |_| panic!("No harvester schedule in this fixture"),
         )
         .unwrap();
         assert_eq!(
