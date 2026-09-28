@@ -138,6 +138,15 @@ fn owned_path_inner(path: &Path, active: &BTreeSet<PathBuf>) -> io::Result<bool>
     if active.iter().any(|root| path.starts_with(root)) {
         return Ok(true);
     }
+    // macOS maps this system allowlist into user processes, but its service
+    // directory is intentionally inaccessible. It is not checkout evidence.
+    #[cfg(target_os = "macos")]
+    if matches!(
+        path.to_str(),
+        Some("/private/var/db/analyticsd/events.allowlist" | "/var/db/analyticsd/events.allowlist")
+    ) {
+        return Ok(false);
+    }
     for (_, admin) in checkouts(&path)? {
         match fs::symlink_metadata(admin.join("locked")) {
             Ok(_) => return Ok(true),
@@ -378,6 +387,22 @@ pub(super) fn protected(table: &Table, candidates: &BTreeSet<u32>) -> BTreeMap<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_analytics_file_does_not_block_unrelated_workload_checks() {
+        for name in [
+            "/private/var/db/analyticsd/events.allowlist",
+            "/var/db/analyticsd/events.allowlist",
+        ] {
+            let path = Path::new(name);
+            assert!(!owned_path(path, &BTreeSet::new()).unwrap());
+            // Explicit workload ownership must still take precedence.
+            assert!(
+                owned_path(path, &BTreeSet::from([path.parent().unwrap().to_owned()])).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn declared_ownership_protocol_keeps_paths_and_rejects_incomplete_inventory() {
