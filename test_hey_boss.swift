@@ -2533,6 +2533,7 @@ func auditArtifactEditor() {
     defer { try? FileManager.default.removeItem(at: root) }
     let launch = ArtifactLaunch(project: "named:Editor tests", id: "test-doc")
     let session = ArtifactEditingSession(launch: launch, journalRoot: root)
+    precondition(!session.dirty, "An unopened library or loading document has nothing to save")
     session.adopt(ArtifactDocument(id: "test-doc", title: "Notes", body: "original", version: 4))
     var requests: [ArtifactSave] = []
     var callbacks: [(Result<ArtifactDocument, Error>) -> Void] = []
