@@ -24,6 +24,26 @@ pub struct ApiClient {
     http: reqwest::Client,
 }
 impl ApiClient {
+    /// Lightweight lifecycle metadata, sharing the daemon cache and quota queue.
+    /// Does not hydrate CI/comments/reviews or register a background watch.
+    pub async fn pull_request(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<crate::Response> {
+        validate_repository(repository)?;
+        if number == 0 {
+            return Err(Error::Invalid("pull number must be positive".into()));
+        }
+        self.read(
+            self.http
+                .get(self.url(&format!("v1/prs/{repository}/{number}/metadata")))
+                .query(&freshness_query(freshness)?),
+        )
+        .await
+    }
+
     pub async fn pr_status(
         &self,
         repository: Option<&str>,

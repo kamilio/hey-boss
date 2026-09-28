@@ -104,6 +104,60 @@ impl Harness {
     }
 }
 
+#[tokio::test]
+async fn metadata_api_reuses_shared_cache_without_hydrating_or_watching() {
+    let h = Harness::new().await;
+    let client = h.client();
+    let expected = client
+        .pull_request("o/r", 1, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let api = hey_gh::api::Api::new(client.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sdk = hey_gh::ApiClient::new(
+        format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    let observed = sdk
+        .pull_request("o/r", 1, Freshness::MaxAge(Duration::from_secs(300)))
+        .await
+        .unwrap();
+    assert_eq!(observed.data, expected.data);
+    assert_eq!(observed.validated_at_ms, expected.validated_at_ms);
+    assert_eq!(h.calls().len(), 1);
+    assert!(client.watches().await.unwrap().is_empty());
+    assert!(matches!(
+        sdk.pull_request("o/r", 2, Freshness::CachedOnly).await,
+        Err(Error::CacheMiss)
+    ));
+    assert_eq!(h.calls().len(), 1);
+    h.mode("issue73-backoff");
+    assert!(matches!(
+        client
+            .pull_request("acme/demo", 7, Freshness::Revalidate)
+            .await,
+        Err(Error::RateLimited { .. })
+    ));
+    let calls = h.calls().len();
+    // A limit seen by any daemon consumer also blocks cold metadata reads,
+    // while validated cached metadata remains usable without quota.
+    assert!(matches!(
+        sdk.pull_request("acme/demo", 8, Freshness::MaxAge(Duration::from_secs(300)))
+            .await,
+        Err(Error::RateLimited { .. })
+    ));
+    assert!(
+        sdk.pull_request("o/r", 1, Freshness::MaxAge(Duration::from_secs(300)))
+            .await
+            .is_ok()
+    );
+    assert_eq!(h.calls().len(), calls);
+    server.abort();
+}
+
 async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     let path = uri.path().to_owned();
     let query = uri.query().unwrap_or_default().to_owned();

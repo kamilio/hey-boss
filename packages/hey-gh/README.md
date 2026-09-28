@@ -52,6 +52,12 @@ PR numbers above are examples. `watch` registrations and discovery state survive
 
 The daemon binds to `127.0.0.1:8787` by default. Use `serve --listen 127.0.0.1:PORT` and `--server http://127.0.0.1:PORT` on client commands for another port. Only loopback addresses are supported. Browser requests and nonlocal Host headers are rejected. The daemon creates a private local API credential automatically; the CLI and `ApiClient` load it without another login or token entry.
 
+For lifecycle-only consumers, Rust `ApiClient::pull_request` and
+`GET /v1/prs/OWNER/REPO/NUMBER/metadata` return the cached REST metadata envelope
+with its original validation timestamp. They share the daemon queue and cooldowns,
+honor `cached_only`/`max_age_seconds`, and never hydrate CI/comments/reviews or
+register watches. Metadata refresh work has a 15-second background deadline.
+
 If the official CLI reports a local API credential failure, use the same OS user
 and cache directory as the daemon. Restart the existing `hey-gh serve` process
 with its original `--listen` and `--cache` options to recreate a lost credential.
