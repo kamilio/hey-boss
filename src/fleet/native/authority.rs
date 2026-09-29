@@ -46,7 +46,8 @@ pub(in crate::fleet) fn call(
     let kind = request["kind"].as_str().unwrap_or("").to_owned();
     let envelope = json!({"database":database,"request":request});
     send(&mut stream, envelope).map_err(unavailable)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    // Requests are newline framed. A fast relay can close after replying before
+    // we half-close, making shutdown fail on macOS despite a buffered reply.
     let result = read_frame(&mut BufReader::new(stream))
         .map_err(unavailable)?
         .ok_or_else(|| unavailable("connection closed before acknowledgment"))?;
@@ -413,7 +414,7 @@ mod tests {
         let (root, ctx, store) = test_context();
         let listener = UnixListener::bind(ctx.state.join(SOCKET)).unwrap();
         let server = thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..300 {
                 let (mut stream, _) = listener.accept().unwrap();
                 read_frame(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
                 send(
@@ -423,13 +424,17 @@ mod tests {
                 .unwrap();
             }
         });
-        for kind in ["capabilities", "issue_metadata", "resource"] {
+        for kind in ["capabilities", "issue_metadata", "resource"]
+            .into_iter()
+            .cycle()
+            .take(300)
+        {
             let error = call(&ctx.state, &ctx.path, json!({"kind":kind})).unwrap_err();
             if kind == "resource" {
                 assert_eq!(error.code, "invalid_input");
                 assert_eq!(error.message, "Unsupported authority request");
             } else {
-                assert_eq!(error.code, "fleet_capability_unsupported");
+                assert_eq!(error.code, "fleet_capability_unsupported", "{error:?}");
                 assert!(error.message.contains("hey-boss upgrade"));
                 assert!(error.message.contains("companion"));
                 assert!(error.message.contains("supervisor"));
