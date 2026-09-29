@@ -179,6 +179,21 @@ fn rust_router_matches_shared_browser_route_contract() {
 }
 
 #[test]
+fn lookup_short_hostname_preserves_ready_state() {
+    let f = Fixture::new("ready-short-hostname");
+    f.execute(json!({"action":"configure_project","prs_enabled":true}));
+    f.execute(json!({"action":"create","title":"Ready PR","body":"","labels":[]}));
+    f.execute(json!({"action":"create","title":"Still open","body":"","labels":[]}));
+    f.execute(json!({"action":"add_pull_request","number":1,"url":"https://github.com/poe-platform/poe-code/pull/1"}));
+    f.execute(json!({"action":"ready","number":1,"force":true}));
+    let value = f.value("http://hey-boss.test/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&inbox_state=unread&state=ready&owner=all");
+    assert_eq!(value["route"]["entity"], "issues");
+    assert_eq!(value["issues"].as_array().unwrap().len(), 1);
+    assert_eq!(value["issues"][0]["number"], 1);
+    assert_eq!(value["issues"][0]["state"], "ready");
+}
+
+#[test]
 fn lookup_collections_keep_web_issue_filters() {
     let f = Fixture::new("collections");
     f.execute(json!({"action":"create","title":"Match","body":"","labels":["ready"]}));
