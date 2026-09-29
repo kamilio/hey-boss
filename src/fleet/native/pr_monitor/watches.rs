@@ -92,13 +92,15 @@ async fn poll_required(
                 "GitHub required-check evidence is stale; waiting for fresh validation".into(),
             ));
         }
-        Store::open(&ctx.path)
-            .map_err(storage)?
-            .record_github_observation(
-                url,
-                &hey_gh::watcher::observe_required(&policy),
-                timestamp(observed)?,
-            )
+        let observed = timestamp(observed)?;
+        let mut store = Store::open(&ctx.path).map_err(storage)?;
+        if policy.pull_request_state.as_deref() == Some("open") {
+            store
+                .record_open_pr_if_changed(url, timestamp(validated)?)
+                .map_err(storage)?;
+        }
+        store
+            .record_github_observation(url, &hey_gh::watcher::observe_required(&policy), observed)
             .map_err(storage)?;
         true
     } else {
@@ -202,10 +204,17 @@ async fn poll_details(
             .map_err(storage)?;
         return Ok(());
     }
-    Store::open(&ctx.path)
-        .map_err(storage)?
-        .record_github_observation(url, &observation, timestamp(ci.observed_at_ms)?)
-        .map_err(storage)?;
+    {
+        let mut store = Store::open(&ctx.path).map_err(storage)?;
+        if super::pr_status(&metadata.data, repository, number) == Some("open") {
+            store
+                .record_open_pr_if_changed(url, timestamp(metadata.validated_at_ms)?)
+                .map_err(storage)?;
+        }
+        store
+            .record_github_observation(url, &observation, timestamp(ci.observed_at_ms)?)
+            .map_err(storage)?;
+    }
     if observation.evidence["ci_settled"] != true || ctx.stopped() {
         return Ok(());
     }
