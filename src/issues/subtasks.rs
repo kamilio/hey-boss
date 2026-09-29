@@ -327,6 +327,7 @@ impl Graph {
 pub(super) fn worker_issue(db: &Connection, project: &str, number: i64) -> Result<Value> {
     let mut issue = json!(get_issue(db, project, number, false)?);
     super::assignments::enrich(db, project, &mut issue)?;
+    super::attempts::enrich(db, project, &mut issue)?;
     Graph::load(db, project)?.attach(&mut issue);
     let mut result = json!({"issue":issue});
     super::super::blockers::enrich(db, project, &mut result)?;

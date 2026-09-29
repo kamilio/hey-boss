@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 pub use store::Store;
 pub(crate) use store::TrackedPullRequest;
+pub use store::attempts::{AttemptEvidence, AttemptReport};
 
 pub const BODY_LIMIT: usize = 1024 * 1024;
 pub const WIRE_LIMIT: usize = 16 * 1024 * 1024;
@@ -354,6 +355,20 @@ pub enum Operation {
     View {
         number: i64,
     },
+    HoldAttempt {
+        number: i64,
+        if_version: i64,
+        report: AttemptReport,
+    },
+    InspectAttempt {
+        number: i64,
+    },
+    ReconcileAttempt {
+        number: i64,
+        if_version: i64,
+        evidence: AttemptEvidence,
+        outcome: String,
+    },
     Allocation {
         number: i64,
         machine: String,
@@ -556,6 +571,7 @@ impl Operation {
                 | Self::List { .. }
                 | Self::ReadPlan { .. }
                 | Self::View { .. }
+                | Self::InspectAttempt { .. }
                 | Self::Allocation { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
@@ -601,6 +617,9 @@ impl Operation {
             | Self::Move { number, .. }
             | Self::Transfer { number, .. }
             | Self::View { number }
+            | Self::HoldAttempt { number, .. }
+            | Self::InspectAttempt { number }
+            | Self::ReconcileAttempt { number, .. }
             | Self::Allocation { number, .. }
             | Self::Assign { number, .. }
             | Self::ReleaseAllocation { number, .. }

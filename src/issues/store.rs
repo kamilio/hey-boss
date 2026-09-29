@@ -32,6 +32,8 @@ mod workers;
 mod artifacts;
 #[path = "assignments.rs"]
 mod assignments;
+#[path = "attempts.rs"]
+pub(super) mod attempts;
 #[path = "batch.rs"]
 mod batch;
 #[path = "pr_monitor.rs"]
@@ -120,6 +122,11 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "issues",
+        "attempt_hold",
+        "TEXT CHECK(attempt_hold IS NULL OR json_valid(attempt_hold))",
+    ),
     ("issues", "assignment_target", "TEXT"),
     ("issues", "github_ack_event", "TEXT"),
     (
@@ -327,11 +334,11 @@ fn comment_page(
         json!({"ok":true,"project":project,"number":number,"comments":comments,"comment_count":total,"sort":sort,"next_offset":if next < total as u64 { Some(next) } else { None }}),
     )
 }
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers,attempt_hold";
 
 // Keep list/registry reads off issue records whose bodies can span hundreds of
 // overflow pages. All persisted summary fields fit in this covering index.
-const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers)";
+const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold)";
 
 fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
     let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
@@ -388,10 +395,23 @@ struct Issue {
     manual_blocked: bool,
     #[serde(default)]
     blocker_numbers: Vec<i64>,
+    #[serde(default)]
+    attempt_hold: Option<Value>,
 }
 fn row_issue(row: &crate::database::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
+        attempt_hold: row
+            .get::<_, Option<String>>("attempt_hold")?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         manual_blocked: row.get("manual_blocked")?,
         blocker_numbers: serde_json::from_str(&row.get::<_, String>("blockers")?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(20, rusqlite::types::Type::Text, Box::new(e))
@@ -1090,7 +1110,7 @@ impl Store {
             .is_none_or(|sql| !sql.contains("ready_dependencies"));
         let needs_readiness_refresh = prior_readiness
             .as_ref()
-            .is_none_or(|sql| !sql.contains("explicit_subtask_dependencies"));
+            .is_none_or(|sql| !sql.contains("surviving_attempt_protection"));
         let needs_repair = version >= 10
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
@@ -1249,8 +1269,11 @@ impl Store {
             tx.execute_batch(include_str!("subtask-readiness.sql"))?;
             tx.commit()?;
         }
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index')", [], |r| r.get::<_,bool>(0))? {
-            db.execute_batch(SUMMARY_INDEX)?;
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0)", [], |r| r.get::<_,bool>(0))? {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch("DROP INDEX IF EXISTS issue_list_summary")?;
+            tx.execute_batch(SUMMARY_INDEX)?;
+            tx.commit()?;
         }
         Ok(Self {
             db,
@@ -1842,6 +1865,35 @@ impl Store {
                 *if_version,
                 now,
             )?,
+            Operation::HoldAttempt {
+                number,
+                if_version,
+                report,
+            } => attempts::hold(
+                &tx,
+                &project,
+                actor.unwrap(),
+                *number,
+                *if_version,
+                report,
+                now,
+            )?,
+            Operation::InspectAttempt { number } => attempts::inspect(&tx, &project, *number)?,
+            Operation::ReconcileAttempt {
+                number,
+                if_version,
+                evidence,
+                outcome,
+            } => attempts::reconcile(
+                &tx,
+                &project,
+                actor.unwrap(),
+                *number,
+                *if_version,
+                evidence,
+                outcome,
+                now,
+            )?,
             Operation::View { number } => {
                 // Forwarded reads retain the initiating actor. Actorless internal
                 // reads continue to inspect from this store's native machine.
@@ -2074,6 +2126,9 @@ impl Store {
         }
         super::blockers::enrich(&tx, &response_project.id, &mut result)?;
         assignments::enrich_result(&tx, &response_project.id, &mut result, actor)?;
+        if let Some(issue) = result.get_mut("issue") {
+            attempts::enrich(&tx, &response_project.id, issue)?;
+        }
         if matches!(r.operation, Operation::Claim { .. }) {
             result["instructions"] = json!(registry::claim_instructions(
                 &tx,
@@ -2407,6 +2462,17 @@ fn mutate(
             | Operation::Restore { .. }
     ) {
         super::fleet::check_mutation(db, &project.id, number)?;
+    }
+    if matches!(
+        operation,
+        Operation::Claim { .. }
+            | Operation::Ready { .. }
+            | Operation::Close { .. }
+            | Operation::Reopen { .. }
+            | Operation::Delete { .. }
+            | Operation::Assign { .. }
+    ) {
+        attempts::guard(db, &project.id, number)?;
     }
     let before = serde_json::to_value(&issue)?;
     let mut action = "";

@@ -510,6 +510,14 @@ impl Store {
         if done {
             return Ok(());
         }
+        if attempts::held(&tx, &job.project.id, job.number())? {
+            tx.execute(
+                "UPDATE worker_runs SET state='attempt_held',summary=?2,updated_at=?3,retry_at=NULL WHERE id=?1",
+                params![job.id, summary, now()],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
         let issue = get_issue(&tx, &job.project.id, job.number(), true)?;
         let own = issue.assignee.as_deref() == Some(&job.actor.id);
         let watching = assignments::is_watching(&tx, &job.project.id, job.number())?;
@@ -793,6 +801,44 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap()
+        }
+    }
+
+    #[test]
+    fn reported_attempt_survives_blocked_finish_and_expired_reservation() {
+        let mut f = HandoffFixture::new(false);
+        f.store.db.execute("UPDATE issues SET attempt_hold=?1 WHERE number=1", [json!({"attempt_id":"validation-1","owner":f.job.actor.id,"machine":"unit","pid":std::process::id(),"process_start":"identity","log_path":"/tmp/validation.log","worktree":"/tmp/source"}).to_string()]).unwrap();
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET reservation_expires=0", [])
+            .unwrap();
+        for state in ["blocked", "interrupted", "failed"] {
+            f.store
+                .worker_finish(&f.job, state, "App handle unavailable; validation survives")
+                .unwrap();
+            assert_eq!(f.state(), "attempt_held");
+            assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
+            assert!(
+                !f.store
+                    .db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE number=1)",
+                        [],
+                        |r| r.get::<_, bool>(0)
+                    )
+                    .unwrap()
+            );
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM worker_runs WHERE finished_at IS NULL",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
         }
     }
     impl Drop for HandoffFixture {

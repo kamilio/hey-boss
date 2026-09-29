@@ -135,7 +135,7 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         let manual = i64::from(m["state"] == "blocked");
         m.entry("manual_blocked").or_insert(json!(manual));
         m.entry("blockers").or_insert(json!("[]"));
-        for column in ["assignment_target", "github_ack_event"] {
+        for column in ["assignment_target", "github_ack_event", "attempt_hold"] {
             if !m.contains_key(column) {
                 let target: Option<Option<String>> = db
                     .query_row(
@@ -728,7 +728,44 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                         )
                 })
                 .collect::<Vec<_>>();
-            if !changed.is_empty() && !owner.first().is_some_and(|r| r["node"] == node) {
+            let hold_change = before["attempt_hold"] != after["attempt_hold"];
+            let hold: Value = serde_json::from_str(
+                after["attempt_hold"]
+                    .as_str()
+                    .or(before["attempt_hold"].as_str())
+                    .unwrap_or("null"),
+            )?;
+            let guarded_hold = hold_change
+                && old["version"] == before["version"]
+                && old["attempt_hold"] == before["attempt_hold"]
+                && hold["machine"] == node
+                && changed.iter().all(|(key, _)| {
+                    key.as_str() == "attempt_hold"
+                        || (key.as_str() == "assignee"
+                            && after["attempt_hold"].is_null()
+                            && after["assignee"].is_null()
+                            && before["assignee"] == hold["owner"])
+                });
+            if hold_change && !guarded_hold {
+                return Err(invalid(
+                    "Surviving attempt changed or belongs to another machine; hold preserved",
+                ));
+            }
+            if !old["attempt_hold"].is_null()
+                && !guarded_hold
+                && changed.iter().any(|(key, value)| {
+                    matches!(key.as_str(), "state" | "deleted_at")
+                        || (key.as_str() == "assignee" && !value.is_null())
+                })
+            {
+                return Err(invalid(
+                    "A surviving task attempt prevents lifecycle changes until reconciliation",
+                ));
+            }
+            if !changed.is_empty()
+                && !guarded_hold
+                && !owner.first().is_some_and(|r| r["node"] == node)
+            {
                 return Err(invalid(
                     "Issue allocation was revoked or belongs to another machine",
                 ));
@@ -2058,6 +2095,60 @@ mod tests {
                 "A parked watcher must release its worker allocation"
             );
         }
+    }
+
+    #[test]
+    fn attempt_holds_replicate_without_allocation_and_reject_stale_or_foreign_release() {
+        let main = Fixture::new();
+        main.capture();
+        let key = json!({"project_id":"named:Native fleet","number":1});
+        let before = current_row(&main.db, "issues", &key).unwrap();
+        let mut after = before.clone();
+        after["attempt_hold"] = json!(json!({"machine":"peer","owner":"codex:original","attempt_id":"validation-1","pid":62791,"process_start":"saved-start","worktree":"/tmp/retained","log_path":"/tmp/retained.log"}).to_string());
+        after["version"] = json!(before["version"].as_i64().unwrap() + 1);
+        let change = |seq: i64, before: &Value, after: &Value| json!({"seq":seq,"table_name":"issues","before_json":before.to_string(),"after_json":after.to_string()});
+        assert_eq!(
+            accept_changes(&main.db, "peer", &[change(901, &before, &after)]).unwrap()[0]["state"],
+            "applied"
+        );
+        let held = current_row(&main.db, "issues", &key).unwrap();
+        assert_eq!(held["attempt_hold"], after["attempt_hold"]);
+        assert!(
+            rows(
+                &main.db,
+                "SELECT * FROM issue_pickup_ready WHERE number=1",
+                &[]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let mut cleared = held.clone();
+        cleared["attempt_hold"] = Value::Null;
+        assert_eq!(
+            accept_changes(&main.db, "other", &[change(902, &held, &cleared)]).unwrap()[0]["state"],
+            "conflict"
+        );
+        main.db
+            .execute("UPDATE issues SET version=version+1 WHERE number=1", [])
+            .unwrap();
+        assert_eq!(
+            accept_changes(&main.db, "peer", &[change(903, &held, &cleared)]).unwrap()[0]["state"],
+            "conflict"
+        );
+        let current = current_row(&main.db, "issues", &key).unwrap();
+        let mut old_peer = current.clone();
+        old_peer.as_object_mut().unwrap().remove("attempt_hold");
+        put_row(&main.db, "issues", &old_peer).unwrap();
+        assert_eq!(
+            current_row(&main.db, "issues", &key).unwrap()["attempt_hold"],
+            held["attempt_hold"]
+        );
+        cleared = current.clone();
+        cleared["attempt_hold"] = Value::Null;
+        assert_eq!(
+            accept_changes(&main.db, "peer", &[change(904, &current, &cleared)]).unwrap()[0]["state"],
+            "applied"
+        );
     }
 
     #[test]

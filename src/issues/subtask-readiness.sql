@@ -1,9 +1,10 @@
 DROP VIEW issue_pickup_ready;
 CREATE VIEW issue_pickup_ready AS
+ -- surviving_attempt_protection
  -- ready_dependencies_fast: workers attest PR readiness; no CI gate.
  -- explicit_subtask_dependencies: grouping does not imply sibling dependencies.
  SELECT i.project_id,i.number FROM issues i JOIN projects p ON p.id=i.project_id
- WHERE i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
+ WHERE i.attempt_hold IS NULL AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
  AND (NOT EXISTS(SELECT 1 FROM issue_subtasks edge WHERE edge.project_id=i.project_id AND edge.child_number=i.number) OR NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=i.project_id AND s.subtask_scheduling='sequential') OR NOT EXISTS(
   WITH RECURSIVE sequence_ancestors(number) AS (
    SELECT i.number UNION ALL

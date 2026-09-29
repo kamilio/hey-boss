@@ -721,6 +721,9 @@ pub(crate) fn stop_group(pid: u32, start: &str) -> Result<()> {
 }
 fn finalize_abandoned(store: &mut Store, machine: &str, id: &str) -> Result<()> {
     for (job, pid, start) in store.worker_orphans(machine)? {
+        if store.worker_attempt_held(&job)? {
+            continue;
+        }
         if job.id != id {
             continue;
         }
@@ -788,6 +791,7 @@ pub(crate) fn recover(store: &mut Store, machine: &str) -> Result<()> {
 
 struct Codex {
     process: crate::agent_process::Process,
+    protection: (PathBuf, Job),
     pending: VecDeque<Value>,
     next_id: u64,
     session: Option<String>,
@@ -832,6 +836,7 @@ impl Codex {
         let process = crate::agent_process::Process::spawn(&mut command)?;
         Ok(Self {
             process,
+            protection: (path.to_path_buf(), job.clone()),
             pending: VecDeque::new(),
             next_id: 0,
             session: None,
@@ -1058,7 +1063,17 @@ impl Codex {
 }
 impl Drop for Codex {
     fn drop(&mut self) {
-        let _ = self.process.stop();
+        let (path, job) = self.protection.clone();
+        let protected = move || {
+            Store::open(&path)
+                .and_then(|s| s.worker_attempt_held(&job))
+                .unwrap_or(true)
+        };
+        if protected() {
+            self.process.preserve_until(protected);
+        } else {
+            let _ = self.process.stop();
+        }
         // The server is stopped before its remaining Inbox questions are cancelled.
         self.approvals = Default::default();
     }
@@ -1124,6 +1139,9 @@ pub(super) fn finish_job(
             if reconnect {
                 *store = Store::open(path)?;
                 reconnect = false;
+            }
+            if store.worker_attempt_held(job)? {
+                return store.worker_finish(&saved.job, &saved.state, &saved.summary);
             }
             let child = store.worker_process_identity(&job.id)?;
             if let Some((Some(pid), Some(start))) = child {
