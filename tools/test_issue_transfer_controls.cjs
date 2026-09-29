@@ -14,7 +14,7 @@ for (const state of ['open', 'blocked', 'ready', 'closed', 'draft', 'deleted']) 
   for (const failure of ['progress', 'attachments', 'artifacts', 'subtasks']) {
     const nodes = new Map();
     const node = selector => {
-      if (!nodes.has(selector)) nodes.set(selector, {innerHTML:'', value:'', closest:() => ({after(){}}), addEventListener(_event, callback){this.listener=callback;}});
+      if (!nodes.has(selector)) nodes.set(selector, {innerHTML:'', value:'', closest:() => ({after(){}}), addEventListener(event, callback){this[event]=callback;}});
       return nodes.get(selector);
     };
     let mounts = 0;
@@ -50,7 +50,7 @@ for (const state of ['open', 'blocked', 'ready', 'closed', 'draft', 'deleted']) 
       const listenerStart = source.indexOf('$("#detail-view").addEventListener("click"');
       vm.runInContext(source.slice(listenerStart, source.indexOf('async function performAction(', listenerStart)), context);
       const button = {hasAttribute:name=>name==='data-transfer',dataset:{}};
-      node('#detail-view').listener({target:{closest:()=>button}});
+      node('#detail-view').click({target:{closest:()=>button}});
     }
   }
 }

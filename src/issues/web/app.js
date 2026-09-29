@@ -49,6 +49,7 @@ let model = {
   actor: null,
   boss: { id: "human:boss", name: "Boss" },
   assignees: [],
+  assignmentMachines: [],
   projects: [],
   labels: [],
   project: null,
@@ -87,6 +88,8 @@ const own = (id) => id && id === model.actor?.id;
 function actorName(id) {
   if (!id) return "Unassigned";
   if (id === "human:boss") return model.boss.name;
+  if (id === "watcher:github") return "GitHub watcher";
+  if (id.startsWith("machine:")) return model.assignmentMachines.find(m => m.id === id.slice(8))?.name || id.slice(8);
   if (own(id)) return "You";
   if (id.startsWith("codex:")) return `Codex · ${id.slice(6, 14)}`;
   if (id.startsWith("claude:")) return `Claude · ${id.slice(7, 15)}`;
@@ -372,12 +375,14 @@ function renderOwnerFilter() {
   const ids = [
     ...new Set([
       "human:boss",
+      "watcher:github",
+      ...model.assignmentMachines.map(m => `machine:${m.id}`),
       ...model.assignees,
       ...(!["all", "mine", "unassigned"].includes(selected) ? [selected] : []),
     ]),
   ];
   $("#owner-filter").innerHTML =
-    '<option value="all">Assignee</option>' +
+    '<option value="all">Assignment</option>' +
     `<option value="mine">Assigned to me (${esc(model.boss.name)})</option><option value="unassigned">Unassigned</option>` +
     ids
       .map((id) => `<option value="${esc(id)}">${esc(actorName(id))}</option>`)
@@ -387,12 +392,19 @@ function renderOwnerFilter() {
 function listLabel(name) {
   return `<a class="list-label-filter" href="${esc(routeHash({ ...model.route, issue: null, label: name }))}" aria-label="Filter by label ${esc(name)}">${label(name)}</a>`;
 }
-function listAssignee(id, number) {
-  const filter = `<a class="list-assignee-filter" href="${esc(routeHash({ ...model.route, issue: null, owner: id }))}" aria-label="Filter by assignee ${esc(actorName(id))}" title="Filter by ${esc(actorName(id))}">${avatar(id)}<span>${esc(actorName(id))}</span></a>`;
-  if (id.startsWith('human:')) return filter;
-  const trace = '/agents/session#' + new URLSearchParams({project:model.project.id, issue:number, agent:id});
-  return `<span class="list-assignee">${filter}<a class="list-agent-trace" href="${esc(trace)}" aria-label="Open agent conversation for issue #${number}" title="Open ${esc(actorName(id))}'s conversation">${icon('arrow-right')}</a></span>`;
+function listAssignment(issue) {
+  const a=IssueAssignments.current(issue);
+  if(a.kind==='unassigned') return '';
+  const description=IssueAssignments.describe(issue,{actorName,bossName:model.boss.name});
+  const owner=a.kind==='github'?'watcher:github':a.kind==='machine'?'machine:'+a.machine:a.actor||issue.assignee||'human:boss';
+  const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
+  const actor=a.actor||issue.assignee;
+  if(!actor || actor.startsWith('human:') || actor==='watcher:github') return filter;
+  const trace='/agents/session#'+new URLSearchParams({project:model.project.id,issue:issue.number,agent:actor});
+  return `<span class="list-assignee">${filter}<a class="list-agent-trace" href="${esc(trace)}" aria-label="Open agent conversation for issue #${issue.number}">${icon('arrow-right')}</a></span>`;
 }
+
+
 function renderLabelFilter() {
   const selected = model.route.label;
   const all = [
@@ -549,6 +561,7 @@ function renderList(result) {
   model.listContext = listContext;
   model.orderVersion = result.order_version;
   model.issues = result.issues;
+  if (result.assignment_machines) { model.assignmentMachines = result.assignment_machines; renderOwnerFilter(); }
   model.signature = JSON.stringify(result.issues);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueBlockers.matches(issue, model.route.blocked))};
@@ -557,7 +570,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${i.assignee ? listAssignee(i.assignee, i.number) : ""}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -834,7 +847,7 @@ async function refresh(quiet = true) {
         else renderDetail(result);
       } else if (
         model.detail &&
-        (JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+        (JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
       ) {
         if (quiet) showUpdate();
         else renderDetail(result);
@@ -910,12 +923,7 @@ document.addEventListener("keydown", event => {
   event.stopImmediatePropagation();
 }, true);
 
-function assigneeActions(issue) {
-  if (issue.state === "ready") return "";
-  if (issue.draft) return '<p>Mark ready before assigning this issue.</p>';
-  if (issue.state !== "open" || issue.deleted_at) return "";
-  return `<div class="assignee-actions">${own(issue.assignee) ? "" : `<button class="button small" data-action="assign_boss">Assign to ${esc(model.boss.name)}</button>`}${issue.assignee ? '<button class="button small" data-action="unassign">Unassign</button>' : ""}</div>`;
-}
+
 function renderIssueComment(comment, deleted) {
   const header = `${avatar(comment.author)}<strong>${esc(actorName(comment.author))}</strong><span>commented ${date(comment.created_at)}</span>`;
   const action = deleted ? "" : `<button type="button" class="comment-resolve" data-resolve-comment="${comment.id}" data-resolved="${!comment.resolved}" aria-label="${comment.resolved ? "Unresolve" : "Resolve"} comment ${comment.id}">${comment.resolved ? "Unresolve" : "Resolve"}</button>`;
@@ -958,6 +966,7 @@ function draftUnavailable(issue, enabled) {
 function renderReadiness(value) {
   const i = value.issue, a = value.allocation;
   if (i.deleted_at) return "";
+  if(i.state === "open" && !i.draft && !i.plan && i.assignment && i.assignment.kind !== "unassigned") return "";
   const expired = a?.reason === "allocation_expired";
   const reserved = !!a?.reserved_machine && !expired && i.state !== "closed";
   const missing = a?.role === "agent" && !a.reserved_machine;
@@ -966,7 +975,7 @@ function renderReadiness(value) {
   const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
   const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
   const note = i.state === "ready" ? i.draft ? "No worker pickup for this source. Eligible dependents can start. CI, review, merge and production approval remain separate. Reopen to withdraw the handoff." : "Dependent tasks can start. Reopen this task before reworking its PR." : i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
-  return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${renderAllocation(value)}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${(i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft && i.state === "open" ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
+  return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${(i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}${i.plan ? `<div class="issue-plan"><h3>Linked plan</h3><code>${esc(i.plan.path)}</code><p>${esc(i.plan.host)} · File changes sync to this issue.</p>${i.draft && i.state === "open" ? "<p>Marking ready syncs the latest file first. The plan must be reachable.</p>" : ""}</div>` : ""}</div>`;
 }
 function issueStateActions(issue) {
   const reopen = issue.state !== "open";
@@ -993,15 +1002,11 @@ function allocationSignature(value) {
   const a = value.allocation;
   return JSON.stringify(a && [a.role, a.reason, a.reserved_machine, a.reserved_host, a.reserved_ssh_host]);
 }
-function renderAllocation(value) {
-  const a = value.allocation;
-  if (!a?.reserved_machine || a.reason === "allocation_expired" || a.role === "standalone" || value.issue.deleted_at || ["closed", "ready"].includes(value.issue.state)) return "";
-  const release = a.authoritative ? `<button type="button" class="button danger" data-action="release_allocation"${value.issue.assignee ? ' disabled title="Unassign the issue before releasing its reservation"' : ""}>Release reservation</button>${value.issue.assignee ? '<p>Stop any active worker attempt and unassign this issue before releasing its reservation.</p>' : ""}` : '<p>Open this issue on the supervisor to release its reservation.</p>';
-  return `<div class="fleet-allocation" aria-label="Fleet allocation"><p class="fleet-device">Reserved for <strong>${esc(a.reserved_host || a.reserved_machine)}</strong></p>${a.reserved_host ? `<details><summary>Machine ID</summary><code>${esc(a.reserved_machine)}</code></details>` : ""}${release}</div>`;
-}
+
 function renderIssueWork(value) {
   const i = value.issue;
-  return `<section class="issue-work" aria-label="Work"><h2 class="issue-section-heading">Work</h2><div class="side-section"><h3 class="side-heading">Assignee${icon("user")}</h3><div class="assignee-line">${i.assignee ? avatar(i.assignee) : ""}<span title="${esc(i.assignee || "")}">${esc(actorName(i.assignee))}</span></div>${assigneeActions(i)}</div>${renderReadiness(value)}${renderTagSidebar(i)}${IssueBlockers.card(i)}</section>`;
+  const assignment=IssueAssignments.render(value,{actorName,bossName:model.boss.name,icon});
+  return `<section class="issue-work" aria-label="Work"><h2 class="issue-section-heading">Work</h2>${assignment}${renderReadiness(value)}${IssueAssignments.status(i,{icon})}${renderTagSidebar(i)}${IssueBlockers.card(i)}</section>`;
 }
 function renderIssueContext(i) {
   return `<details class="issue-context"><summary>Issue details</summary>${HeyBossOrigin.card(i.origin, model.project.id, actorName)}<div class="side-section"><h2 class="side-heading">Project</h2><div class="side-project">${icon("folder")}${esc(model.project.name)}</div><p>${esc(model.project.id.startsWith("local:") ? "Local directory" : model.project.id.replace(/^named:/, ""))}</p></div><div class="side-section"><h2 class="side-heading">History</h2><p>Updated ${date(i.updated_at)}</p>${i.closed_by ? `<p>Closed by ${esc(actorName(i.closed_by))}</p>` : ""}<p data-issue-version>Revision ${i.version}</p>${agentLaunchCount(i, true)}</div></details>`;
@@ -1032,6 +1037,7 @@ function renderIssueHeadingActions(issue) {
   return `<div class="detail-heading-actions">${deleted ? "" : `<button type="button" class="button" data-create-subtask aria-keyshortcuts="Shift+N" title="Add subtask (Shift+N)">${icon("plus")}Add subtask</button><button class="button" data-edit>${icon("edit")}Edit</button>`}<button class="icon-button" data-copy aria-label="Copy issue link" title="Copy issue link">${icon("link")}</button>${deleted ? "" : `<details class="issue-overflow"><summary class="icon-button" aria-label="More issue actions" title="More issue actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-transfer>${icon("folder")}Move to project…</button><button type="button" class="danger" data-action="delete">${icon("trash")}Delete issue</button></div></details>`}</div>`;
 }
 function renderDetail(value) {
+  if(value.assignment_machines) model.assignmentMachines=value.assignment_machines;
   if (value.moved_to) {
     saveComment();
     const destination = value.moved_to;
@@ -1172,6 +1178,30 @@ $("#detail-view").addEventListener("click", async (e) => {
     changePullRequest("remove_pull_request", button.dataset.removePr);
   if (button.dataset.action) performAction(button.dataset.action, button);
 });
+$("#detail-view").addEventListener("change", event => {
+  if(event.target.matches('[data-assignment-select]')) changeAssignment(event.target);
+});
+async function changeAssignment(select) {
+  const issue=model.detail.issue,project=model.project.id,host=model.route.host||null;
+  const target=select.value,assignment=IssueAssignments.current(issue);
+  if(target==='active') return;
+  if((target==='boss'||target==='unassigned') && assignment.actor && assignment.actor!=='human:boss') {
+    await performAction(target==='boss'?'assign_boss':'unassign',select);
+    if(select.isConnected) await renderRoute();
+    return;
+  }
+  saveComment();
+  select.disabled=true;
+  try {
+    await mutate({action:'assign',number:issue.number,target,if_version:issue.version},project,host);
+    toast(target==='github'?'Assigned to GitHub watcher':target==='unassigned'?'Assignment cleared':'Assignment updated');
+    if(model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) await renderRoute();
+  } catch(error) {
+    toast(error.message,true);
+    if(select.isConnected) { select.disabled=false; select.value=assignment.kind==='github'?'github':assignment.kind==='boss'?'boss':assignment.kind==='machine'?'machine:'+assignment.machine:assignment.kind==='agent'?'active':'unassigned'; }
+  }
+}
+
 async function performAction(action, button) {
   const i = model.detail.issue,
     project = model.project.id;
@@ -1197,6 +1227,7 @@ async function performAction(action, button) {
   }
   if (
     i.assignee &&
+    i.assignee !== "watcher:github" &&
     !own(i.assignee) &&
     ["claim", "assign_boss", "ready", "unassign", "close", "block", "delete"].includes(action)
   ) {

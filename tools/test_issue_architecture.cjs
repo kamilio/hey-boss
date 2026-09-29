@@ -5,10 +5,11 @@ const source = fs.readFileSync('src/issues/web/app.js', 'utf8');
 const context = vm.createContext({
   esc: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
   icon: () => '', avatar: () => '', date: () => 'today', actorName: id => id || 'Unassigned',
-  model: {project: {id: 'named:QA', name: 'QA'}},
+  model: {project: {id: 'named:QA', name: 'QA'}, boss: {name: 'Boss'}},
+  IssueAssignments: {render: () => '<label>Assignment</label>', status: () => '<section>GitHub status</section>'},
   assigneeActions: () => '<button>Assign</button>', renderReadiness: () => '<div>Readiness</div>',
   renderTagSidebar: () => '<div>Tags</div>',
-  IssueBlockers: {card: () => '<button>Add blocker</button>'},
+  IssueBlockers: {card: () => '<button>Add blocker</button>', description: () => 'Blocked'},
   HeyBossOrigin: {card: () => '<section>Origin</section>'},
   agentLaunchCount: () => '<button>Agent launches</button>',
 });
@@ -18,7 +19,8 @@ vm.runInContext(source.slice(start, source.indexOf('function renderDetail(', sta
 const value = {issue: {number: 1, version: 3, assignee: null}};
 const work = context.renderIssueWork(value);
 assert.match(work, /aria-label="Work"/);
-assert.match(work, /Assignee/);
+assert.match(work, /Assignment/);
+assert.match(work, /GitHub status/);
 assert.match(work, /Readiness/);
 assert.match(work, /Tags/);
 assert.match(work, /Add blocker/);
@@ -36,7 +38,8 @@ context.renderAllocation = () => '';
 vm.runInContext(source.slice(source.indexOf('function draftUnavailable('), source.indexOf('function issueStateActions(')), context);
 const readiness = issue => context.renderReadiness({issue, drafts_enabled: true});
 assert.match(readiness({state: 'open'}), /data-draft-action="draft"/);
-for (const issue of [{state: 'closed'}, {state: 'open', assignee: 'codex:assigned'}, {state: 'blocked'}, {state: 'open', draft: true}]) {
+assert.match(readiness({state: 'blocked'}), /data-draft-action="draft"/);
+for (const issue of [{state: 'closed'}, {state: 'open', assignee: 'codex:assigned'}, {state: 'open', draft: true}]) {
   assert.doesNotMatch(readiness(issue), /data-draft-action="draft"/);
 }
 assert.match(readiness({state: 'open', assignee: 'codex:assigned'}), /Assigned/);
