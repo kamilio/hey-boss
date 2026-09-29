@@ -12,6 +12,25 @@ pub struct Observation {
     pub evidence: Value,
 }
 
+/// The watcher supports canonical GitHub pull-request links.
+pub fn pull_request_selector(url: &str) -> Option<(String, u64)> {
+    let tail = url.strip_prefix("https://github.com/")?;
+    let parts: Vec<_> = tail.trim_end_matches('/').split('/').collect();
+    if parts.len() != 4
+        || parts[2] != "pull"
+        || parts[..2].iter().any(|s| {
+            s.is_empty()
+                || !s
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        })
+    {
+        return None;
+    }
+    let number = parts[3].parse::<u64>().ok().filter(|n| *n > 0)?;
+    Some((format!("{}/{}", parts[0], parts[1]), number))
+}
+
 fn fingerprint(value: &Value) -> String {
     crate::digest(&value.to_string())
 }
@@ -41,17 +60,19 @@ fn selected<'a>(rows: impl IntoIterator<Item = &'a Value>, fields: &[&str]) -> V
     values
 }
 
-/// Report times are deliberately excluded from event identities. Reruns and
-/// edited reviews change identities; rereading the same evidence does not.
-pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
-    let pr = &report.data;
-    let ci = &pr.ci;
-    let current = pr.pull_request["state"] == "open"
-        && pr.pull_request["head"]["sha"] == ci.head_sha
+fn ci_signals(
+    repository: &str,
+    number: u64,
+    pull_request: &Value,
+    ci: &crate::CiReport,
+    policy: &RequiredChecksReport,
+) -> Observation {
+    let current = pull_request["state"] == "open"
+        && pull_request["head"]["sha"] == ci.head_sha
         && policy.head_sha == ci.head_sha
         && policy.merge_sha == ci.merge_sha
-        && policy.repository.eq_ignore_ascii_case(&pr.repository)
-        && policy.pull_number == pr.number
+        && policy.repository.eq_ignore_ascii_case(repository)
+        && policy.pull_number == number
         && policy.errors.is_empty()
         && ci.errors.is_empty();
     let checks = selected(
@@ -80,14 +101,6 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
             "head_sha",
             "html_url",
         ],
-    );
-    let reviews = selected(
-        &pr.reviews,
-        &["id", "state", "body", "commit_id", "html_url"],
-    );
-    let comments = selected(
-        &pr.review_comments,
-        &["id", "body", "commit_id", "path", "line", "html_url"],
     );
     let mut blocking = Vec::new();
     if current {
@@ -166,8 +179,6 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
     blocking.sort();
     blocking.dedup();
     let complete = current
-        && report.complete
-        && pr.errors.is_empty()
         && ci.summary.pending == 0
         && ci.summary.unknown == 0
         && !matches!(policy.state.as_str(), "unknown" | "pending" | "missing")
@@ -192,6 +203,50 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
             )
         ]))
     });
+    Observation {
+        head: ci.head_sha.clone(),
+        blocking,
+        completed,
+        feedback: Vec::new(),
+        evidence: json!({"repository":repository,"number":number,"head":ci.head_sha,
+            "complete":false,"ci_complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
+            "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
+            "policy_errors":policy.errors,"ci_errors":ci.errors}),
+    }
+}
+
+/// Detect required failures without collecting reviews. A completion signal is
+/// reserved for a full, current PR snapshot so the agent gets its review findings.
+pub fn observe_ci(
+    repository: &str,
+    number: u64,
+    pull_request: &Value,
+    ci: &crate::CiReport,
+    policy: &RequiredChecksReport,
+) -> Observation {
+    let mut observation = ci_signals(repository, number, pull_request, ci, policy);
+    observation.completed = None;
+    observation
+}
+
+/// Report times are deliberately excluded from event identities. Reruns and
+/// edited reviews change identities; rereading the same evidence does not.
+pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
+    let pr = &report.data;
+    let ci = &pr.ci;
+    let mut observation = ci_signals(&pr.repository, pr.number, &pr.pull_request, ci, policy);
+    let complete = observation.completed.is_some() && report.complete && pr.errors.is_empty();
+    if !complete {
+        observation.completed = None;
+    }
+    let reviews = selected(
+        &pr.reviews,
+        &["id", "state", "body", "commit_id", "html_url"],
+    );
+    let comments = selected(
+        &pr.review_comments,
+        &["id", "body", "commit_id", "path", "line", "html_url"],
+    );
     let mut feedback = Vec::new();
     let by_author = |value: &Value| {
         pr.pull_request["user"]["login"]
@@ -263,17 +318,13 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
             })
             .collect()
     }
-    Observation {
-        head: ci.head_sha.clone(),
-        blocking,
-        completed,
-        feedback,
-        evidence: json!({"repository":pr.repository,"number":pr.number,"head":ci.head_sha,
-            "complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
-            "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
-            "reviews":excerpt(reviews),"review_comments":excerpt(comments),"comments":excerpt(discussion),"unresolved_threads":pr.review_status.unresolved_threads,
-            "conflicts":pr.conflicts,"source_errors":pr.errors,"policy_errors":policy.errors,"ci_errors":ci.errors}),
-    }
+    observation.feedback = feedback;
+    observation.evidence.as_object_mut().expect("CI evidence is an object").extend(
+        json!({"complete":complete,"reviews":excerpt(reviews),"review_comments":excerpt(comments),
+            "comments":excerpt(discussion),"unresolved_threads":pr.review_status.unresolved_threads,
+            "conflicts":pr.conflicts,"source_errors":pr.errors}).as_object().unwrap().clone()
+    );
+    observation
 }
 
 #[cfg(test)]
@@ -291,6 +342,39 @@ mod tests {
         let policy = serde_json::from_value(json!({"repository":"o/r","pull_number":1,"head_sha":"head","base_branch":"main","state":"failure","strict":false,"up_to_date":true,"checks":[{"context":"test","app_id":1,"state":"failure","sha":"head","url":"https://github.com/o/r/actions/runs/1"}],"rules":[],"errors":[],"cursor":"unused"})).unwrap();
         (report, policy)
     }
+    #[test]
+    fn ci_only_observation_wakes_before_review_sources_are_read() {
+        let (mut report, policy) = fixture();
+        report.data.ci.summary.pending = 0;
+        let early = observe_ci(
+            &report.data.repository,
+            report.data.number,
+            &report.data.pull_request,
+            &report.data.ci,
+            &policy,
+        );
+        let full = observe(&report, &policy);
+        assert_eq!(early.blocking, full.blocking);
+        assert!(!early.blocking.is_empty());
+        assert!(
+            early.completed.is_none(),
+            "Completion must include the review snapshot"
+        );
+        assert_eq!(early.evidence["ci_complete"], true);
+        assert_eq!(early.evidence["complete"], false);
+        assert!(full.completed.is_some());
+        report.data.pull_request["head"]["sha"] = json!("new-head");
+        let stale = observe_ci(
+            &report.data.repository,
+            report.data.number,
+            &report.data.pull_request,
+            &report.data.ci,
+            &policy,
+        );
+        assert!(stale.blocking.is_empty());
+        assert_eq!(stale.evidence["ci_complete"], false);
+    }
+
     #[test]
     fn required_failure_wakes_before_optional_checks_finish() {
         let (r, p) = fixture();
