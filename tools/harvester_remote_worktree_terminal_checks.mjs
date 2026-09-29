@@ -15,17 +15,20 @@ try {
   await mkdir(output, {recursive: true});
   await mkdir(join(root, 'bin'));
   const reasons = [
-    'Clean and unused; commits verified on a remote branch',
+    'Clean and unused for 4 hours; ownership and recovery checks passed',
     'Commits not verified on a remote branch; preserved',
     'Present skip-worktree file may hide edits; index flags preserved',
     'Locked worktree; preserved — issue 697; active owner',
+    'Cannot verify HEAD on a live remote branch; preserved',
+    'Open in a process or agent; preserved',
+    'Source or Git activity within 4 hours; preserved',
   ];
   const snapshot = {
     reporting_build: 'fixture697', scan_build: 'fixture697', observed_at: 1,
     last_cleanup_at: 1, metrics: {disk_path: '/fixture', memory_pressure: 'Normal'},
     config: {}, processes: [], harvested_processes: 0, removed_worktrees: 0, errors: [],
     worktrees: reasons.map((detail, i) => ({
-      name: `/Users/example/Workspace/project-${['published-sparse', 'unpushed', 'hidden-edits', 'owned'][i]}`,
+      name: `/Users/example/Workspace/project-${['published-sparse', 'unpushed', 'hidden-edits', 'owned', 'offline', 'active', 'recent'][i]}`,
       detail, eligible: i === 0,
       worktree: {path: `/fixture/worktree-${i}`, age_seconds: 86400, repository: 'example/project', github_url: null},
     })),
@@ -72,7 +75,7 @@ try {
   assert.equal(await session.waitForExit({timeout: 5000}), 0);
   const calls = await readFile(join(root, 'calls'), 'utf8');
   assert(!calls.includes('remove-worktree') && !calls.includes("'clean'"));
-  console.log('Passed: published/sparse, unpushed, hidden edits and ownership details at 100/48 columns; cancellation; no mutations; clean exit.');
+  console.log('Passed: published/sparse, unpushed, hidden edits, ownership, offline, active and recent details at 100/48 columns; cancellation; no mutations; clean exit.');
 } finally {
   if (pilot) await pilot.close();
   await rm(root, {recursive: true, force: true});
