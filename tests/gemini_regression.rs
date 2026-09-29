@@ -2005,3 +2005,115 @@ fn compaction_and_unhashed_tool_names_and_empty_model_content_parts() {
         assert!(events.iter().any(|e| e["type"] == "response.completed"));
     }
 }
+
+#[test]
+fn responses_lite_empty_tools_and_all_turns_review() {
+    let request = json!({
+        "model":"gemini/test", "stream":true, "store":false,
+        "tool_choice":"none", "parallel_tool_calls":false,
+        "reasoning":{"effort":"low","context":"all_turns"},
+        "input":[
+            {"type":"additional_tools","id":"at_review","role":"developer","tools":[]},
+            {"type":"message","role":"developer","content":[{"type":"input_text","text":"Classify the proposed action."}]},
+            {"type":"message","role":"user","content":"Read the repository README."}
+        ]
+    });
+    let converted = convert_request(&request, &config(), &codec()).unwrap();
+    assert!(converted.tools.is_empty());
+    assert!(converted.body.get("tools").is_none());
+    assert_eq!(
+        converted.body["toolConfig"]["functionCallingConfig"]["mode"],
+        "NONE"
+    );
+    assert_eq!(
+        converted.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        1024
+    );
+    assert_eq!(converted.body["contents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        converted.body["contents"][0]["parts"][0]["text"],
+        "Read the repository README."
+    );
+    assert!(
+        converted.body["systemInstruction"]
+            .to_string()
+            .contains("Classify the proposed action.")
+    );
+}
+
+#[test]
+fn responses_lite_tools_merge_select_and_replay_with_native_identity() {
+    let codec = codec();
+    let mut request = base_request();
+    request["tools"] =
+        json!([{"type":"function","name":"existing","parameters":{"type":"object"}}]);
+    request["input"] = json!([
+        {"type":"additional_tools","id":"at_tools","role":"developer","tools":[
+            {"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]},
+            {"type":"custom","name":"script","format":{"type":"text"}}
+        ]},
+        {"role":"user","content":"Read README.md"}
+    ]);
+    request["reasoning"]["context"] = json!("all_turns");
+    request["tool_choice"] = json!({"type":"function","namespace":"files","name":"read"});
+    let converted = convert_request(&request, &config(), &codec).unwrap();
+    assert_eq!(converted.tools.len(), 3);
+    assert_eq!(
+        converted.body["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let name = native_tool_name("files.read");
+    assert_eq!(
+        converted.body["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"],
+        json!([name])
+    );
+    assert!(converted.tools[&native_tool_name("script")].custom);
+    let native = json!({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":name,"args":{"path":"README.md"},"id":"read1"},"thoughtSignature":"signed"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}});
+    let response = convert_response(&native, &converted, &codec, "response1").unwrap();
+    let output = response["output"].as_array().unwrap();
+    let call = output
+        .iter()
+        .find(|v| v["type"] == "function_call")
+        .unwrap();
+    assert_eq!(call["namespace"], "files");
+    assert_eq!(call["name"], "read");
+    request["input"]
+        .as_array_mut()
+        .unwrap()
+        .extend(output.clone());
+    request["input"].as_array_mut().unwrap().push(
+        json!({"type":"function_call_output","call_id":call["call_id"],"output":"README contents"}),
+    );
+    let replay = convert_request(&request, &config(), &codec).unwrap();
+    assert_eq!(
+        replay.body["contents"][1]["parts"][0]["thoughtSignature"],
+        "signed"
+    );
+    assert_eq!(
+        replay.body["contents"][2]["parts"][0]["functionResponse"]["name"],
+        name
+    );
+}
+
+#[test]
+fn responses_lite_rejects_malformed_or_unsupported_tool_declarations() {
+    for item in [
+        json!({"type":"additional_tools","role":"developer"}),
+        json!({"type":"additional_tools","role":"user","tools":[]}),
+        json!({"type":"additional_tools","role":"developer","tools":null}),
+        json!({"type":"additional_tools","role":"developer","tools":[],"unknown":true}),
+        json!({"type":"additional_tools","role":"developer","id":42,"tools":[]}),
+        json!({"type":"additional_tools","role":"developer","tools":[{"type":"web_search"}]}),
+        json!({"type":"additional_tools","role":"developer","tools":[{"type":"function","name":"duplicate"},{"type":"function","name":"duplicate"}]}),
+    ] {
+        let mut request = base_request();
+        request["input"] = json!([item,{"role":"user","content":"hello"}]);
+        assert!(convert_request(&request, &config(), &codec()).is_err());
+    }
+    let mut request = base_request();
+    request["reasoning"]["context"] = json!("unknown");
+    assert!(convert_request(&request, &config(), &codec()).is_err());
+}

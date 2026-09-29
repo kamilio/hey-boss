@@ -493,6 +493,34 @@ pub fn convert_request(
             .and_then(Value::as_str)
             .unwrap_or("message");
         match kind {
+            "additional_tools" => {
+                // Responses Lite moves declarations from top-level tools into
+                // a developer input item (including an empty list for reviews).
+                // These are declarations, not conversation text or tool results.
+                for key in item.as_object().unwrap().keys() {
+                    if !["type", "id", "role", "tools"].contains(&key.as_str()) {
+                        bail!("Unsupported additional_tools field {key}");
+                    }
+                }
+                if !["developer", "system"].contains(&string(item, "role")?) {
+                    bail!("additional_tools requires a developer or system role");
+                }
+                if item
+                    .get("id")
+                    .is_some_and(|id| !id.is_null() && !id.is_string())
+                {
+                    bail!("additional_tools id must be a string");
+                }
+                add_tools(
+                    item["tools"]
+                        .as_array()
+                        .ok_or_else(|| anyhow!("additional_tools.tools must be an array"))?,
+                    "",
+                    &mut tools,
+                    &mut names,
+                    &mut declarations,
+                )?;
+            }
             "reasoning" => {
                 let carrier = string(item, "encrypted_content")?;
                 let replay = codec.open(&model, carrier)?;
@@ -680,9 +708,14 @@ pub fn convert_request(
             .ok_or_else(|| anyhow!("reasoning must be an object"))?
             .keys()
         {
-            if !["effort", "summary"].contains(&key.as_str()) {
+            if !["effort", "summary", "context"].contains(&key.as_str()) {
                 bail!("Unsupported reasoning parameter {key}");
             }
+        }
+        // Gemini replay retains every authenticated reasoning turn. This is
+        // exactly the all_turns policy sent by Responses Lite/Luna reviews.
+        if reasoning.get("context").is_some_and(|v| v != "all_turns") {
+            bail!("Gemini reasoning.context only supports all_turns");
         }
         let summary = reasoning
             .get("summary")
