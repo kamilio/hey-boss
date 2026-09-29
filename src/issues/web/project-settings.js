@@ -1,7 +1,7 @@
 "use strict";
 const workflowPromptKeys = ["plan", "worktree", "checkout", "prs", "main"];
 let projectPromptDefaults = {};
-let chiefDefaultPrompt = "";
+let chiefDefaultPrompt = "", chiefPreviewTemplate = "", projectSettingsTab = "instructions";
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
   projectSettingsFocus = null,
@@ -19,7 +19,12 @@ function selectProjectSettingsTab(tab, focus = false) {
     item.tabIndex = selected ? 0 : -1;
     document.getElementById(item.getAttribute("aria-controls")).hidden = !selected;
   }
+  document.getElementById(tab.getAttribute("aria-controls")).scrollTop = 0;
+  $(".settings-preview").scrollTop = 0;
+  projectSettingsTab = tab.id.replace('settings-tab-', '');
   $(".project-settings-body").scrollTop = 0;
+  updateWorkflowBranches();
+  if (projectSettingsOriginal) previewProjectInstructions();
   if (focus) tab.focus();
   tab.scrollIntoView({block: "nearest", inline: "nearest"});
 }
@@ -105,11 +110,11 @@ $("#project-settings-trigger").onclick = async () => {
     $("#project-chief").checked = value.chief_enabled;
     $("#project-chief-prompt").value = value.chief_prompt;
     chiefDefaultPrompt = value.chief_default_prompt;
-    $("#project-chief-instructions").open = false;
+    chiefPreviewTemplate = value.chief_preview_template;
+    $("#project-chief-instructions").open = true;
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
     $("#project-preview-workspace").value = "checkout";
-    $("#project-preview-task").value = "implement";
     projectPromptDefaults = value.prompt_defaults;
     for (const key of workflowPromptKeys) {
       const input = $("#project-prompt-" + key);
@@ -181,10 +186,13 @@ function previewProjectInstructions() {
   $("#project-instructions-preview").setAttribute("aria-busy", "true");
   projectPreviewTimer = setTimeout(async () => {
     try {
-      const value = await api(
+      const value = projectSettingsTab === "chief" ? {
+        prompt: chiefPreviewTemplate.replace(/{{(project|prompt)}}/g, (_, key) => key === "project" ? project : draft.chief_prompt),
+        use_goal: false,
+      } : await api(
         {
           action: "preview_worker",
-          task_kind: $("#project-preview-task").value,
+          task_kind: projectSettingsTab === "planning" ? "plan" : "implement",
           worktree_allowed: draft.worktree_enabled,
           config: {
             projects: [project],
@@ -236,10 +244,11 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 $("#project-drafts").onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
 $("#project-chief").onchange = projectSettingsChanged;
-$("#project-chief-prompt").oninput = projectSettingsChanged;
+$("#project-chief-prompt").oninput = () => { projectSettingsChanged(); previewProjectInstructions(); };
 $("#project-chief-reset").onclick = () => {
   $("#project-chief-prompt").value = chiefDefaultPrompt;
   projectSettingsChanged();
+  previewProjectInstructions();
 };
 
 function setProjectSettingsDisabled(disabled) {
@@ -247,15 +256,17 @@ function setProjectSettingsDisabled(disabled) {
   $("#project-settings-cancel").disabled = projectSettingsSaving;
   for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt], #project-chief-reset")) input.disabled = disabled;
   $("#project-preview-workspace").disabled = disabled;
-  $("#project-preview-task").disabled = disabled;
 }
 function updateWorkflowBranches() {
-  const plan = $("#project-preview-task").value === "plan";
+  const plan = projectSettingsTab === "planning", chief = projectSettingsTab === "chief";
+  $("#project-preview-label").textContent = chief ? "CHIEF PREVIEW" : plan ? "PLAN PREVIEW" : "IMPLEMENTATION PREVIEW";
+  $("#project-preview-help").textContent = chief ? "Chief instructions. Updates as you edit." : plan ? "Plan instructions. Updates as you edit." : "Includes workspace and delivery instructions. Updates as you edit.";
+  $("#project-preview-worker").hidden = plan || chief;
   const allowed = $("#project-worktree").checked;
   $("#project-preview-workspace option[value=worktree]").disabled = !allowed;
   if (!allowed) $("#project-preview-workspace").value = "checkout";
-  const active = plan ? ["plan"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main"];
-  $("#project-preview-workspace").disabled = plan || $("#project-preview-task").disabled;
+  const active = chief ? [] : plan ? ["plan"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main"];
+  $("#project-preview-workspace").disabled = plan || chief || projectSettingsSaving || !projectSettingsOriginal;
   $("#project-preview-workspace-help").textContent = plan ? "Plan tasks use their own prompt without workspace or delivery instructions." : "Preview only. Each worker chooses its own workspace.";
   for (const key of workflowPromptKeys) {
     const branch = document.querySelector(`[data-branch="${key}"]`);
@@ -265,12 +276,8 @@ function updateWorkflowBranches() {
     $("#project-source-" + key).textContent = custom ? "Project override" : "Built-in default";
     branch.querySelector("[data-reset-prompt]").hidden = !custom;
   }
-  $("#project-preview-choices").textContent = plan ? "Plan · Linked artifacts" : `${active[0] === "worktree" ? "Dedicated worktree" : "Existing checkout"} · ${active[1] === "prs" ? "Pull requests" : "Push to main"}`;
+  $("#project-preview-choices").textContent = chief ? "Chief · Organizing pass" : plan ? "Plan · Linked artifacts" : `${active[0] === "worktree" ? "Dedicated worktree" : "Existing checkout"} · ${active[1] === "prs" ? "Pull requests" : "Push to main"}`;
 }
-$("#project-preview-task").onchange = () => {
-  updateWorkflowBranches();
-  previewProjectInstructions();
-};
 $("#project-preview-workspace").onchange = () => {
   updateWorkflowBranches();
   previewProjectInstructions();

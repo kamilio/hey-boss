@@ -358,7 +358,6 @@
           <button type="button" role="tab" id="settings-tab-planning" aria-controls="settings-panel-planning" aria-selected="false" tabindex="-1">Planning</button>
           <button type="button" role="tab" id="settings-tab-workflow" aria-controls="settings-panel-workflow" aria-selected="false" tabindex="-1">Workflow</button>
           <button type="button" role="tab" id="settings-tab-chief" aria-controls="settings-panel-chief" aria-selected="false" tabindex="-1">Chief</button>
-          <button type="button" role="tab" id="settings-tab-preview" aria-controls="settings-panel-preview" aria-selected="false" tabindex="-1">Preview</button>
         </div>
         <div class="project-settings-body">
           <div id="settings-panel-instructions" role="tabpanel" aria-labelledby="settings-tab-instructions" tabindex="0">
@@ -414,26 +413,23 @@
               </div>
               <p class="field-help" id="project-chief-help">Runs one pass every hour while a worker monitors this project. Resumes the same conversation and uses no issue slots. Workers handle code changes.</p>
               <div class="chief-cadence"><span id="project-chief-state">Disabled</span><span>Hourly · Same conversation</span></div>
-              <details id="project-chief-instructions"><summary>Chief instructions</summary>
+              <details id="project-chief-instructions" open><summary>Chief instructions</summary>
                 <label class="field-label" for="project-chief-prompt">Organizing prompt</label>
                 <textarea class="text-input" id="project-chief-prompt" rows="7" maxlength="32000" required aria-describedby="project-chief-prompt-help"></textarea>
                 <div class="branch-footer"><span id="project-chief-prompt-help">Separate from worker instructions. Each pass ends automatically.</span><button class="button link-button" id="project-chief-reset" type="button">Use default</button></div>
               </details>
             </section>
           </div>
-          <div id="settings-panel-preview" role="tabpanel" aria-labelledby="settings-tab-preview" tabindex="0" hidden>
 <aside class="settings-preview" aria-labelledby="settings-preview-title">
-            <div class="preview-heading"><span class="preview-eyebrow">ASSEMBLED PROMPT</span><h3 id="settings-preview-title">What the agent receives <span id="project-goal-indicator" class="goal-indicator" hidden>/goal</span></h3>
-            <p class="field-help">Implementation adds workspace and delivery instructions. Plan uses its own prompt. Updates as you edit.</p>
-            <label class="field-label" for="project-preview-task">Preview task</label>
-            <select class="text-input" id="project-preview-task"><option value="implement">Implement</option><option value="plan">Plan</option></select>
+            <div class="preview-heading"><span class="preview-eyebrow" id="project-preview-label">IMPLEMENTATION PREVIEW</span><h3 id="settings-preview-title">What the agent receives <span id="project-goal-indicator" class="goal-indicator" hidden>/goal</span></h3>
+            <p class="field-help" id="project-preview-help">Updates as you edit.</p>
+            <div id="project-preview-worker">
             <label class="field-label" for="project-preview-workspace">Preview worker workspace</label>
             <select class="text-input" id="project-preview-workspace" aria-describedby="project-preview-workspace-help"><option value="checkout">Existing checkout</option><option value="worktree">Dedicated worktree</option></select>
             <p class="field-help" id="project-preview-workspace-help">Preview only. Each worker chooses its own workspace.</p>
-            <div id="project-preview-choices" class="preview-choices"></div></div>
+            </div><div id="project-preview-choices" class="preview-choices"></div></div>
             <p id="project-instructions-preview" aria-live="polite"></p>
           </aside>
-          </div>
         </div>
         <p id="project-settings-error" class="form-error" role="alert" hidden></p>
         <div class="dialog-footer">
