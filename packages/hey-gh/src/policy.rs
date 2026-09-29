@@ -581,7 +581,9 @@ pub(crate) fn failure_key<'a>(
                 c["context"],
                 c["conclusion"],
                 c["state"],
-                c["app"]["id"]
+                c["app"]["id"],
+                c["started_at"],
+                c["completed_at"]
             ])
         })
         .collect();
@@ -618,6 +620,10 @@ mod tests {
         assert_eq!(key(&ci), first);
         ci.check_runs[0]["id"] = json!(2);
         assert_ne!(key(&ci), first);
+        let second = key(&ci);
+        ci.check_runs[0]["started_at"] = json!("2026-09-29T02:00:00Z");
+        ci.check_runs[0]["completed_at"] = json!("2026-09-29T02:01:00Z");
+        assert_ne!(key(&ci), second, "A provider can rerun the same check ID");
         ci.check_runs.push(json!({"id":3,"name":"test","head_sha":"head","app":{"id":3},"status":"in_progress","conclusion":null}));
         assert!(key(&ci).is_null(), "Superseded failures must disappear");
     }
