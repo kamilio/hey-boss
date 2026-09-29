@@ -10,7 +10,7 @@ async page => {
       await page.emulateMedia({colorScheme});
       for (const width of [1440, 768, 390, 320]) {
         await page.setViewportSize({width, height:900});
-        await page.goto(detail, {waitUntil:'commit'});
+        await page.goto(detail, {waitUntil:'load'});
         await page.waitForFunction(() => typeof model !== 'undefined' && model.detail?.issue.number === 2);
         for (const [number, purpose] of [[123,'prerequisite'],[124,'supporting-evidence'],[125,'fix']]) {
           const url = `https://github.com/example/supervisor-tunnel/pull/${number}`;
@@ -27,13 +27,20 @@ async page => {
         await page.getByRole('button', {name:'All issues', exact:true}).click();
         await page.waitForFunction(() => !model.route.issue);
         const row = page.locator('[data-issue-number="2"]');
-        check(await row.locator('.issue-pr-link').count() === 3, `Three list links ${colorScheme} ${width}`);
-        check((await row.innerText()).includes('Prerequisite') && (await row.innerText()).includes('Supporting evidence'), `List purpose labels ${colorScheme} ${width}`);
+        await row.waitFor({state:'visible'});
+        const fix = row.getByRole('link', {name:'Open pull request #125 · Fix', exact:true});
+        await fix.waitFor({state:'visible'});
+        check(await row.locator('.issue-pr-link').count() === 1 && await fix.getAttribute('href') === 'https://github.com/example/supervisor-tunnel/pull/125', `List shows the fix ${colorScheme} ${width}`);
+        check(!(await row.innerText()).includes('Prerequisite') && !(await row.innerText()).includes('Supporting evidence'), `Supporting links stay in detail ${colorScheme} ${width}`);
+        await page.waitForFunction(() => document.querySelector('[data-issue-number="2"] .issue-row-main')?.clientWidth >= 150);
+        checks.push(`Readable list title ${colorScheme} ${width}`);
+        check(await row.evaluate(el => el.scrollWidth <= el.clientWidth && el.getBoundingClientRect().right <= innerWidth), `No list overflow ${colorScheme} ${width}`);
+        if ([1440,320].includes(width)) await page.screenshot({path:`output/playwright/pr-tunnel/${colorScheme}-${width}-list.png`, fullPage:true});
       }
     }
-    await page.goto(detail, {waitUntil:'commit'});
-    await page.reload({waitUntil:'commit'});
-    await page.waitForFunction(() => model.detail?.issue.pull_requests.length === 3);
+    await page.goto(detail, {waitUntil:'load'});
+    await page.reload({waitUntil:'load'});
+    await page.waitForFunction(() => typeof model !== 'undefined' && model.detail?.issue.pull_requests.length === 3);
     check(errors.length === 0, 'No browser runtime errors');
     return {completed:checks.length, checks};
   } finally { page.off('pageerror', onError); }
