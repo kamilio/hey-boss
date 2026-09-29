@@ -424,7 +424,7 @@ fn cached_inventory_names_a_reserved_device_without_releasing_offline_work() {
 }
 
 #[test]
-fn authoritative_manual_claim_allocates_atomically_and_can_resume_after_release() {
+fn unassign_releases_the_destination_and_a_manual_claim_reserves_it_again() {
     let f = Fixture::new("resume");
     let db = f.db("controller");
     let machine = f.json(&["whoami"])["agent"]["machine"].clone();
@@ -434,6 +434,8 @@ fn authoritative_manual_claim_allocates_atomically_and_can_resume_after_release(
         machine
     );
     f.json(&["unassign", "1"]);
+    assert!(f.json(&["allocation", "1"])["allocation"]["reserved_machine"].is_null());
+    f.json(&["claim", "1"]);
     // A pull carries the supervisor allocation to the companion; no worker changes.
     db.execute("UPDATE fleet_meta SET role='agent'", [])
         .unwrap();

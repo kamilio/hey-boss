@@ -353,6 +353,14 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
+    /// Assign to github, boss, unassigned, or machine:MACHINE_ID.
+    Assign {
+        number: i64,
+        target: String,
+        /// Current issue version from issue view.
+        #[arg(long)]
+        if_version: i64,
+    },
     /// Hand an attached PR to Boss and unblock dependents; caller assesses usability.
     #[command(
         after_help = "Ready records development usability, not passing CI, merge, completion, or production approval.\nFor a draft source, --keep-draft preserves its no-worker scope while unblocking eligible dependents.\nIt requires an unreserved draft and all three guards from the same fresh issue view, plus --request-id.\nIt never undrafts or launches a worker. Ordinary drafts remain unschedulable.\nReopen the source to withdraw its handoff; the draft flag is retained."
@@ -875,6 +883,15 @@ impl Options {
                 number: *number,
                 force: *force,
             },
+            Action::Assign {
+                number,
+                target,
+                if_version,
+            } => Operation::Assign {
+                number: *number,
+                target: target.clone(),
+                if_version: *if_version,
+            },
             Action::Ready {
                 number,
                 force,
@@ -1006,6 +1023,7 @@ pub fn run(options: &Options) -> Result<()> {
             options.action,
             Action::View { .. }
                 | Action::Allocation { .. }
+                | Action::Assign { .. }
                 | Action::Reopen { .. }
                 | Action::Batch { .. }
                 | Action::Edit {

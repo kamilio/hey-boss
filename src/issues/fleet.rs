@@ -41,6 +41,22 @@ pub(crate) fn check_claim(
     if force {
         return Ok(());
     }
+    let target: Option<String> = db
+        .query_row(
+            "SELECT assignment_target FROM issues WHERE project_id=?1 AND number=?2",
+            params![project, number],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(target) = target.and_then(|t| t.strip_prefix("machine:").map(str::to_owned))
+        && target != machine
+    {
+        return Err(Error::new(
+            "fleet_reserved",
+            format!("Issue #{number} is assigned to machine {target}"),
+        ));
+    }
     db.execute("DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND (SELECT role FROM fleet_meta WHERE id=1)='controller' AND EXISTS(SELECT 1 FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.project_id=?1 AND d.issue_number=?2 AND d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000 AND i.assignee IS NULL)", params![project,number])?;
     // Keep successful pickup cheap: host lookup and connection files are only
     // needed when explaining a denial, not while arbitrating ordinary claims.

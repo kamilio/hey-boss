@@ -104,7 +104,12 @@ impl Store {
     }
 
     pub(crate) fn worker_steering(&self, run: &str) -> Result<Option<Value>> {
-        Ok(self.db.query_row("SELECT request_id,text,scope,issue_body FROM agent_steering WHERE run_id=?1 AND state='queued' ORDER BY created_at,rowid LIMIT 1", [run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"text":r.get::<_,String>(1)?,"scope":r.get::<_,String>(2)?,"issue_body":r.get::<_,Option<String>>(3)?}))).optional()?)
+        if let Err(error) = assignments::queue_steering(&self.db, run)
+            && error.code != "database_busy"
+        {
+            return Err(error);
+        }
+        pending(&self.db, run)
     }
     pub(crate) fn worker_steering_result(
         &self,
@@ -118,6 +123,10 @@ impl Store {
         )?;
         Ok(changed != 0)
     }
+}
+
+fn pending(db: &Connection, run: &str) -> Result<Option<Value>> {
+    Ok(db.query_row("SELECT request_id,text,scope,issue_body FROM agent_steering WHERE run_id=?1 AND state='queued' ORDER BY created_at,rowid LIMIT 1", [run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"text":r.get::<_,String>(1)?,"scope":r.get::<_,String>(2)?,"issue_body":r.get::<_,Option<String>>(3)?}))).optional()?)
 }
 
 #[cfg(test)]
@@ -152,7 +161,7 @@ mod migration_tests {
             db,
             attachment_root: std::env::temp_dir(),
         };
-        let queued = store.worker_steering("run").unwrap().unwrap();
+        let queued = pending(&store.db, "run").unwrap().unwrap();
         assert_eq!(queued["request_id"], "message");
         assert_eq!(queued["scope"], "issue");
         assert_eq!(queued["text"], "Keep this instruction");
@@ -161,7 +170,7 @@ mod migration_tests {
             .worker_steering_result("message", "delivered", None)
             .unwrap();
         assert_eq!(
-            store.worker_steering("run").unwrap().unwrap()["issue_body"],
+            pending(&store.db, "run").unwrap().unwrap()["issue_body"],
             "Saved issue body"
         );
         store
@@ -172,6 +181,6 @@ mod migration_tests {
                 .worker_steering_result("new", "sending", None)
                 .unwrap()
         );
-        assert!(store.worker_steering("run").unwrap().is_none());
+        assert!(pending(&store.db, "run").unwrap().is_none());
     }
 }

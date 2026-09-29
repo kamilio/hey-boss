@@ -354,6 +354,11 @@ pub enum Operation {
         number: i64,
         machine: String,
     },
+    Assign {
+        number: i64,
+        target: String,
+        if_version: i64,
+    },
     ReleaseAllocation {
         number: i64,
         expected_machine: String,
@@ -585,6 +590,7 @@ impl Operation {
             | Self::Transfer { number, .. }
             | Self::View { number }
             | Self::Allocation { number, .. }
+            | Self::Assign { number, .. }
             | Self::ReleaseAllocation { number, .. }
             | Self::Subtasks { number, .. }
             | Self::CreateSubtask { number, .. }

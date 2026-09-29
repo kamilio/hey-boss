@@ -30,6 +30,8 @@ mod workers;
 
 #[path = "artifacts.rs"]
 mod artifacts;
+#[path = "assignments.rs"]
+mod assignments;
 #[path = "batch.rs"]
 mod batch;
 #[path = "pr_monitor.rs"]
@@ -118,6 +120,8 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    ("issues", "assignment_target", "TEXT"),
+    ("issues", "github_ack_event", "TEXT"),
     (
         "project_settings",
         "subtask_scheduling",
@@ -329,16 +333,28 @@ const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,cre
 // overflow pages. All persisted summary fields fit in this covering index.
 const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers)";
 
-fn list_query(search: bool) -> String {
+fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
     let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
     let body_search = if search {
         " OR instr(lower(body),lower(?5))>0"
     } else {
         ""
     };
+    let owner_filter = if owner == Some("watcher:github") {
+        "assignment_target='github' AND ?3 IS NOT NULL"
+    } else if owner.is_some_and(|o| o.starts_with("machine:")) {
+        "(assignment_target=?3 OR EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=issues.project_id AND a.issue_number=issues.number AND a.node=substr(?3,9)))"
+    } else {
+        "(?3 IS NULL OR assignee=?3)"
+    };
+    let unassigned_filter = if unassigned {
+        "(?4=0 OR (assignee IS NULL AND assignment_target IS NULL AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=issues.project_id AND a.issue_number=issues.number)))"
+    } else {
+        "?4=0"
+    };
     format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) AS comment_count FROM issues WHERE project_id=?1
         AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2 OR (?2='active' AND state IN ('open','ready','blocked')))))
-        AND (?3 IS NULL OR assignee=?3) AND (?4=0 OR assignee IS NULL)
+        AND {owner_filter} AND {unassigned_filter}
         AND (?5 IS NULL OR instr(lower(title),lower(?5))>0{body_search})
         AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
         ORDER BY sort_order,number LIMIT ?7 OFFSET ?8")
@@ -1214,6 +1230,7 @@ impl Store {
         status::migrate(&db)?;
         provenance::migrate(&db)?;
         steering::migrate(&db)?;
+        assignments::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
@@ -1307,14 +1324,14 @@ impl Store {
                 return self.execute_supervisor(r);
             }
         }
-        // Drafting is an online authority operation on companions. Never make a
+        // Drafting and assignment are online authority operations on companions. Never make a
         // local edit that cannot be accepted by the supervisor on replay.
         if matches!(
             r.operation,
             Operation::Edit {
                 draft: Some(true),
                 ..
-            }
+            } | Operation::Assign { .. }
         ) {
             validate(r)?;
             let companion: bool = self.db.query_row(
@@ -1334,7 +1351,12 @@ impl Store {
                         request.actor.as_ref().map(|a| &a.id),
                         request.operation
                     ]))?;
-                    request.request_id = Some(format!("draft-{:x}", Sha256::digest(key)));
+                    let prefix = if matches!(request.operation, Operation::Assign { .. }) {
+                        "assign"
+                    } else {
+                        "draft"
+                    };
+                    request.request_id = Some(format!("{prefix}-{:x}", Sha256::digest(key)));
                 }
                 let mut result = self.execute_supervisor(&request)?;
                 result["store"] = json!({"host":"supervisor"});
@@ -1609,7 +1631,7 @@ impl Store {
                     coalesce(sum(i.state='open' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.state='closed' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.deleted_at IS NOT NULL),0),
-                    coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL),0),
+                    coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.assignment_target IS NULL AND i.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number)),0),
                     p.activity_at,p.hidden_at,p.created_at,
                     coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.state='ready' AND i.deleted_at IS NULL),0),
@@ -1698,7 +1720,7 @@ impl Store {
                 } else {
                     assignee.as_deref()
                 };
-                let mut stmt = tx.prepare(&list_query(search.is_some()))?;
+                let mut stmt = tx.prepare(&list_query(search.is_some(), owner, *unassigned))?;
                 let rows = stmt.query_map(
                     params![
                         project.id,
@@ -2005,6 +2027,7 @@ impl Store {
             subtasks::enrich(&tx, &response_project.id, &mut result)?;
         }
         super::blockers::enrich(&tx, &response_project.id, &mut result)?;
+        assignments::enrich_result(&tx, &response_project.id, &mut result, actor)?;
         if matches!(r.operation, Operation::Claim { .. }) {
             result["instructions"] = json!(registry::claim_instructions(
                 &tx,
@@ -2255,7 +2278,7 @@ pub(super) fn event(
     Ok(())
 }
 fn ownership(issue: &Issue, actor: &Actor, force: bool) -> Result<()> {
-    if !force && issue.assignee.as_ref().is_some_and(|id| id != &actor.id) {
+    if !force && issue.assignee.as_ref().is_some_and(|id| id != &actor.id && id != "watcher:github") {
         return Err(Error::conflict(format!(
             "Issue #{} is claimed by {}; use --force for an intentional takeover or removal",
             issue.number,
@@ -2329,6 +2352,12 @@ fn mutate(
     let mut data = json!({});
     let mut comment_id = None;
     match operation {
+        Operation::Assign {
+            target, if_version, ..
+        } => {
+            data = assignments::assign(db, project, actor, &mut issue, target, *if_version, now)?;
+            action = "assigned";
+        }
         Operation::SetYolo {
             enabled,
             if_version,
@@ -2484,15 +2513,20 @@ fn mutate(
             }
             if target == "human:boss" {
                 ready::register_boss(db, actor, now)?;
+                assignments::clear(db, &project.id, number)?;
             }
             if issue.assignee.as_deref() != Some(target) {
                 action = "claimed";
                 data = json!({"previous_assignee":issue.assignee,"assignee":target,"forced":force});
                 issue.assignee = Some(target.into());
             }
+            if matches!(operation, Operation::Claim { .. }) {
+                assignments::acknowledge_claim(db, &project.id, number, actor)?;
+            }
         }
         Operation::Unassign { force, .. } => {
             ownership(&issue, actor, *force)?;
+            assignments::clear(db, &project.id, number)?;
             if issue.assignee.is_some() {
                 action = "unassigned";
                 data = json!({"previous_assignee":issue.assignee,"forced":force});
@@ -2763,7 +2797,10 @@ mod contention_tests {
         let store = Store::open(&root.join("issues.db")).unwrap();
         let plan = store
             .db
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", list_query(false)))
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                list_query(false, None, false)
+            ))
             .unwrap()
             .query_map(
                 params![

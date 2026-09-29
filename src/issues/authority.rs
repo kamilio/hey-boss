@@ -14,6 +14,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             ..
         } if *version > 0 => {}
         Operation::Ready { guard: Some(_), .. } => {}
+        Operation::Assign { if_version, .. } if *if_version > 0 => {}
         Operation::Batch { edits }
             if edits
                 .iter()

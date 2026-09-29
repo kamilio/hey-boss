@@ -133,7 +133,9 @@ impl Fixture {
         }
     }
     fn wait(&self, predicate: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Several scenarios launch multiple real CLI/Node processes in order.
+        // Three successful turns can exceed 15s on a busy developer machine.
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let status = self.cli(&["worker", "status"]);
             if predicate(&status) {
@@ -1115,6 +1117,82 @@ fn a_completed_session_is_not_resumed_when_the_issue_is_reopened() {
             .any(|v| v["method"] == "thread/resume")
     );
     replacement.stop();
+}
+
+#[test]
+fn github_events_start_fresh_but_retries_of_delivered_work_can_resume() {
+    for delivered in [false, true] {
+        let f = Fixture::new(if delivered {
+            "watch-retry"
+        } else {
+            "watch-new-event"
+        });
+        fs::write(f.root.join("mode.txt"), "delay").unwrap();
+        f.setup(&[]);
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        let machine: String = db
+            .query_row(
+                "SELECT json_extract(metadata,'$.machine') FROM agents LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let job = serde_json::json!({"config":{"cwd":f.root.canonicalize().unwrap()}}).to_string();
+        db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,session_id,retry_allowed) VALUES('previous',(SELECT id FROM projects LIMIT 1),1,?1,'old-agent','cancelled',1,'old-start',?2,0,0,1,'saved-session',1)",rusqlite::params![job,machine]).unwrap();
+        db.execute_batch("UPDATE issues SET assignment_target='github'; INSERT INTO issue_github_watches SELECT project_id,number,'{\"prs\":{},\"event\":\"latest-failure\"}' FROM issues;").unwrap();
+        if delivered {
+            db.execute_batch("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES('github:previous:latest-failure','previous','session','','delivered',1);").unwrap();
+        }
+        fs::write(
+            f.root.join(".codex-fixture-saved-session.json"),
+            r#"{"turns":["previous attempt"]}"#,
+        )
+        .unwrap();
+        let mut worker = f.worker();
+        let active =
+            f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["claimed_at"].is_number());
+        let resumed = active["runs"][0]["session_id"] == "saved-session";
+        worker.stop();
+        assert_eq!(resumed, delivered, "{active}");
+        let protocol = f.transcript();
+        let turn = protocol
+            .iter()
+            .find(|v| v["method"] == "turn/start")
+            .unwrap();
+        assert!(
+            turn["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("latest-failure")
+        );
+    }
+}
+
+#[test]
+fn standalone_worker_picks_up_an_explicit_assignment_to_its_machine() {
+    let f = Fixture::new("assigned-local-machine");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    let machine: String = db
+        .query_row(
+            "SELECT json_extract(metadata,'$.machine') FROM agents LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let issue = f.cli(&["view", "1"]);
+    f.cli(&[
+        "assign",
+        "1",
+        &format!("machine:{machine}"),
+        "--if-version",
+        &issue["issue"]["version"].to_string(),
+    ]);
+    let mut worker = f.worker();
+    let active = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    worker.stop();
+    assert_eq!(active["runs"][0]["number"], 1);
 }
 
 #[test]
