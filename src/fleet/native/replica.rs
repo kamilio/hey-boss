@@ -769,6 +769,9 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                 let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_github_watches WHERE project_id=?1 AND issue_number=?2 AND json_type(status,'$.event')='text' AND json_extract(status,'$.event') IS NOT ?3)",rusqlite::params![merged["project_id"].as_str(),merged["number"].as_i64(),merged["github_ack_event"].as_str()],|r|r.get(0))?;
                 if pending {
                     merged["assignee"] = Value::Null;
+                    if merged["state"] == "ready" {
+                        merged["state"] = json!("open");
+                    }
                 } else {
                     execute(
                         db,
@@ -2012,7 +2015,7 @@ mod tests {
 
     #[test]
     fn github_watcher_remote_handoff_cannot_hide_a_newer_supervisor_event() {
-        for handled in [false, true] {
+        for (handled, ready) in [(false, false), (false, true), (true, false), (true, true)] {
             let main = Fixture::new();
             main.capture();
             main.db.execute_batch("INSERT INTO agents(id,metadata,last_seen) VALUES('watcher:github','{}',0); UPDATE issues SET assignment_target='github',assignee='human:fixture'; INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'peer');").unwrap();
@@ -2021,6 +2024,9 @@ mod tests {
             let mut after = before.clone();
             after["assignee"] = json!("watcher:github");
             after["github_ack_event"] = json!(if handled { "second" } else { "first" });
+            if ready {
+                after["state"] = json!("ready");
+            }
             main.db
                 .execute(
                     "INSERT INTO issue_github_watches VALUES('named:Native fleet',1,?1)",
@@ -2031,6 +2037,11 @@ mod tests {
             let receipts = accept_changes(&main.db, "peer", &[change]).unwrap();
             assert_eq!(receipts[0]["state"], "applied", "{receipts:?}");
             let issue = current_row(&main.db, "issues", &key).unwrap();
+            assert_eq!(
+                issue["state"],
+                if ready && handled { "ready" } else { "open" },
+                "Pending watcher work must remain eligible for pickup"
+            );
             assert_eq!(
                 issue["assignee"],
                 if handled {

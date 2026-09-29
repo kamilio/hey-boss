@@ -607,7 +607,13 @@ impl Store {
             } else if own && watching {
                 assignments::release_worker(&tx, job, state)?;
             } else if own {
-                assignments::release_claim(&tx, job)?;
+                assignments::release_claim(
+                    &tx,
+                    &job.project.id,
+                    job.number(),
+                    &job.actor.id,
+                    now(),
+                )?;
             }
         }
         if approval_hold

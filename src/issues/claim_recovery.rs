@@ -48,16 +48,7 @@ impl Store {
                 rusqlite::params![project.id, number, actor.id, metadata, last_seen], |r| r.get(0),
             )?;
             if unchanged && super::super::identity::presence(&actor, machine) == "stale" {
-                mutate(
-                    &tx,
-                    &project,
-                    &actor,
-                    &Operation::Unassign {
-                        number,
-                        force: false,
-                    },
-                    now,
-                )?;
+                assignments::release_claim(&tx, &project.id, number, &actor.id, now)?;
                 event(
                     &tx,
                     &project.id,
@@ -181,6 +172,27 @@ mod tests {
                 .unwrap();
         }
         store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('active',?1,7,'{}','codex:supervised','running',1,'start','local',0,0)", [&project.id]).unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE issues SET assignment_target='machine:local' WHERE number=1",
+                [],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO fleet_allocations(project_id,issue_number,node) VALUES(?1,1,'local')",
+                [&project.id],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE issues SET assignment_target='github' WHERE number=2",
+                [],
+            )
+            .unwrap();
         assert_eq!(store.release_stale_claims("local", clock).unwrap(), 1);
         assert_eq!(store.release_stale_claims("local", clock).unwrap(), 0);
         assert!(
@@ -199,6 +211,33 @@ mod tests {
             );
         }
         assert_eq!(store.release_stale_claims("local", clock + 1).unwrap(), 1);
+        let target: String = store
+            .db
+            .query_row(
+                "SELECT assignment_target FROM issues WHERE number=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(target, "machine:local");
+        let reserved: String = store
+            .db
+            .query_row(
+                "SELECT node FROM fleet_allocations WHERE issue_number=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reserved, "local");
+        let target: String = store
+            .db
+            .query_row(
+                "SELECT assignment_target FROM issues WHERE number=2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(target, "github");
         let expired: i64 = store
             .db
             .query_row(
