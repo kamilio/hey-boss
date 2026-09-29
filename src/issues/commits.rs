@@ -209,7 +209,9 @@ fn parse_url_commit(url: &str) -> Option<(Option<(String, String)>, String)> {
     None
 }
 
-fn git_resolve_in(cwd: &Path, rev: &str) -> Option<(String, String, Option<(String, String)>)> {
+type ResolvedCommit = (String, String, Option<(String, String)>);
+
+fn git_resolve_in(cwd: &Path, rev: &str) -> Option<ResolvedCommit> {
     let sha_out = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -846,6 +848,170 @@ pub fn target_issues_for_hook(
     Ok(targets)
 }
 
+const MANAGED_HOOKS: &[&str] = &[
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "post-rewrite",
+    "pre-push",
+    "post-checkout",
+    "post-merge",
+];
+
+pub fn hooks_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    Some(home.join(".config").join("hey-boss").join("git-hooks"))
+}
+
+fn hook_script(hook: &str) -> String {
+    let post_action = if matches!(hook, "post-commit" | "post-rewrite") {
+        "\nexport PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"\nhey-boss issue commit hook >/dev/null 2>&1 || true\n"
+    } else {
+        ""
+    };
+    format!(
+        "#!/bin/sh
+# Managed by hey-boss: chains repo-local and previous global hooks before commit provenance capture.
+SELF_DIR=$(cd \"$(dirname \"$0\")\" 2>/dev/null && pwd)
+HOOK_NAME=\"{hook}\"
+
+run_chained() {{
+    target=\"$1\"
+    shift
+    if [ -n \"$target\" ] && [ -x \"$target\" ] && [ ! \"$target\" -ef \"$0\" ]; then
+        \"$target\" \"$@\"
+        status=$?
+        if [ $status -ne 0 ]; then
+            exit $status
+        fi
+        return 0
+    fi
+    return 1
+}}
+
+local_hooks=$(git config --local --get core.hooksPath 2>/dev/null || true)
+if [ -n \"$local_hooks\" ]; then
+    case \"$local_hooks\" in
+        /*) candidate=\"$local_hooks/$HOOK_NAME\" ;;
+        *)
+            top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+            candidate=\"$top/$local_hooks/$HOOK_NAME\"
+            ;;
+    esac
+    run_chained \"$candidate\" \"$@\" || true
+else
+    common_dir=$(git rev-parse --git-common-dir 2>/dev/null || git rev-parse --git-dir 2>/dev/null || true)
+    if [ -n \"$common_dir\" ]; then
+        run_chained \"$common_dir/hooks/$HOOK_NAME\" \"$@\" || true
+    fi
+fi
+
+if [ -f \"$SELF_DIR/.previous-global-hooks-path\" ]; then
+    prev_dir=$(cat \"$SELF_DIR/.previous-global-hooks-path\" 2>/dev/null || true)
+    if [ -n \"$prev_dir\" ] && [ \"$prev_dir\" != \"$SELF_DIR\" ]; then
+        run_chained \"$prev_dir/$HOOK_NAME\" \"$@\" || true
+    fi
+fi
+{post_action}exit 0
+"
+    )
+}
+
+pub fn ensure_git_hooks() -> Result<PathBuf> {
+    let dir = hooks_dir().ok_or_else(|| Error::invalid("HOME is not set"))?;
+    provision_git_hooks(&dir)?;
+    Ok(dir)
+}
+
+fn provision_git_hooks(dir: &std::path::Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| Error::invalid("Invalid hooks directory"))?;
+    std::fs::create_dir_all(parent)?;
+    // Multiple workers can launch together. Keep recovery and wrapper updates
+    // under the same lock so one launch cannot move another's repaired directory.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.with_extension("lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if !dir.is_dir() {
+        match std::fs::symlink_metadata(dir) {
+            Ok(_) => {
+                // Reserve a fresh recovery directory; never overwrite an earlier
+                // recovery or discard the obstructing file/symlink.
+                for attempt in 0u64.. {
+                    let suffix = if attempt == 0 {
+                        String::new()
+                    } else {
+                        format!("-{attempt}")
+                    };
+                    let backup = dir.with_extension(format!("recovery{suffix}"));
+                    match std::fs::create_dir(&backup) {
+                        Ok(()) => {
+                            std::fs::rename(dir, backup.join("original"))?;
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        std::fs::create_dir_all(dir)?;
+    }
+    for &hook in MANAGED_HOOKS {
+        let path = dir.join(hook);
+        let content = hook_script(hook);
+        let unchanged = std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str());
+        if !unchanged {
+            std::fs::write(&path, content)?;
+        }
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn install_global_git_hooks() -> Result<PathBuf> {
+    let dir = ensure_git_hooks()?;
+    let existing = Command::new("git")
+        .args(["config", "--global", "--get", "core.hooksPath"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    if let Some(prev) = existing {
+        let prev_path = PathBuf::from(&prev);
+        if prev_path != dir && !prev.ends_with("hey-boss/git-hooks") {
+            let _ = std::fs::write(dir.join(".previous-global-hooks-path"), format!("{prev}\n"));
+        }
+    }
+    let status = Command::new("git")
+        .args([
+            "config",
+            "--global",
+            "core.hooksPath",
+            dir.to_str().unwrap_or(""),
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(Error::invalid("Failed to set git global core.hooksPath"));
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,7 +1273,7 @@ mod tests {
         for input in [
             "71cb79c",
             full_sha,
-            &format!("https://github.com/kamilio/hey-boss/commit/71cb79c.patch"),
+            "https://github.com/kamilio/hey-boss/commit/71cb79c.patch",
         ] {
             let (changed_again, list_again) =
                 add(&db, &project, 704, input, None, &actor, 1020).unwrap();
@@ -1173,168 +1339,4 @@ mod tests {
         .unwrap();
         assert_eq!(targets, vec![704]);
     }
-}
-
-const MANAGED_HOOKS: &[&str] = &[
-    "pre-commit",
-    "prepare-commit-msg",
-    "commit-msg",
-    "post-commit",
-    "post-rewrite",
-    "pre-push",
-    "post-checkout",
-    "post-merge",
-];
-
-pub fn hooks_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(home.join(".config").join("hey-boss").join("git-hooks"))
-}
-
-fn hook_script(hook: &str) -> String {
-    let post_action = if matches!(hook, "post-commit" | "post-rewrite") {
-        "\nexport PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"\nhey-boss issue commit hook >/dev/null 2>&1 || true\n"
-    } else {
-        ""
-    };
-    format!(
-        "#!/bin/sh
-# Managed by hey-boss: chains repo-local and previous global hooks before commit provenance capture.
-SELF_DIR=$(cd \"$(dirname \"$0\")\" 2>/dev/null && pwd)
-HOOK_NAME=\"{hook}\"
-
-run_chained() {{
-    target=\"$1\"
-    shift
-    if [ -n \"$target\" ] && [ -x \"$target\" ] && [ ! \"$target\" -ef \"$0\" ]; then
-        \"$target\" \"$@\"
-        status=$?
-        if [ $status -ne 0 ]; then
-            exit $status
-        fi
-        return 0
-    fi
-    return 1
-}}
-
-local_hooks=$(git config --local --get core.hooksPath 2>/dev/null || true)
-if [ -n \"$local_hooks\" ]; then
-    case \"$local_hooks\" in
-        /*) candidate=\"$local_hooks/$HOOK_NAME\" ;;
-        *)
-            top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-            candidate=\"$top/$local_hooks/$HOOK_NAME\"
-            ;;
-    esac
-    run_chained \"$candidate\" \"$@\" || true
-else
-    common_dir=$(git rev-parse --git-common-dir 2>/dev/null || git rev-parse --git-dir 2>/dev/null || true)
-    if [ -n \"$common_dir\" ]; then
-        run_chained \"$common_dir/hooks/$HOOK_NAME\" \"$@\" || true
-    fi
-fi
-
-if [ -f \"$SELF_DIR/.previous-global-hooks-path\" ]; then
-    prev_dir=$(cat \"$SELF_DIR/.previous-global-hooks-path\" 2>/dev/null || true)
-    if [ -n \"$prev_dir\" ] && [ \"$prev_dir\" != \"$SELF_DIR\" ]; then
-        run_chained \"$prev_dir/$HOOK_NAME\" \"$@\" || true
-    fi
-fi
-{post_action}exit 0
-"
-    )
-}
-
-pub fn ensure_git_hooks() -> Result<PathBuf> {
-    let dir = hooks_dir().ok_or_else(|| Error::invalid("HOME is not set"))?;
-    provision_git_hooks(&dir)?;
-    Ok(dir)
-}
-
-fn provision_git_hooks(dir: &std::path::Path) -> Result<()> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
-    let parent = dir
-        .parent()
-        .ok_or_else(|| Error::invalid("Invalid hooks directory"))?;
-    std::fs::create_dir_all(parent)?;
-    // Multiple workers can launch together. Keep recovery and wrapper updates
-    // under the same lock so one launch cannot move another's repaired directory.
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.with_extension("lock"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    if !dir.is_dir() {
-        match std::fs::symlink_metadata(dir) {
-            Ok(_) => {
-                // Reserve a fresh recovery directory; never overwrite an earlier
-                // recovery or discard the obstructing file/symlink.
-                for attempt in 0u64.. {
-                    let suffix = if attempt == 0 {
-                        String::new()
-                    } else {
-                        format!("-{attempt}")
-                    };
-                    let backup = dir.with_extension(format!("recovery{suffix}"));
-                    match std::fs::create_dir(&backup) {
-                        Ok(()) => {
-                            std::fs::rename(dir, backup.join("original"))?;
-                            break;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        std::fs::create_dir_all(dir)?;
-    }
-    for &hook in MANAGED_HOOKS {
-        let path = dir.join(hook);
-        let content = hook_script(hook);
-        let unchanged = std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str());
-        if !unchanged {
-            std::fs::write(&path, content)?;
-        }
-        let mut perms = std::fs::metadata(&path)?.permissions();
-        if perms.mode() & 0o111 == 0 {
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms)?;
-        }
-    }
-    Ok(())
-}
-
-pub fn install_global_git_hooks() -> Result<PathBuf> {
-    let dir = ensure_git_hooks()?;
-    let existing = Command::new("git")
-        .args(["config", "--global", "--get", "core.hooksPath"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty());
-    if let Some(prev) = existing {
-        let prev_path = PathBuf::from(&prev);
-        if prev_path != dir && !prev.ends_with("hey-boss/git-hooks") {
-            let _ = std::fs::write(dir.join(".previous-global-hooks-path"), format!("{prev}\n"));
-        }
-    }
-    let status = Command::new("git")
-        .args([
-            "config",
-            "--global",
-            "core.hooksPath",
-            dir.to_str().unwrap_or(""),
-        ])
-        .status()?;
-    if !status.success() {
-        return Err(Error::invalid("Failed to set git global core.hooksPath"));
-    }
-    Ok(dir)
 }
