@@ -33,6 +33,12 @@ let info: [String: Any] = [
     "CFBundleIconFile": "hey-boss.icns",
     "LSMinimumSystemVersion": "26.0",
     "NSHighResolutionCapable": true,
+    // The local Issues service intentionally uses HTTP. Keep ATS for all other hosts.
+    "NSAppTransportSecurity": [
+        "NSExceptionDomains": [
+            "hey-boss.test": ["NSExceptionAllowsInsecureHTTPLoads": true],
+        ],
+    ],
 ]
 try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
     .write(to: contents.appendingPathComponent("Info.plist"), options: .atomic)
