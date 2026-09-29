@@ -1,5 +1,10 @@
 # Worktree ownership and recovery
 
+Current cleanup policy (September 28): tracked edits and unpublished commits block
+removal; untracked/ignored output is disposable and does not reset idle time.
+Live remote verification, ownership locks, activity and database protections still
+apply. The dated investigations below describe the policies at those times.
+
 ## Reopened investigation — September 25, 2026
 
 The new poe-code reports describe missing checkouts and validation evidence around
