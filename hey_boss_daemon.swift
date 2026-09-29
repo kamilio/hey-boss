@@ -1416,6 +1416,7 @@ extension NSAttributedString.Key {
 final class NativeMarkdownRenderer {
     let output = NSMutableAttributedString(string: "")
     var tableID = 0
+    var localImages = false
     static let cache = NSCache<NSString, NSData>()
     static let queue: OperationQueue = {
         let queue = OperationQueue(); queue.name = "hey-boss.markdown"; queue.maxConcurrentOperationCount = 2
@@ -1423,8 +1424,9 @@ final class NativeMarkdownRenderer {
         cache.totalCostLimit = 24 * 1024 * 1024
         return queue
     }()
-    static func render(_ root: NativeMarkdownNode) -> NSAttributedString {
+    static func render(_ root: NativeMarkdownNode, localImages: Bool = false) -> NSAttributedString {
         let renderer = NativeMarkdownRenderer()
+        renderer.localImages = localImages
         let paragraph = NSMutableParagraphStyle(); paragraph.lineSpacing = 4; paragraph.paragraphSpacing = 12
         renderer.node(root, [.font:NSFont.systemFont(ofSize:15), .foregroundColor:NSColor.textColor, .paragraphStyle:paragraph])
         return renderer.output
@@ -1588,7 +1590,7 @@ final class NativeMarkdownRenderer {
             append("[" + (node.value ?? "") + "] ",attributes,node); children(node,attributes); newline(attributes,node)
         case "image":
             let alt = (node.children ?? []).compactMap(\.value).joined()
-            if let raw = node.url, let url = URL(string:raw), ["https","http","file", ""].contains(url.scheme ?? "") {
+            if let raw = node.url, let url = URL(string:raw), ["https","http"].contains(url.scheme ?? "") || (localImages && ["file", ""].contains(url.scheme ?? "")) {
                 let attachment = NSTextAttachment(); attachment.image = NSImage(systemSymbolName:"photo",accessibilityDescription:alt)
                 attachment.bounds = NSRect(x:0,y:0,width:32,height:32)
                 var imageAttributes = attributes; imageAttributes[.attachment] = attachment
@@ -5473,7 +5475,7 @@ final class ArtifactMarkdownText: NSTextView {
         label.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]").replacingOccurrences(of: "\n", with: " ")
     }
     static func markdownLink(_ label: String, _ destination: String) -> String {
-        let allowed = CharacterSet.urlFragmentAllowed.union(CharacterSet(charactersIn: "%")).subtracting(CharacterSet(charactersIn: "<>\\\"\n\r\t "))
+        let allowed = CharacterSet.urlFragmentAllowed.union(CharacterSet(charactersIn: "%#[]")).subtracting(CharacterSet(charactersIn: "<>\\\"\n\r\t "))
         return "[" + escapedLabel(label) + "](<" + (destination.addingPercentEncoding(withAllowedCharacters: allowed) ?? destination) + ">)"
     }
     func linkSelection() -> (range: NSRange, label: String, destination: String) {
@@ -5499,6 +5501,10 @@ final class ArtifactMarkdownText: NSTextView {
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         if isEditable, ArtifactImageInput.containsImages(sender.draggingPasteboard) { return .copy }
         return super.draggingUpdated(sender)
+    }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if isEditable, ArtifactImageInput.containsImages(sender.draggingPasteboard) { return true }
+        return super.prepareForDragOperation(sender)
     }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let images = ArtifactImageInput.read(sender.draggingPasteboard)
@@ -6078,7 +6084,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 if done.wait(timeout: .now() + 15) != .success { process.terminate(); if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }; throw StorageError(description: "Preview timed out") }
                 guard process.terminationStatus == 0 else { throw StorageError(description: "Preview unavailable") }
                 let node = try JSONDecoder().decode(NativeMarkdownNode.self, from: Data(contentsOf: output))
-                onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.textStorage?.setAttributedString(NativeMarkdownRenderer.render(node)); self.loadPreviewImages(generation: generation); self.reader.setSelectedRange(NSRange(location: 0, length: 0)); self.reader.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
+                onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.textStorage?.setAttributedString(NativeMarkdownRenderer.render(node, localImages: true)); self.loadPreviewImages(generation: generation); self.reader.setSelectedRange(NSRange(location: 0, length: 0)); self.reader.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
             } catch { onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.string = source; self.status.stringValue = "Preview unavailable · showing source" } }
         }
     }
