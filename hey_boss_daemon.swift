@@ -5091,6 +5091,7 @@ final class ActionHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate
 }
 
 final class DesktopActions {
+    static let clipboardByteLimit = 128 * 1024
     struct Site { let generation: String?; let owner: String; let url: URL; let host: String?; let remotePort: Int?; let localPort: Int? }
     let queue = DispatchQueue(label: "hey-boss.desktop-actions")
     var sites: [String: Site] = [:]
@@ -5098,6 +5099,7 @@ final class DesktopActions {
     var completionOrder: [String] = []
     var inFlight: Set<String> = []
     var requests: [String: ActionHTTP] = [:]
+    var pasteboard: () -> NSPasteboard = { .general }
     var openWebsite: (URL, @escaping (Bool) -> Void) -> Void = { url, completion in onMain { completion(NSWorkspace.shared.open(url)) } }
     var forward: (String, Int) throws -> Int
     var cancel: (String, Int, Int) -> Void
@@ -5138,6 +5140,7 @@ final class DesktopActions {
         }
         let owner = request.bridge_host ?? request.source_host ?? "This Mac"
         let key = owner + ":" + (request.bridge_generation ?? "local") + ":" + id
+        let isClipboard = method == "clipboard.copy" || method == "clipboard.paste"
         if request.bridge_host != nil {
             let stale = sites.filter { $0.value.owner == owner && $0.value.generation != request.bridge_generation }.map { $0.key }
             for id in stale { sites.removeValue(forKey: id) }
@@ -5150,14 +5153,15 @@ final class DesktopActions {
                 case .failure(let error): body = ["version":1,"id":id,"error":["code":-32000,"message":(error as? StorageError)?.description ?? error.localizedDescription]]; success = false
                 }
                 self.inFlight.remove(key); self.requests.removeValue(forKey: key)
-                if success {
+                // Clipboard requests and results are transient, never replayed or retained.
+                if success && !isClipboard {
                     self.completed[key] = (payload, body, success); self.completionOrder.append(key)
                     while self.completionOrder.count > 32 { self.completed.removeValue(forKey: self.completionOrder.removeFirst()) }
                 }
                 self.send(body, id: id, success: success, reply: send)
             }
         }
-        if let cached = completed[key] {
+        if !isClipboard, let cached = completed[key] {
             if cached.0 == payload { self.send(cached.1, id: id, success: cached.2, reply: send) }
             else { self.send(["version":1,"id":id,"error":["code":-32600,"message":"Request ID reused with different payload"]], id: id, success: false, reply: send) }
             return
@@ -5168,7 +5172,31 @@ final class DesktopActions {
         inFlight.insert(key)
         do {
             switch method {
-            case "capabilities": emit(.success(["methods":["capabilities","browser.open","browser.request","browser.close"],"protocol":1,"http_response_limit":131072,"browser":"system default","requests":"HTTP to selected website origin"] ))
+            case "capabilities": emit(.success(["methods":["capabilities","browser.open","browser.request","browser.close","clipboard.copy","clipboard.paste"],"protocol":1,"http_response_limit":131072,"clipboard_byte_limit":Self.clipboardByteLimit,"browser":"system default","requests":"HTTP to selected website origin"] ))
+            case "clipboard.copy":
+                guard params.count == 1, let base64 = params["base64"] as? String,
+                      base64.utf8.count <= ((Self.clipboardByteLimit + 2) / 3) * 4,
+                      let bytes = Data(base64Encoded: base64), bytes.count <= Self.clipboardByteLimit,
+                      bytes.base64EncodedString() == base64, let text = String(data: bytes, encoding: .utf8) else {
+                    throw StorageError(description: "Expected only base64 containing UTF-8 text of at most 128 KiB")
+                }
+                onMain {
+                    let pasteboard = self.pasteboard()
+                    pasteboard.clearContents()
+                    guard pasteboard.setString(text, forType: .string) else {
+                        emit(.failure(StorageError(description: "Cannot write clipboard text"))); return
+                    }
+                    emit(.success(["copied":true]))
+                }
+            case "clipboard.paste":
+                guard params.isEmpty else { throw StorageError(description: "Clipboard paste expects empty params") }
+                onMain {
+                    let text = self.pasteboard().string(forType: .string) ?? ""
+                    guard text.utf8.count <= Self.clipboardByteLimit else {
+                        emit(.failure(StorageError(description: "Clipboard text exceeds 128 KiB"))); return
+                    }
+                    emit(.success(["base64":Data(text.utf8).base64EncodedString()]))
+                }
             case "browser.open":
                 guard sites.count < 32, let raw = params["url"] as? String, raw.utf8.count <= 8192,
                       var url = URLComponents(string: raw), ["http","https"].contains(url.scheme?.lowercased() ?? ""),

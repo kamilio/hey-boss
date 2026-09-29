@@ -14,6 +14,7 @@ mod notif_cli;
 mod secret_cli;
 mod upgrade_cli;
 mod upgrade_provenance;
+mod utils_cli;
 mod worker_cli;
 use clap::{Args, Parser, Subcommand};
 use hey_boss::{Client, Request, Severity, resolve_icon_file};
@@ -161,6 +162,9 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Git shortcuts and your connected main Mac's clipboard.
+    #[command(subcommand)]
+    Utils(utils_cli::Action),
     /// List agents, open their overview, configure access, and control threads.
     #[command(subcommand)]
     Agent(AgentAction),
@@ -416,9 +420,11 @@ fn main() {
 }
 
 fn run() -> std::io::Result<()> {
-    let cli = Cli::parse().canonicalize();
-    // Review captures use private SQLite files without starting a database service.
+    let (args, git_args) = utils_cli::cli_args();
+    let cli = Cli::parse_from(args).canonicalize();
+    // Dispatch utilities and private review captures before database service setup.
     match &cli.command {
+        Command::Utils(action) => return utils_cli::run(action, &git_args),
         Command::Admin(options) => return admin_cli::run(options),
         Command::Skill(options) => return admin_cli::skill(options),
         _ => {}
