@@ -23,6 +23,7 @@ pub mod worktree_ownership;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 pub use store::Store;
+pub use store::coordination::{Coordinate, coordinate};
 pub(crate) use store::TrackedPullRequest;
 pub use store::attempts::{AttemptEvidence, AttemptReport};
 
