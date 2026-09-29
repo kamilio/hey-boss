@@ -1213,13 +1213,18 @@ mod tests {
                 .any(|p| p.pid == std::process::id())
         );
         assert!(store.state().unwrap().snapshot.process_inventory.is_none());
-        drop(lock);
+        release_fixture_lock(lock);
         let status = store.status().unwrap();
         assert!(!status.running && status.phase.contains("interrupted"));
         assert_eq!(status.errors.len(), 1);
         // Status is a read-only projection, including interruption detection.
         assert!(store.state().unwrap().snapshot.running);
         fs::remove_dir_all(root).unwrap();
+    }
+    fn release_fixture_lock(lock: File) {
+        // Parallel process tests can fork while this descriptor is open. Make
+        // the fixture's unlocked state explicit even before that child execs.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
     }
     #[test]
     fn status_reloads_a_worker_that_finished_after_the_initial_read() {
@@ -1240,7 +1245,7 @@ mod tests {
         state.snapshot.errors.push("Existing cleanup error".into());
         state.snapshot.record("scan", "Finished: removed 7 caches");
         store.save("state.json", &state).unwrap();
-        drop(lock);
+        release_fixture_lock(lock);
 
         store.reconcile_running_snapshot(&mut stale).unwrap();
         assert_eq!(
