@@ -2619,6 +2619,7 @@ func auditArtifactEditor() {
     let existingLink = text.linkSelection()
     precondition(existingLink.label == "🦀" && existingLink.destination == "https://example.com/a%20b?q=(x)")
     precondition(ArtifactMarkdownText.markdownLink(existingLink.label, existingLink.destination) == "[🦀](<https://example.com/a%20b?q=(x)>)", "Editing a link preserves URL escapes")
+    precondition(ArtifactMarkdownText.markdownLink("Section", "https://example.com/#section") == "[Section](<https://example.com/#section>)", "Link fragments retain their delimiter")
     precondition(ArtifactMarkdownText.markdownLink("[label]", "https://example.com/>").contains("\\[label\\]"))
     let clipboard = NSPasteboard.withUniqueName()
     clipboard.setString("plain text", forType: .string)
@@ -2672,7 +2673,8 @@ func auditArtifactEditor() {
     precondition(editor.text.string.hasPrefix("Before A \n![Pasted image.png]"), "Image insertion follows edits made while the file is being copied")
     precondition(editor.text.string.contains("Keyboard.assets/"))
     let imageNode = try! JSONDecoder().decode(NativeMarkdownNode.self, from: JSONSerialization.data(withJSONObject: ["type": "image", "lineStart": 1, "lineEnd": 1, "url": imported, "children": [["type": "text", "value": "Preview", "lineStart": 1, "lineEnd": 1]]]))
-    editor.reader.textStorage!.setAttributedString(NativeMarkdownRenderer.render(imageNode))
+    precondition(NativeMarkdownRenderer.render(imageNode).string == "Preview", "Readers without a local image resolver keep alternative text")
+    editor.reader.textStorage!.setAttributedString(NativeMarkdownRenderer.render(imageNode, localImages: true))
     editor.loadPreviewImages(generation: editor.renderGeneration)
     wait { !editor.previewImages.isEmpty }
     let attachment = editor.reader.textStorage!.attribute(.attachment, at: 0, effectiveRange: nil) as! NSTextAttachment
