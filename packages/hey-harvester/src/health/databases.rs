@@ -37,6 +37,8 @@ pub(super) fn protected(path: &Path) -> io::Result<bool> {
         || name.ends_with("-journal")
         || name
             .split('.')
+            // The basename is not an extension: sqlite.ts is source code.
+            .skip(1)
             .any(|s| matches!(s, "db" | "sqlite" | "sqlite3" | "sqlitedb"))
     {
         return Ok(true);
@@ -144,6 +146,31 @@ mod tests {
         let p = root.join("cache.bin");
         fs::write(&p, b"ordinary disposable content").unwrap();
         assert!(!protected(&p).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn database_named_source_files_are_not_database_extensions() {
+        let root = fixture();
+        for name in [
+            "sqlite.ts",
+            "sqlite.test.ts",
+            "sqlite.d.ts",
+            "db.rs",
+            "sqlite3.py",
+        ] {
+            let path = root.join(name);
+            fs::write(&path, "ordinary source code").unwrap();
+            assert!(
+                !protected(&path).unwrap(),
+                "source filename misclassified: {name}"
+            );
+            fs::write(&path, b"SQLite format 3\0actual database").unwrap();
+            assert!(
+                protected(&path).unwrap(),
+                "headers still protect disguised databases"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
