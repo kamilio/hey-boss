@@ -176,12 +176,30 @@ machine, just as normal claim protection does.
 Noninteractive `issue view` preserves configured actor identities but skips live
 session discovery. Without a configured identity it uses the terminal caller;
 claims and edits still require the normal verified agent identity.
-Issue details show the reserved device, with reservation timing explained on
-hover or keyboard focus. Boss can use **Release reservation** on the supervisor
-to let another device pick up an unassigned issue. Stop any active worker attempt
-first. The confirmed device and issue revision must still match; releases are
-recorded in activity and replicated automatically. Reservations do not expire
-automatically, including while a device is offline.
+Issue details have one **Assignment** control: choose a machine, Boss, Unassigned,
+or GitHub watcher. A machine assignment becomes an agent assignment when a worker
+claims it; the device remains visible. Explicit machine assignments survive
+reservation cleanup and reconnects. Changing to Unassigned clears that destination.
+Stop an active worker before moving its task to another machine. Assignment edits
+check the issue revision and use stable request IDs across the supervisor tunnel.
+
+**GitHub watcher** requires an attached open GitHub PR and parks the task outside
+worker pickup. The supervisor polls through the shared `hey-gh` daemon. A fresh
+required-check failure wakes work immediately, without waiting for optional jobs
+or reviews. Completed checks and later review findings also wake work. A running
+agent receives the latest update through steering; otherwise, the next event
+starts a fresh session. Successful work returns to watching after the current
+event is delivered; undelivered work remains queued. Claims and steering include
+structured GitHub evidence, with size limits and explicit omission counts.
+Polling does not post status comments. Removing the last open PR returns waiting
+work to Boss; an active agent keeps its claim. Existing merged-fix auto-close
+behavior still applies. Stale or unavailable evidence stays an error, not a
+successful check result.
+
+For example, `hey-boss issue assign 12 github --if-version 4` enables watching.
+Other destinations are `boss`, `unassigned`, and `machine:ID`. `issue view` exposes
+the assignment, available machines, and last GitHub status. Allocation inspection
+remains available for diagnostics.
 
 To resume a released manual claim, keep its saved `--agent ID`. For missing local
 allocation, run `hey-boss issue allocation NUMBER --host SUPERVISOR` with the
