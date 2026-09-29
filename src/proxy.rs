@@ -7,6 +7,7 @@ pub(crate) mod logs;
 mod messages;
 mod overview;
 mod recovery;
+mod replay;
 mod sse;
 mod websocket;
 use crate::config::{self, Config, Fingerprint, IpVersion, Mode};
@@ -841,10 +842,13 @@ async fn prepare_body(
         original.0.read_to_end(&mut bytes).await?;
         let incoming = logs::json_model(&bytes);
         log.0.routing_decision(log.1, config, path, &bytes);
-        let (rewritten, key) =
+        let (mut rewritten, key) =
             rewrite(config, path, Bytes::from(bytes)).map_err(anyhow::Error::msg)?;
         // A body model, when supplied, takes precedence over URL routing.
-        let value: Value = serde_json::from_slice(&rewritten).unwrap_or(Value::Null);
+        let mut value: Value = serde_json::from_slice(&rewritten).unwrap_or(Value::Null);
+        if config.mode != Mode::Client && replay::for_openai(path, &mut value) {
+            rewritten = Bytes::from(serde_json::to_vec(&value)?);
+        }
         if guidance::present(&value) {
             log.0.update(
                 log.1,

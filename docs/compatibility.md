@@ -4,6 +4,10 @@
 
 OpenAI requests use the configured upstream and credential. JSON model names and selected reasoning settings can be overwritten. HTTP bodies, streaming Responses, Chat Completions, and supported WebSocket routes are forwarded through the existing endpoint paths.
 
+For HTTP Responses requests routed to OpenAI, the proxy removes Gemini reasoning capsules marked `hey_gemini_v1.` from the outgoing attempt. OpenAI cannot decrypt these capsules when a conversation moves from Gemini to OpenAI or supplies Gemini history to a separate reviewer. Visible messages, tool calls/results, review instructions, and the proposed action are preserved. Native OpenAI reasoning, compaction items, and unknown encrypted formats remain unchanged; upstream validation failures are returned without stripping more context or retrying them. Client relays leave this decision to their host. WebSocket replay does not perform this conversion.
+
+To check a configured route using fresh synthetic history, run `python3 tests/review_context_live.py --parent-model YOUR_PARENT_MODEL --reviewer-model YOUR_REVIEWER_MODEL`. Add `--require-encrypted` to require an encrypted parent reply, or `--context compaction` to test a fresh checkpoint. These manual checks make billable model requests, print only result metadata, and test both an authorized read and an unauthorized destructive action description. They execute neither action and do not verify a live Codex owner's approval flow.
+
 Keep request compression disabled when using model overwrites or Responses-to-Gemini conversion. The optional Codex setup commands configure this setting for you.
 
 ## Chat clients using Responses or Gemini
@@ -16,7 +20,7 @@ Use `gemini/MODEL_NAME` on `/v1/responses`. The converter supports text, images,
 
 The converter preserves provider signatures in opaque reasoning items so they can be sent back on subsequent turns. Return reasoning and tool-call items in order; do not strip or edit their encrypted content. The proxy stores a private reasoning-encryption key beside its config. Preserve this key across restarts if you need to continue existing conversations.
 
-Providers have different schemas and capabilities. Unsupported options or incompatible signed history produce explicit errors; the proxy does not silently discard them. Stateful OpenAI features such as `previous_response_id` are not a portable replacement for sending full history to Gemini. Hosted tools also depend on provider support.
+Providers have different schemas and capabilities. When routing to Gemini, foreign reasoning items are omitted; Gemini's own capsules still require the original model, key, and matching visible output. Unsupported options or incompatible native signed history produce explicit errors. Stateful OpenAI features such as `previous_response_id` are not a portable replacement for sending full history to Gemini. Hosted tools also depend on provider support.
 
 `providers.gemini.thinking` accepts `auto`, `budget`, or `level`. Auto selects levels for the Gemini 3 model family and budgets otherwise. Use an explicit setting when another model requires a particular thinking format. Reasoning summaries reflect the provider's available thought summaries, not a guarantee of access to hidden reasoning.
 

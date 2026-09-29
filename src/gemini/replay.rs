@@ -6,7 +6,8 @@ use anyhow::{Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::Value;
 
-pub(crate) const CARRIER_PREFIX: &str = "hey_gemini_v1.";
+/// Wire-format marker only; recognizing it does not authenticate the carrier.
+pub const CARRIER_PREFIX: &str = "hey_gemini_v1.";
 
 /// Authenticated, stateless carrier for the exact native model turn. Persist the
 /// caller-supplied key to replay conversations across process restarts.
