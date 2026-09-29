@@ -2,6 +2,8 @@ use super::*;
 use serde_json::{Value, json};
 #[path = "end_to_end.rs"]
 mod end_to_end;
+#[path = "review_only.rs"]
+mod review_only;
 
 #[test]
 fn validation_times_must_be_recent_and_plausible() {

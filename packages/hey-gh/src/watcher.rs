@@ -171,17 +171,19 @@ fn ci_signals(
     }
     blocking.sort();
     blocking.dedup();
-    let complete = current
+    let has_checks = !(checks.is_empty() && statuses.is_empty() && workflows.is_empty());
+    let settled = current
         && ci.summary.pending == 0
         && ci.summary.unknown == 0
         && !matches!(policy.state.as_str(), "unknown" | "pending" | "missing")
-        && !(checks.is_empty() && statuses.is_empty() && workflows.is_empty())
+        && (has_checks || (policy.state == "not_required" && policy.checks.is_empty()))
         && checks.iter().all(|c| c["status"] == "completed")
         && ci.workflow_runs.iter().all(|c| c["status"] == "completed")
         && ci
             .commit_statuses
             .iter()
             .all(|c| matches!(c["state"].as_str(), Some("success" | "failure" | "error")));
+    let complete = settled && has_checks;
     let completed = complete.then(|| {
         fingerprint(&json!([
             ci.head_sha,
@@ -207,7 +209,7 @@ fn ci_signals(
             "source_heads":{"pull_request":pull_request["head"]["sha"],"ci":ci.head_sha,"required":policy.head_sha},
             "source_merges":{"ci":ci.merge_sha,"required":policy.merge_sha},
             "source_bases":{"pull_request":{"ref":pull_request["base"]["ref"],"sha":pull_request["base"]["sha"]},"required":{"ref":policy.base_branch,"sha":policy.pr_base_sha}},
-            "complete":false,"ci_complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
+            "complete":false,"ci_complete":complete,"ci_settled":settled,"has_checks":has_checks,"checks":checks,"statuses":statuses,"workflows":workflows,
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
         ),
@@ -261,7 +263,8 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
     let pr = &report.data;
     let ci = &pr.ci;
     let mut observation = ci_signals(&pr.repository, pr.number, &pr.pull_request, ci, policy);
-    let complete = observation.completed.is_some() && report.complete && pr.errors.is_empty();
+    let complete =
+        observation.evidence["ci_settled"] == true && report.complete && pr.errors.is_empty();
     if !complete {
         observation.completed = None;
     }
@@ -467,6 +470,39 @@ mod tests {
             .push(json!({"id":5,"state":"CHANGES_REQUESTED","body":"fix race"}));
         assert_eq!(observe(&r, &p).completed.as_ref(), Some(&first));
         assert_eq!(observe(&r, &p).feedback.len(), 1);
+    }
+    #[test]
+    fn checkless_prs_deliver_reviews_without_an_empty_completion_event() {
+        let (mut report, mut policy) = fixture();
+        report.data.ci.check_runs.clear();
+        report.data.ci.summary.pending = 0;
+        report.data.ci.summary.failed = 0;
+        policy.checks.clear();
+        policy.state = "not_required".into();
+        let empty = observe(&report, &policy);
+        assert!(empty.blocking.is_empty());
+        assert!(empty.completed.is_none());
+        assert!(empty.feedback.is_empty());
+        assert_eq!(empty.evidence["ci_settled"], true);
+        assert_eq!(empty.evidence["ci_complete"], false);
+        assert_eq!(empty.evidence["has_checks"], false);
+        assert_eq!(empty.evidence["complete"], true);
+        report
+            .data
+            .reviews
+            .push(json!({"id":5,"state":"CHANGES_REQUESTED","body":"fix race"}));
+        let reviewed = observe(&report, &policy);
+        assert!(reviewed.completed.is_none());
+        assert_eq!(reviewed.feedback.len(), 1);
+        report.observed_at_ms += 100;
+        assert_eq!(observe(&report, &policy).feedback, reviewed.feedback);
+        report.complete = false;
+        assert!(observe(&report, &policy).feedback.is_empty());
+        report.complete = true;
+        for state in ["unknown", "pending", "missing", "failure", "satisfied"] {
+            policy.state = state.into();
+            assert!(observe(&report, &policy).feedback.is_empty(), "{state}");
+        }
     }
     #[test]
     fn unknown_policy_stale_heads_and_incomplete_details_never_complete() {

@@ -53,6 +53,13 @@ test('incomplete GitHub evidence is presented without a completion claim', () =>
   assert.doesNotMatch(html, /All checks finished|Ready to merge/);
 });
 
+test('review-only pull requests do not claim that CI ran', () => {
+  const html = assignments.status({...base, github_status:{prs:{'https://github.com/o/r/pull/1':{evidence:{complete:true,ci_settled:true,ci_complete:false,has_checks:false,required_state:'not_required',reviews:[{body:'Please fix the race'}]}}}}},helpers);
+  assert.match(html,/No checks reported/);
+  assert.match(html,/Please fix the race/);
+  assert.doesNotMatch(html,/All checks finished|Checks in progress/);
+});
+
 test('a failed refresh shows its PR error instead of claiming stale checks have finished', () => {
   const html = assignments.status({...base, github_status: {prs: {
     'https://github.com/o/r/pull/1': {error: 'Rate limited', evidence: {complete: true}},

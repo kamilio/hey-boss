@@ -17,6 +17,8 @@ fn condensed(snapshot: &Value) -> Value {
         "head",
         "complete",
         "ci_complete",
+        "ci_settled",
+        "has_checks",
         "required_state",
         "sources_match",
         "source_heads",
@@ -110,6 +112,17 @@ pub(super) fn bounded(mut status: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn condensed_review_only_status_keeps_absent_checks_explicit() {
+        let snapshot = condensed(
+            &json!({"evidence":{"complete":true,"ci_complete":false,"ci_settled":true,"has_checks":false,"reviews":[{"body":"finding"}]}}),
+        );
+        assert_eq!(snapshot["evidence"]["ci_complete"], false);
+        assert_eq!(snapshot["evidence"]["ci_settled"], true);
+        assert_eq!(snapshot["evidence"]["has_checks"], false);
+        assert_eq!(snapshot["evidence"]["omitted"]["reviews"], 1);
+    }
 
     #[test]
     fn omitted_pr_count_and_trigger_survive_a_large_roster() {
