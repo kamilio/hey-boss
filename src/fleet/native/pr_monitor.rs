@@ -77,18 +77,33 @@ pub(super) fn run(ctx: Context) {
     };
     let mut daemon: Option<std::process::Child> = None;
     while !ctx.stopped() {
+        let started = std::time::Instant::now();
         // Start the same shared daemon used by the CLI if it is absent. Never
         // fall back to a private GitHub queue that bypasses its quota backoff.
         if let Err(error) = ensure_daemon(&ctx, &mut daemon) {
             eprintln!("PR monitor: cannot start hey-gh serve: {error}");
         }
-        if let Err(error) = watches::poll(&ctx, &runtime, &client) {
-            eprintln!("GitHub watcher: {error}");
-        }
-        if let Err(error) = poll(&ctx, &runtime, &client) {
-            eprintln!("PR monitor: {error}");
-        }
-        ctx.wait(INTERVAL);
+        poll_cycle(&ctx, &runtime, &client);
+        ctx.wait(INTERVAL.saturating_sub(started.elapsed()));
+    }
+}
+
+fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) {
+    // Both use the shared hey-gh queue, but waiting for ordinary metadata must
+    // not add another serial batch before the next required-check observation.
+    let (watched, metadata) = runtime.block_on(async {
+        tokio::join!(
+            watches::poll_once(ctx, client),
+            tokio::time::timeout(Duration::from_secs(40), poll_once(ctx, client))
+        )
+    });
+    if let Err(error) = watched {
+        eprintln!("GitHub watcher: {error}");
+    }
+    match metadata {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("PR monitor: {error}"),
+        Err(_) => eprintln!("PR monitor: metadata batch deadline reached"),
     }
 }
 
@@ -123,7 +138,12 @@ fn ensure_daemon(ctx: &Context, child: &mut Option<std::process::Child>) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) -> Result<()> {
+    runtime.block_on(poll_once(ctx, client))
+}
+
+async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
     let mut store = Store::open(&ctx.path)?;
     let mut actor = ctx.actor()?;
     actor.id = "human:pr-monitor".into();
@@ -159,7 +179,7 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
             )?;
             continue;
         };
-        let result = runtime.block_on(tokio_read(client, &repository, number));
+        let result = tokio_read(client, &repository, number).await;
         match result {
             Ok(response) => {
                 let checked_at = i64::try_from(response.validated_at_ms)?;
