@@ -23,7 +23,7 @@ const server = createServer((req, res) => {
       const renderRoute = async () => {}, updateHeader = () => {}, toast = () => {};
       window.saved = []; window.failSave = false; window.failLoad = false;
       window.fixtureSettings = {version:1,prompt:'Fixture implementation',chief_prompt:'Fixture chief',
-        chief_default_prompt:'Fixture chief',chief_enabled:false,prs_enabled:false,worktree_enabled:true,
+        chief_default_prompt:'Fixture chief',chief_preview_template:'Chief for {{project}}: {{prompt}}',chief_enabled:false,prs_enabled:false,worktree_enabled:true,
         drafts_enabled:true,plan_template:'plans/{number}.md',
         prompt_defaults:{plan:'',worktree:'',checkout:'',prs:'',main:''},prompt_overrides:{}};
       async function api(request) {
@@ -32,7 +32,7 @@ const server = createServer((req, res) => {
           return {...window.fixtureSettings};
         }
         window.preview = request;
-        return {prompt:request.config.prompt,use_goal:false};
+        return {prompt:request.task_kind === 'plan' ? request.config.prompt_overrides.plan : request.config.prompt,use_goal:false};
       }
       async function mutate(request) {
         if (window.failSave) throw Error('Fixture save failed');
