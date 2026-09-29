@@ -16,8 +16,14 @@ pub(super) fn read(db: &Connection) -> Result<Value> {
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let cwd = std::env::current_dir().ok();
+    let skills = home
+        .as_deref()
+        .map(|h| crate::skill::audit_report(h, cwd.as_deref()))
+        .unwrap_or_else(|| json!({"global_skills":[],"project_skills":[],"selected":[],"max_lines_policy":crate::skill::SKILL_MAX_LINES}));
     Ok(
-        json!({"ok":true,"scope":"global","boss_name":name,"auto_close_merged_prs":auto_close,"version":version,"boss":{"id":"human:boss","name":name,"version":version}}),
+        json!({"ok":true,"scope":"global","boss_name":name,"auto_close_merged_prs":auto_close,"version":version,"boss":{"id":"human:boss","name":name,"version":version},"skills":skills}),
     )
 }
 
@@ -86,13 +92,26 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
         Operation::ConfigureGlobal {
             boss_name,
             auto_close_merged_prs,
+            selected_skills,
+            sync_skills,
             if_version,
-        } => configure_settings(
-            db,
-            boss_name.as_deref(),
-            *auto_close_merged_prs,
-            *if_version,
-        )?,
+        } => {
+            if let Some(home_os) = std::env::var_os("HOME") {
+                let home = std::path::Path::new(&home_os);
+                if let Some(skills) = selected_skills {
+                    let _ = crate::skill::set_selected_skills(home, skills);
+                }
+                if *sync_skills || selected_skills.is_some() {
+                    let _ = crate::skill::sync_skills(home, None);
+                }
+            }
+            configure_settings(
+                db,
+                boss_name.as_deref(),
+                *auto_close_merged_prs,
+                *if_version,
+            )?
+        }
         _ => return Err(Error::invalid("Unknown global settings operation")),
     };
     if let (Some(key), Some(actor)) = (&request.request_id, identity) {

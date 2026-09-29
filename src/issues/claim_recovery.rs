@@ -162,6 +162,8 @@ mod tests {
                     body: String::new(),
                     labels: vec![],
                     at_top: false,
+                    blockers: vec![],
+                    then_titles: vec![],
                 }))
                 .unwrap();
             store

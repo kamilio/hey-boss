@@ -1357,11 +1357,20 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
             ));
         }
     }
-    if config.prs_enabled
+    let has_dependency_prs = job.issue["dependency_context"]
+        .as_array()
+        .is_some_and(|deps| {
+            deps.iter().any(|d| {
+                d["pull_requests"]
+                    .as_array()
+                    .is_some_and(|prs| !prs.is_empty())
+            })
+        });
+    if (config.prs_enabled || has_dependency_prs)
         && artifact_task(&job.issue).is_none()
-        && job.issue["dependency_ready_state"] != "closed"
+        && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs)
     {
-        instructions.push_str(&format!("\n\nThis project unblocks dependencies at Ready, before merge. Make stacked PRs when prerequisites have unmerged PRs: start your branch from the preceding/dependency PR branch and use that branch as your PR base, keeping the diff limited to this task. Read all dependency PRs; coordinate multiple prerequisite branches as needed. If upstream changes or merges, update/rebase your stack and adjust the PR base. Before reworking a Ready task, reopen it so new dependent pickups pause. When your PR is ready for Boss, attach it and run `hey-boss issue ready {} --project '{}'`. You decide readiness; the service does not independently check CI. Leave handoff notes for the next worker.", job.number(), job.project.id.replace('\'', "'\\''")));
+        instructions.push_str(&format!("\n\nThis project unblocks dependencies at Ready, before merge. Make stacked PRs when prerequisites have unmerged PRs: start your branch from the preceding/dependency PR branch and use that branch as your PR base, keeping the diff limited to this task (`gh stack link --base main <prereq-pr> <your-pr>`). Read all dependency PRs; coordinate multiple prerequisite branches as needed. If upstream changes or merges, update/rebase your stack and adjust the PR base. Before reworking a Ready task, reopen it so new dependent pickups pause. When your PR is ready for Boss, attach it and run `hey-boss issue ready {} --project '{}'`. You decide readiness; the service does not independently check CI. Leave handoff notes for the next worker.", job.number(), job.project.id.replace('\'', "'\\''")));
     }
     if job.resume_session.is_some() {
         instructions.push_str("\n\nResume the saved work. If a previous database mutation had an unknown outcome, first read and reconcile the current issue state or reuse its original request ID for deduplication; never blindly replay it. If an infrastructure outage still prevents progress, report the active outage and retain the continuation state. An automatic retry never bypasses permissions or verification.");
