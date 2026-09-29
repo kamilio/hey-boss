@@ -59,15 +59,40 @@ pub(super) fn execute(
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(json!({"ok":true,"project":project,"parent_issue":parent,"issues":issues}))
         }
-        Operation::CreateSubtask { if_version, .. } => {
+        Operation::CreateSubtask {
+            if_version,
+            labels,
+            then_titles,
+            ..
+        } => {
             let parent = get_issue(db, &project.id, number, false)?;
             expected(parent.version, *if_version)?;
             let actor = actor.unwrap();
             let child = create_issue(db, project, actor, operation, now)?;
             change(db, project, actor, operation, child.number, true, now)?;
-            Ok(
-                json!({"ok":true,"project":project,"issue":get_issue(db,&project.id,child.number,false)?,"parent_issue":get_issue(db,&project.id,number,false)?,"changed":true}),
-            )
+            let mut created_chain = vec![serde_json::to_value(get_issue(db, &project.id, child.number, false)?)?];
+            let mut prev_number = child.number;
+            for next_title in then_titles {
+                let next_op = Operation::CreateSubtask {
+                    number,
+                    title: next_title.clone(),
+                    body: String::new(),
+                    labels: labels.clone(),
+                    at_top: false,
+                    if_version: None,
+                    blockers: vec![prev_number],
+                    then_titles: Vec::new(),
+                };
+                let next_child = create_issue(db, project, actor, &next_op, now)?;
+                change(db, project, actor, &next_op, next_child.number, true, now)?;
+                prev_number = next_child.number;
+                created_chain.push(serde_json::to_value(get_issue(db, &project.id, next_child.number, false)?)?);
+            }
+            let mut out = json!({"ok":true,"project":project,"issue":get_issue(db,&project.id,child.number,false)?,"parent_issue":get_issue(db,&project.id,number,false)?,"changed":true});
+            if !then_titles.is_empty() {
+                out["created_chain"] = json!(created_chain);
+            }
+            Ok(out)
         }
         Operation::AddSubtask { child, .. } | Operation::RemoveSubtask { child, .. } => {
             let changed = change(

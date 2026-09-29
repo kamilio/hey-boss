@@ -69,23 +69,33 @@ struct Graph {
     parents: BTreeMap<i64, i64>,
     previous: BTreeMap<i64, Vec<i64>>,
     links: BTreeMap<i64, Vec<i64>>,
+    dependents: BTreeMap<i64, Vec<(i64, &'static str)>>,
+    active_cache: RefCell<BTreeMap<i64, BTreeMap<i64, &'static str>>>,
 }
 impl Graph {
     fn load(db: &Connection, project: &str) -> Result<Self> {
         let mut graph = Self {
             satisfied: RefCell::new(BTreeMap::new()),
-            explicit: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND subtask_scheduling='explicit')", [project], |r| r.get(0))?,
+            explicit: !db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND subtask_scheduling='sequential')", [project], |r| r.get::<_, bool>(0))?,
             prs_enabled: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)", [project], |r| r.get(0))?,
             issues: BTreeMap::new(),
             children: BTreeMap::new(),
             parents: BTreeMap::new(),
             previous: BTreeMap::new(),
             links: BTreeMap::new(),
+            dependents: BTreeMap::new(),
+            active_cache: RefCell::new(BTreeMap::new()),
         };
         let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
         for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?)))? {
             let (n, issue, links) = row?;
-            graph.links.insert(n, serde_json::from_str(&links)?);
+            let parsed_links: Vec<i64> = serde_json::from_str(&links)?;
+            if issue["deleted_at"].is_null() {
+                for &target in &parsed_links {
+                    graph.dependents.entry(target).or_default().push((n, "linked"));
+                }
+            }
+            graph.links.insert(n, parsed_links);
             graph.issues.insert(n, issue);
         }
         let mut stmt = db.prepare("SELECT r.parent_number,r.child_number FROM issue_subtasks r JOIN issues i ON i.project_id=r.project_id AND i.number=r.child_number WHERE r.project_id=?1 ORDER BY i.sort_order,i.number")?;
@@ -93,6 +103,11 @@ impl Graph {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })? {
             let (parent, child) = row?;
+            if graph.issues.get(&parent).is_some_and(|i| i["deleted_at"].is_null())
+                && graph.issues.get(&child).is_some_and(|i| i["deleted_at"].is_null())
+            {
+                graph.dependents.entry(child).or_default().push((parent, "subtask"));
+            }
             graph.parents.insert(child, parent);
             graph.children.entry(parent).or_default().push(child);
         }
@@ -148,7 +163,7 @@ impl Graph {
         let unfinished = self.issues.get(&n).is_none_or(|i| {
             i["deleted_at"].is_null()
                 && i["state"] != "closed"
-                && !(self.prs_enabled && i["state"] == "ready" && self.active(n).is_empty())
+                && !(i["state"] == "ready" && self.active(n).is_empty())
         });
         self.satisfied.borrow_mut().insert(n, !unfinished);
         unfinished
@@ -170,6 +185,9 @@ impl Graph {
         found
     }
     fn active(&self, n: i64) -> BTreeMap<i64, &'static str> {
+        if let Some(cached) = self.active_cache.borrow().get(&n) {
+            return cached.clone();
+        }
         let mut result = BTreeMap::new();
         for child in self.descendants(n) {
             if self.unfinished(child) {
@@ -188,6 +206,7 @@ impl Graph {
                 result.insert(blocker, "linked");
             }
         }
+        self.active_cache.borrow_mut().insert(n, result.clone());
         result
     }
     fn validate_subtask_claims(&self) -> Result<()> {
@@ -250,6 +269,42 @@ impl Graph {
         }
         Ok(())
     }
+}
+
+pub(super) fn validate_new_links(
+    db: &Connection,
+    project: &str,
+    links: &[i64],
+) -> Result<bool> {
+    if links.is_empty() {
+        return Ok(false);
+    }
+    if links.len() > 100
+        || links.iter().any(|n| *n < 1)
+        || links.iter().collect::<BTreeSet<_>>().len() != links.len()
+    {
+        return Err(Error::invalid(
+            "Use up to 100 different positive blocker issue numbers",
+        ));
+    }
+    let graph = Graph::load(db, project)?;
+    let mut any_unfinished = false;
+    for &target in links {
+        if graph
+            .issues
+            .get(&target)
+            .is_none_or(|i| !i["deleted_at"].is_null())
+        {
+            return Err(Error::new(
+                "not_found",
+                format!("Blocker issue #{target} was not found in this project"),
+            ));
+        }
+        if graph.unfinished(target) {
+            any_unfinished = true;
+        }
+    }
+    Ok(any_unfinished)
 }
 
 pub(crate) fn validate_links(
@@ -510,7 +565,7 @@ fn reconcile_projects(db: &Connection, upgrading: bool) -> Result<()> {
     Ok(())
 }
 pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Result<()> {
-    if !["issue", "parent_issue", "child_issue", "issues", "subtasks"]
+    if !["issue", "parent_issue", "child_issue", "issues", "subtasks", "created_chain"]
         .iter()
         .any(|key| {
             result
@@ -572,7 +627,34 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
                 .get(&n)
                 .into_iter()
                 .flatten()
-                .map(|&n| graph.reference(n, "linked"))
+                .map(|&b| {
+                    let mut r = graph.reference(b, "linked");
+                    r["satisfied"] = json!(!graph.unfinished(b));
+                    r
+                })
+                .collect::<Vec<_>>()
+        );
+        issue["blocking"] = json!(
+            graph
+                .dependents
+                .get(&n)
+                .into_iter()
+                .flatten()
+                .map(|&(dep, source)| {
+                    let m_active = graph.active(dep);
+                    let actively_blocked = m_active.contains_key(&n);
+                    let unblocks_on_release = actively_blocked
+                        && m_active.len() == 1
+                        && graph
+                            .issues
+                            .get(&dep)
+                            .is_some_and(|i| i["manual_blocked"] != true && i["draft"] != true);
+                    let mut r = graph.reference(dep, source);
+                    r["actively_blocked"] = json!(actively_blocked);
+                    r["unblocks_on_release"] = json!(unblocks_on_release);
+                    r["remaining_blocker_count"] = json!(m_active.len());
+                    r
+                })
                 .collect::<Vec<_>>()
         );
     };
@@ -581,7 +663,7 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
             attach(i);
         }
     }
-    for key in ["issues", "subtasks"] {
+    for key in ["issues", "subtasks", "created_chain"] {
         if let Some(issues) = result[key].as_array_mut() {
             for i in issues {
                 attach(i);

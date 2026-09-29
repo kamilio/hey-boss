@@ -67,7 +67,7 @@ $("#project-settings-trigger").onclick = async () => {
     );
     if (sequence !== projectSettingsSequence) return;
     projectSettingsVersion = value.version;
-    $("#project-subtask-scheduling").value = value.subtask_scheduling || "sequential";
+    $("#project-subtask-scheduling").value = value.subtask_scheduling || "explicit";
     $("#project-prompt").value = value.prompt;
     $("#project-chief").checked = value.chief_enabled;
     $("#project-chief-prompt").value = value.chief_prompt;

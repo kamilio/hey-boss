@@ -144,9 +144,15 @@ pub(super) fn handoff(
         ));
     }
     if registry::project_settings(db, project)?["prs_enabled"] != true {
-        return Err(Error::conflict(
-            "Ready requires pull requests enabled for this project",
-        ));
+        if *keep_draft {
+            return Err(Error::conflict(
+                "Ready requires pull requests enabled for this project",
+            ));
+        }
+        db.execute(
+            "INSERT INTO project_settings(project_id,prompt,prs_enabled,version,subtask_scheduling) VALUES(?1,'',1,1,'explicit') ON CONFLICT(project_id) DO UPDATE SET prs_enabled=1,version=version+1",
+            params![project.id],
+        )?;
     }
     let attached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))", params![project.id,issue.number], |r| r.get(0))?;
     if !attached {
