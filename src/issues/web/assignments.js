@@ -6,6 +6,11 @@
     catch { return null; }
   };
   const link = (url, text) => safeUrl(url) ? `<a href="${esc(safeUrl(url))}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>` : esc(text);
+  const watchablePr = pr => {
+    if (["closed", "merged"].includes(pr.status)) return false;
+    const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/([1-9][0-9]{0,19})\/?$/.exec(pr.url);
+    return !!match && ![match[1], match[2]].some(part => part === "." || part === "..") && (match[3].length < 20 || match[3] <= "18446744073709551615");
+  };
   function current(issue) {
     return issue.assignment || (issue.assignee === "watcher:github" ? {kind:"github", waiting:true} : issue.assignee === "human:boss" ? {kind:"boss"} : issue.assignee ? {kind:"agent", actor:issue.assignee} : {kind:"unassigned"});
   }
@@ -20,7 +25,7 @@
   function render(value, helpers) {
     const issue = value.issue, a = current(issue), description = describe(issue, helpers);
     const editable = ["open", "ready"].includes(issue.state) && !issue.deleted_at && !issue.draft;
-    const hasPr = issue.pull_requests?.some(pr => !["closed", "merged"].includes(pr.status) && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9][0-9]*\/?$/.test(pr.url));
+    const hasPr = issue.pull_requests?.some(watchablePr);
     const selected = a.kind === "github" ? "github" : a.kind === "boss" ? "boss" : a.kind === "machine" ? `machine:${a.machine}` : a.kind === "agent" ? "active" : "unassigned";
     const targets = [{id:"unassigned", name:"Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub watcher", disabled:!hasPr}];
     for (const machine of value.assignment_machines || []) targets.push({id:`machine:${machine.id}`, name:machine.name || machine.host || machine.id});

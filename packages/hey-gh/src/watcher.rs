@@ -16,16 +16,20 @@ pub struct Observation {
 /// The watcher supports canonical GitHub pull-request links.
 pub fn pull_request_selector(url: &str) -> Option<(String, u64)> {
     let tail = url.strip_prefix("https://github.com/")?;
-    let parts: Vec<_> = tail.trim_end_matches('/').split('/').collect();
+    let parts: Vec<_> = tail.strip_suffix('/').unwrap_or(tail).split('/').collect();
     if parts.len() != 4
         || parts[2] != "pull"
         || parts[..2].iter().any(|s| {
             s.is_empty()
+                || matches!(*s, "." | "..")
                 || !s
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
         })
     {
+        return None;
+    }
+    if parts[3].starts_with('0') || !parts[3].bytes().all(|c| c.is_ascii_digit()) {
         return None;
     }
     let number = parts[3].parse::<u64>().ok().filter(|n| *n > 0)?;
@@ -319,6 +323,34 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_links_have_one_canonical_numeric_spelling() {
+        for repository in ["../r", "./r", "o/.", "o/.."] {
+            assert!(
+                pull_request_selector(&format!("https://github.com/{repository}/pull/1")).is_none()
+            );
+        }
+        assert_eq!(
+            pull_request_selector("https://github.com/o/r/pull/42/"),
+            Some(("o/r".into(), 42))
+        );
+        for tail in [
+            "+1",
+            "01",
+            "1//",
+            "1?query=true",
+            "1#fragment",
+            "18446744073709551616",
+            "0",
+        ] {
+            assert_eq!(
+                pull_request_selector(&format!("https://github.com/o/r/pull/{tail}")),
+                None,
+                "{tail}"
+            );
+        }
+    }
     fn fixture() -> (Report, RequiredChecksReport) {
         let report = serde_json::from_value(json!({
             "data":{"repository":"o/r","number":1,"pull_request":{"state":"open","head":{"sha":"head"}},

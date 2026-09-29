@@ -2,6 +2,16 @@ use super::*;
 use serde_json::{Value, json};
 
 #[test]
+fn validation_times_must_be_recent_and_plausible() {
+    let now = crate::issues::worker::now() as u64;
+    assert!(fresh(now));
+    assert!(fresh(now - 60_000));
+    assert!(!fresh(now - 300_000));
+    assert!(!fresh(now + 300_000));
+    assert!(!fresh(u64::MAX));
+}
+
+#[test]
 fn slow_optional_details_do_not_hold_up_other_required_checks() {
     queue_scenario(true);
 }
@@ -163,6 +173,11 @@ fn stale_ci_never_wakes_work_or_starts_review_collection() {
 }
 
 #[test]
+fn invalid_observation_time_never_wakes_work() {
+    scenario(Scenario::InvalidTime);
+}
+
+#[test]
 fn required_failure_survives_unavailable_workflow_details() {
     scenario(Scenario::CiDenied);
 }
@@ -172,6 +187,7 @@ enum Scenario {
     ReviewsDenied,
     Pending,
     Stale,
+    InvalidTime,
     CiDenied,
     Closed,
     Merged,
@@ -194,6 +210,7 @@ fn disabling_automatic_completion_returns_merged_work_to_boss() {
 fn scenario(scenario: Scenario) {
     let pending = matches!(scenario, Scenario::Pending);
     let stale = matches!(scenario, Scenario::Stale);
+    let invalid_time = matches!(scenario, Scenario::InvalidTime);
     let ci_denied = matches!(scenario, Scenario::CiDenied);
     let terminal = matches!(
         scenario,
@@ -231,6 +248,9 @@ fn scenario(scenario: Scenario) {
     }
     drop(store);
     let (ci, mut policy, mut metadata) = evidence(pending, stale);
+    if invalid_time {
+        policy["observed_at_ms"] = json!(u64::MAX);
+    }
     if terminal {
         policy["pull_request_state"] = json!("closed");
         metadata["data"]["state"] = json!("closed");
@@ -243,7 +263,7 @@ fn scenario(scenario: Scenario) {
     let serving = std::thread::spawn(move || {
         let expected = if terminal {
             2
-        } else if stale {
+        } else if stale || invalid_time {
             1
         } else if pending || ci_denied {
             3
@@ -325,16 +345,16 @@ fn scenario(scenario: Scenario) {
     if terminal && !matches!(scenario, Scenario::Merged) {
         assert_eq!(view["issue"]["assignee"], "human:boss");
         assert_eq!(view["issue"]["state"], "open");
-    } else if stale {
+    } else if stale || invalid_time {
         assert_eq!(view["issue"]["assignee"], "watcher:github");
     } else {
         assert!(view["issue"]["assignee"].is_null());
     }
     let status = &view["issue"]["github_status"]["prs"]["https://github.com/o/r/pull/1"];
-    if !terminal && (stale || !pending) {
+    if !terminal && (stale || invalid_time || !pending) {
         assert!(status["error"].is_string(), "{view}");
     }
-    if !stale && !terminal {
+    if !stale && !invalid_time && !terminal {
         assert_eq!(status["evidence"]["required"][0]["state"], "failure");
     }
     if terminal {

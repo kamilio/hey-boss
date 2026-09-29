@@ -32,7 +32,7 @@ test('one assignment control preserves Boss and explains when GitHub is unavaila
 });
 
 test('watcher destination is unavailable for unsupported or closed pull request links', () => {
-  for (const pr of [{url:'https://example.com/o/r/pull/1'}, {url:'https://github.com/o/r/pull/0'}, {url:'https://github.com/o/r/pull/1',status:'closed'}]) {
+  for (const pr of [{url:'https://example.com/o/r/pull/1'}, {url:'https://github.com/o/r/pull/0'}, {url:'https://github.com/../r/pull/1'}, {url:'https://github.com/o/./pull/1'}, {url:'https://github.com/o/r/pull/18446744073709551616'}, {url:'https://github.com/o/r/pull/1',status:'closed'}]) {
     const html = assignments.render({issue:{...base,pull_requests:[pr]}},helpers);
     assert.match(html,/value="github"[^>]*disabled/);
   }
