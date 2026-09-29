@@ -137,7 +137,7 @@ enum Command {
     Unwatch {
         id: String,
     },
-    /// Read changes since an opaque cursor. Omit the cursor to replay history.
+    /// Read current data changed since a cursor. Intermediate versions are coalesced.
     Changes {
         #[arg(long, default_value_t = 100)]
         limit: usize,
