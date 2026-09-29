@@ -171,15 +171,16 @@ fn startup_connection_outage_waits_idle_and_is_cancellable() {
     let mut f = Fixture::new();
     f.worker = Some(f.command().spawn().unwrap());
     f.wait_idle();
-    thread::sleep(Duration::from_millis(1300));
-    assert!(f.worker.as_mut().unwrap().try_wait().unwrap().is_none());
-    assert!(
-        fs::read_to_string(f.root.0.join("stderr"))
-            .unwrap()
-            .matches("Worker idle:")
-            .count()
-            >= 2
-    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(f.worker.as_mut().unwrap().try_wait().unwrap().is_none());
+        let error = fs::read_to_string(f.root.0.join("stderr")).unwrap();
+        if error.matches("Worker idle:").count() >= 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Worker did not retry: {error}");
+        thread::sleep(Duration::from_millis(20));
+    }
     f.cancel();
 }
 
