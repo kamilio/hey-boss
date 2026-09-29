@@ -57,6 +57,16 @@ fn wait(label: &str, root: &std::path::Path, mut ready: impl FnMut() -> bool) {
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
 fn github_http_poll_claim_steer_rearm_and_fresh_session() {
+    lifecycle(false);
+}
+
+#[test]
+#[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
+fn github_http_poll_rejected_steering_starts_fresh_session_with_pending_findings() {
+    lifecycle(true);
+}
+
+fn lifecycle(reject_steering: bool) {
     let binary = std::env::current_exe()
         .unwrap()
         .parent()
@@ -98,6 +108,10 @@ fn github_http_poll_claim_steer_rearm_and_fresh_session() {
             .env("HEY_BOSS_FLEET_STATE", &ctx.state)
             .env("HEY_BOSS_INBOX_SOCKET", root.join("absent-inbox.sock"))
             .env("HEY_BOSS_TEST_CLI", &binary)
+            .env(
+                "HEY_BOSS_TEST_REJECT_STEERING",
+                if reject_steering { "1" } else { "0" },
+            )
             .env(
                 "HEY_BOSS_CODEX",
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -214,33 +228,60 @@ fn github_http_poll_claim_steer_rearm_and_fresh_session() {
     assert_eq!(scalar("SELECT count(*) FROM worker_runs"), 1);
     phase.store(2, Ordering::Release);
     poll_now();
+    let after_completion = if reject_steering { 2 } else { 1 };
     wait("steering and return to watcher", &root, || {
-        scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == 1
+        scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == after_completion
             && scalar("SELECT count(*) FROM issues WHERE assignee='watcher:github'") == 1
     });
     let steered = records()
         .into_iter()
-        .find(|r| r["type"] == "steer")
+        .find(|r| {
+            r["type"]
+                == if reject_steering {
+                    "steer_rejected"
+                } else {
+                    "steer"
+                }
+        })
         .unwrap();
     assert_eq!(steered["session"], first["session"]);
     assert_ne!(steered["status"]["event"], first["status"]["event"]);
+    if reject_steering {
+        let delivered = records()
+            .into_iter()
+            .filter(|r| r["type"] == "claim")
+            .nth(1)
+            .unwrap();
+        assert_ne!(delivered["session"], first["session"]);
+        assert_eq!(delivered["status"]["event"], steered["status"]["event"]);
+        assert_eq!(
+            delivered["status"]["prs"]["https://github.com/o/r/pull/1"]["evidence"]["complete"],
+            true
+        );
+        assert_eq!(
+            scalar("SELECT count(*) FROM agent_steering WHERE state='rejected'"),
+            1
+        );
+    }
     phase.store(3, Ordering::Release);
     poll_now();
     wait("fresh second session", &root, || {
-        scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == 2
+        scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == after_completion + 1
             && scalar("SELECT count(*) FROM issues WHERE assignee='watcher:github'") == 1
     });
     let claims: Vec<_> = records()
         .into_iter()
         .filter(|r| r["type"] == "claim")
         .collect();
-    assert_eq!(claims.len(), 2);
-    assert_ne!(claims[0]["session"], claims[1]["session"]);
+    assert_eq!(claims.len(), (after_completion + 1) as usize);
+    for pair in claims.windows(2) {
+        assert_ne!(pair[0]["session"], pair[1]["session"]);
+    }
     poll_now();
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(
         scalar("SELECT count(*) FROM worker_runs"),
-        2,
+        after_completion + 1,
         "Repeated observations cannot launch duplicate work"
     );
     drop(server);
