@@ -19,6 +19,12 @@
 .github-observed { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
 .list-assignment { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .list-assignment > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) {
+  .issue-row:not(.subtask-row) { display: grid; grid-template-columns: 22px 17px minmax(0, 1fr); }
+  .issue-row:not(.subtask-row) > .issue-row-end { grid-column: 3; justify-self: start; flex-direction: row; flex-wrap: wrap; min-width: 0; max-width: 100%; margin-top: 0; }
+  .issue-row-end .list-assignee { min-width: 0; max-width: 100%; }
+  .issue-row-end .list-assignment { max-width: 100%; }
+}
 .github-fetch-overview { margin-top: 12px; }
 .github-fetch + .github-fetch { margin-top: 12px; }
 .github-fetch-state { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
