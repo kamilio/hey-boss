@@ -1,0 +1,55 @@
+"use strict";
+(function(root) {
+  const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const safeUrl = value => {
+    try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? url.href : null; }
+    catch { return null; }
+  };
+  const link = (url, text) => safeUrl(url) ? `<a href="${esc(safeUrl(url))}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>` : esc(text);
+  function current(issue) {
+    return issue.assignment || (issue.assignee === "watcher:github" ? {kind:"github", waiting:true} : issue.assignee === "human:boss" ? {kind:"boss"} : issue.assignee ? {kind:"agent", actor:issue.assignee} : {kind:"unassigned"});
+  }
+  function describe(issue, {actorName, bossName}) {
+    const a = current(issue), machine = a.machine_name || a.machine;
+    if (a.kind === "github") return {label:"GitHub watcher", detail:a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for required failures or all checks to finish." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
+    if (a.kind === "machine") return {label:machine || "Machine", detail:"Waiting for an agent.", icon:"monitor"};
+    if (a.kind === "agent") return {label:actorName(a.actor), detail:machine ? `Working on ${machine}.` : "Agent is working.", icon:"user"};
+    if (a.kind === "boss") return {label:bossName, detail:"Assigned to you.", icon:"user"};
+    return {label:"Unassigned", detail:"An available machine can pick this up.", icon:"user"};
+  }
+  function render(value, helpers) {
+    const issue = value.issue, a = current(issue), description = describe(issue, helpers);
+    const editable = ["open", "ready"].includes(issue.state) && !issue.deleted_at && !issue.draft;
+    const hasPr = issue.pull_requests?.some(pr => !["closed", "merged"].includes(pr.status) && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9][0-9]*\/?$/.test(pr.url));
+    const selected = a.kind === "github" ? "github" : a.kind === "boss" ? "boss" : a.kind === "machine" ? `machine:${a.machine}` : a.kind === "agent" ? "active" : "unassigned";
+    const targets = [{id:"unassigned", name:"Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub watcher", disabled:!hasPr}];
+    for (const machine of value.assignment_machines || []) targets.push({id:`machine:${machine.id}`, name:machine.name || machine.host || machine.id});
+    if (a.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
+    if (a.kind === "agent") targets.unshift({id:"active", name:description.label, disabled:true});
+    const options = targets.map(t => `<option value="${esc(t.id)}"${t.id === selected ? " selected" : ""}${t.disabled ? " disabled" : ""}>${esc(t.name)}</option>`).join("");
+    return `<div class="side-section issue-assignment"><label class="side-heading" for="issue-assignment">Assignment${helpers.icon(description.icon)}</label><select id="issue-assignment" data-assignment-select aria-describedby="assignment-detail"${editable ? "" : " disabled"}>${options}</select><p id="assignment-detail" class="assignment-detail">${esc(issue.draft ? "Mark ready before assigning this issue." : description.detail)}</p>${editable && !hasPr ? '<p class="assignment-hint">Attach a PR to enable the GitHub watcher.</p>' : ""}</div>`;
+  }
+  const checkState = state => ({failure:"Failed",satisfied:"Passed",success:"Passed",pending:"Running",missing:"Not reported",unknown:"Unknown",not_required:"No required checks"}[state] || state || "Unknown");
+  function status(issue, helpers) {
+    const watch = issue.github_status;
+    if (!watch && current(issue).kind !== "github") return "";
+    const prs = Object.entries(watch?.prs || {});
+    const error = watch?.error ? `<p class="github-status-error" role="status"><strong>Status unavailable</strong><br>${esc(watch.error)}</p>` : "";
+    const entries = prs.map(([url, snapshot]) => {
+      const evidence = snapshot.evidence || {}, required = evidence.required || [];
+      const failed = required.filter(c => c.state === "failure");
+      const incomplete = (evidence.source_errors?.length || evidence.ci_errors?.length || evidence.policy_errors?.length);
+      const label = snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : failed.length ? `${failed.length} required check${failed.length === 1 ? "" : "s"} failed` : evidence.complete ? "All checks finished" : "Checks in progress";
+      const checks = required.map(c => `<li><span class="github-check-state ${c.state === "failure" ? "failed" : ""}">${esc(checkState(c.state))}</span>${link(c.url, c.context)}</li>`).join("");
+      const feedback = [...(evidence.reviews || []).filter(r => r.body), ...(evidence.comments || []).filter(c => c.body), ...(evidence.review_comments || []).filter(c => c.body)].slice(0, 5);
+      const reviews = feedback.length ? `<details class="github-feedback"><summary>Recent review feedback</summary>${feedback.map(r => `<article><p>${esc(r.body)}</p>${r.html_url ? link(r.html_url, "View on GitHub") : ""}</article>`).join("")}</details>` : "";
+      const date = typeof snapshot.checked_at === "number" && Number.isFinite(snapshot.checked_at) && snapshot.checked_at > 0 ? new Date(snapshot.checked_at) : null;
+      const observed = date && Number.isFinite(date.getTime()) ? `<p class="github-observed">Observed <time datetime="${date.toISOString()}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}</time></p>` : "";
+      return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}</h4><p class="github-check-summary${failed.length ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${checks ? `<details><summary>Required checks</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${observed}</article>`;
+    }).join("");
+    return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${watch?.monitoring === false ? '<p class="assignment-hint">Monitoring paused. Last recorded status:</p>' : ""}${error}${entries || (!error ? '<p class="assignment-detail">Waiting for the first GitHub status.</p>' : "")}</section>`;
+  }
+  const api = {current, describe, render, status};
+  if (typeof module !== "undefined") module.exports = api;
+  else root.IssueAssignments = api;
+})(globalThis);
