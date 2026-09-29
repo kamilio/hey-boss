@@ -88,6 +88,7 @@ const HeyBossQuickIssue = (() => {
       submit = document.getElementById("quick-issue-submit"),
       bottom = document.getElementById("quick-issue-bottom"),
       kind = document.getElementById("quick-issue-kind"),
+      blockersInput = document.getElementById("quick-issue-blockers"),
       status = document.getElementById("quick-issue-status");
     const picker = document.getElementById("quick-issue-project-picker"),
       list = document.getElementById("quick-issue-projects"),
@@ -195,6 +196,12 @@ const HeyBossQuickIssue = (() => {
     window.addEventListener("hashchange", openFromLink);
     openFromLink();
     document.getElementById("quick-issue-open").onclick = open;
+    window.addEventListener("hey-boss-quick-issue-blocked-by", e => {
+      open();
+      if (blockersInput && e.detail?.number) {
+        blockersInput.value = String(e.detail.number);
+      }
+    });
     document.getElementById("quick-issue-close").onclick = close;
     input.oninput = () => { dismissed = false; preview(); updatePicker(); };
     input.addEventListener("click",() => { dismissed = false; updatePicker(); });
@@ -246,7 +253,8 @@ const HeyBossQuickIssue = (() => {
       if (!ready || saving) return;
       let parsed;
       try { parsed = parse(input.value, projects, current); } catch (e) { fail(e.message); input.focus(); return; }
-      const operation = {action:"create", title:parsed.title, body:"", labels:taskLabels([],kind.value), at_top:!bottom.checked};
+      const blockerNums = (blockersInput?.value || "").split(/[\s,#]+/).filter(Boolean).map(Number).filter(n => Number.isInteger(n) && n > 0);
+      const operation = {action:"create", title:parsed.title, body:"", labels:taskLabels([],kind.value), at_top:!bottom.checked, ...(blockerNums.length ? {blockers:[...new Set(blockerNums)]} : {})};
       const key = JSON.stringify([host, parsed.project.id, operation]);
       if (pending?.key !== key) pending = {key, id:HeyBossUI.requestId()};
       hidePicker();
@@ -254,7 +262,7 @@ const HeyBossQuickIssue = (() => {
       try {
         const value = await post(operation, parsed.project.name, pending.id);
         const savedHost = host;
-        pending = null; input.value = ""; bottom.checked = false; kind.value = "implement"; saving = false; close();
+        pending = null; input.value = ""; if (blockersInput) blockersInput.value = ""; bottom.checked = false; kind.value = "implement"; saving = false; close();
         const link = document.createElement("a");
         link.href = `/#${new URLSearchParams({project:value.project.id, issue:value.issue.number, ...(savedHost ? {host:savedHost} : {})})}`;
         link.textContent = `Created #${value.issue.number} in ${value.project.name}`;

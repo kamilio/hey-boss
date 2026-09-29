@@ -125,7 +125,7 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     (
         "project_settings",
         "subtask_scheduling",
-        "TEXT NOT NULL DEFAULT 'sequential' CHECK(subtask_scheduling IN ('sequential','explicit'))",
+        "TEXT NOT NULL DEFAULT 'explicit' CHECK(subtask_scheduling IN ('sequential','explicit'))",
     ),
     ("worker_runs", "retry_at", "INTEGER"),
     ("worker_runs", "retry_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -645,15 +645,20 @@ fn validate(r: &Request) -> Result<()> {
             title,
             body: text,
             labels: values,
+            then_titles,
             ..
         }
         | Operation::CreateSubtask {
             title,
             body: text,
             labels: values,
+            then_titles,
             ..
         } => {
             title_content::split(title, text)?;
+            for next in then_titles {
+                title_content::split(next, "")?;
+            }
             labels(values)?;
         }
         Operation::Edit {
@@ -1929,9 +1934,34 @@ impl Store {
                 *if_version,
                 now,
             )?,
-            Operation::Create { .. } => {
+            Operation::Create {
+                draft,
+                labels,
+                then_titles,
+                ..
+            } => {
                 let issue = create_issue(&tx, &project, actor.unwrap(), &r.operation, now)?;
-                json!({"ok":true,"project":project,"issue":issue,"changed":true})
+                let mut created_chain = vec![serde_json::to_value(&issue)?];
+                let mut prev_number = issue.number;
+                for next_title in then_titles {
+                    let next_op = Operation::Create {
+                        draft: *draft,
+                        title: next_title.clone(),
+                        body: String::new(),
+                        labels: labels.clone(),
+                        at_top: false,
+                        blockers: vec![prev_number],
+                        then_titles: Vec::new(),
+                    };
+                    let next_issue = create_issue(&tx, &project, actor.unwrap(), &next_op, now)?;
+                    prev_number = next_issue.number;
+                    created_chain.push(serde_json::to_value(&next_issue)?);
+                }
+                let mut out = json!({"ok":true,"project":project,"issue":issue,"changed":true});
+                if !then_titles.is_empty() {
+                    out["created_chain"] = json!(created_chain);
+                }
+                out
             }
             operation => mutate(&tx, &project, actor.unwrap(), operation, now)?,
         };
@@ -1983,6 +2013,13 @@ impl Store {
                 if let Some(number) = result[key]["number"].as_i64() {
                     result[key] =
                         serde_json::to_value(get_issue(&tx, &response_project.id, number, true)?)?;
+                }
+            }
+            if let Some(chain) = result["created_chain"].as_array_mut() {
+                for item in chain {
+                    if let Some(number) = item["number"].as_i64() {
+                        *item = serde_json::to_value(get_issue(&tx, &response_project.id, number, true)?)?;
+                    }
                 }
             }
         }
@@ -2149,12 +2186,13 @@ fn create_issue(
     operation: &Operation,
     now: i64,
 ) -> Result<Issue> {
-    let (title, body, labels, at_top) = match operation {
+    let (title, body, labels, at_top, blockers) = match operation {
         Operation::Create {
             title,
             body,
             labels,
             at_top,
+            blockers,
             ..
         }
         | Operation::CreateSubtask {
@@ -2162,8 +2200,9 @@ fn create_issue(
             body,
             labels,
             at_top,
+            blockers,
             ..
-        } => (title, body, labels, at_top),
+        } => (title, body, labels, at_top, blockers),
         _ => unreachable!(),
     };
     let (title, body) = title_content::split(title, body)?;
@@ -2171,6 +2210,8 @@ fn create_issue(
     if draft {
         super::planning::drafts_allowed(db, project)?;
     }
+    let any_unfinished = super::blockers::validate_new_links(db, &project.id, blockers)?;
+    let initial_state = if !draft && any_unfinished { "blocked" } else { "open" };
     let number: i64 = db.query_row(
         "SELECT next_number FROM projects WHERE id=?1",
         [&project.id],
@@ -2187,9 +2228,11 @@ fn create_issue(
         params![project.id,at_top],
         |r| r.get(0),
     )?;
-    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,draft,origin) VALUES(?1,?2,?3,?4,'open',?5,?6,?6,1,?7,?8,?9,?10)",
-        params![project.id,number,title,body,actor.id,now,serde_json::to_string(&labels)?,sort_order,draft,provenance::capture(db,actor,now)?])?;
-    db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,node FROM fleet_meta WHERE id=1 AND role='agent'", params![project.id,number])?;
+    db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,draft,origin,blockers) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,1,?8,?9,?10,?11,?12)",
+        params![project.id,number,title,body,initial_state,actor.id,now,serde_json::to_string(&labels)?,sort_order,draft,provenance::capture(db,actor,now)?,serde_json::to_string(blockers)?])?;
+    if initial_state == "open" && !draft {
+        db.execute("INSERT OR IGNORE INTO fleet_allocations(project_id,issue_number,node) SELECT ?1,?2,node FROM fleet_meta WHERE id=1 AND role='agent'", params![project.id,number])?;
+    }
     db.execute(
         "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",
         [&project.id],

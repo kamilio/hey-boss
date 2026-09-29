@@ -28,3 +28,32 @@ assert.match(closedActions, /data-action="reopen"/);
 assert.doesNotMatch(closedActions, /disabled/, 'Closed issues can reopen into dependency waiting');
 assert.match(context.issueStateActions(dependency), /disabled/, 'Reopen cannot bypass active dependencies');
 console.log('COMPLETE: closed issue reopening retains dependency protection');
+
+context.esc = s => String(s ?? "");
+context.routeHash = () => "#test";
+const cardHtml = context.blockers.card({
+  number: 2,
+  title: "API layer",
+  state: "open",
+  blocked_by: [],
+  blocker_links: [{
+    number: 1,
+    title: "Storage layer",
+    state: "ready",
+    satisfied: true,
+    pull_requests: [{url: "https://github.com/example/repo/pull/101"}]
+  }],
+  blocking: [{
+    number: 3,
+    title: "Web UI",
+    state: "blocked",
+    actively_blocked: true,
+    unblocks_on_release: true,
+    pull_requests: []
+  }]
+});
+assert.match(cardHtml, /dep-chain-graph/);
+assert.match(cardHtml, /PR #101/);
+assert.match(cardHtml, /Unblocks on Ready\/Close/);
+assert.match(cardHtml, /data-create-dependent="2"/);
+console.log("COMPLETE: dependency chain and PR stack visualization");

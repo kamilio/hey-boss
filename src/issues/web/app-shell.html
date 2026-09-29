@@ -92,6 +92,7 @@
         <p id="quick-issue-overflow" role="status" hidden>Long title · Extra text will move to the description.</p>
         <div class="quick-issue-footer">
           <span id="quick-issue-context" role="status"></span>
+          <label class="task-kind-choice" for="quick-issue-blockers" title="Issue numbers that block this new issue (starts in Blocked state immediately)">Blocked by <input id="quick-issue-blockers" type="text" placeholder="#1, #2" autocomplete="off" style="width:76px;padding:3px 7px;font-size:11px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text)" /></label>
           <label class="task-kind-choice" for="quick-issue-kind">Task <select id="quick-issue-kind" title="Plan produces linked artifacts"><option value="implement">Implement</option><option value="plan">Plan</option></select></label>
           <label class="issue-placement" title="Toggle add to bottom (⌘⇧B / Ctrl+Shift+B)"><input type="checkbox" id="quick-issue-bottom" aria-keyshortcuts="Meta+Shift+B Control+Shift+B" /> Add to bottom <kbd>⌘⇧B</kbd></label>
           <button id="quick-issue-submit" class="button" type="submit" disabled>Create ↵</button>

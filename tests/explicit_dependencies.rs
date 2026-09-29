@@ -62,8 +62,6 @@ fn explicit_dependencies_keep_nested_groups_without_sibling_blockers() {
     f.create(Some(1));
     f.create(Some(2));
     f.create(Some(3));
-    assert_eq!(f.ready(), vec![4]);
-    f.run(json!({"action":"configure_project","subtask_scheduling":"explicit"}));
     assert_eq!(f.ready(), vec![4, 5]);
     let fifth = f.view(5);
     assert_eq!(fifth["parent"]["number"], 3);
@@ -275,6 +273,7 @@ fn clear_manual_hold_keeps_dependencies_and_checks_version_first() {
     f.create(None);
     f.create(Some(1));
     f.create(Some(1));
+    f.run(json!({"action":"set_blockers","number":3,"blockers":[2],"force":false}));
     f.run(json!({"action":"block","number":3,"comment":null,"force":false}));
     let before = f.view(3);
     let stale = f
@@ -290,7 +289,7 @@ fn clear_manual_hold_keeps_dependencies_and_checks_version_first() {
         .execute(&Fixture::request(json!({"action":"reopen","number":3})))
         .unwrap_err();
     assert!(
-        blocked.message.contains("#2 (previous_subtask)"),
+        blocked.message.contains("#2 (linked)"),
         "{blocked}"
     );
     assert!(blocked.message.contains("--clear-manual-hold"), "{blocked}");

@@ -120,7 +120,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
-        subtask_scheduling: "sequential".into(),
+        subtask_scheduling: "explicit".into(),
         chief_enabled: false,
         chief_prompt: None,
         prompt: worker::DEFAULT_PROMPT.into(),
