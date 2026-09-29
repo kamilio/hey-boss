@@ -73,8 +73,15 @@ fn new_configs_are_global_scoped_and_idempotent() {
         serde_json::json!(["Bash(/opt/hey-boss/bin/hey-boss *)", "Bash(hey-boss *)"])
     );
     let rules = fs::read_to_string(fixture.rules()).unwrap();
-    assert!(rules.contains("pattern = [\"hey-boss\"], decision = \"allow\""));
-    assert!(rules.contains("pattern = [\"/opt/hey-boss/bin/hey-boss\"]"));
+    assert_eq!(
+        rules,
+        concat!(
+            "# Managed by hey-boss configure-agents.\n",
+            "prefix_rule(pattern = [\"/opt/hey-boss/bin/hey-boss\"], decision = \"allow\")\n",
+            "prefix_rule(pattern = [\"hey-boss\"], decision = \"allow\")\n",
+            "prefix_rule(pattern = [\"git\", \"commit\", \"--no-verify\"], decision = \"allow\")\n",
+        )
+    );
     assert_eq!(
         fs::read_to_string(fixture.0.join(".codex/rules/default.rules")).unwrap(),
         untouched
@@ -87,6 +94,7 @@ fn new_configs_are_global_scoped_and_idempotent() {
     fixture.success();
     assert_eq!(fs::read(fixture.settings()).unwrap(), settings);
     assert_eq!(fs::metadata(fixture.settings()).unwrap().ino(), inode);
+    assert_eq!(fs::read_to_string(fixture.rules()).unwrap(), rules);
     assert!(fixture.backups().is_empty());
     assert_eq!(
         fs::metadata(fixture.settings())
@@ -96,6 +104,31 @@ fn new_configs_are_global_scoped_and_idempotent() {
             & 0o777,
         0o600
     );
+}
+
+#[test]
+fn existing_managed_rules_gain_no_verify_once() {
+    let fixture = Fixture::new();
+    let original = concat!(
+        "# Managed by hey-boss configure-agents.\n",
+        "prefix_rule(pattern = [\"hey-boss\"], decision = \"allow\")\n",
+        "prefix_rule(pattern = [\"/old/bin/hey-boss\"], decision = \"allow\")\n",
+    );
+    fs::write(fixture.rules(), original).unwrap();
+    fixture.success();
+    let rules = fs::read_to_string(fixture.rules()).unwrap();
+    assert!(rules.contains(
+        "prefix_rule(pattern = [\"git\", \"commit\", \"--no-verify\"], decision = \"allow\")\n"
+    ));
+    assert!(!rules.contains("/old/bin/hey-boss"));
+    let backups = fixture.backups();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read_to_string(&backups[0]).unwrap(), original);
+    let inode = fs::metadata(fixture.rules()).unwrap().ino();
+    fixture.success();
+    assert_eq!(fs::read_to_string(fixture.rules()).unwrap(), rules);
+    assert_eq!(fs::metadata(fixture.rules()).unwrap().ino(), inode);
+    assert_eq!(fixture.backups(), backups);
 }
 
 #[test]
@@ -171,6 +204,8 @@ fn unowned_or_modified_rules_are_not_overwritten() {
     for input in [
         "# personal rules\n",
         "# Managed by hey-boss configure-agents.\n# custom addition\n",
+        "# Managed by hey-boss configure-agents.\nprefix_rule(pattern = [\"git\"], decision = \"allow\")\n",
+        "# Managed by hey-boss configure-agents.\nprefix_rule(pattern = [\"git\", \"commit\"], decision = \"allow\")\n",
     ] {
         let fixture = Fixture::new();
         fs::write(fixture.rules(), input).unwrap();
