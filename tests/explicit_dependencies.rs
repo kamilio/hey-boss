@@ -288,10 +288,7 @@ fn clear_manual_hold_keeps_dependencies_and_checks_version_first() {
         .store
         .execute(&Fixture::request(json!({"action":"reopen","number":3})))
         .unwrap_err();
-    assert!(
-        blocked.message.contains("#2 (linked)"),
-        "{blocked}"
-    );
+    assert!(blocked.message.contains("#2 (linked)"), "{blocked}");
     assert!(blocked.message.contains("--clear-manual-hold"), "{blocked}");
     let cleared = f.run(json!({"action":"reopen","number":3,"if_version":before["version"],"clear_manual_hold":true}));
     assert_eq!(cleared["issue"]["state"], "blocked");
