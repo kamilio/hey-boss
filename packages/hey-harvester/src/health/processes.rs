@@ -229,10 +229,7 @@ fn category(p: &Process) -> Option<&'static str> {
         Some("Cloudflare test worker")
     } else if p.executable.contains("/.wrangler/chrome/")
         && (name == "Google Chrome for Testing" || name == "chrome")
-        && p.arguments.contains(" --headless")
-        && p.arguments.contains("/miniflare-")
-        && p.arguments.contains("/browser-rendering/profile-")
-        && p.arguments.contains(" --user-data-dir=")
+        && miniflare_options(&p.arguments)
     {
         Some("Cloudflare test browser")
     } else if p.executable.contains("/.wrangler/chrome/") && name == "chrome_crashpad_handler" {
@@ -249,6 +246,55 @@ fn category(p: &Process) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn miniflare_options(arguments: &str) -> bool {
+    let options: Vec<_> = arguments.split_whitespace().collect();
+    if !options
+        .iter()
+        .any(|s| matches!(*s, "--headless" | "--headless=new"))
+        || options.iter().any(|s| s.starts_with("--type="))
+    {
+        return false;
+    }
+    let profiles: Vec<_> = options
+        .iter()
+        .filter_map(|s| s.strip_prefix("--user-data-dir="))
+        .collect();
+    let [profile] = profiles.as_slice() else {
+        return false;
+    };
+    let path = Path::new(profile);
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let Some(rendering) = path.parent() else {
+        return false;
+    };
+    let Some(instance) = rendering.parent() else {
+        return false;
+    };
+    let Some(temp) = instance.parent() else {
+        return false;
+    };
+    (path.starts_with("/tmp")
+        || path.starts_with("/private/tmp")
+        || ((path.starts_with("/var/folders") || path.starts_with("/private/var/folders"))
+            && temp.file_name().is_some_and(|name| name == "T")))
+        && path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("profile-") && s.len() > 8)
+        && rendering
+            .file_name()
+            .is_some_and(|s| s == "browser-rendering")
+        && instance
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("miniflare-") && s.len() > 10)
 }
 
 fn browser(p: &Process) -> bool {
@@ -270,7 +316,14 @@ fn strict_cpu(p: &Process) -> bool {
 /// headless browser burns a few hundred milliseconds a minute on timers; with a flat
 /// 0.1-second limit every browser failed the final check and was preserved forever.
 fn quiet_since(old: &Process, fresh: &Process, strict: bool) -> bool {
-    let elapsed = fresh.age_seconds.saturating_sub(old.age_seconds) as f64;
+    if fresh.age_seconds < old.age_seconds
+        || !old.cpu_seconds.is_finite()
+        || !fresh.cpu_seconds.is_finite()
+        || fresh.cpu_seconds < old.cpu_seconds
+    {
+        return false;
+    }
+    let elapsed = (fresh.age_seconds - old.age_seconds) as f64;
     let budget = if strict { 0.1 } else { elapsed * 0.02 + 0.1 };
     fresh.cpu_seconds - old.cpu_seconds <= budget
 }
@@ -426,6 +479,9 @@ fn disconnected(root: &Process, ids: &BTreeSet<u32>) -> io::Result<bool> {
         "-F",
         "pftn",
     ])?;
+    if category(root) == Some("Cloudflare test browser") {
+        return Ok(browser_connections_idle(root.pid, &network, &stdio));
+    }
     if stdio.is_empty() {
         return Ok(false);
     }
@@ -439,6 +495,85 @@ fn disconnected(root: &Process, ids: &BTreeSet<u32>) -> io::Result<bool> {
         return Ok(false);
     }
     Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn browser_connections_idle(root: u32, network: &str, stdio: &str) -> bool {
+    #[derive(Default)]
+    struct Descriptor<'a> {
+        pid: u32,
+        fd: &'a str,
+        kind: &'a str,
+        name: &'a str,
+        state: &'a str,
+    }
+    fn parse(data: &str) -> Option<Vec<Descriptor<'_>>> {
+        let mut result = Vec::new();
+        let mut pid = 0;
+        let mut current: Option<Descriptor<'_>> = None;
+        for line in data.lines() {
+            let (tag, value) = line.split_at_checked(1)?;
+            if tag == "p" || tag == "f" {
+                if let Some(record) = current.take() {
+                    result.push(record);
+                }
+                if tag == "p" {
+                    pid = value.parse().ok()?;
+                } else {
+                    current = Some(Descriptor {
+                        pid,
+                        fd: value,
+                        ..Descriptor::default()
+                    });
+                }
+            } else {
+                let record = current.as_mut()?;
+                match tag {
+                    "t" => record.kind = value,
+                    "n" => record.name = value,
+                    "T" => {
+                        if let Some(state) = value.strip_prefix("ST=") {
+                            record.state = state;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        if let Some(record) = current {
+            result.push(record);
+        }
+        if (!data.is_empty() && result.is_empty())
+            || result
+                .iter()
+                .any(|r| r.pid == 0 || r.fd.is_empty() || r.kind.is_empty() || r.name.is_empty())
+        {
+            return None;
+        }
+        Some(result)
+    }
+    let (Some(network), Some(stdio)) = (parse(network), parse(stdio)) else {
+        return false;
+    };
+    network.iter().all(|r| {
+        matches!(r.kind, "IPv4" | "IPv6")
+            && r.state == "LISTEN"
+            && (r.name.starts_with("127.0.0.1:")
+                || r.name.starts_with("[::1]:")
+                || r.name.starts_with("::1:"))
+    }) && stdio.len() == 3
+        && ["0", "1", "2"].iter().all(|fd| {
+            stdio
+                .iter()
+                .filter(|r| {
+                    r.pid == root
+                        && r.fd == *fd
+                        && ((r.kind == "unix" && r.name == "->(none)")
+                            || (r.kind == "CHR" && r.name == "/dev/null"))
+                })
+                .count()
+                == 1
+        })
 }
 
 struct QuietWindow {
@@ -510,6 +645,73 @@ pub(super) fn signal(p: &Process, signal: i32) -> io::Result<bool> {
         }
     }
 }
+fn unchanged_browser_family(
+    root: &Process,
+    ids: &BTreeSet<u32>,
+    old: &Table,
+    fresh: &Table,
+    config: &Config,
+) -> bool {
+    let Some(current) = fresh.get(&root.pid) else {
+        return false;
+    };
+    category(current) == Some("Cloudflare test browser")
+        && current.identity == root.identity
+        && tree(current, fresh, root.uid, minimum_age(current, config)).as_ref() == Some(ids)
+        && ids.iter().all(|pid| {
+            old.get(pid)
+                .zip(fresh.get(pid))
+                .is_some_and(|(old, fresh)| {
+                    old.identity == fresh.identity
+                        && old.executable == fresh.executable
+                        && old.arguments == fresh.arguments
+                        && quiet_since(old, fresh, false)
+                })
+        })
+}
+
+fn terminate_browser(
+    root: &Process,
+    ids: &BTreeSet<u32>,
+    old: &Table,
+    config: &Config,
+    activity: &Option<String>,
+) -> io::Result<usize> {
+    // A cwd-only ownership exemption is granted only after the quiet observation
+    // window, and renewed with fresh family/connection/ownership evidence at each stage.
+    for (kind, root_only, delay) in [
+        (libc::SIGTERM, true, 500),
+        (libc::SIGTERM, false, 1000),
+        (libc::SIGKILL, false, 100),
+    ] {
+        if identity(root.pid).as_deref() != Some(&root.identity) {
+            break;
+        }
+        let fresh = inventory()?;
+        if !unchanged_browser_family(root, ids, old, &fresh, config)
+            || !disconnected(&fresh[&root.pid], ids)?
+            || activity_fingerprint(ids)? != *activity
+            || !super::workload_ownership::protected(&fresh, ids, ids).is_empty()
+        {
+            break;
+        }
+        if root_only {
+            signal(&fresh[&root.pid], kind)?;
+        } else {
+            for pid in ids {
+                signal(&fresh[pid], kind)?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(delay));
+    }
+    Ok(ids
+        .iter()
+        .filter(|pid| {
+            identity(**pid).as_deref() != Some(&old[pid].identity) || executable(**pid).is_none()
+        })
+        .count())
+}
+
 fn terminate(
     root: &Process,
     ids: &BTreeSet<u32>,
@@ -517,6 +719,9 @@ fn terminate(
     config: &Config,
     activity: &Option<String>,
 ) -> io::Result<usize> {
+    if category(root) == Some("Cloudflare test browser") {
+        return terminate_browser(root, ids, old, config, activity);
+    }
     let fresh = inventory()?;
     let Some(current) = fresh.get(&root.pid) else {
         return Ok(0);
@@ -535,19 +740,19 @@ fn terminate(
             return Ok(0);
         }
     }
-    if !super::workload_ownership::protected(&fresh, ids).is_empty() {
+    if !super::workload_ownership::protected(&fresh, ids, &BTreeSet::new()).is_empty() {
         return Ok(0);
     }
     signal(current, libc::SIGTERM)?;
     std::thread::sleep(Duration::from_millis(500));
-    let owned = super::workload_ownership::protected(&fresh, ids);
+    let owned = super::workload_ownership::protected(&fresh, ids, &BTreeSet::new());
     for pid in ids {
         if !owned.contains_key(pid) {
             signal(&old[pid], libc::SIGTERM)?;
         }
     }
     std::thread::sleep(Duration::from_millis(1000));
-    let owned = super::workload_ownership::protected(&fresh, ids);
+    let owned = super::workload_ownership::protected(&fresh, ids, &BTreeSet::new());
     for pid in ids {
         if !owned.contains_key(pid) {
             signal(&old[pid], libc::SIGKILL)?;
@@ -574,14 +779,19 @@ pub fn harvest(
     let mut items = Vec::new();
     let mut killed = 0;
     for root in table.values() {
+        if config.aggressive && category(root) != Some("Cloudflare test browser") {
+            continue;
+        }
         let Some(ids) = tree(root, table, uid, minimum_age(root, config)) else {
             continue;
         };
-        let key = ids
-            .iter()
-            .map(|pid| format!("{pid}:{}", table[pid].identity))
-            .collect::<Vec<_>>()
-            .join("/");
+        let key = format!(
+            "orphan:{}",
+            ids.iter()
+                .map(|pid| format!("{pid}:{}", table[pid].identity))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
         let inspection = disconnected(root, &ids).and_then(|idle| {
             Ok((
                 idle,
@@ -655,7 +865,7 @@ pub fn harvest(
             error: None,
         });
     }
-    observations.retain(|key, _| retained.contains(key));
+    observations.retain(|key, _| !key.starts_with("orphan:") || retained.contains(key));
     Ok((items, killed))
 }
 
@@ -939,6 +1149,12 @@ int main(int argc, char **argv) {
                 .unwrap()
                 .success()
         );
+        let browser_bin = root.join(".wrangler/chrome/mac/chrome-mac/Google Chrome for Testing");
+        std::fs::create_dir_all(browser_bin.parent().unwrap()).unwrap();
+        std::fs::copy(&bin, &browser_bin).unwrap();
+        let locked = root.join("locked-checkout");
+        std::fs::create_dir_all(locked.join(".git")).unwrap();
+        std::fs::write(locked.join(".git/locked"), "active worktree").unwrap();
         struct Fixture {
             process: Process,
             child: std::process::Child,
@@ -950,15 +1166,24 @@ int main(int argc, char **argv) {
                 let _ = self.child.wait();
             }
         }
-        let launch = |owned: bool| {
-            let mut child = Command::new(&bin)
-                .current_dir(&root)
-                .args([
-                    "serve",
-                    "--control-fd=3",
-                    "-",
-                    if owned { "owned" } else { "orphan" },
-                ])
+        let launch = |owned: bool, browser: bool| {
+            let mut child = Command::new(if browser { &browser_bin } else { &bin })
+                .current_dir(if browser { &locked } else { &root })
+                .args(if browser {
+                    [
+                        "--headless=new",
+                        "--remote-debugging-port=0",
+                        "--user-data-dir=/tmp/miniflare-fixture/browser-rendering/profile-1",
+                        if owned { "owned" } else { "orphan" },
+                    ]
+                } else {
+                    [
+                        "serve",
+                        "--control-fd=3",
+                        "-",
+                        if owned { "owned" } else { "orphan" },
+                    ]
+                })
                 .stdout(Stdio::piped())
                 .spawn()
                 .unwrap();
@@ -980,10 +1205,13 @@ int main(int argc, char **argv) {
                 port,
             }
         };
-        let orphan = launch(false);
-        let connected = launch(false);
-        let owned = launch(true);
+        let orphan = launch(false, false);
+        let connected = launch(false, false);
+        let owned = launch(true, false);
+        let abandoned_browser = launch(false, true);
+        let connected_browser = launch(false, true);
         let _client = TcpStream::connect(("127.0.0.1", connected.port)).unwrap();
+        let _browser_client = TcpStream::connect(("127.0.0.1", connected_browser.port)).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(orphan.process.parent, 1);
         let table = Table::from(
@@ -991,15 +1219,48 @@ int main(int argc, char **argv) {
                 orphan.process.clone(),
                 connected.process.clone(),
                 owned.process.clone(),
+                abandoned_browser.process.clone(),
+                connected_browser.process.clone(),
             ]
             .map(|p| (p.pid, p)),
         );
         let config = Config {
             process_min_age_seconds: 0,
+            browser_min_age_seconds: 0,
             observation_seconds: 0,
             ..Config::default()
         };
         let mut observations = BTreeMap::new();
+        let aggressive_browser = launch(false, true);
+        let aggressive_config = Config {
+            aggressive: true,
+            ..config.clone()
+        };
+        let aggressive_table = Table::from([(
+            aggressive_browser.process.pid,
+            aggressive_browser.process.clone(),
+        )]);
+        let (first, count) = aggressive_harvest(
+            &aggressive_table,
+            "Warning",
+            &aggressive_config,
+            &mut observations,
+            true,
+        )
+        .unwrap();
+        assert_eq!(count, 0, "{first:?}");
+        assert!(!first.iter().any(|item| item.eligible));
+        let (second, count) = aggressive_harvest(
+            &aggressive_table,
+            "Warning",
+            &aggressive_config,
+            &mut observations,
+            true,
+        )
+        .unwrap();
+        assert_eq!(count, 1, "{second:?}");
+        assert!(identity(aggressive_browser.process.pid).is_none());
+        observations.clear();
         assert_eq!(
             harvest(&table, &config, &mut observations, true).unwrap().1,
             0
@@ -1025,7 +1286,14 @@ int main(int argc, char **argv) {
                 let table = table
                     .into_iter()
                     .filter(|(pid, _)| {
-                        [orphan.process.pid, connected.process.pid, owned.process.pid].contains(pid)
+                        [
+                            orphan.process.pid,
+                            connected.process.pid,
+                            owned.process.pid,
+                            abandoned_browser.process.pid,
+                            connected_browser.process.pid,
+                        ]
+                        .contains(pid)
                     })
                     .collect();
                 super::super::inspect_processes(
@@ -1035,14 +1303,14 @@ int main(int argc, char **argv) {
                     &mut snapshot,
                     true,
                 );
-                if snapshot.harvested_processes > 0 {
+                if snapshot.harvested_processes == 2 {
                     let _ = send.try_send(());
                 }
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(snapshot.harvested_processes, 1, "{:?}", snapshot.processes);
+        assert_eq!(snapshot.harvested_processes, 2, "{:?}", snapshot.processes);
         assert!(
             snapshot
                 .activity
@@ -1052,6 +1320,11 @@ int main(int argc, char **argv) {
                 >= 2
         );
         assert!(identity(orphan.process.pid).is_none());
+        assert!(identity(abandoned_browser.process.pid).is_none());
+        assert_eq!(
+            identity(connected_browser.process.pid).as_deref(),
+            Some(connected_browser.process.identity.as_str())
+        );
         assert_eq!(
             identity(connected.process.pid).as_deref(),
             Some(connected.process.identity.as_str())
@@ -1083,7 +1356,7 @@ fn essential(p: &Process) -> bool {
         || p.arguments.to_ascii_lowercase().contains("hables")
 }
 fn expired_kind(p: &Process, pressure: &str) -> Option<&'static str> {
-    if essential(p) {
+    if essential(p) || p.executable.contains("/.wrangler/chrome/") {
         return None;
     }
     let name = Path::new(&p.executable)
@@ -1104,7 +1377,6 @@ fn expired_kind(p: &Process, pressure: &str) -> Option<&'static str> {
             | "uv"
     );
     let testing = p.executable.contains("ms-playwright")
-        || p.executable.contains("/.wrangler/chrome/")
         || p.executable.contains("chrome-for-testing")
         || p.arguments.contains("--headless")
         || p.arguments.contains("/playwright_");
@@ -1158,6 +1430,14 @@ pub(super) fn aggressive_harvest(
     while pid > 1 && protected.insert(pid) {
         pid = table.get(&pid).map_or(0, |p| p.parent);
     }
+    // Wrangler browsers and their helpers are reserved for verified orphan cleanup,
+    // never age-only expiration (including connected and not-yet-observed families).
+    for p in table
+        .values()
+        .filter(|p| p.executable.contains("/.wrangler/chrome/"))
+    {
+        protected.extend(descendants(p.pid, table));
+    }
     let mut selected = BTreeSet::new();
     let mut labels = BTreeMap::new();
     for p in table.values() {
@@ -1187,7 +1467,9 @@ pub(super) fn aggressive_harvest(
         }
     }
     let mut items = Vec::new();
-    for (pid, protection) in super::workload_ownership::protected(table, &selected) {
+    for (pid, protection) in
+        super::workload_ownership::protected(table, &selected, &BTreeSet::new())
+    {
         selected.remove(&pid);
         items.push(Item {
             name: format!("Protected workload · PID {pid}"),
@@ -1224,7 +1506,7 @@ pub(super) fn aggressive_harvest(
         std::thread::sleep(Duration::from_secs(1));
     }
     let pending: BTreeSet<_> = signaled.iter().map(|p| p.pid).collect();
-    let newly_owned = super::workload_ownership::protected(table, &pending);
+    let newly_owned = super::workload_ownership::protected(table, &pending, &BTreeSet::new());
     for p in &signaled {
         if !newly_owned.contains_key(&p.pid) {
             signal(p, libc::SIGKILL)?;
@@ -1253,9 +1535,164 @@ pub(super) fn aggressive_harvest(
             }
         }
     }
+    let (browser_items, browser_exited) = harvest(table, config, observations, apply)?;
+    items.extend(browser_items);
     let (idle_items, exited) = super::codex::graceful_idle(table, config, observations, apply)?;
     items.extend(idle_items);
-    Ok((items, killed + exited))
+    Ok((items, killed + browser_exited + exited))
+}
+
+#[cfg(test)]
+mod abandoned_browser_tests {
+    use super::*;
+
+    fn browser() -> Process {
+        Process {
+            pid: 100,
+            parent: 1,
+            uid: unsafe { libc::geteuid() },
+            age_seconds: 14400,
+            cpu_seconds: 20.0,
+            executable: "/cache/.wrangler/chrome/mac_arm-1/chrome-mac-arm64/Google Chrome for Testing".into(),
+            identity: "browser-start".into(),
+            arguments: "chrome --headless=new --remote-debugging-port=0 --user-data-dir=/private/var/folders/test/T/miniflare-123/browser-rendering/profile-abc".into(),
+        }
+    }
+
+    #[test]
+    fn miniflare_signature_requires_real_options_and_a_temporary_profile() {
+        let p = browser();
+        assert_eq!(category(&p), Some("Cloudflare test browser"));
+        for arguments in [
+            "chrome --headless=new --user-data-dir=/repo/miniflare-1/browser-rendering/profile-1",
+            "chrome --headless=new --type=renderer --user-data-dir=/tmp/miniflare-1/browser-rendering/profile-1",
+            "chrome --headless-fake --user-data-dir=/tmp/miniflare-1/browser-rendering/profile-1",
+            "chrome --headless=new --user-data-dir=/tmp/personal /miniflare-1/browser-rendering/profile-1",
+        ] {
+            let mut other = p.clone();
+            other.arguments = arguments.into();
+            assert_ne!(
+                category(&other),
+                Some("Cloudflare test browser"),
+                "{arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn miniflare_families_never_fall_back_to_aggressive_expiration() {
+        let mut p = browser();
+        for parent in [1, 42] {
+            p.parent = parent;
+            for pressure in ["Normal", "Warning", "Critical"] {
+                assert!(expired_kind(&p, pressure).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn orphan_observation_pruning_preserves_codex_exit_receipts() {
+        let mut observations = BTreeMap::from([(
+            "codex-exit:session".into(),
+            Observation {
+                first_seen: 1,
+                last_seen: 1,
+                cpu_seconds: 0.0,
+                activity_fingerprint: None,
+            },
+        )]);
+        harvest(&Table::new(), &Config::default(), &mut observations, false).unwrap();
+        assert!(observations.contains_key("codex-exit:session"));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn browser_connection_proof_requires_complete_disconnected_controller_evidence() {
+        let network = "p100\nf53\ntIPv4\nn127.0.0.1:63453\nTST=LISTEN\n";
+        let stdio = "p100\nf0\ntunix\nn->(none)\nf1\ntCHR\nn/dev/null\nf2\ntunix\nn->(none)\n";
+        assert!(browser_connections_idle(100, network, stdio));
+        assert!(browser_connections_idle(100, "", stdio));
+        for bad in [
+            network.replace("LISTEN", "ESTABLISHED"),
+            network.replace("127.0.0.1", "0.0.0.0"),
+            network.replace("TST=LISTEN\n", ""),
+            format!("{network}p101\nf4\ntIPv4\nn127.0.0.1:40->127.0.0.1:41\nTST=ESTABLISHED\n"),
+        ] {
+            assert!(!browser_connections_idle(100, &bad, stdio), "{bad}");
+        }
+        for bad in [
+            stdio.replace("n->(none)", "n->0x123"),
+            stdio.replace("tunix", "tPIPE"),
+            stdio.replace("n/dev/null", "n/dev/ttys001"),
+            stdio.replace("f2\ntunix\nn->(none)\n", ""),
+            stdio.replace("p100", "p101"),
+            stdio.replace("tunix", "tunknown"),
+            String::new(),
+        ] {
+            assert!(!browser_connections_idle(100, network, &bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn browser_final_validation_rejects_changed_families_or_identity() {
+        let root = browser();
+        let mut child = root.clone();
+        child.pid = 101;
+        child.parent = root.pid;
+        let old = Table::from([(root.pid, root.clone()), (child.pid, child)]);
+        let ids = BTreeSet::from([100, 101]);
+        assert!(unchanged_browser_family(
+            &root,
+            &ids,
+            &old,
+            &old,
+            &Config::default()
+        ));
+        for change in 0..6 {
+            let mut fresh = old.clone();
+            match change {
+                0 => {
+                    fresh.get_mut(&100).unwrap().parent = 42;
+                }
+                1 => {
+                    fresh.get_mut(&101).unwrap().identity = "reused".into();
+                }
+                2 => {
+                    fresh.get_mut(&101).unwrap().executable = "/usr/bin/node".into();
+                }
+                3 => {
+                    fresh.get_mut(&101).unwrap().cpu_seconds += 20.0;
+                }
+                4 => {
+                    fresh.remove(&100);
+                }
+                _ => {
+                    let mut extra = fresh[&101].clone();
+                    extra.pid = 102;
+                    fresh.insert(102, extra);
+                }
+            }
+            assert!(
+                !unchanged_browser_family(&root, &ids, &old, &fresh, &Config::default()),
+                "change {change}"
+            );
+        }
+    }
+
+    #[test]
+    fn final_quiet_check_rejects_regressing_or_invalid_counters() {
+        let old = browser();
+        for (age, cpu) in [
+            (old.age_seconds - 1, old.cpu_seconds),
+            (old.age_seconds + 1, old.cpu_seconds - 1.0),
+            (old.age_seconds + 1, f64::NAN),
+        ] {
+            let mut fresh = old.clone();
+            fresh.age_seconds = age;
+            fresh.cpu_seconds = cpu;
+            assert!(!quiet_since(&old, &fresh, false));
+        }
+    }
 }
 
 #[cfg(test)]

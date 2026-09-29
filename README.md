@@ -965,7 +965,13 @@ developer workloads after a day, and automated browsers after an hour
 developer workers; critical pressure can reclaim old Chrome renderers. Descendants
 are stopped with TERM then KILL, rechecking identity before every signal. The
 harvester ancestry, OS processes, Hables and Hey Boss database/control services
-remain protected. Ordinary GUI browser roots are retained.
+remain protected. Ordinary GUI browser roots are retained. Wrangler/Miniflare
+browsers always use the conservative orphan checks, even in aggressive mode:
+repeated quiet observations, disconnected controllers and no connected clients.
+An inherited cwd in an active or locked worktree does not keep a proven abandoned
+browser alive; open/mapped worktree files, executable ownership and uncertain
+inspections still protect the whole family. Family, connection and ownership
+checks repeat before escalation; cleanup never removes the worktree or its lock.
 
 Codex, its ancestors/children and its live worktrees are excluded from forced
 cleanup. An interactive CLI can receive one Ctrl-D through its iTerm2/tmux controller only after its open transcript
