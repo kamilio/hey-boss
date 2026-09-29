@@ -547,6 +547,9 @@ fn validate(r: &Request) -> Result<()> {
             return Err(Error::invalid("--request-id applies only to mutations"));
         }
     }
+    if let Operation::RequestStatus { id } = &r.operation {
+        identifier(id, "request ID", 256)?;
+    }
     if let Operation::Ready {
         guard,
         clear_manual_hold,
@@ -1500,6 +1503,43 @@ impl Store {
         supervisor_unowned: bool,
     ) -> Result<Value> {
         validate(r)?;
+        if let Operation::RequestStatus { id } = &r.operation {
+            let snapshot = self.db.read_transaction()?;
+            let project = resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
+            let actor = &r.actor.as_ref().unwrap().id;
+            let saved: Option<(String, String)> = snapshot.query_row(
+                "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
+                params![project.id, actor, id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            let (operation, response) = match saved {
+                Some((payload, response)) => {
+                    let operation: Operation = serde_json::from_str(&payload)?;
+                    if !matches!(
+                        operation,
+                        Operation::Create { .. } | Operation::CreateSubtask { .. }
+                    ) {
+                        return Err(Error::invalid(
+                            "This receipt is not an issue creation; retry its original operation to reconcile it",
+                        ));
+                    }
+                    (
+                        serde_json::from_str::<Value>(&payload)?,
+                        serde_json::from_str::<Value>(&response)?,
+                    )
+                }
+                None => (Value::Null, Value::Null),
+            };
+            let recorded = !response.is_null();
+            let replica: bool = snapshot.query_row(
+                "SELECT role='agent' FROM fleet_meta WHERE id=1",
+                [],
+                |row| row.get(0),
+            )?;
+            return Ok(json!({"ok":true,"project":project,"request":{
+                "id":id,"actor":actor,"state":if recorded {"recorded"} else {"not_recorded"},
+                "replica":replica,"operation":operation,"response":response,
+                "guidance":if recorded {"Saved creation result. Retry only the identical operation with the original project, actor and request ID."} else {"No receipt in this store snapshot. This does not prove non-creation: check the original host, project and actor, then retry only the identical request with its original ID."}
+            }}));
+        }
         if let Operation::ReadPlan { plan } = &r.operation {
             return super::planning::read_plan(&self.db, plan);
         }

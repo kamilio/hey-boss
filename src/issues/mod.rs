@@ -259,6 +259,9 @@ pub enum Operation {
         task_kind: Option<String>,
     },
     GlobalSettings,
+    RequestStatus {
+        id: String,
+    },
     ConfigureGlobal {
         boss_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,6 +579,7 @@ impl Operation {
                 | Self::Workers { .. }
                 | Self::PreviewWorker { .. }
                 | Self::GlobalSettings
+                | Self::RequestStatus { .. }
                 | Self::ProjectSettings
                 | Self::PullRequests { .. }
                 | Self::Commits { .. }
@@ -596,7 +600,11 @@ impl Operation {
         )
     }
     pub fn needs_actor(&self) -> bool {
-        self.writes() || matches!(self, Self::Whoami | Self::List { mine: true, .. })
+        self.writes()
+            || matches!(
+                self,
+                Self::Whoami | Self::List { mine: true, .. } | Self::RequestStatus { .. }
+            )
     }
     pub fn number(&self) -> Option<i64> {
         match self {
@@ -612,6 +620,7 @@ impl Operation {
             | Self::ControlWorker { .. }
             | Self::PreviewWorker { .. }
             | Self::GlobalSettings
+            | Self::RequestStatus { .. }
             | Self::ConfigureGlobal { .. }
             | Self::ProjectSettings
             | Self::ConfigureProject { .. }

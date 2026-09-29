@@ -26,6 +26,10 @@ hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 Bodies and comments are Markdown text stored directly in SQLite. No Markdown
 file is required. `create` allows an empty body; comments must contain text.
 
+For an uncertain creation, `issue request ID --agent ORIGINAL_ACTOR --json`
+reads its saved receipt. See [request recovery](issue-request-recovery.md) before
+retrying; a missing receipt or search result does not prove non-creation.
+
 `issue search QUERY` matches a literal substring in titles and descriptions,
 ignoring ASCII case. It defaults to open, ready, and blocked issues (`--state active`);
 closed and deleted issues are excluded. Use `--state all` to include closed issues,
