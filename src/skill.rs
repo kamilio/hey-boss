@@ -513,7 +513,9 @@ pub fn remote_install_script() -> String {
 umask 077
 skill_stage=$(mktemp -d "${TMPDIR:-/tmp}/hey-boss-skill.XXXXXX")
 trap 'rm -rf "$skill_stage"' EXIT HUP INT TERM
-tar -xf - -C "$skill_stage"
+cat > "$skill_stage/bundle.tar"
+tar -xf "$skill_stage/bundle.tar" -C "$skill_stage"
+rm "$skill_stage/bundle.tar"
 for root in .codex .agents .claude; do
   for skill_dir in "$skill_stage"/*; do
     [ -d "$skill_dir" ] || continue
@@ -601,7 +603,10 @@ mod tests {
         std::fs::create_dir_all(stacked.parent().unwrap()).unwrap();
         std::fs::write(&stacked, "# Stacked PRs\nUse gh stack.\n").unwrap();
 
-        let archive = super::archive_for_home(Some(&home.0)).unwrap();
+        let mut archive = super::archive_for_home(Some(&home.0)).unwrap();
+        // Tar readers may stop at the end marker before the sender has written
+        // the padded final records. The receiver must consume the entire input.
+        archive.resize(archive.len() + 128 * 1024, 0);
         let remote_home = crate::admin::Temporary::new().unwrap();
         let remote_custom = remote_home.0.join(".agents/skills/hey-boss/custom.md");
         std::fs::create_dir_all(remote_custom.parent().unwrap()).unwrap();
@@ -612,10 +617,18 @@ mod tests {
                 .args(["-c", &super::remote_install_script()])
                 .env("HOME", &remote_home.0)
                 .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            child.stdin.take().unwrap().write_all(&archive).unwrap();
-            assert!(child.wait().unwrap().success());
+            let sent = child.stdin.take().unwrap().write_all(&archive);
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                sent.is_ok() && output.status.success(),
+                "Sent {} bytes: {sent:?}; installer {}: {}",
+                archive.len(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
             for root in [".codex", ".agents", ".claude"] {
                 for (path, text) in super::FILES {
                     assert_eq!(
