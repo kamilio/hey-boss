@@ -77,7 +77,21 @@ fn ci_signals(
         && policy.head_sha == ci.head_sha
         && policy.merge_sha == ci.merge_sha
         && policy.repository.eq_ignore_ascii_case(repository)
-        && policy.pull_number == number;
+        && policy.pull_number == number
+        && pull_request["number"]
+            .as_u64()
+            .is_none_or(|value| value == number)
+        && pull_request["base"]["repo"]["full_name"]
+            .as_str()
+            .is_none_or(|value| value.eq_ignore_ascii_case(repository))
+        && pull_request["base"]["ref"]
+            .as_str()
+            .is_none_or(|value| value == policy.base_branch)
+        && policy
+            .pr_base_sha
+            .as_deref()
+            .zip(pull_request["base"]["sha"].as_str())
+            .is_none_or(|(required, observed)| required == observed);
     let current = pull_request["state"] == "open"
         && sources_match
         && policy.errors.is_empty()
@@ -192,6 +206,7 @@ fn ci_signals(
             "sources_match":sources_match,
             "source_heads":{"pull_request":pull_request["head"]["sha"],"ci":ci.head_sha,"required":policy.head_sha},
             "source_merges":{"ci":ci.merge_sha,"required":policy.merge_sha},
+            "source_bases":{"pull_request":{"ref":pull_request["base"]["ref"],"sha":pull_request["base"]["sha"]},"required":{"ref":policy.base_branch,"sha":policy.pr_base_sha}},
             "complete":false,"ci_complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
@@ -492,6 +507,28 @@ mod tests {
         report.data.pull_request["head"]["sha"] = json!("next-head");
         assert_eq!(observe(&report, &policy).evidence["sources_match"], false);
         report.data.pull_request["head"]["sha"] = json!("head");
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], true);
+    }
+    #[test]
+    fn retargeted_base_and_wrong_pr_identity_do_not_reuse_required_policy() {
+        let (mut report, mut policy) = fixture();
+        report.data.ci.summary.pending = 0;
+        report.data.pull_request["base"] =
+            json!({"ref":"release","sha":"base","repo":{"full_name":"o/r"}});
+        let retargeted = observe(&report, &policy);
+        assert_eq!(retargeted.evidence["sources_match"], false);
+        assert!(retargeted.blocking.is_empty());
+        assert!(retargeted.completed.is_none());
+        report.data.pull_request["base"]["ref"] = json!("main");
+        policy.pr_base_sha = Some("previous-base".into());
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], false);
+        policy.pr_base_sha = Some("base".into());
+        report.data.pull_request["number"] = json!(2);
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], false);
+        report.data.pull_request["number"] = json!(1);
+        report.data.pull_request["base"]["repo"]["full_name"] = json!("another/repository");
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], false);
+        report.data.pull_request["base"]["repo"]["full_name"] = json!("O/R");
         assert_eq!(observe(&report, &policy).evidence["sources_match"], true);
     }
     #[test]
