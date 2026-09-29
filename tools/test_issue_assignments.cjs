@@ -70,3 +70,11 @@ test('review fetch errors keep the required failure visible', () => {
   assert.match(html, /1 required check failed/);
   assert.match(html, /Review access denied/);
 });
+
+test('stopped watchers explain missing PRs without advertising queued work', () => {
+  const issue = {...base, state:'closed', assignment:{kind:'github'}, github_status:{monitoring:false, stopped_reason:'no_open_pull_requests', prs:{}}};
+  assert.match(assignments.describe(issue, helpers).detail, /Monitoring stopped/);
+  const html = assignments.status(issue, helpers);
+  assert.match(html, /No open GitHub pull requests remain/);
+  assert.doesNotMatch(html, /Waiting for the first GitHub status/);
+});

@@ -803,6 +803,9 @@ pub(super) fn execute(
                 if changed > 0 {
                     db.execute("UPDATE issues SET version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2",params![p.id,number,now()])?;
                     event(db, &p.id, *number, &actor.id, action, now(), &data)?;
+                    if matches!(op, Operation::RemovePullRequest { .. }) {
+                        assignments::links_changed(db, &p.id, *number, actor)?;
+                    }
                 }
             }
             Ok(

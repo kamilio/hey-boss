@@ -2278,7 +2278,12 @@ pub(super) fn event(
     Ok(())
 }
 fn ownership(issue: &Issue, actor: &Actor, force: bool) -> Result<()> {
-    if !force && issue.assignee.as_ref().is_some_and(|id| id != &actor.id && id != "watcher:github") {
+    if !force
+        && issue
+            .assignee
+            .as_ref()
+            .is_some_and(|id| id != &actor.id && id != "watcher:github")
+    {
         return Err(Error::conflict(format!(
             "Issue #{} is claimed by {}; use --force for an intentional takeover or removal",
             issue.number,

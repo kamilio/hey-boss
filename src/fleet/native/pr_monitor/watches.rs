@@ -6,7 +6,12 @@ pub(super) fn poll(
     runtime: &tokio::runtime::Runtime,
     client: &ApiClient,
 ) -> Result<()> {
-    let tracked: Vec<_> = Store::open(&ctx.path)?
+    let mut store = Store::open(&ctx.path)?;
+    let mut actor = ctx.actor()?;
+    actor.id = "human:pr-monitor".into();
+    store.close_merged_pull_requests(&actor)?;
+    store.reconcile_github_assignments(&actor)?;
+    let tracked: Vec<_> = store
         .github_watch_urls()?
         .into_iter()
         .map(|url| crate::issues::TrackedPullRequest {
@@ -15,6 +20,7 @@ pub(super) fn poll(
             closed: false,
         })
         .collect();
+    drop(store);
     let path = ctx.state.join("github-watch-schedule.json");
     let mut schedule: schedule::Schedule = serde_json::from_value(
         ctx.read_json(&path, serde_json::json!({"cooldown_until":0,"entries":{}}))?,
@@ -101,6 +107,33 @@ async fn poll_one(
         // identities; keep the CI-based fallback until their next upgrade.
         false
     };
+    if policy.pull_request_state.as_deref() == Some("closed") {
+        let response = tokio::time::timeout_at(
+            batch_deadline,
+            client.pull_request(repository, number, Freshness::Revalidate),
+        )
+        .await
+        .map_err(|_| hey_gh::Error::Deadline)??;
+        let status = super::pr_status(&response.data, repository, number);
+        if !fresh(response.validated_at_ms) || !matches!(status, Some("merged" | "closed")) {
+            return Err(hey_gh::Error::Invalid(
+                "Pull request changed while confirming its closure; refreshing again".into(),
+            ));
+        }
+        let mut store = Store::open(&ctx.path).map_err(storage)?;
+        store
+            .record_pr_status(url, status, response.validated_at_ms as i64, None)
+            .map_err(storage)?;
+        let mut actor = ctx
+            .actor()
+            .map_err(|error| hey_gh::Error::Invalid(error.to_string()))?;
+        actor.id = "human:pr-monitor".into();
+        store.close_merged_pull_requests(&actor).map_err(storage)?;
+        store
+            .reconcile_github_assignments(&actor)
+            .map_err(storage)?;
+        return Ok(());
+    }
     let result = tokio::time::timeout_at(
         batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20)),
         async {

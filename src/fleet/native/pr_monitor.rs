@@ -39,6 +39,24 @@ fn merged(data: &serde_json::Value, repository: &str, number: u64) -> bool {
             .is_some_and(|r| r.eq_ignore_ascii_case(repository))
 }
 
+fn pr_status(data: &serde_json::Value, repository: &str, number: u64) -> Option<&'static str> {
+    if merged(data, repository, number) {
+        return Some("merged");
+    }
+    if data["number"] != number
+        || !data["base"]["repo"]["full_name"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+    {
+        return None;
+    }
+    match data["state"].as_str() {
+        Some("open") => Some("open"),
+        Some("closed") if data["merged"] == false => Some("closed"),
+        _ => None,
+    }
+}
+
 pub(super) fn run(ctx: Context) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -110,6 +128,7 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
     let mut actor = ctx.actor()?;
     actor.id = "human:pr-monitor".into();
     store.close_merged_pull_requests(&actor)?;
+    store.reconcile_github_assignments(&actor)?;
     let prs = store.tracked_pull_requests()?;
     drop(store);
     let path = ctx.state.join("pr-monitor-schedule.json");
@@ -145,21 +164,7 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
             Ok(response) => {
                 let checked_at = i64::try_from(response.validated_at_ms)?;
                 let data = response.data;
-                let status = if merged(&data, &repository, number) {
-                    Some("merged")
-                } else if data["number"] == number
-                    && data["base"]["repo"]["full_name"]
-                        .as_str()
-                        .is_some_and(|r| r.eq_ignore_ascii_case(&repository))
-                {
-                    match data["state"].as_str() {
-                        Some("open") => Some("open"),
-                        Some("closed") if data["merged"] == false => Some("closed"),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+                let status = pr_status(&data, &repository, number);
                 Store::open(&ctx.path)?.record_pr_status(
                     &url,
                     status,
@@ -213,7 +218,9 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
             }
         }
     }
-    let count = Store::open(&ctx.path)?.close_merged_pull_requests(&actor)?;
+    let mut store = Store::open(&ctx.path)?;
+    let count = store.close_merged_pull_requests(&actor)?;
+    store.reconcile_github_assignments(&actor)?;
     if count > 0 {
         eprintln!("PR monitor: closed {count} tasks after their fix PRs merged");
     }
