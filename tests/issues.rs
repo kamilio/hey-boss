@@ -651,7 +651,6 @@ fn batch_rejects_changed_owner_and_blocks_other_entries() {
         rejected
     );
     for invalid in [
-        r#"[{"number":1,"if_version":1,"add_labels":["x"]}]"#,
         r#"[{"number":1,"if_version":1,"expected_assignee":null,"assignment":"close"}]"#,
         r#"[{"number":1,"if_version":1,"expected_assignee":null,"add_labels":["x"],"remove_labels":["x"]}]"#,
     ] {
@@ -665,10 +664,10 @@ fn batch_rejects_changed_owner_and_blocks_other_entries() {
             Some(2)
         );
     }
-    assert_eq!(
-        f.stdin(&["batch", "--file", "-"], edits).status.code(),
-        Some(2)
-    );
+    let automatic = rejected_batch(f.stdin(&["batch", "--file", "-"], edits));
+    assert_eq!(automatic["applied"], false);
+    assert_eq!(automatic["results"][0]["status"], "blocked");
+    assert_eq!(automatic["results"][1]["status"], "rejected");
     assert_eq!(
         f.stdin(
             &[
@@ -684,6 +683,19 @@ fn batch_rejects_changed_owner_and_blocks_other_entries() {
         .status
         .code(),
         Some(2)
+    );
+    let default_owner = br#"[{"number":1,"if_version":1,"add_labels":["x"]}]"#;
+    let applied = success(f.stdin(&["batch", "--file", "-"], default_owner));
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["results"][0]["after"]["assignee"], Value::Null);
+    assert_eq!(
+        f.run("session-a", &["view", "1"])["issue"]["labels"],
+        json!(["x"])
+    );
+    f.run("session-a", &["claim", "1"]);
+    assert_eq!(
+        success(f.stdin(&["batch", "--file", "-"], default_owner)),
+        applied
     );
 }
 
