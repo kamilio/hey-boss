@@ -15,8 +15,17 @@ def run(*args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
+def user_bus_environment():
+    # Non-login SSH commands often lack these, even while the user manager runs.
+    runtime = os.environ.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
+    bus = os.path.join(runtime, 'bus')
+    if os.path.exists(bus):
+        os.environ.setdefault('DBUS_SESSION_BUS_ADDRESS', f'unix:path={bus}')
+
+
 def preflight():
     if sys.platform == 'linux':
+        user_bus_environment()
         run('systemctl', '--user', 'show-environment', stdout=subprocess.DEVNULL)
     elif sys.platform == 'darwin':
         run('launchctl', 'print', f'gui/{os.getuid()}', stdout=subprocess.DEVNULL)

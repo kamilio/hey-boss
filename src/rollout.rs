@@ -668,149 +668,8 @@ pub(crate) async fn check_credentials(config: &Config) -> Result<()> {
 }
 fn source_bundle(dir: &Path) -> Result<()> {
     // Embedded sources make the installed CLI independent of the checkout and remote architecture.
-    const FILES: &[(&str, &str)] = &[
-        ("Cargo.toml", include_str!("../Cargo.toml")),
-        ("README.md", include_str!("../README.md")),
-        ("LICENSE", include_str!("../LICENSE")),
-        ("src/lib.rs", include_str!("lib.rs")),
-        ("src/fallback.rs", include_str!("fallback.rs")),
-        ("src/proxy/fallback.rs", include_str!("proxy/fallback.rs")),
-        (
-            "src/proxy/fallback/tests.rs",
-            include_str!("proxy/fallback/tests.rs"),
-        ),
-        (
-            "tests/fallback_policy.rs",
-            include_str!("../tests/fallback_policy.rs"),
-        ),
-        ("src/credentials.rs", include_str!("credentials.rs")),
-        (
-            "tests/gemini_conversion.rs",
-            include_str!("../tests/gemini_conversion.rs"),
-        ),
-        (
-            "tests/credential_sources.rs",
-            include_str!("../tests/credential_sources.rs"),
-        ),
-        (
-            "tests/gemini_stream_partitions.rs",
-            include_str!("../tests/gemini_stream_partitions.rs"),
-        ),
-        (
-            "tests/gemini_regression.rs",
-            include_str!("../tests/gemini_regression.rs"),
-        ),
-        (
-            "tests/gemini_strict_schema.rs",
-            include_str!("../tests/gemini_strict_schema.rs"),
-        ),
-        (
-            "tests/gemini_hardening.rs",
-            include_str!("../tests/gemini_hardening.rs"),
-        ),
-        ("src/gemini/mod.rs", include_str!("gemini/mod.rs")),
-        ("src/gemini/error.rs", include_str!("gemini/error.rs")),
-        (
-            "tests/gemini_errors.rs",
-            include_str!("../tests/gemini_errors.rs"),
-        ),
-        ("src/gemini/request.rs", include_str!("gemini/request.rs")),
-        ("src/gemini/response.rs", include_str!("gemini/response.rs")),
-        ("src/gemini/stream.rs", include_str!("gemini/stream.rs")),
-        ("src/gemini/replay.rs", include_str!("gemini/replay.rs")),
-        ("src/gemini/validate.rs", include_str!("gemini/validate.rs")),
-        ("src/gemini/partial.rs", include_str!("gemini/partial.rs")),
-        (
-            "src/proxy/gemini/hardening_tests.rs",
-            include_str!("proxy/gemini/hardening_tests.rs"),
-        ),
-        ("src/proxy/gemini.rs", include_str!("proxy/gemini.rs")),
-        ("Cargo.lock", include_str!("../Cargo.lock")),
-        ("src/main.rs", include_str!("main.rs")),
-        ("src/config.rs", include_str!("config.rs")),
-        ("src/access.rs", include_str!("access.rs")),
-        ("src/mode_tests.rs", include_str!("mode_tests.rs")),
-        ("src/proxy.rs", include_str!("proxy.rs")),
-        ("src/proxy/overview.rs", include_str!("proxy/overview.rs")),
-        (
-            "src/proxy/overview.html",
-            include_str!("proxy/overview.html"),
-        ),
-        ("src/proxy/overview.js", include_str!("proxy/overview.js")),
-        (
-            "src/proxy/overview/tests.rs",
-            include_str!("proxy/overview/tests.rs"),
-        ),
-        ("src/proxy/chat.rs", include_str!("proxy/chat.rs")),
-        (
-            "src/proxy/chat/request.rs",
-            include_str!("proxy/chat/request.rs"),
-        ),
-        (
-            "src/proxy/chat/response.rs",
-            include_str!("proxy/chat/response.rs"),
-        ),
-        (
-            "src/proxy/chat/stream.rs",
-            include_str!("proxy/chat/stream.rs"),
-        ),
-        (
-            "src/proxy/chat/tests.rs",
-            include_str!("proxy/chat/tests.rs"),
-        ),
-        ("src/proxy/sse.rs", include_str!("proxy/sse.rs")),
-        ("src/proxy/capacity.rs", include_str!("proxy/capacity.rs")),
-        ("src/proxy/guidance.rs", include_str!("proxy/guidance.rs")),
-        ("src/proxy/recovery.rs", include_str!("proxy/recovery.rs")),
-        ("src/rollout.rs", include_str!("rollout.rs")),
-        ("src/rollout.sh", include_str!("rollout.sh")),
-        ("src/remote_service.py", include_str!("remote_service.py")),
-        (
-            "src/controller_tunnel.py",
-            include_str!("controller_tunnel.py"),
-        ),
-        ("src/proxy/logs.rs", include_str!("proxy/logs.rs")),
-        (
-            "src/proxy/logs/database.rs",
-            include_str!("proxy/logs/database.rs"),
-        ),
-        (
-            "src/proxy/logs/store.rs",
-            include_str!("proxy/logs/store.rs"),
-        ),
-        (
-            "src/proxy/logs/query.rs",
-            include_str!("proxy/logs/query.rs"),
-        ),
-        (
-            "src/proxy/logs/report.rs",
-            include_str!("proxy/logs/report.rs"),
-        ),
-        (
-            "src/proxy/logs/pricing.rs",
-            include_str!("proxy/logs/pricing.rs"),
-        ),
-        (
-            "src/proxy/logs/prices.json",
-            include_str!("proxy/logs/prices.json"),
-        ),
-        (
-            "src/proxy/logs/lifecycle.rs",
-            include_str!("proxy/logs/lifecycle.rs"),
-        ),
-        (
-            "src/proxy/logs/websocket.rs",
-            include_str!("proxy/logs/websocket.rs"),
-        ),
-        (
-            "src/proxy/logs/persistence_tests.rs",
-            include_str!("proxy/logs/persistence_tests.rs"),
-        ),
-        ("src/proxy/reporting.js", include_str!("proxy/reporting.js")),
-        ("src/proxy/logs.html", include_str!("proxy/logs.html")),
-        ("src/proxy/dashboard.js", include_str!("proxy/dashboard.js")),
-        ("src/proxy/websocket.rs", include_str!("proxy/websocket.rs")),
-    ];
+    // build.rs lists every file under src/ and tests/, so new modules ship automatically.
+    const FILES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/bundle_files.rs"));
     for (name, content) in FILES {
         let path = dir.join(name);
         fs::create_dir_all(path.parent().unwrap())?;
@@ -928,6 +787,7 @@ async fn deploy(config: &Config, host: &SshHost, access_key: Option<&str>) -> Re
                 "Cargo.lock",
                 "README.md",
                 "LICENSE",
+                "build.rs",
                 "src",
                 "tests",
                 "remote-config.json",
@@ -1611,6 +1471,11 @@ mod tests {
             "src/proxy/chat/stream.rs",
             "src/proxy/chat/tests.rs",
             "src/proxy/sse.rs",
+            "src/model_registry.rs",
+            "src/proxy/messages.rs",
+            "src/proxy/messages/gemini.rs",
+            "build.rs",
+            "Cargo.lock",
         ] {
             assert!(
                 dir.path().join(file).exists(),

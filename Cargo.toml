@@ -6,7 +6,7 @@ description = "Local OpenAI and Gemini proxy with model overwrites, fallbacks, a
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/kamilio/hey-proxy"
-include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/src/**/*.rs", "/src/**/*.py", "/src/**/*.sh", "/src/**/*.js", "/src/**/*.html", "/src/**/*.json", "/tests/*.rs", "/tests/*.py", "/tests/*.cjs", "/tests/*.mjs", "/examples/*.json", "/docs/*.md", "/scripts/*.py"]
+include = ["/Cargo.toml", "/Cargo.lock", "/build.rs", "/README.md", "/LICENSE", "/src/**/*.rs", "/src/**/*.py", "/src/**/*.sh", "/src/**/*.js", "/src/**/*.html", "/src/**/*.json", "/tests/*.rs", "/tests/*.py", "/tests/*.cjs", "/tests/*.mjs", "/examples/*.json", "/docs/*.md", "/scripts/*.py"]
 
 [dependencies]
 aes-gcm-siv = "0.11"

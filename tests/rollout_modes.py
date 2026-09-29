@@ -163,3 +163,24 @@ else: raise AssertionError(command)
             except ProcessLookupError: pass
         upstream.shutdown()
         upstream.server_close()
+
+# SSH commands without a login session still reach an existing systemd user bus.
+import importlib.util as _util, os as _os, tempfile as _tempfile, socket as _socket
+from unittest.mock import patch as _patch
+_spec = _util.spec_from_file_location('bus_service', Path(__file__).resolve().parents[1] / 'src/remote_service.py')
+_service = _util.module_from_spec(_spec)
+_spec.loader.exec_module(_service)
+with _tempfile.TemporaryDirectory() as _runtime:
+    _sock = _socket.socket(_socket.AF_UNIX)
+    _sock.bind(_os.path.join(_runtime, 'bus'))
+    with _patch.dict(_os.environ, {'XDG_RUNTIME_DIR': _runtime}, clear=True):
+        _service.user_bus_environment()
+        assert _os.environ['DBUS_SESSION_BUS_ADDRESS'] == f'unix:path={_runtime}/bus'
+    with _patch.dict(_os.environ, {'XDG_RUNTIME_DIR': _runtime, 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/custom'}, clear=True):
+        _service.user_bus_environment()
+        assert _os.environ['DBUS_SESSION_BUS_ADDRESS'] == 'unix:path=/custom'
+    _sock.close()
+with _patch.dict(_os.environ, {}, clear=True):
+    _service.user_bus_environment()
+    assert _os.environ['XDG_RUNTIME_DIR'] == f'/run/user/{_os.getuid()}'
+print('user bus environment ok')
