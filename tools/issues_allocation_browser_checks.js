@@ -27,8 +27,10 @@ async page => {
       if (body.operation?.action === 'assign') request = body;
     }
   });
+  await select.focus();
   await select.selectOption('unassigned');
   await page.waitForFunction(() => model.detail?.issue?.assignment?.kind === 'unassigned');
+  check(await select.evaluate(node => node === document.activeElement), 'Assignment retains keyboard focus after saving');
   check(request.operation.target === 'unassigned' && request.operation.if_version === original.issue.version && !!request.request_id, 'Destination changes carry revision and retry guards');
   const state = await page.evaluate(async () => api({action:'view',number:model.detail.issue.number}));
   check(state.allocation.reserved_machine === null, 'Clearing assignment releases the real reservation');
