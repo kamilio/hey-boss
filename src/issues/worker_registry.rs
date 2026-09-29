@@ -1144,11 +1144,11 @@ mod tests {
     fn recovery_queue_survives_followups_and_pickup_explains_its_choice() {
         // Reservation validates the provider executable but never launches it.
         // Isolate the override from other parallel tests and the developer's CLI.
-        let fixture = std::env::current_exe().unwrap();
-        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(fixture.as_os_str()) {
-            let output = std::process::Command::new(&fixture)
+        let provider = std::env::current_exe().unwrap();
+        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(provider.as_os_str()) {
+            let output = std::process::Command::new(&provider)
                 .args(["--exact", "issues::store::registry::tests::recovery_queue_survives_followups_and_pickup_explains_its_choice", "--nocapture"])
-                .env("HEY_BOSS_CODEX", &fixture)
+                .env("HEY_BOSS_CODEX", &provider)
                 .output().unwrap();
             assert!(
                 output.status.success(),

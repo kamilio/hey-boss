@@ -12,7 +12,13 @@ impl Fixture {
             .join("out")
             .join(format!("sequence-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let store = Store::open(&root.join("issues.db")).unwrap();
+        let mut store = Store::open(&root.join("issues.db")).unwrap();
+        // This suite exercises opt-in legacy sequences, not the new-project default.
+        store
+            .execute(&Self::request(
+                json!({"action":"configure_project","subtask_scheduling":"sequential"}),
+            ))
+            .unwrap();
         Self { root, store }
     }
     fn request(op: Value) -> Request {
@@ -340,7 +346,7 @@ fn ready_requires_pr_project_and_pr_attachment_and_is_not_a_worker_pickup_state(
 }
 
 #[test]
-fn ready_chain_rework_cascades_and_settings_control_completion() {
+fn ready_chain_rework_cascades_without_reblocking_on_pr_mode_changes() {
     let mut f = Fixture::new("ready-chain");
     for _ in 0..4 {
         f.create(None);
@@ -361,7 +367,8 @@ fn ready_chain_rework_cascades_and_settings_control_completion() {
     f.run(json!({"action":"ready","number":1,"force":false}));
     assert_eq!(f.ready(), vec![2]);
     f.run(json!({"action":"configure_project","prs_enabled":false}));
-    assert!(f.ready().is_empty());
+    // Explicit links retain the existing Ready handoff when PR mode changes.
+    assert_eq!(f.ready(), vec![2]);
     f.run(json!({"action":"close","number":1,"force":true}));
     assert_eq!(f.ready(), vec![2]);
 }
