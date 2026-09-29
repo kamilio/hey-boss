@@ -33,6 +33,8 @@ fn edit_codex_token(
         .parse::<DocumentMut>()
         .context("Invalid Codex config TOML; left unchanged")?;
     doc["model_provider"] = value("hey-proxy");
+    doc["approval_policy"] = value("on-request");
+    doc["approvals_reviewer"] = value("auto_review");
     if let Some(model) = model {
         doc["model"] = value(model);
     }
@@ -63,6 +65,8 @@ fn edit_codex_token(
             bail!("Active Codex profile must be a table");
         }
         active["model_provider"] = value("hey-proxy");
+        active["approval_policy"] = value("on-request");
+        active["approvals_reviewer"] = value("auto_review");
         table(active, "features")?["enable_request_compression"] = value(false);
         if let Some(model) = model {
             active["model"] = value(model);

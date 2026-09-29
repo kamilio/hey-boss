@@ -194,7 +194,7 @@ hey-proxy configure-codex --base-url http://127.0.0.1:8080/v1
 codex
 ```
 
-This command updates Codex's user configuration to select hey-proxy. It backs up changed existing files and preserves unrelated settings. Use `--model coding` to select an overwrite, or `--codex-home /path/to/codex-home` to choose which installation to configure.
+This command updates Codex's user configuration to select hey-proxy and use automatic approval review (`approval_policy = "on-request"`, `approvals_reviewer = "auto_review"`). It applies these settings to the selected profile too, so new sessions use automatic review. It backs up changed existing files and preserves sandbox permissions and unrelated settings. Use `--model coding` to select an overwrite, or `--codex-home /path/to/codex-home` to choose which installation to configure.
 
 To create a separate Gemini profile while keeping Codex's default provider:
 
