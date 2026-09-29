@@ -104,6 +104,8 @@ fn ci_signals(
             "status",
             "conclusion",
             "head_sha",
+            "started_at",
+            "completed_at",
             "details_url",
             "app",
         ],
@@ -189,7 +191,16 @@ fn ci_signals(
             ci.head_sha,
             selected(
                 &checks,
-                &["id", "name", "status", "conclusion", "head_sha", "app"]
+                &[
+                    "id",
+                    "name",
+                    "status",
+                    "conclusion",
+                    "head_sha",
+                    "app",
+                    "started_at",
+                    "completed_at"
+                ]
             ),
             selected(&statuses, &["id", "context", "state"]),
             selected(
@@ -567,6 +578,22 @@ mod tests {
         report.data.pull_request["base"]["repo"]["full_name"] = json!("O/R");
         assert_eq!(observe(&report, &policy).evidence["sources_match"], true);
     }
+    #[test]
+    fn a_reused_check_id_with_a_new_attempt_wakes_again() {
+        let (mut report, policy) = fixture();
+        report.data.ci.summary.pending = 0;
+        report.data.ci.check_runs[0]["started_at"] = json!("2026-09-29T01:00:00Z");
+        report.data.ci.check_runs[0]["completed_at"] = json!("2026-09-29T01:01:00Z");
+        let first = observe(&report, &policy);
+        report.observed_at_ms += 100;
+        assert_eq!(observe(&report, &policy).blocking, first.blocking);
+        report.data.ci.check_runs[0]["started_at"] = json!("2026-09-29T02:00:00Z");
+        report.data.ci.check_runs[0]["completed_at"] = json!("2026-09-29T02:01:00Z");
+        let rerun = observe(&report, &policy);
+        assert_ne!(rerun.blocking, first.blocking);
+        assert_ne!(rerun.completed, first.completed);
+    }
+
     #[test]
     fn rerun_is_a_new_failure_and_empty_ci_is_not_completion() {
         let (mut r, p) = fixture();
