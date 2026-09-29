@@ -1,5 +1,29 @@
 # Codex controls in the Agents overview
 
+`hey-boss agent coordinate /absolute/worktree` identifies a current local session
+and lists its issue associations, including an explicit absence. It uses an open
+transcript with current turn metadata or a live descendant's exact inherited
+session ID and working directory. A shared desktop PID alone remains unknown.
+This extra process check runs only for an explicit lookup.
+
+For an untracked session, create a draft with `issue create --draft --request-id`
+and user-supplied title/body. The existing session, or a human using the usual
+`--agent human:boss` terminal identity, approves it with
+`agent coordinate PATH --issue NUMBER --link`. Other agents cannot approve the
+link. Repeating the link reuses it; a second issue for that session is rejected.
+Links require an unassigned, unreserved draft with no worker. They do not change
+claims, source, worker settings, or the session.
+
+After saving an ordinary issue comment, its author or the human can deliver its
+exact text with `agent coordinate PATH --issue NUMBER --comment COMMENT_ID`.
+The issue must belong to that session or be its approved draft. Delivery requires
+the existing configured owning server below. No worker or thread is started.
+Receipts are retained on the owning device; retries never resend an acknowledged
+or uncertain delivery. `unknown` means inspect the conversation before taking
+further action, not successful delivery. A missing endpoint fails before sending.
+Run the command on the session's device; it does not redirect through a remote
+issue override. `--json` exposes the owner, evidence, issue absence and outcome.
+
 Expand a Codex row and click **Connect controls**. The inline panel displays the
 saved objective and goal status, with **Re-enable goal** or **Pause goal**.
 Re-enabling sends `thread/goal/set` with status `active`; pausing sends status

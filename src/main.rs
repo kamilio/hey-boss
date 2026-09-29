@@ -275,6 +275,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    /// Inspect a live worktree owner, approve a draft issue link, or deliver a saved comment.
+    Coordinate(hey_boss::issues::Coordinate),
     /// Read local issue-owned worktrees, excluding verified stale owners.
     OwnedWorktrees {
         #[arg(long)]
@@ -605,6 +607,50 @@ fn run() -> std::io::Result<()> {
                 hey_boss::markdown::render_document(&markdown)
             },
         );
+    }
+    if let Command::Agent(AgentAction::Coordinate(options)) = &cli.command {
+        let report = match hey_boss::issues::coordinate(options) {
+            Ok(report) => report,
+            Err(error) => {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                }
+                return Err(std::io::Error::other(error));
+            }
+        };
+        if options.json {
+            println!("{}", report);
+        } else {
+            println!(
+                "{}\n  Worktree: {}\n  Evidence: {}",
+                report["owner"].as_str().unwrap(),
+                report["worktree"].as_str().unwrap(),
+                report["evidence"].as_str().unwrap()
+            );
+            if report["issue_absent"] == true {
+                println!(
+                    "  No associated issue. Create a draft with issue create --draft --request-id, then approve its link with agent coordinate PATH --issue NUMBER --link. The existing session or human:boss must approve the link."
+                );
+            } else {
+                for issue in report["issues"].as_array().unwrap() {
+                    println!(
+                        "  {} #{} · {} · {}",
+                        issue["project"].as_str().unwrap(),
+                        issue["number"],
+                        issue["title"].as_str().unwrap(),
+                        issue["association"].as_str().unwrap()
+                    );
+                }
+                println!(
+                    "  Deliver a saved comment: agent coordinate PATH --issue NUMBER --comment COMMENT_ID"
+                );
+            }
+            println!("  Delivery: {}", report["delivery"].as_str().unwrap());
+            if let Some(error) = report["error"].as_str() {
+                println!("  {error}");
+            }
+        }
+        return Ok(());
     }
     if let Command::Agent(AgentAction::OwnedWorktrees { json }) = &cli.command {
         let worktrees = hey_boss::issues::worktree_ownership::declared_worktrees()
