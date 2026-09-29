@@ -1055,9 +1055,12 @@ mod tests {
     struct HookFixture(PathBuf);
     impl HookFixture {
         fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SERIAL: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "hey-boss-hook-test-{}-{}",
+                "hey-boss-hook-test-{}-{}-{}",
                 std::process::id(),
+                SERIAL.fetch_add(1, Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
