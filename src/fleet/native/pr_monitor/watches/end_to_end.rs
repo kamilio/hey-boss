@@ -57,22 +57,38 @@ fn wait(label: &str, root: &std::path::Path, mut ready: impl FnMut() -> bool) {
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
 fn github_http_poll_claim_steer_rearm_and_fresh_session() {
-    lifecycle(false, 1);
+    lifecycle(false, Followups::RequiredFailures(1));
 }
 
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
 fn github_http_poll_rejected_steering_starts_fresh_session_with_pending_findings() {
-    lifecycle(true, 1);
+    lifecycle(true, Followups::RequiredFailures(1));
 }
 
 #[test]
 #[ignore = "long-running isolated worker soak; requires cargo build --bin hey-boss"]
 fn github_watcher_process_soak_retains_exactly_once_wakeups() {
-    lifecycle(true, 600);
+    lifecycle(true, Followups::RequiredFailures(600));
 }
 
-fn lifecycle(reject_steering: bool, following_failures: usize) {
+#[test]
+#[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
+fn github_http_late_review_edits_start_fresh_sessions_without_repeating_completed_ci() {
+    lifecycle(false, Followups::ReviewEdits(3));
+}
+
+#[derive(Clone, Copy)]
+enum Followups {
+    RequiredFailures(usize),
+    ReviewEdits(usize),
+}
+
+fn lifecycle(reject_steering: bool, followups: Followups) {
+    let (following_updates, review_edits) = match followups {
+        Followups::RequiredFailures(count) => (count, false),
+        Followups::ReviewEdits(count) => (count, true),
+    };
     let binary = std::env::current_exe()
         .unwrap()
         .parent()
@@ -173,8 +189,9 @@ fn lifecycle(reject_steering: bool, following_failures: usize) {
                     continue;
                 };
                 let phase = serving_phase.load(Ordering::Acquire);
-                let (mut ci, mut policy, metadata) = evidence(phase != 2, false);
-                if phase >= 3 {
+                let (mut ci, mut policy, metadata) =
+                    evidence(phase != 2 && !(review_edits && phase >= 3), false);
+                if phase >= 3 && !review_edits {
                     ci["data"]["check_runs"][0]["id"] = json!(phase - 1);
                     let observation = hey_gh::watcher::observe_ci(
                         "o/r",
@@ -194,8 +211,13 @@ fn lifecycle(reject_steering: bool, following_failures: usize) {
                     ci
                 } else {
                     let now = crate::issues::worker::now();
+                    let finding = if review_edits && phase >= 3 {
+                        format!("Synthetic review finding, edit {}", phase - 2)
+                    } else {
+                        "Synthetic review finding".into()
+                    };
                     json!({"data":{"repository":"o/r","number":1,"pull_request":metadata["data"],"conflicts":"clean",
-                        "comments":[],"review_comments":[],"reviews":[{"id":1,"state":"CHANGES_REQUESTED","body":"Synthetic review finding"}],
+                        "comments":[],"review_comments":[],"reviews":[{"id":1,"state":"CHANGES_REQUESTED","body":finding}],
                         "timeline":[],"review_events":[],"review_threads":[],
                         "review_status":{"requested_reviewers":[],"requested_teams":[],"latest_reviews":[],"approved_by":[],"changes_requested_by":[],"dismissed_reviews":[],"resolved_threads":0,"unresolved_threads":0,"outdated_threads":0},
                         "ci":ci["data"],"errors":[]},"complete":true,"observed_at_ms":now,"oldest_validation_at_ms":now,"validations":[]})
@@ -270,7 +292,7 @@ fn lifecycle(reject_steering: bool, following_failures: usize) {
         );
     }
     let started = Instant::now();
-    for index in 0..following_failures {
+    for index in 0..following_updates {
         phase.store(index + 3, Ordering::Release);
         poll_now();
         let expected = after_completion + index as i64 + 1;
@@ -285,13 +307,13 @@ fn lifecycle(reject_steering: bool, following_failures: usize) {
             expected,
             "Repeated observations cannot launch duplicate work"
         );
-        if following_failures > 1 && (index + 1) % 20 == 0 {
+        if following_updates > 1 && (index + 1) % 20 == 0 {
             let rss = Command::new("ps")
                 .args(["-o", "rss=", "-p", &worker.0.id().to_string()])
                 .output()
                 .unwrap();
             eprintln!(
-                "Watcher soak: {}/{following_failures} reruns, elapsed {:?}, worker RSS {} KiB, status {} bytes",
+                "Watcher soak: {}/{following_updates} reruns, elapsed {:?}, worker RSS {} KiB, status {} bytes",
                 index + 1,
                 started.elapsed(),
                 String::from_utf8_lossy(&rss.stdout).trim(),
@@ -303,9 +325,20 @@ fn lifecycle(reject_steering: bool, following_failures: usize) {
         .into_iter()
         .filter(|r| r["type"] == "claim")
         .collect();
-    assert_eq!(claims.len(), after_completion as usize + following_failures);
+    assert_eq!(claims.len(), after_completion as usize + following_updates);
     for pair in claims.windows(2) {
         assert_ne!(pair[0]["session"], pair[1]["session"]);
+    }
+    if review_edits {
+        for (index, claim) in claims.iter().skip(after_completion as usize).enumerate() {
+            let evidence = &claim["status"]["prs"]["https://github.com/o/r/pull/1"]["evidence"];
+            assert_eq!(evidence["complete"], true);
+            assert_eq!(evidence["checks"][0]["id"], 1, "Completed CI did not rerun");
+            assert_eq!(
+                evidence["reviews"][0]["body"],
+                format!("Synthetic review finding, edit {}", index + 1)
+            );
+        }
     }
     // Re-observe the first failure after many newer runs on this same head.
     // Exact signal history must still suppress it, including across DB opens.
@@ -314,7 +347,7 @@ fn lifecycle(reject_steering: bool, following_failures: usize) {
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(
         scalar("SELECT count(*) FROM worker_runs"),
-        after_completion + following_failures as i64,
+        after_completion + following_updates as i64,
         "Repeated observations cannot launch duplicate work"
     );
     drop(server);
