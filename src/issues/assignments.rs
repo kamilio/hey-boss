@@ -557,9 +557,16 @@ fn same_ci_evidence(previous: &Value, next: &Value) -> bool {
     next.get("reviews").is_none()
         && (next.get("ci_complete").is_none() || next["ci_complete"] == previous["ci_complete"])
         && next.as_object().is_some_and(|fields| {
-            fields
-                .iter()
-                .all(|(key, value)| key == "complete" || previous.get(key) == Some(value))
+            fields.iter().all(|(key, value)| {
+                key == "complete"
+                    || (key == "omitted"
+                        && value.as_object().is_some_and(|counts| {
+                            counts
+                                .iter()
+                                .all(|(name, count)| previous["omitted"].get(name) == Some(count))
+                        }))
+                    || previous.get(key) == Some(value)
+            })
         })
 }
 
@@ -1007,7 +1014,7 @@ mod tests {
             blocking: vec![],
             completed: Some("done".into()),
             feedback: vec![],
-            evidence: json!({"head":"head","ci_complete":true,"complete":true,"checks":[],"reviews":[{"body":"Finding"}],"source_errors":[]}),
+            evidence: json!({"head":"head","ci_complete":true,"complete":true,"checks":[],"reviews":[{"body":"Finding"}],"source_errors":[],"omitted":{"checks":5,"reviews":9},"truncated":true}),
         };
         let url = "https://github.com/o/r/pull/1";
         f.store
@@ -1015,8 +1022,7 @@ mod tests {
             .unwrap();
         let before = saved(&f.store.db, "named:test", 1).unwrap().1;
         observation.completed = None;
-        observation.evidence =
-            json!({"head":"head","ci_complete":true,"complete":false,"checks":[]});
+        observation.evidence = json!({"head":"head","ci_complete":true,"complete":false,"checks":[],"omitted":{"checks":5},"truncated":true});
         f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
         let mut writer = Connection::open(&f.root.join("issues.db")).unwrap();
         let lock = writer
