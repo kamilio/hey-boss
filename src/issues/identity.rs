@@ -357,6 +357,7 @@ mod tests {
             pid,
             kind: "Codex".into(),
             cwd: None,
+            cwd_source: None,
             session_id: session.map(str::to_owned),
             task: None,
             title: None,

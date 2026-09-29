@@ -13,6 +13,8 @@ pub struct Agent {
     pub pid: u32,
     pub kind: String,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub cwd_source: Option<String>,
     pub session_id: Option<String>,
     pub task: Option<String>,
     #[serde(default)]
@@ -311,7 +313,22 @@ fn apply_event(agent: &mut Agent, event: &Value) {
             .as_str()
             .map(str::to_owned)
             .or(agent.cwd.take());
+        agent.cwd_source = Some("session_meta".into());
         saved_codex_git(agent, &payload["git"]);
+    }
+    if category == "turn_context" && agent.kind == "Codex" {
+        if let Some(cwd) = payload["cwd"]
+            .as_str()
+            .filter(|cwd| Path::new(cwd).is_absolute())
+        {
+            if agent.cwd.as_deref() != Some(cwd) {
+                agent.git = None;
+            }
+            agent.cwd = Some(cwd.into());
+            agent.cwd_source = Some("turn_context".into());
+        } else {
+            agent.cwd_source = None;
+        }
     }
     if ty == "item_completed" || ty == "item_started" {
         let item = &payload["item"];
@@ -464,7 +481,7 @@ struct CachedSession {
     #[serde(default)]
     process_identity: Option<String>,
 }
-const CACHE_VERSION: u32 = 7;
+const CACHE_VERSION: u32 = 8;
 #[derive(Serialize, Deserialize, Default)]
 struct Cache {
     #[serde(default)]
@@ -538,9 +555,11 @@ fn read_session(agent: &mut Agent, path: &Path, cache: &mut Cache) -> bool {
         internal = previous.internal;
         let id = agent.id.clone();
         let pid = agent.pid;
+        let evidence = agent.evidence.clone();
         *agent = previous.summary.clone();
         agent.id = id;
         agent.pid = pid;
+        agent.evidence = evidence;
     }
     if offset > 0 && agent.kind == "Codex" && agent.git.is_none() {
         // Older caches lack saved Git metadata. Read just the first record;
@@ -668,6 +687,179 @@ fn files(pids: &[u32]) -> BTreeMap<u32, Files> {
         }
     }
     result
+}
+
+// On-demand coordination evidence, never background discovery. Inspect only the
+// environment's exact session key, never command text or other environment values.
+fn environment_session(bytes: &[u8]) -> Option<String> {
+    let mut values = bytes
+        .split(|b| *b == 0)
+        .filter_map(|entry| entry.strip_prefix(b"CODEX_THREAD_ID="));
+    let value = values.next()?;
+    if values.next().is_some() || value.len() != 36 {
+        return None;
+    }
+    let value = std::str::from_utf8(value).ok()?;
+    value
+        .bytes()
+        .enumerate()
+        .all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+        .then(|| value.to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn process_session(pid: u32) -> Option<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
+    let mut bytes = vec![0u8; 1024 * 1024];
+    let mut size = bytes.len();
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
+    if !(0..=65536).contains(&argc) {
+        return None;
+    }
+    let mut at = 4 + bytes.get(4..)?.iter().position(|b| *b == 0)? + 1;
+    while bytes.get(at) == Some(&0) {
+        at += 1;
+    }
+    for _ in 0..argc {
+        at += bytes.get(at..)?.iter().position(|b| *b == 0)? + 1;
+    }
+    environment_session(bytes.get(at..)?)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_session(pid: u32) -> Option<String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(format!("/proc/{pid}/environ"))
+        .ok()?
+        .take(1024 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    environment_session(&bytes)
+}
+
+/// Augment an exact-worktree lookup with same-user live descendant evidence.
+/// A shared application PID without an exact inherited session ID proves nothing.
+pub fn verify_worktree(snapshot: &mut Snapshot, worktree: &Path) -> std::io::Result<()> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,uid="])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other("Process ancestry unavailable"));
+    }
+    let parents: BTreeMap<u32, u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields = line
+                .split_whitespace()
+                .filter_map(|v| v.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            (fields.len() == 3 && fields[2] == unsafe { libc::getuid() })
+                .then(|| (fields[0], fields[1]))
+        })
+        .collect();
+    let output = Command::new("lsof")
+        .args([
+            "-nP",
+            "-a",
+            "-u",
+            &unsafe { libc::getuid() }.to_string(),
+            "-d",
+            "cwd",
+            "-Fpn",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            "Process working directories unavailable",
+        ));
+    }
+    let mut pid = 0;
+    let mut verified = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            pid = value.parse().unwrap_or(0);
+        }
+        let Some(path) = line.strip_prefix('n') else {
+            continue;
+        };
+        if !Path::new(path).starts_with(worktree) || !parents.contains_key(&pid) {
+            continue;
+        }
+        let Some(identity) = process_identity(pid) else {
+            continue;
+        };
+        let Some(session) = process_session(pid) else {
+            continue;
+        };
+        let candidates = snapshot
+            .agents
+            .iter()
+            .filter(|a| {
+                a.kind == "Codex"
+                    && a.session_id.as_deref() == Some(&session)
+                    && a.evidence == "Session file held open by this process"
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            continue;
+        }
+        let agent = candidates[0];
+        let mut parent = pid;
+        let mut owned = false;
+        for _ in 0..128 {
+            let Some(next) = parents.get(&parent).copied() else {
+                break;
+            };
+            if next == agent.pid {
+                owned = true;
+                break;
+            }
+            if next == parent {
+                break;
+            }
+            parent = next;
+        }
+        let still_here = owned
+            && files(&[pid])
+                .get(&pid)
+                .and_then(|f| f.cwd.as_deref())
+                .is_some_and(|cwd| Path::new(cwd).starts_with(worktree));
+        if still_here && process_identity(pid).as_deref() == Some(&identity) {
+            verified.insert((agent.pid, session));
+        }
+    }
+    for agent in &mut snapshot.agents {
+        if agent
+            .session_id
+            .as_ref()
+            .is_some_and(|s| verified.contains(&(agent.pid, s.clone())))
+        {
+            agent.cwd = Some(worktree.to_string_lossy().into_owned());
+            agent.cwd_source = Some("live_process_environment".into());
+            agent.git = None;
+        }
+    }
+    Ok(())
 }
 #[cfg(not(target_os = "macos"))]
 fn files(pids: &[u32]) -> BTreeMap<u32, Files> {
@@ -1026,6 +1218,7 @@ pub fn scan() -> Snapshot {
             pid,
             kind,
             cwd: detail.and_then(|d| d.cwd.clone()),
+            cwd_source: None,
             session_id: None,
             task: None,
             title: None,
@@ -1191,6 +1384,7 @@ mod tests {
             pid: 1,
             kind: "Codex".into(),
             cwd: None,
+            cwd_source: None,
             session_id: None,
             task: None,
             title: None,
@@ -1202,6 +1396,57 @@ mod tests {
             activity_at: None,
             git: None,
         }
+    }
+    #[test]
+    fn current_turn_worktrees_remain_distinct_under_shared_desktop_pid() {
+        let mut first = agent();
+        let mut second = agent();
+        for (agent, id, cwd) in [
+            (&mut first, "first", "/worktrees/first"),
+            (&mut second, "second", "/worktrees/second"),
+        ] {
+            apply_event(
+                agent,
+                &serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":"/main"}}),
+            );
+            apply_event(
+                agent,
+                &serde_json::json!({"type":"turn_context","payload":{"cwd":cwd}}),
+            );
+            assert_eq!(agent.cwd.as_deref(), Some(cwd));
+            apply_event(
+                agent,
+                &serde_json::json!({"type":"turn_context","payload":{"cwd":"relative"}}),
+            );
+            assert_eq!(agent.cwd.as_deref(), Some(cwd));
+        }
+        assert_eq!(first.pid, second.pid);
+        assert_ne!(first.cwd, second.cwd);
+        assert_ne!(first.session_id, second.session_id);
+    }
+    #[test]
+    fn process_environment_requires_one_exact_session_key() {
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        assert_eq!(
+            environment_session(format!("OTHER=value\0CODEX_THREAD_ID={id}\0").as_bytes())
+                .as_deref(),
+            Some(id)
+        );
+        assert!(
+            environment_session(format!("COMMAND=CODEX_THREAD_ID={id}\0").as_bytes()).is_none()
+        );
+        assert!(
+            environment_session(format!("CODEX_THREAD_ID={id}\0CODEX_THREAD_ID={id}\0").as_bytes())
+                .is_none()
+        );
+        assert!(environment_session(b"CODEX_THREAD_ID=invalid\0").is_none());
+    }
+    #[test]
+    fn own_process_session_matches_only_the_inherited_environment() {
+        let expected = std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .and_then(|id| environment_session(format!("CODEX_THREAD_ID={id}\0").as_bytes()));
+        assert_eq!(process_session(std::process::id()), expected);
     }
     #[test]
     fn cached_idle_bindings_reject_reused_pids_and_internal_sessions() {
