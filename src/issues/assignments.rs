@@ -2,6 +2,8 @@
 use super::*;
 
 const WATCHER: &str = "watcher:github";
+#[path = "assignment_evidence.rs"]
+mod evidence;
 #[path = "assignment_lifecycle.rs"]
 mod lifecycle;
 
@@ -286,7 +288,7 @@ fn public_status(status: Value, monitoring: bool) -> Value {
             pr.remove("seen");
         }
     }
-    status
+    evidence::bounded(status)
 }
 
 pub(super) fn enrich_result(
@@ -855,6 +857,35 @@ mod tests {
                 .assignee
                 .as_deref(),
             Some("human:boss")
+        );
+    }
+
+    #[test]
+    fn many_prs_have_bounded_claim_evidence_with_trigger_and_failure_totals_retained() {
+        let mut status =
+            json!({"event":"new","trigger":{"url":"https://github.com/o/r/pull/40"},"prs":{}});
+        for number in 1..=40 {
+            status["prs"][format!("https://github.com/o/r/pull/{number}")] = json!({"head":"head","checked_at":123,
+                "evidence":{"repository":"o/r","number":number,"complete":true,"required_state":"failure",
+                    "required_counts":{"total":200,"failure":100},"required":[{"context":"test","state":"failure"}],
+                    "reviews":(0..30).map(|id|json!({"id":id,"body":"x".repeat(1800)})).collect::<Vec<_>>()}});
+        }
+        let public = public_status(status.clone(), true);
+        assert!(public.to_string().len() <= 128 * 1024);
+        assert_eq!(public["prs"].as_object().unwrap().len(), 40);
+        assert_eq!(
+            public["prs"]["https://github.com/o/r/pull/40"]["evidence"]["reviews"],
+            status["prs"]["https://github.com/o/r/pull/40"]["evidence"]["reviews"]
+        );
+        for snapshot in public["prs"].as_object().unwrap().values() {
+            assert_eq!(snapshot["evidence"]["required_counts"]["failure"], 100);
+        }
+        assert!(
+            public["prs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|snapshot| snapshot["evidence"]["truncated"] == true)
         );
     }
 
