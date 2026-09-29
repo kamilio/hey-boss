@@ -284,7 +284,10 @@ fn native_web_view_uses_boss_machine_identity_in_allocation_diagnostics() {
     assert_eq!(view["allocation"]["reason"], "allocated_here");
     assert_eq!(view["allocation"]["caller_machine"], machine);
     assert_eq!(view["allocation"]["store_machine"], "replica-machine");
-    assert_eq!(view["issue"], created["issue"]);
+    let mut expected = created["issue"].clone();
+    expected["assignment"] =
+        json!({"kind":"machine","machine":machine,"machine_name":machine});
+    assert_eq!(view["issue"], expected);
 }
 
 #[test]
