@@ -1661,6 +1661,51 @@ mod tests {
     }
 
     #[test]
+    fn github_delivery_receipts_do_not_retain_repeated_large_payloads() {
+        let mut f = watching_fixture();
+        f.store.worker_steer(&f.job.id, &json!({"scope":"session","text":"Keep the human instruction","request_id":"human-message"})).unwrap();
+        f.store
+            .worker_steering_result("human-message", "delivered", None)
+            .unwrap();
+        let started = std::time::Instant::now();
+        for index in 0..64 {
+            let key = format!("event-{index}-{}", "evidence".repeat(4096));
+            watch_event(&mut f, &key);
+            let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+            assert!(instruction["text"].as_str().unwrap().len() > 32_000);
+            f.store
+                .worker_steering_result(
+                    instruction["request_id"].as_str().unwrap(),
+                    "delivered",
+                    None,
+                )
+                .unwrap();
+            assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+        }
+        let bytes: i64 = f.store.db.query_row("SELECT sum(length(text)) FROM agent_steering WHERE substr(request_id,1,7)='github:'", [], |r| r.get(0)).unwrap();
+        eprintln!(
+            "64 large watcher deliveries: {:?}, retained payload bytes: {bytes}",
+            started.elapsed()
+        );
+        assert_eq!(
+            bytes, 0,
+            "Delivery identities suffice after the transport acknowledges a snapshot"
+        );
+        let human: String = f
+            .store
+            .db
+            .query_row(
+                "SELECT text FROM agent_steering WHERE request_id='human-message'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(human, "Keep the human instruction");
+        f.store.worker_finish(&f.job, "completed", "Fixed").unwrap();
+        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+    }
+
+    #[test]
     fn github_watcher_coalesces_queued_snapshots_but_preserves_human_and_inflight_messages() {
         let mut f = watching_fixture();
         watch_event(&mut f, "second");
