@@ -43,6 +43,12 @@ for await (const line of createInterface({input:process.stdin})) {
     assert(!params.input[0].text.includes('Boss added an instruction'), 'Automatic evidence must not impersonate a human instruction');
     const update = status(params.input[0].text);
     assert.equal(Object.values(update.prs)[0].evidence.complete,true);
+    if (process.env.HEY_BOSS_TEST_REJECT_STEERING === '1') {
+      record({type:'steer_rejected',phase,status:update});
+      send({id:message.id,error:{code:-32601,message:'Steering is unsupported in this fixture'}});
+      setTimeout(finish, 100);
+      continue;
+    }
     record({type:'steer',phase,status:update});
     result = {turnId:turn};
   }
