@@ -22,6 +22,7 @@ pub struct PrStatusSelection<'a> {
 pub struct ApiClient {
     base: Url,
     http: reqwest::Client,
+    background: bool,
 }
 impl ApiClient {
     /// Lightweight lifecycle metadata, sharing the daemon cache and quota queue.
@@ -39,7 +40,7 @@ impl ApiClient {
         self.read(
             self.http
                 .get(self.url(&format!("v1/prs/{repository}/{number}/metadata")))
-                .query(&freshness_query(freshness)?),
+                .query(&self.pr_query(freshness)?),
         )
         .await
     }
@@ -135,7 +136,24 @@ impl ApiClient {
             .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| Error::Transport(e.to_string()))?;
-        Ok(Self { base, http })
+        Ok(Self {
+            base,
+            http,
+            background: false,
+        })
+    }
+    /// Use the daemon's background lane and bounded request lifetime for
+    /// targeted PR, CI, policy, and metadata reads. Other methods are unchanged.
+    pub fn background(mut self) -> Self {
+        self.background = true;
+        self
+    }
+    fn pr_query(&self, freshness: Freshness) -> Result<Vec<(&'static str, String)>> {
+        let mut query = freshness_query(freshness)?;
+        if self.background {
+            query.push(("background", "true".into()));
+        }
+        Ok(query)
     }
     fn url(&self, path: &str) -> Url {
         self.base.join(path).expect("validated API path")
@@ -161,7 +179,7 @@ impl ApiClient {
         self.read(
             self.http
                 .get(self.url(&format!("v1/prs/{repository}/{number}")))
-                .query(&freshness_query(freshness)?),
+                .query(&self.pr_query(freshness)?),
         )
         .await
     }
@@ -175,7 +193,7 @@ impl ApiClient {
         self.read(
             self.http
                 .get(self.url(&format!("v1/prs/{repository}/{number}/ci")))
-                .query(&freshness_query(freshness)?),
+                .query(&self.pr_query(freshness)?),
         )
         .await
     }
@@ -215,7 +233,7 @@ impl ApiClient {
         self.read(
             self.http
                 .get(self.url(&format!("v1/prs/{repository}/{number}/required-checks")))
-                .query(&freshness_query(freshness)?),
+                .query(&self.pr_query(freshness)?),
         )
         .await
     }

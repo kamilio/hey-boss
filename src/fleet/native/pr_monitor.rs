@@ -69,7 +69,7 @@ pub(super) fn run(ctx: Context) {
         }
     };
     let client = match ApiClient::new("http://127.0.0.1:8787/".parse().unwrap()) {
-        Ok(client) => client,
+        Ok(client) => client.background(),
         Err(error) => {
             eprintln!("PR monitor: {error}");
             return;

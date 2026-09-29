@@ -7554,6 +7554,78 @@ async fn required_policy_promotes_coalesced_requests_and_keeps_background_fair()
 }
 
 #[tokio::test]
+async fn background_pr_http_reads_do_not_promote_the_shared_queue() {
+    for suffix in ["required-checks", "ci", ""] {
+        let h = Harness::new().await;
+        h.phase(2);
+        let c = h.client();
+        let gate_client = c.clone();
+        let gate =
+            tokio::spawn(async move { gate_client.get("slow", Freshness::Revalidate).await });
+        until(|| h.calls().len() == 1).await;
+        let mut background = Vec::new();
+        for n in 0..8 {
+            let client = c.clone();
+            background.push(tokio::spawn(async move {
+                client
+                    .get(&format!("queued/{n}"), Freshness::Revalidate)
+                    .await
+            }));
+        }
+        until(|| c.status().outstanding_requests == 9).await;
+        let client = c.clone();
+        background.push(tokio::spawn(async move {
+            client
+                .get("repos/acme/demo/pulls/7", Freshness::Revalidate)
+                .await
+        }));
+        until(|| c.status().outstanding_requests == 10).await;
+        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sdk = hey_gh::ApiClient::new(
+            format!("http://{}/", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        )
+        .unwrap()
+        .background();
+        let server = tokio::spawn(axum::serve(listener, api.router()).into_future());
+        let reader = tokio::spawn(async move {
+            match suffix {
+                "required-checks" => {
+                    sdk.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+                        .await
+                        .unwrap();
+                }
+                "ci" => {
+                    sdk.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    sdk.pr_report("acme/demo", 7, Freshness::Revalidate)
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        until(|| c.status().coalesced_requests >= 1).await;
+        h.mock.release.notify_one();
+        assert!(gate.await.unwrap().is_ok());
+        reader.await.unwrap();
+        for job in background {
+            assert!(job.await.unwrap().is_ok());
+        }
+        assert!(
+            h.calls()[1].path.starts_with("/queued/"),
+            "{suffix}: a watcher must not promote its coalesced request ahead of waiting background work"
+        );
+        api.stop().await;
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn ruleset_cache_policy_preserves_required_evidence_and_strict_ancestry_errors() {
     let h = Harness::new().await;
     h.mode("ruleset-cache-policy");
