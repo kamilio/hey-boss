@@ -18,7 +18,7 @@ pub struct Options {
     /// Authoritative SSH host (also HEY_BOSS_ISSUE_HOST); never falls back locally.
     #[arg(long, global = true)]
     host: Option<String>,
-    /// Use the connected supervisor for guarded metadata, dependency edits or reopen (no SSH or work claim).
+    /// Use the connected supervisor for PR add/list, guarded metadata, dependency edits or reopen (no SSH or work claim).
     #[arg(long, global = true, conflicts_with = "host")]
     supervisor: bool,
     /// Print structured results and operational errors.
@@ -616,7 +616,7 @@ enum CommitAction {
 
 #[derive(Subcommand)]
 enum PrAction {
-    /// Attach a PR; existing links keep their recorded purpose.
+    /// Attach a PR; existing links keep their recorded purpose. Supports --supervisor without a work claim.
     Add {
         number: i64,
         url: String,
@@ -634,6 +634,7 @@ enum PrAction {
         number: i64,
         url: String,
     },
+    /// Read attached PRs; --supervisor reads the authoritative store.
     List {
         number: i64,
     },
@@ -1185,13 +1186,16 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Reopen { .. }
                 | Action::BlockedBy { .. }
                 | Action::Batch { .. }
+                | Action::Pr {
+                    command: PrAction::Add { .. } | PrAction::List { .. },
+                }
                 | Action::Edit {
                     interactive: false,
                     ..
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, request, allocation, guarded metadata edits, guarded blocked-by edits, guarded reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, request, allocation, PR add/list, guarded metadata edits, guarded blocked-by edits, guarded reopen and label-only batches; this command is not supported",
             ));
         }
     }
