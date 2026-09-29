@@ -18,6 +18,9 @@ fn condensed(snapshot: &Value) -> Value {
         "complete",
         "ci_complete",
         "required_state",
+        "sources_match",
+        "source_heads",
+        "source_merges",
     ] {
         if let Some(value) = source.get(field) {
             evidence.insert(field.into(), short(value, 256));

@@ -186,6 +186,17 @@ async fn poll_details(
     }
     let observation =
         hey_gh::watcher::observe_ci(repository, number, &metadata.data, &ci.data, &policy);
+    if observation.evidence["sources_match"] == false {
+        Store::open(&ctx.path)
+            .map_err(storage)?
+            .record_github_error(
+                url,
+                "ci",
+                "Pull request changed during CI collection; refreshing again. Last validated status retained.",
+            )
+            .map_err(storage)?;
+        return Ok(());
+    }
     Store::open(&ctx.path)
         .map_err(storage)?
         .record_github_observation(url, &observation, timestamp(ci.observed_at_ms)?)
@@ -204,13 +215,14 @@ async fn poll_details(
     .unwrap_or(Err(hey_gh::Error::Deadline));
     let mut store = Store::open(&ctx.path).map_err(storage)?;
     match result {
-        Ok(report) if fresh(report.oldest_validation_at_ms) && timestamp(report.observed_at_ms).is_ok() => store
-            .record_github_observation(
-                url,
-                &hey_gh::watcher::observe(&report, &policy),
-                timestamp(report.observed_at_ms)?,
-            )
-            .map_err(storage)?,
+        Ok(report) if fresh(report.oldest_validation_at_ms) && timestamp(report.observed_at_ms).is_ok() => {
+            let observation = hey_gh::watcher::observe(&report, &policy);
+            if observation.evidence["sources_match"] == false {
+                store.record_github_error(url, "reviews", "Pull request changed during review collection; refreshing again. Last validated status retained.").map_err(storage)?;
+            } else {
+                store.record_github_observation(url, &observation, timestamp(report.observed_at_ms)?).map_err(storage)?;
+            }
+        }
         Ok(_) => store
             .record_github_error(
                 url,

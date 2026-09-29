@@ -1789,6 +1789,15 @@ mod tests {
             .unwrap();
         assert_eq!(f.state(), "completed");
         assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+        let prs_enabled: bool = f
+            .store
+            .db
+            .query_row("SELECT prs_enabled FROM project_settings", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            !prs_enabled,
+            "Watcher handoff must not change project PR policy"
+        );
     }
 
     #[test]

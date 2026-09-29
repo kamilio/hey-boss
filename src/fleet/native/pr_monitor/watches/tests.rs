@@ -184,6 +184,16 @@ fn required_failure_survives_unavailable_workflow_details() {
     scenario(Scenario::CiDenied);
 }
 
+#[test]
+fn changed_ci_head_preserves_the_early_failure_without_misattributing_it() {
+    scenario(Scenario::HeadChanged);
+}
+
+#[test]
+fn changed_review_head_preserves_the_validated_ci_failure() {
+    scenario(Scenario::ReviewHeadChanged);
+}
+
 #[derive(Clone, Copy)]
 enum Scenario {
     ReviewsDenied,
@@ -191,6 +201,8 @@ enum Scenario {
     Stale,
     InvalidTime,
     CiDenied,
+    HeadChanged,
+    ReviewHeadChanged,
     Closed,
     Merged,
     KeepMergedOpen,
@@ -214,6 +226,8 @@ fn scenario(scenario: Scenario) {
     let stale = matches!(scenario, Scenario::Stale);
     let invalid_time = matches!(scenario, Scenario::InvalidTime);
     let ci_denied = matches!(scenario, Scenario::CiDenied);
+    let head_changed = matches!(scenario, Scenario::HeadChanged);
+    let review_head_changed = matches!(scenario, Scenario::ReviewHeadChanged);
     let terminal = matches!(
         scenario,
         Scenario::Closed | Scenario::Merged | Scenario::KeepMergedOpen
@@ -249,7 +263,11 @@ fn scenario(scenario: Scenario) {
             .unwrap();
     }
     drop(store);
-    let (ci, mut policy, mut metadata) = evidence(pending, stale);
+    let (mut ci, mut policy, mut metadata) = evidence(pending, stale);
+    if head_changed {
+        ci["data"]["head_sha"] = json!("next-head");
+        metadata["data"]["head"]["sha"] = json!("next-head");
+    }
     if invalid_time {
         policy["observed_at_ms"] = json!(u64::MAX);
     }
@@ -258,6 +276,12 @@ fn scenario(scenario: Scenario) {
         metadata["data"]["state"] = json!("closed");
         metadata["data"]["merged"] = json!(merged);
     }
+    let mut changed_report = json!({"data":{"repository":"o/r","number":1,"pull_request":metadata["data"],"conflicts":"clean",
+        "comments":[],"review_comments":[],"reviews":[],"timeline":[],"review_events":[],"review_threads":[],
+        "review_status":{"requested_reviewers":[],"requested_teams":[],"latest_reviews":[],"approved_by":[],"changes_requested_by":[],"dismissed_reviews":[],"resolved_threads":0,"unresolved_threads":0,"outdated_threads":0},
+        "ci":ci["data"],"errors":[]},"complete":true,"observed_at_ms":ci["observed_at_ms"],"oldest_validation_at_ms":ci["oldest_validation_at_ms"],"validations":[]});
+    changed_report["data"]["pull_request"]["head"]["sha"] = json!("next-head");
+    changed_report["data"]["ci"]["head_sha"] = json!("next-head");
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let client =
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
@@ -267,7 +291,7 @@ fn scenario(scenario: Scenario) {
             2
         } else if stale || invalid_time {
             1
-        } else if pending || ci_denied {
+        } else if pending || ci_denied || head_changed {
             3
         } else {
             4
@@ -311,7 +335,11 @@ fn scenario(scenario: Scenario) {
                         assignee.is_none(),
                         "Required failure must release the watcher before the review request starts"
                     );
-                    (&Value::Null, 503)
+                    if review_head_changed {
+                        (&changed_report, 200)
+                    } else {
+                        (&Value::Null, 503)
+                    }
                 }
                 _ => panic!("Unexpected watcher request: {path}"),
             };
@@ -358,6 +386,14 @@ fn scenario(scenario: Scenario) {
     }
     if !stale && !invalid_time && !terminal {
         assert_eq!(status["evidence"]["required"][0]["state"], "failure");
+    }
+    if head_changed || review_head_changed {
+        assert_eq!(
+            status["head"], "head",
+            "Retain the independently validated early observation"
+        );
+        assert!(status["error"].as_str().unwrap().contains("changed"));
+        assert!(view["issue"]["github_status"]["event"].is_string());
     }
     if terminal {
         assert_eq!(view["issue"]["github_status"]["monitoring"], false);

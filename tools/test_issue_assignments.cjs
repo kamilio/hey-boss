@@ -71,6 +71,13 @@ test('review fetch errors keep the required failure visible', () => {
   assert.match(html, /Review access denied/);
 });
 
+test('mismatched source heads label old checks instead of attributing failure to the new head', () => {
+  const html = assignments.status({...base, github_status:{prs:{'https://github.com/o/r/pull/1':{evidence:{sources_match:false,required:[{context:'tests',state:'failure'}],complete:false}}}}},helpers);
+  assert.match(html,/Refreshing changed pull request/);
+  assert.match(html,/Last recorded required checks/);
+  assert.doesNotMatch(html,/1 required check failed|All checks finished|github-check-summary failed/);
+});
+
 test('stopped watchers explain missing PRs without advertising queued work', () => {
   const issue = {...base, state:'closed', assignment:{kind:'github'}, github_status:{monitoring:false, stopped_reason:'no_open_pull_requests', prs:{}}};
   assert.match(assignments.describe(issue, helpers).detail, /Monitoring stopped/);
