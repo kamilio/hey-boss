@@ -77,6 +77,8 @@ try {
   async function relay() {
     try {
       const queue=await (await fetch(paired+'/api/bridge/web',{headers})).json();
+      // The development CLI may reload after a build; refresh its CSRF token.
+      if (queue.requests.length) boot=await (await fetch(native+'/api/bootstrap')).json();
       for (const request of queue.requests) {
         const response=request.kind==='inbox'?{ok:true,tasks:[]}:
           await (await fetch(native+'/api/'+request.kind,request.kind==='bootstrap'?{}:{method:'POST',
