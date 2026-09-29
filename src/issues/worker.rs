@@ -1928,6 +1928,12 @@ fn run_thread(
 }
 
 fn steering_text(instruction: &Value) -> String {
+    if instruction["request_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("github:"))
+    {
+        return instruction["text"].as_str().unwrap().to_owned();
+    }
     if instruction["scope"] == "dependency" {
         return format!(
             "Task dependency update. Preserve your running claim and coordinate the stack.\n\n{}",
@@ -2309,6 +2315,15 @@ impl Startup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watcher_steering_is_structured_evidence_without_a_human_instruction_wrapper() {
+        let text = json!({"github_status":{"event":"new","prs":{}}}).to_string();
+        assert_eq!(
+            steering_text(&json!({"request_id":"github:run:new","scope":"session","text":text})),
+            text
+        );
+    }
 
     #[test]
     fn startup_registration_reconciles_lost_commit_acknowledgments() {

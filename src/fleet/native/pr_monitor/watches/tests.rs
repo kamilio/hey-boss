@@ -1,5 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
+#[path = "end_to_end.rs"]
+mod end_to_end;
 
 #[test]
 fn validation_times_must_be_recent_and_plausible() {
