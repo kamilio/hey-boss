@@ -978,6 +978,29 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn removing_last_pr_from_blocked_work_stops_monitoring_without_lifting_the_hold() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.observation(None);
+        f.call(
+            json!({"action":"block","number":1,"force":true,"comment":"Synthetic dependency hold"}),
+        )
+        .unwrap();
+        f.call(json!({"action":"remove_pull_request","number":1,"url":"https://github.com/o/r/pull/1"})).unwrap();
+        let view = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(view["issue"]["state"], "blocked");
+        assert_eq!(view["issue"]["manual_blocked"], true);
+        assert!(view["issue"]["assignee"].is_null());
+        assert_eq!(view["issue"]["github_status"]["monitoring"], false);
+        assert_eq!(
+            view["issue"]["github_status"]["stopped_reason"],
+            "no_open_pull_requests"
+        );
+        f.store
+            .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+            .unwrap();
+    }
 
     #[test]
     fn removing_one_watched_pr_prunes_its_snapshot_and_signal_history() {
