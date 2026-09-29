@@ -98,7 +98,7 @@ fn checkless_pr_waits_for_feedback_and_repeated_reviews_do_not_repeat_work() {
         });
         runtime.block_on(async {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            let required = poll_required(&ctx, &client, url, "o/r", 1, deadline)
+            let required = poll_required(&ctx, &client, url, "o/r", 1, deadline, false)
                 .await
                 .unwrap()
                 .unwrap();

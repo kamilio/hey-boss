@@ -4,6 +4,8 @@ use super::*;
 const WATCHER: &str = "watcher:github";
 #[path = "assignment_evidence.rs"]
 mod evidence;
+#[path = "github_fetch.rs"]
+pub(super) mod fetch;
 #[path = "assignment_lifecycle.rs"]
 mod lifecycle;
 
@@ -17,8 +19,9 @@ pub(super) fn links_changed(
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=4 FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_assignment_summary','issue_github_destinations')",[],|r|r.get::<_,bool>(0))? { return Ok(()); }
+    if db.query_row("SELECT count(*)=5 FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_assignment_summary','issue_github_destinations','github_fetch_status')",[],|r|r.get::<_,bool>(0))? { return Ok(()); }
     db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_watches(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,status TEXT NOT NULL CHECK(json_valid(status)),PRIMARY KEY(project_id,issue_number),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)); CREATE INDEX IF NOT EXISTS issue_assignment_summary ON issues(project_id,number,assignment_target); CREATE INDEX IF NOT EXISTS issue_github_destinations ON issues(project_id,number) WHERE assignment_target='github';")?;
+    fetch::migrate(db)?;
     // The supervisor retains exact event identities locally. Peers need only
     // current evidence and its event generation, not an ever-growing history.
     db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_signals(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,url TEXT NOT NULL,head TEXT NOT NULL,signal TEXT NOT NULL,PRIMARY KEY(project_id,issue_number,url,head,signal),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)) WITHOUT ROWID;")?;
@@ -337,6 +340,7 @@ pub(super) fn enrich_result(
                 && issue["state"] != "closed"
                 && issue["deleted_at"].is_null();
             issue["github_status"] = public_status(status, monitoring);
+            issue["github_status"]["fetches"] = fetch::status(db, project, number)?;
         }
     }
     result["assignment_machines"] = json!(machines);
@@ -837,6 +841,59 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+    #[test]
+    fn manual_fetch_preserves_ownership_and_survives_an_inflight_request() {
+        let mut f = Fixture::new();
+        assert!(
+            f.call(json!({"action":"refresh_github","number":1}))
+                .is_err()
+        );
+        f.assign("github").unwrap();
+        f.store
+            .db
+            .execute("UPDATE issues SET assignee='human:test' WHERE number=1", [])
+            .unwrap();
+        f.observation(None);
+        let evidence_before = saved(&f.store.db, "named:test", 1).unwrap().1;
+        let before = f.call(json!({"action":"view","number":1})).unwrap();
+        let result = f
+            .call(json!({"action":"refresh_github","number":1}))
+            .unwrap();
+        assert_eq!(result["issue"]["version"], before["issue"]["version"]);
+        assert_eq!(result["issue"]["assignee"], before["issue"]["assignee"]);
+        let url = "https://github.com/o/r/pull/1";
+        let now = crate::issues::worker::now();
+        let (started, force) = f.store.begin_github_fetch(url, now).unwrap();
+        assert!(force);
+        f.call(json!({"action":"refresh_github","number":1}))
+            .unwrap();
+        f.store
+            .finish_github_fetch(url, started, now + 1, now + 30000, None)
+            .unwrap();
+        assert!(f.store.requested_github_fetches().unwrap().contains(url));
+        let (newer, force) = f.store.begin_github_fetch(url, now + 2).unwrap();
+        assert!(force);
+        f.store
+            .finish_github_fetch(url, started, now + 3, 0, Some("old failure"))
+            .unwrap();
+        f.store
+            .finish_github_fetch(url, newer, newer + 4, newer + 30000, None)
+            .unwrap();
+        f.observation(None);
+        assert_eq!(
+            saved(&f.store.db, "named:test", 1).unwrap().1,
+            evidence_before
+        );
+        assert!(f.store.requested_github_fetches().unwrap().is_empty());
+        let result = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(
+            result["issue"]["github_status"]["fetches"][url]["finished_at"],
+            newer + 4
+        );
+        assert!(result["issue"]["github_status"]["fetches"][url]["error"].is_null());
+        assert_eq!(result["issue"]["version"], before["issue"]["version"]);
+    }
+
     #[test]
     fn trailing_slash_aliases_share_event_history_after_either_link_is_removed() {
         let url = "https://github.com/o/r/pull/1";

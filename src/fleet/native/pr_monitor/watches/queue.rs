@@ -7,6 +7,8 @@ struct Task {
     repository: String,
     number: u64,
     required: Option<RequiredEvidence>,
+    started: i64,
+    force: bool,
 }
 
 pub(super) async fn poll(
@@ -25,6 +27,8 @@ pub(super) async fn poll(
                 repository,
                 number,
                 required: None,
+                started: 0,
+                force: false,
             })
         })
         .collect();
@@ -45,7 +49,7 @@ pub(super) async fn poll(
             } else {
                 required.pop_front()
             };
-            let Some(task) = next else {
+            let Some(mut task) = next else {
                 break;
             };
             policy_streak = if task.required.is_some() {
@@ -53,6 +57,10 @@ pub(super) async fn poll(
             } else {
                 policy_streak.saturating_add(1)
             };
+            if task.required.is_none() {
+                (task.started, task.force) = Store::open(&ctx.path)?
+                    .begin_github_fetch(&task.url, crate::issues::worker::now())?;
+            }
             let ctx = ctx.clone();
             let client = client.clone();
             running.spawn(async move {
@@ -81,17 +89,26 @@ pub(super) async fn poll(
                             &task.repository,
                             task.number,
                             deadline,
+                            task.force,
                         )
                         .await
                     }
                 };
-                (task.url, task.repository, task.number, source, result)
+                (
+                    task.url,
+                    task.repository,
+                    task.number,
+                    task.started,
+                    task.force,
+                    source,
+                    result,
+                )
             });
         }
         let Some(result) = running.join_next().await else {
             break;
         };
-        let (url, repository, number, source, result) = result?;
+        let (url, repository, number, started, force, source, result) = result?;
         match result {
             Ok(evidence) => {
                 // Checkpoint policy progress even when this batch has no time
@@ -103,15 +120,45 @@ pub(super) async fn poll(
                         repository,
                         number,
                         required: Some(evidence),
+                        started,
+                        force,
                     });
+                } else {
+                    Store::open(&ctx.path)?.finish_github_fetch(
+                        &url,
+                        started,
+                        crate::issues::worker::now(),
+                        schedule.next_at(&url),
+                        None,
+                    )?;
                 }
             }
             Err(error) => {
                 schedule.failure(&url, crate::issues::worker::now(), &error);
-                Store::open(&ctx.path)?.record_github_error(&url, source, &error.to_string())?;
+                let mut store = Store::open(&ctx.path)?;
+                store.record_github_error(&url, source, &error.to_string())?;
+                store.finish_github_fetch(
+                    &url,
+                    started,
+                    crate::issues::worker::now(),
+                    schedule.next_at(&url),
+                    Some(&error.to_string()),
+                )?;
+                store.github_fetch_cooldown(schedule.cooldown_until)?;
             }
         }
         ctx.atomic_json(path, &serde_json::to_value(&schedule)?)?;
+    }
+    // A batch can end before the detail lane runs; never leave an immortal
+    // "fetching" record when required checks alone were collected.
+    for task in details {
+        Store::open(&ctx.path)?.finish_github_fetch(
+            &task.url,
+            task.started,
+            crate::issues::worker::now(),
+            schedule.next_at(&task.url),
+            Some("Required checks fetched; details deferred to the next poll"),
+        )?;
     }
     Ok(())
 }

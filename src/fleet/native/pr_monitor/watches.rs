@@ -26,13 +26,25 @@ pub(super) async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
             closed: false,
         })
         .collect();
+    let requested = store.requested_github_fetches()?;
     drop(store);
     let path = ctx.state.join("github-watch-schedule.json");
     let mut schedule: schedule::Schedule = serde_json::from_value(
         ctx.read_json(&path, serde_json::json!({"cooldown_until":0,"entries":{}}))?,
     )?;
-    let due = schedule.due(&tracked, crate::issues::worker::now());
+    let due = schedule.watch_due(&tracked, &requested, crate::issues::worker::now());
+    if schedule.cooldown_until > crate::issues::worker::now() {
+        Store::open(&ctx.path)?.github_fetch_cooldown(schedule.cooldown_until)?;
+    }
     queue::poll(ctx, client, due, &mut schedule, &path).await
+}
+
+fn fetch_freshness(force: bool) -> Freshness {
+    if force {
+        Freshness::Revalidate
+    } else {
+        Freshness::MaxAge(Duration::from_secs(30))
+    }
 }
 
 fn fresh(validated_at: u64) -> bool {
@@ -58,6 +70,7 @@ fn storage(error: crate::issues::Error) -> hey_gh::Error {
 struct RequiredEvidence {
     policy: hey_gh::RequiredChecksReport,
     published: bool,
+    force: bool,
 }
 
 async fn poll_required(
@@ -67,8 +80,9 @@ async fn poll_required(
     repository: &str,
     number: u64,
     batch_deadline: tokio::time::Instant,
+    force: bool,
 ) -> hey_gh::Result<Option<RequiredEvidence>> {
-    let freshness = Freshness::MaxAge(Duration::from_secs(30));
+    let freshness = fetch_freshness(force);
     let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20));
     let policy = tokio::time::timeout_at(
         deadline,
@@ -138,6 +152,7 @@ async fn poll_required(
     Ok(Some(RequiredEvidence {
         policy,
         published: published_required,
+        force,
     }))
 }
 
@@ -153,8 +168,9 @@ async fn poll_details(
     let RequiredEvidence {
         policy,
         published: published_required,
+        force,
     } = required;
-    let freshness = Freshness::MaxAge(Duration::from_secs(30));
+    let freshness = fetch_freshness(force);
     let result = tokio::time::timeout_at(
         batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20)),
         async {

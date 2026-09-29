@@ -390,6 +390,9 @@ pub enum Operation {
         number: i64,
         machine: String,
     },
+    RefreshGithub {
+        number: i64,
+    },
     Assign {
         number: i64,
         target: String,
@@ -649,6 +652,7 @@ impl Operation {
             | Self::ReconcileAttempt { number, .. }
             | Self::Allocation { number, .. }
             | Self::Assign { number, .. }
+            | Self::RefreshGithub { number }
             | Self::ReleaseAllocation { number, .. }
             | Self::Subtasks { number, .. }
             | Self::CreateSubtask { number, .. }

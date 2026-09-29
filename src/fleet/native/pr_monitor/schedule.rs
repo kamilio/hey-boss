@@ -15,6 +15,38 @@ struct Entry {
 }
 
 impl Schedule {
+    pub fn next_at(&self, url: &str) -> i64 {
+        self.cooldown_until
+            .max(self.entries.get(url).map_or(0, |entry| entry.next_at))
+    }
+
+    pub fn watch_due(
+        &mut self,
+        prs: &[crate::issues::TrackedPullRequest],
+        requested: &std::collections::BTreeSet<String>,
+        now: i64,
+    ) -> Vec<String> {
+        let mut due = self.due(prs, now);
+        if now < self.cooldown_until {
+            return due;
+        }
+        // Manual requests join the same bounded queue and cannot bypass quota.
+        for pr in prs {
+            if requested.contains(pr.url.trim_end_matches('/')) && !due.contains(&pr.url) {
+                due.push(pr.url.clone());
+            }
+        }
+        due.sort_by_key(|url| {
+            (
+                !requested.contains(url.trim_end_matches('/')),
+                self.entries.get(url).map_or(0, |entry| entry.attempted_at),
+                url.clone(),
+            )
+        });
+        due.truncate(20);
+        due
+    }
+
     pub fn watch_success(&mut self, url: &str, now: i64) {
         self.entries.insert(
             url.into(),
@@ -96,6 +128,23 @@ fn interval(closed: bool) -> i64 {
 mod tests {
     use super::*;
     use crate::issues::TrackedPullRequest;
+
+    #[test]
+    fn manual_fetch_bypasses_local_backoff_but_obeys_quota_and_batch_limit() {
+        let mut schedule = Schedule::default();
+        let prs = (0..25)
+            .map(|n| pr(&format!("pr-{n}"), None, false))
+            .collect::<Vec<_>>();
+        for pr in &prs {
+            schedule.watch_success(&pr.url, 1000);
+        }
+        let requested = prs.iter().map(|pr| pr.url.clone()).collect();
+        assert!(schedule.due(&prs, 2000).is_empty());
+        assert_eq!(schedule.watch_due(&prs, &requested, 2000).len(), 20);
+        schedule.cooldown_until = 3000;
+        assert!(schedule.watch_due(&prs, &requested, 2000).is_empty());
+        assert_eq!(schedule.next_at("pr-0"), 31000);
+    }
 
     fn pr(url: &str, checked_at: Option<i64>, closed: bool) -> TrackedPullRequest {
         TrackedPullRequest {

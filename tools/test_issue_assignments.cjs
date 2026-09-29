@@ -127,3 +127,41 @@ test('a surviving attempt disables reassignment and never promises pickup', () =
   assert.match(html,/Pickup is paused until the retained attempt is reconciled/);
   assert.doesNotMatch(html,/An available machine can pick this up/);
 });
+
+test('assignment shows actual fetch activity and a fetch-now action', () => {
+  const url=base.pull_requests[0].url;
+  const html=assignments.render({issue:{...base,assignment:{kind:'github',waiting:true},github_status:{monitoring:true,fetches:{[url]:{finished_at:Date.now()-60000,next_at:Date.now()+30000}},prs:{[url]:{evidence:{required_state:'pending'}}}}}},helpers);
+  assert.match(html,/Last fetch/);
+  assert.match(html,/<time datetime=/);
+  assert.match(html,/data-action="refresh_github"/);
+  assert.match(html,/Fetch now/);
+});
+
+test('queued fetches and stopped monitoring are clear in assignment', () => {
+  const url=base.pull_requests[0].url;
+  const issue={...base,assignment:{kind:'github',waiting:true},github_status:{monitoring:true,fetches:{[url]:{requested_at:Date.now()}},prs:{}}};
+  assert.match(assignments.render({issue},helpers),/Fetch queued/);
+  const stopped=assignments.render({issue:{...issue,state:'closed',github_status:{...issue.github_status,monitoring:false}}},helpers);
+  assert.doesNotMatch(stopped,/data-action="refresh_github"/);
+});
+
+test('fetch errors are escaped and interrupted attempts allow another fetch', () => {
+  const url=base.pull_requests[0].url, now=Date.now();
+  const issue={...base,assignment:{kind:'github',actor:'codex:123',machine_name:'Devbox'},github_status:{monitoring:true,fetches:{[url]:{started_at:now-180000,finished_at:now-240000,error:'retry <unsafe>'}},prs:{}}};
+  const html=assignments.render({issue},helpers);
+  assert.match(html,/Codex is working on Devbox/);
+  assert.match(html,/Fetch interrupted/);
+  assert.match(html,/retry &lt;unsafe&gt;/);
+  assert.doesNotMatch(html,/refresh_github" disabled|<unsafe>/);
+});
+
+test('multiple PRs show their own last fetch and retry time', () => {
+  const now=Date.now(), url=base.pull_requests[0].url, other='https://github.com/o/r/pull/2';
+  const issue={...base,pull_requests:[...base.pull_requests,{url:other}],assignment:{kind:'github'},github_status:{fetches:{[url]:{finished_at:now-10000},[other]:{finished_at:now-200000,next_at:now+300000,error:'Rate limited'}}}};
+  const html=assignments.render({issue},helpers);
+  assert.match(html,/PR #1/);
+  assert.match(html,/PR #2/);
+  assert.equal((html.match(/Last fetch/g)||[]).length,2);
+  assert.match(html,/Retry after/);
+  assert.match(html,/Rate limited/);
+});

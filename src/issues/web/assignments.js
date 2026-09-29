@@ -37,7 +37,28 @@
     if (a.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
     if (a.kind === "agent") targets.unshift({id:"active", name:description.label, disabled:true});
     const options = targets.map(t => `<option value="${esc(t.id)}"${t.id === selected ? " selected" : ""}${t.disabled ? " disabled" : ""}>${esc(t.name)}</option>`).join("");
-    return `<div class="side-section issue-assignment"><label class="side-heading" for="issue-assignment">Assignment${helpers.icon(description.icon)}</label><select id="issue-assignment" data-assignment-select aria-describedby="assignment-detail"${editable ? "" : " disabled"}>${options}</select><p id="assignment-detail" class="assignment-detail">${esc(issue.draft ? "Mark ready before assigning this issue." : description.detail)}</p>${editable && !hasPr ? '<p class="assignment-hint">Attach a PR to enable the GitHub watcher.</p>' : ""}</div>`;
+    return `<div class="side-section issue-assignment"><label class="side-heading" for="issue-assignment">Assignment${helpers.icon(description.icon)}</label><select id="issue-assignment" data-assignment-select aria-describedby="assignment-detail"${editable ? "" : " disabled"}>${options}</select><p id="assignment-detail" class="assignment-detail">${esc(issue.draft ? "Mark ready before assigning this issue." : description.detail)}</p>${fetchOverview(issue)}${editable && !hasPr ? '<p class="assignment-hint">Attach a PR to enable the GitHub watcher.</p>' : ""}</div>`;
+  }
+  function fetchTime(value) {
+    const date = typeof value === "number" && value > 0 ? new Date(value) : null;
+    return date && Number.isFinite(date.getTime()) ? `<time datetime="${date.toISOString()}" data-absolute title="${esc(date.toLocaleString())}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit"}))}</time>` : "Not recorded yet";
+  }
+  function fetchOverview(issue) {
+    if (current(issue).kind !== "github") return "";
+    const watch = issue.github_status || {}, now = Date.now();
+    const active = watch.monitoring !== false && issue.state !== "closed" && !issue.deleted_at && !issue.draft;
+    const prs = (issue.pull_requests || []).filter(watchablePr);
+    const rows = prs.map(pr => {
+      const f = watch.fetches?.[pr.url] || {}, snapshot = watch.prs?.[pr.url] || {};
+      const fetching = f.started_at > (f.finished_at || 0) && f.started_at > now - 120000;
+      const interrupted = f.started_at > (f.finished_at || 0) && !fetching;
+      const queued = f.requested_at > (f.started_at || 0) || !!f.requested_at && !fetching;
+      const error = f.error || snapshot.error;
+      const delayed = f.next_at > now;
+      const label = !active ? "Monitoring stopped" : fetching ? "Fetching GitHub…" : queued ? "Fetch queued" : interrupted ? "Fetch interrupted; waiting to retry" : error ? "Fetch needs retry" : !f.finished_at ? "Waiting for first fetch" : "Watching checks and reviews";
+      return {busy:fetching || queued, html:`<div class="github-fetch"><p class="github-fetch-state" role="status">${prs.length > 1 ? link(pr.url, "PR #" + pr.url.split("/").filter(Boolean).pop()) + " · " : ""}${esc(label)}</p><p class="assignment-hint">Last fetch ${fetchTime(f.finished_at)}</p>${active && delayed ? `<p class="assignment-hint">${error || queued ? "Retry after" : "Next poll after"} ${fetchTime(f.next_at)}</p>` : ""}${error ? `<p class="github-status-error">${esc(error)}</p>` : ""}</div>`};
+    });
+    return `<div class="github-fetch-overview">${rows.map(row => row.html).join("")}${active && prs.length ? `<button type="button" class="github-fetch-now" data-action="refresh_github"${rows.some(row => row.busy) ? " disabled" : ""}>Fetch now</button><p class="assignment-hint">Fetches on the next watcher cycle, subject to GitHub rate limits.</p>` : ""}</div>`;
   }
   const checkState = state => ({failure:"Failed",satisfied:"Passed",success:"Passed",pending:"Running",missing:"Not reported",unknown:"Unknown",not_required:"No required checks"}[state] || state || "Unknown");
   function status(issue, helpers) {
@@ -71,7 +92,7 @@
     }).join("");
     return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries || (!error && !paused ? '<p class="assignment-detail">Waiting for the first GitHub status.</p>' : "")}${omittedPrs}</section>`;
   }
-  const api = {current, describe, render, status};
+  const api = {current, describe, render, status, fetchOverview};
   if (typeof module !== "undefined") module.exports = api;
   else root.IssueAssignments = api;
 })(globalThis);

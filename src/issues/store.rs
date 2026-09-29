@@ -1342,6 +1342,24 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        if matches!(r.operation, Operation::RefreshGithub { .. }) {
+            validate(r)?;
+            let companion: bool =
+                self.db
+                    .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
+                        r.get(0)
+                    })?;
+            if companion {
+                let mut request = r.clone();
+                if request.request_id.is_none() {
+                    request.request_id = Some(super::worker::random_id()?);
+                }
+                let mut result = self.execute_supervisor(&request)?;
+                result["store"] = json!({"host":"supervisor"});
+                result["request_id"] = json!(request.request_id);
+                return Ok(result);
+            }
+        }
         if let Operation::Ready { guard, .. } = &r.operation {
             validate(r)?;
             let replica: bool = self.db.query_row(
@@ -1638,6 +1656,9 @@ impl Store {
         }
         let mut attachment_files = crate::attachments::DiskChange::default();
         let mut result = match &r.operation {
+            Operation::RefreshGithub { number } => {
+                assignments::fetch::request(&tx, &project, *number, now)?
+            }
             Operation::Attachment { operation } => crate::attachments::execute(
                 &tx,
                 &self.attachment_root,

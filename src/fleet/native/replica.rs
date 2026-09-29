@@ -13,6 +13,7 @@ pub(super) const TABLES: &[(&str, &[&str])] = &[
     ("agents", &["id"]),
     ("issues", &["project_id", "number"]),
     ("issue_status_updates", &["id"]),
+    ("github_fetch_status", &["url"]),
     ("issue_github_watches", &["project_id", "issue_number"]),
     (
         "issue_agent_launches",
@@ -533,7 +534,7 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| invalid("Invalid replicated table"))?;
     keys(table)?;
-    if table == "issue_github_watches" {
+    if matches!(table, "issue_github_watches" | "github_fetch_status") {
         return Err(invalid("GitHub observations are written by the supervisor"));
     }
     let mut before = row_json(change, "before_json")?;
@@ -2009,6 +2010,30 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn github_fetch_activity_replicates_but_companions_cannot_overwrite_it() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute("INSERT INTO github_fetch_status(url,finished_at) VALUES('https://github.com/o/r/pull/1',100)", []).unwrap();
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "peer").unwrap();
+        apply_pull(&peer.db, "peer", &snapshot(&main.db, "peer").unwrap(), &[]).unwrap();
+        let key = json!({"url":"https://github.com/o/r/pull/1"});
+        let before = current_row(&peer.db, "github_fetch_status", &key).unwrap();
+        assert_eq!(before["finished_at"], 100);
+        let mut after = before.clone();
+        after["requested_at"] = json!(200);
+        let change = json!({"seq":901,"table_name":"github_fetch_status","before_json":before.to_string(),"after_json":after.to_string()});
+        assert_eq!(
+            accept_changes(&main.db, "peer", &[change]).unwrap()[0]["state"],
+            "conflict"
+        );
+        assert_eq!(
+            current_row(&main.db, "github_fetch_status", &key).unwrap(),
+            before
+        );
+    }
 
     #[test]
     fn github_watch_status_flows_from_supervisor_and_rejects_companion_edits() {
