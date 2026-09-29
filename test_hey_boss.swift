@@ -1085,7 +1085,7 @@ func makeAgentPreview() -> AgentsOverview {
     worktree["worktree"] = "/Users/example/Workspace/hey-boss-activity"
     worktree["branch"] = "feature/agent-overview"
     let fixture: [String: Any] = ["host": "Fixture Mac", "observed_at": now, "warnings": [], "agents": [
-        ["id": "codex-1", "pid": 101, "kind": "Codex", "cwd": "/Users/example/Workspace/hey-boss", "session_id": "session-codex", "task": "Build a native overview of running agents and their current projects", "update": "I found the new Codex event schema. I’m checking the parser against your live session.", "activity": "Reading session events", "activity_at": now - 8, "state": "Working", "updated_at": now, "evidence": "Session file held open by this process", "git": repository],
+        ["id": "codex-1", "pid": 101, "kind": "Codex", "cwd_source": "turn_context", "cwd": "/Users/example/Workspace/hey-boss", "session_id": "session-codex", "task": "Build a native overview of running agents and their current projects", "update": "I found the new Codex event schema. I’m checking the parser against your live session.", "activity": "Reading session events", "activity_at": now - 8, "state": "Working", "updated_at": now, "evidence": "Session file held open by this process", "git": repository],
         ["id": "codex-2", "pid": 102, "kind": "Codex", "cwd": "/Users/example/Workspace/atlas", "session_id": "session-idle", "task": "Review the release checklist", "update": "The release checks passed. The review is ready.", "activity": "Turn completed", "activity_at": now - 60, "state": "Idle", "updated_at": now - 60, "evidence": "Session file held open by this process"],
         ["id": "claude-1", "pid": 103, "kind": "Claude", "cwd": "/Users/example/Workspace/notes", "state": "Process detected", "evidence": "Running process; session unavailable"],
         ["id": "claude-2", "pid": 104, "kind": "Claude", "cwd": "/Users/example/Workspace/hey-boss-activity", "session_id": "session-claude", "task": "Make the agent activity easier to understand and group sessions by repository", "update": "I’m refining the grouped rows and checking the selection detail in light and dark appearances.", "activity": "Editing AgentsOverview.swift", "activity_at": now - 18, "state": "Working", "updated_at": now, "evidence": "PID-specific Claude metadata; process start verified", "git": worktree]
@@ -1251,6 +1251,7 @@ func auditAgentOverview() -> AgentsOverview {
     let overview = makeAgentPreview()
     let local = overview.local!
     precondition(local.agents[0].sessionId == "session-codex")
+    precondition(local.agents[0].cwdSource == "turn_context")
     precondition(overview.rows.count == 4 && overview.rows.allSatisfy { !$0.unattributed })
     precondition(overview.rows.filter { $0.stale }.count == 1)
     precondition(overview.rows.first { $0.stale }?.stateLabel == "Offline / stale")

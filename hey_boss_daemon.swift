@@ -3012,6 +3012,7 @@ struct AgentInfo: Codable, Equatable {
     let pid: UInt32
     let kind: String
     let cwd: String?
+    var cwdSource: String? = nil
     let sessionId: String?
     let task: String?
     var title: String? = nil
@@ -5000,7 +5001,8 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let activity = label([row.agent.activity ?? "Activity unavailable", agentRelativeTime(row.agent.activityAt)].compactMap { $0 }.joined(separator: " · "), font: .systemFont(ofSize: 11), color: .tertiaryLabelColor, lines: 1)
         var lines: [NSView] = [badgeLine, title, progress, activity]
         if expanded {
-            let details = ["Task: \(row.taskLabel)", "Directory: \(row.agent.cwd ?? "unavailable")", "Worktree: \(row.agent.git?.worktree ?? row.agent.cwd ?? "unavailable")", "Session: \(row.agent.sessionId ?? "unavailable") · PID: \(row.agent.pid)", "Discovery: \(row.agent.evidence)"].joined(separator: "\n")
+            let directorySource = row.agent.cwdSource == "turn_context" ? "Current turn" : "Saved / process directory"
+            let details = ["Task: \(row.taskLabel)", "\(directorySource): \(row.agent.cwd ?? "unavailable")", "Worktree: \(row.agent.git?.worktree ?? row.agent.cwd ?? "unavailable")", "Session: \(row.agent.sessionId ?? "unavailable") · PID: \(row.agent.pid)", "Discovery: \(row.agent.evidence)"].joined(separator: "\n")
             let field = label(details, font: .systemFont(ofSize: 11), color: .secondaryLabelColor, lines: 7)
             field.isSelectable = true
             lines.append(field)
