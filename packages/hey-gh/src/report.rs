@@ -1396,7 +1396,7 @@ fn review_status(pr: &Value, reviews: &[Value], threads: &[Value]) -> ReviewStat
 // GitHub's filter=latest is scoped to check suites. A later workflow run
 // creates a different suite, so superseded failures can still be returned.
 // Preserve raw evidence, but roll up the newest check per SHA/app/name.
-fn latest_checks(checks: &[Value]) -> Vec<&Value> {
+pub(crate) fn latest_checks(checks: &[Value]) -> Vec<&Value> {
     let mut latest = HashMap::<(&str, i64, &str), (u64, usize)>::new();
     let mut retained = HashSet::new();
     for (index, check) in checks.iter().enumerate() {

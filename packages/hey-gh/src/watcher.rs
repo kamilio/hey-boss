@@ -16,14 +16,23 @@ fn fingerprint(value: &Value) -> String {
     crate::digest(&value.to_string())
 }
 
-fn selected(rows: &[Value], fields: &[&str]) -> Vec<Value> {
+fn selected<'a>(rows: impl IntoIterator<Item = &'a Value>, fields: &[&str]) -> Vec<Value> {
     let mut values: Vec<Value> = rows
-        .iter()
+        .into_iter()
         .map(|row| {
             Value::Object(
                 fields
                     .iter()
-                    .map(|field| ((*field).into(), row[*field].clone()))
+                    .map(|field| {
+                        (
+                            (*field).into(),
+                            if *field == "app" {
+                                json!({"id":row["app"]["id"]})
+                            } else {
+                                row[*field].clone()
+                            },
+                        )
+                    })
                     .collect(),
             )
         })
@@ -46,7 +55,7 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
         && policy.errors.is_empty()
         && ci.errors.is_empty();
     let checks = selected(
-        &ci.check_runs,
+        crate::report::latest_checks(&ci.check_runs),
         &[
             "id",
             "name",
@@ -163,14 +172,26 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
         && ci.summary.unknown == 0
         && !matches!(policy.state.as_str(), "unknown" | "pending" | "missing")
         && !(checks.is_empty() && statuses.is_empty() && workflows.is_empty())
-        && ci.check_runs.iter().all(|c| c["status"] == "completed")
+        && checks.iter().all(|c| c["status"] == "completed")
         && ci.workflow_runs.iter().all(|c| c["status"] == "completed")
         && ci
             .commit_statuses
             .iter()
             .all(|c| matches!(c["state"].as_str(), Some("success" | "failure" | "error")));
-    let completed =
-        complete.then(|| fingerprint(&json!([ci.head_sha, checks, statuses, workflows])));
+    let completed = complete.then(|| {
+        fingerprint(&json!([
+            ci.head_sha,
+            selected(
+                &checks,
+                &["id", "name", "status", "conclusion", "head_sha", "app"]
+            ),
+            selected(&statuses, &["id", "context", "state"]),
+            selected(
+                &workflows,
+                &["id", "run_attempt", "status", "conclusion", "head_sha"]
+            )
+        ]))
+    });
     let mut feedback = Vec::new();
     let by_author = |value: &Value| {
         pr.pull_request["user"]["login"]
@@ -360,5 +381,34 @@ mod tests {
         );
         r.data.ci.check_runs.push(json!({"id":3,"name":"test","status":"in_progress","app":{"id":1},"head_sha":"another"}));
         assert_eq!(observe(&r, &p).blocking, before);
+    }
+
+    #[test]
+    fn superseded_check_runs_do_not_delay_or_change_completion() {
+        let (mut r, mut p) = fixture();
+        r.data.ci.summary.pending = 0;
+        p.state = "satisfied".into();
+        p.checks[0].state = "satisfied".into();
+        r.data.ci.check_runs[0]["head_sha"] = json!("head");
+        r.data.ci.check_runs[0]["status"] = json!("in_progress");
+        r.data.ci.check_runs.push(json!({"id":2,"name":"test","app":{"id":1},"head_sha":"head","status":"completed","conclusion":"success"}));
+        let completed = observe(&r, &p)
+            .completed
+            .expect("Latest successful check completed");
+        r.data.ci.check_runs[0]["status"] = json!("completed");
+        assert_eq!(observe(&r, &p).completed.as_ref(), Some(&completed));
+        r.data.ci.check_runs.remove(0);
+        assert_eq!(observe(&r, &p).completed.as_ref(), Some(&completed));
+    }
+
+    #[test]
+    fn ci_metadata_does_not_repeat_completion() {
+        let (mut r, p) = fixture();
+        r.data.ci.summary.pending = 0;
+        let before = observe(&r, &p).completed;
+        assert!(before.is_some());
+        r.data.ci.check_runs[0]["details_url"] = json!("https://github.com/o/r/actions/runs/1");
+        r.data.ci.check_runs[0]["app"]["name"] = json!("Updated app name");
+        assert_eq!(observe(&r, &p).completed, before);
     }
 }
