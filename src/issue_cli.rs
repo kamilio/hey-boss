@@ -1300,7 +1300,7 @@ pub fn run(options: &Options) -> Result<()> {
             command: CommitAction::Hook { issue, commit },
         } = &options.action
         {
-            return run_commit_hook(&options, *issue, commit);
+            return run_commit_hook(options, *issue, commit);
         }
         let interactive = match &options.action {
             Action::Create { interactive, .. } | Action::Edit { interactive, .. } => *interactive,
