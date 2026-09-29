@@ -8,11 +8,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - run: cargo test --locked
+      - run: cargo test --locked -p hey-boss --lib github_http_ -- --ignored --test-threads=1
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py
       - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py tools/test_mobile_issues.py
       - run: python3 tools/test_issue_planning.py
       - run: node tools/test_quick_issue.js && node --check src/issues/web/quick-issue.js
       - run: node tools/test_issue_blocked_types.cjs
+      - run: node --test tools/test_issue_assignments.cjs
       - run: node tools/test_issue_transfer_controls.cjs
       - run: node tools/test_issue_navigation_exit.cjs
       - run: node tools/test_local_http_crypto.cjs
@@ -44,6 +46,7 @@ jobs:
       # need permission to inspect those processes. Keep other tests unprivileged.
       - run: |
           cargo test --locked -- --skip health::
+      - run: cargo test --locked -p hey-boss --lib github_http_ -- --ignored --test-threads=1
       - run: |
           sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" cargo test --locked --lib health::
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py

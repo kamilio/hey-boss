@@ -78,16 +78,24 @@ fn github_http_late_review_edits_start_fresh_sessions_without_repeating_complete
     lifecycle(false, Followups::ReviewEdits(3));
 }
 
+#[test]
+#[ignore = "three-hour isolated polling cadence soak; requires cargo build --bin hey-boss"]
+fn github_watcher_real_cadence_soak_handles_failures_completions_and_review_edits() {
+    lifecycle(false, Followups::TimedMixed(180));
+}
+
 #[derive(Clone, Copy)]
 enum Followups {
     RequiredFailures(usize),
     ReviewEdits(usize),
+    TimedMixed(usize),
 }
 
 fn lifecycle(reject_steering: bool, followups: Followups) {
-    let (following_updates, review_edits) = match followups {
-        Followups::RequiredFailures(count) => (count, false),
-        Followups::ReviewEdits(count) => (count, true),
+    let (following_updates, review_edits, real_cadence) = match followups {
+        Followups::RequiredFailures(count) => (count, false, false),
+        Followups::ReviewEdits(count) => (count, true, false),
+        Followups::TimedMixed(count) => (count, false, true),
     };
     let binary = std::env::current_exe()
         .unwrap()
@@ -98,6 +106,16 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
         .join("hey-boss");
     assert!(binary.is_file(), "Run cargo build --bin hey-boss first");
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    let binary = if real_cadence {
+        let isolated = root.join("hey-boss");
+        fs::copy(binary, &isolated).unwrap();
+        isolated
+    } else {
+        binary
+    };
+    if real_cadence {
+        eprintln!("Watcher cadence fixture: {}", root.display());
+    }
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {
@@ -123,7 +141,7 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
     // Host the fixture's DB in this test so no detached companion is bootstrapped.
     let owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
     let logs = fs::File::create(root.join("worker.log")).unwrap();
-    let worker = Worker(
+    let mut worker = Worker(
         Command::new(&binary)
             .current_dir(&root)
             .env("HEY_BOSS_ISSUE_DB", &ctx.path)
@@ -164,6 +182,11 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
         scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='issue_workers'") > 0
     });
     wait("worker registration", &root, || {
+        assert!(
+            worker.0.try_wait().unwrap().is_none(),
+            "Fixture worker exited during startup; logs: {}",
+            root.display()
+        );
         scalar("SELECT count(*) FROM issue_workers WHERE owner_pid IS NOT NULL") > 0
     });
     thread::sleep(Duration::from_millis(1200));
@@ -189,10 +212,16 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
                     continue;
                 };
                 let phase = serving_phase.load(Ordering::Acquire);
+                let completed_review = (review_edits && phase >= 3)
+                    || (real_cadence && phase >= 4 && phase.is_multiple_of(2));
                 let (mut ci, mut policy, metadata) =
-                    evidence(phase != 2 && !(review_edits && phase >= 3), false);
+                    evidence(phase != 2 && !completed_review, false);
                 if phase >= 3 && !review_edits {
-                    ci["data"]["check_runs"][0]["id"] = json!(phase - 1);
+                    ci["data"]["check_runs"][0]["id"] = json!(if real_cadence {
+                        phase.div_ceil(2)
+                    } else {
+                        phase - 1
+                    });
                     let observation = hey_gh::watcher::observe_ci(
                         "o/r",
                         1,
@@ -211,7 +240,7 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
                     ci
                 } else {
                     let now = crate::issues::worker::now();
-                    let finding = if review_edits && phase >= 3 {
+                    let finding = if completed_review {
                         format!("Synthetic review finding, edit {}", phase - 2)
                     } else {
                         "Synthetic review finding".into()
@@ -237,9 +266,18 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
         .enable_all()
         .build()
         .unwrap();
+    let last_poll = std::cell::Cell::new(None::<Instant>);
     let poll_now = || {
-        let _ = fs::remove_file(ctx.state.join("github-watch-schedule.json"));
-        poll(&ctx, &runtime, &client).unwrap();
+        if real_cadence {
+            if let Some(last) = last_poll.get() {
+                thread::sleep(Duration::from_secs(30).saturating_sub(last.elapsed()));
+            }
+            crate::fleet::native::pr_monitor::poll_cycle(&ctx, &runtime, &client);
+            last_poll.set(Some(Instant::now()));
+        } else {
+            let _ = fs::remove_file(ctx.state.join("github-watch-schedule.json"));
+            poll(&ctx, &runtime, &client).unwrap();
+        }
     };
     let records = || {
         fs::read_to_string(root.join("github-worker.jsonl"))
@@ -307,7 +345,7 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
             expected,
             "Repeated observations cannot launch duplicate work"
         );
-        if following_updates > 1 && (index + 1) % 20 == 0 {
+        if following_updates > 1 && (index + 1) % (if real_cadence { 5 } else { 20 }) == 0 {
             let rss = Command::new("ps")
                 .args(["-o", "rss=", "-p", &worker.0.id().to_string()])
                 .output()
