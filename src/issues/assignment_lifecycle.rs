@@ -51,7 +51,7 @@ pub(super) fn reconcile_issue(
     let has_open = has_open_pr(&links);
     let (_, previous) = saved(db, project, number)?;
     let mut status = linked_status(previous.clone(), &links, !has_open);
-    db.execute("DELETE FROM issue_github_signals WHERE project_id=?1 AND issue_number=?2 AND url NOT IN (SELECT url FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2)", params![project,number])?;
+    db.execute("DELETE FROM issue_github_signals WHERE project_id=?1 AND issue_number=?2 AND rtrim(url,'/') NOT IN (SELECT rtrim(url,'/') FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2)", params![project,number])?;
     if has_open {
         if status != previous {
             db.execute(
