@@ -253,6 +253,8 @@ try {
     assert.equal(cleared.issue.state,'open');
     assert.equal(cleared.issue.assignee,null);
     await edit('5',['6'],'dependencies-restore');
+    await edit('7',['6'],'dependencies-independent-add');
+    assert.equal((await edit('7',[],'dependencies-independent-clear')).issue.state,'open');
     const before=await ownership();
     assert.equal((await edit('2',['6'],'dependencies-live-owner',4)).error.code,'conflict');
     assert.deepEqual(await ownership(),before);
