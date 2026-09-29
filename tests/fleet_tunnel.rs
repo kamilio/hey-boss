@@ -658,7 +658,11 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         1,
     );
     assert_eq!(offline["error"]["code"], "fleet_unavailable");
-    let before = f.issue("peer", &["view", "4"], 0);
+    // The replica may not have received #4 before disconnect. Compare its
+    // actual snapshot instead of requiring replication for a no-fallback check.
+    let replica_snapshot =
+        "SELECT number,state,assignee,blockers,version FROM issues ORDER BY number";
+    let before = f.sql("peer", replica_snapshot);
     assert_eq!(
         f.issue(
             "peer",
@@ -676,7 +680,7 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         )["error"]["code"],
         "fleet_unavailable"
     );
-    assert_eq!(f.issue("peer", &["view", "4"], 0)["issue"], before["issue"]);
+    assert_eq!(f.sql("peer", replica_snapshot), before);
     assert_eq!(
         f.sql(
             "peer",
