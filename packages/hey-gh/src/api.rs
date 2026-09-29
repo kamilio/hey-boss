@@ -585,8 +585,29 @@ struct ReadQuery {
     refresh: Option<bool>,
     cached_only: Option<bool>,
     max_age_seconds: Option<u64>,
+    #[serde(default)]
+    background: bool,
 }
 impl ReadQuery {
+    async fn run<T>(&self, future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        if self.background {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            crate::client::BACKGROUND_READ
+                .scope(
+                    (),
+                    crate::client::REQUEST_DEADLINE.scope(Some(deadline), async {
+                        tokio::time::timeout_at(deadline, future)
+                            .await
+                            .map_err(|_| Error::Deadline)?
+                    }),
+                )
+                .await
+        } else {
+            crate::client::INTERACTIVE_READ
+                .scope(crate::client::foreground_priority(), future)
+                .await
+        }
+    }
     fn freshness(&self) -> Result<Freshness> {
         if self.refresh == Some(true) && self.cached_only == Some(true) {
             return Err(Error::Invalid(
@@ -615,9 +636,8 @@ async fn pr(
     Query(query): Query<ReadQuery>,
 ) -> ApiResult<Json<Report>> {
     Ok(Json(
-        crate::client::INTERACTIVE_READ
-            .scope(
-                crate::client::foreground_priority(),
+        query
+            .run(
                 api.0
                     .client
                     .pr_report(&format!("{owner}/{repo}"), number, query.freshness()?),
@@ -653,9 +673,8 @@ async fn ci(
     Query(query): Query<ReadQuery>,
 ) -> ApiResult<Json<crate::CiObservation>> {
     Ok(Json(
-        crate::client::INTERACTIVE_READ
-            .scope(
-                crate::client::foreground_priority(),
+        query
+            .run(
                 api.0
                     .client
                     .ci_for_pr(&format!("{owner}/{repo}"), number, query.freshness()?),
@@ -699,6 +718,7 @@ async fn repository(
                     refresh: query.refresh,
                     cached_only: query.cached_only,
                     max_age_seconds: query.max_age_seconds,
+                    background: false,
                 }
                 .freshness()?,
             )
@@ -711,9 +731,12 @@ async fn required_checks(
     Query(query): Query<ReadQuery>,
 ) -> ApiResult<Json<crate::RequiredChecksReport>> {
     Ok(Json(
-        api.0
-            .client
-            .required_checks_for_pr(&format!("{owner}/{repo}"), number, query.freshness()?)
+        query
+            .run(api.0.client.required_checks_for_pr(
+                &format!("{owner}/{repo}"),
+                number,
+                query.freshness()?,
+            ))
             .await?,
     ))
 }
@@ -733,6 +756,7 @@ async fn repository_prs(
         refresh: query.refresh,
         cached_only: query.cached_only,
         max_age_seconds: query.max_age_seconds,
+        background: false,
     }
     .freshness()?;
     Ok(Json(
@@ -797,6 +821,7 @@ async fn pr_status(
         refresh: query.refresh,
         cached_only: query.cached_only,
         max_age_seconds: query.max_age_seconds,
+        background: false,
     }
     .freshness()?;
     if let Some(cursor) = &query.cursor {
@@ -1133,6 +1158,36 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn background_read_deadline_cancels_the_handler_and_bounds_queued_work() {
+        let query = ReadQuery {
+            background: true,
+            ..ReadQuery::default()
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let started = tokio::time::Instant::now();
+        let result: Result<()> = query
+            .run(async move {
+                let _sender = sender;
+                assert!(!crate::client::interactive_read());
+                assert_eq!(
+                    crate::client::REQUEST_DEADLINE.get(),
+                    Some(started + Duration::from_secs(20))
+                );
+                std::future::pending().await
+            })
+            .await;
+        assert!(matches!(result, Err(Error::Deadline)));
+        assert!(
+            receiver.await.is_err(),
+            "The expired read future must release its resources"
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_secs(20)
+        );
+    }
 
     #[tokio::test]
     async fn covered_watches_require_recent_lane_validation_not_cached_completeness() {

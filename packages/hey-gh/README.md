@@ -58,6 +58,11 @@ with its original validation timestamp. They share the daemon queue and cooldown
 honor `cached_only`/`max_age_seconds`, and never hydrate CI/comments/reviews or
 register watches. Metadata refresh work has a 15-second background deadline.
 
+Watcher integrations can use `ApiClient::background()` or `background=true` on
+targeted PR, CI, and required-check HTTP reads. These share the background queue
+and stop after 20 seconds; new upstream jobs inherit that deadline. Interactive
+reads can still promote shared work. Metadata keeps its 15-second deadline.
+
 If the official CLI reports a local API credential failure, use the same OS user
 and cache directory as the daemon. Restart the existing `hey-gh serve` process
 with its original `--listen` and `--cache` options to recreate a lost credential.
