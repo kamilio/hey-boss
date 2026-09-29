@@ -355,7 +355,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(referenced(&db, "mac.local", "session:commit-agent").unwrap().is_some());
+        assert!(
+            referenced(&db, "mac.local", "session:commit-agent")
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             assigned_run(&db, "Atlas", 10, "codex:commit-agent")
                 .unwrap()

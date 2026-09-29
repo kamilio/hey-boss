@@ -2144,8 +2144,7 @@ impl Store {
         {
             issue["pull_requests"] =
                 json!(registry::pull_requests(&tx, &response_project.id, number)?);
-            issue["commits"] =
-                json!(super::commits::list(&tx, &response_project.id, number)?);
+            issue["commits"] = json!(super::commits::list(&tx, &response_project.id, number)?);
             if issue["assignee"] == "human:boss" {
                 issue["assignee_name"] = settings["boss_name"].clone();
             }
@@ -2156,8 +2155,7 @@ impl Store {
                 if let Some(number) = issue["number"].as_i64() {
                     issue["pull_requests"] =
                         json!(registry::pull_requests(&tx, &project.id, number)?);
-                    issue["commits"] =
-                        json!(commits_by_issue.remove(&number).unwrap_or_default());
+                    issue["commits"] = json!(commits_by_issue.remove(&number).unwrap_or_default());
                     if issue["assignee"] == "human:boss" {
                         issue["assignee_name"] = settings["boss_name"].clone();
                     }
