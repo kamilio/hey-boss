@@ -120,7 +120,7 @@ fn overlong_issue_titles_preserve_edit_body_and_subtask_links() {
 }
 
 #[test]
-fn default_creation_stays_on_the_first_page_of_a_long_cli_queue() {
+fn human_creation_stays_on_the_first_page_of_a_long_cli_queue() {
     let f = Fixture::new();
     f.create();
     f.sql().execute_batch(
@@ -130,7 +130,7 @@ fn default_creation_stays_on_the_first_page_of_a_long_cli_queue() {
          FROM issues CROSS JOIN numbers WHERE number=1;
          UPDATE projects SET next_number=61;",
     ).unwrap();
-    let created = f.run("session-a", &["create", "--title", "Visible immediately"]);
+    let created = f.run("human:boss", &["create", "--title", "Visible immediately"]);
     assert_eq!(created["issue"]["number"], 61);
     let first = f.run("session-a", &["list"]);
     assert_eq!(first["issues"].as_array().unwrap().len(), 50);
@@ -142,7 +142,7 @@ fn default_creation_stays_on_the_first_page_of_a_long_cli_queue() {
 }
 
 #[test]
-fn creation_defaults_to_front_with_explicit_bottom_and_stable_existing_ranks() {
+fn human_creation_defaults_to_front_with_explicit_bottom_and_stable_existing_ranks() {
     let f = Fixture::new();
     f.create();
     let before: i64 = f
@@ -151,7 +151,7 @@ fn creation_defaults_to_front_with_explicit_bottom_and_stable_existing_ranks() {
             r.get(0)
         })
         .unwrap();
-    f.run("session-a", &["create", "--title", "Newest"]);
+    f.run("human:boss", &["create", "--title", "Newest"]);
     f.run("session-a", &["create", "--title", "Later", "--at-bottom"]);
     let list = f.run("session-a", &["list"]);
     assert_eq!(
@@ -170,6 +170,73 @@ fn creation_defaults_to_front_with_explicit_bottom_and_stable_existing_ranks() {
             .unwrap(),
         before
     );
+}
+
+#[test]
+fn agent_creation_appends_and_explicit_priority_preserves_recovery_order() {
+    let f = Fixture::new();
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    f.run("human:boss", &["create", "--title", "Recovery second"]);
+    f.run("human:boss", &["create", "--title", "Recovery first"]);
+    let ranks = || {
+        f.sql()
+            .prepare("SELECT number,sort_order FROM issues WHERE number<=2 ORDER BY number")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = ranks();
+    for actor in ["codex:test", "claude:test", "session-a"] {
+        let args = [
+            "create",
+            "--title",
+            "Ordinary follow-up",
+            "--request-id",
+            "ordinary",
+        ];
+        let created = f.run(actor, &args);
+        assert_eq!(created["placement"], "bottom");
+        assert_eq!(f.run(actor, &args)["issue"], created["issue"]);
+    }
+    f.run(
+        "codex:test",
+        &["create", "--title", "Explicit MCP priority", "--at-top"],
+    );
+    f.run(
+        "human:boss",
+        &["create", "--title", "Human bottom", "--at-bottom"],
+    );
+    let list = f.run("session-a", &["list"]);
+    assert_eq!(
+        list["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["number"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![6, 2, 1, 3, 4, 5, 7]
+    );
+    assert_eq!(ranks(), before);
+    let history = f.run("session-a", &["history", "3"]);
+    assert_eq!(history["events"][0]["data"]["placement"], "bottom");
+    assert!(history["events"][0]["data"]["sort_order"].is_i64());
+    let rejected = f
+        .cmd(
+            "session-a",
+            &[
+                "create",
+                "--title",
+                "Conflicting intent",
+                "--at-top",
+                "--at-bottom",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("cannot be used with"));
 }
 
 #[test]

@@ -33,8 +33,12 @@ or `--state deleted` to search the trash. Filters, queue order, pagination, and
 `--json` match `issue list`; `--all` retrieves every matching result without changing
 the state filter. `issue list --search QUERY` keeps its open-only default.
 
-New CLI issues go to the front of the queue. Use `create --at-bottom` to append
-work deliberately; `--at-top` remains supported. Connected companions refresh
+Agent CLI creation appends to the queue by default, including custom `--agent`
+identities. Human identities (`--agent human:NAME`) retain front insertion.
+`create --at-top` explicitly promotes new work; `--at-bottom` explicitly appends it.
+These choices change only the new issue, preserving existing order and claims.
+RPC creation retains its explicit `at_top` contract (omitted means bottom).
+Connected companions refresh
 their number reservations on demand, including projects without workers. See
 [companion issue creation](companion-issue-creation.md) for offline behavior.
 
@@ -732,7 +736,8 @@ to another keeps the other hidden issues in their relative order. New issues
 created in the UI go to the top by default; check **Add to bottom** in the editor
 or Quick Add to append instead. Press **⌘⇧B / Ctrl+Shift+B** while composing to
 toggle placement. Unsent drafts retain the choice; the next issue defaults to top.
-CLI-created issues also go to the front; `--at-bottom` appends instead. Creating
+Agent CLI creation defaults to bottom; human CLI creation defaults to top.
+Both accept explicit `--at-top` and `--at-bottom`. Creating
 in the UI keeps you on the list and highlights the new row for four seconds.
 Matching filters remain; filters that exclude the new issue reset to reveal it. Closing,
 deleting, reopening, and restoring retain position.
@@ -743,6 +748,15 @@ output), and worker pickup and previews. Every worker reservation reads the
 current queue in a fresh SQLite write transaction; no preloaded issue queue is
 used. Reordering pending work while a worker is busy changes its next pickup.
 Eligibility tags, existing claims, and reservation locks still apply.
+
+Creation output reports `placement`; issue history records that placement and
+the insertion `sort_order`. Each worker selection records its worker ID, required
+tags, project scope, queue key, and selection rule in the issue's **View activity**
+and `issue history NUMBER --json`. The key is a snapshot at selection, not a
+current rank: lower `sort_order` wins among eligible candidates, then creation
+time, project ID, and issue number. Drafts, claims, reservations, dependencies,
+and retry holds still exclude work. Tags filter candidates; they do not reorder
+them. A selection reserves work and does not prove that its agent has launched.
 
 ```sh
 hey-boss issue move 12 --before 3

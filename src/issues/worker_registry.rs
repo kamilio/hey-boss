@@ -997,6 +997,33 @@ pub(super) fn reserve(
                 machine: machine.into(),
             };
             tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires,session_id) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11,?12)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000,job.resume_session])?;
+            let (sort_order, created_at): (i64, i64) = tx.query_row(
+                "SELECT sort_order,created_at FROM issues WHERE project_id=?1 AND number=?2",
+                params![project.id, number],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let selected_at = now();
+            tx.execute(
+                "INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3)",
+                params![
+                    job.actor.id,
+                    serde_json::to_string(&job.actor)?,
+                    selected_at
+                ],
+            )?;
+            event(
+                &tx,
+                &project.id,
+                number,
+                &job.actor.id,
+                "worker_selected",
+                selected_at,
+                &json!({"worker_id":worker_id,"worker_name":settings.name,"run_id":id,
+                    "required_tags":settings.tags,"projects":settings.projects,
+                    "sort_order":sort_order,"issue_created_at":created_at,
+                    "rule":"First eligible issue in queue order with a valid checkout. Drafts, claims, reservations, dependencies and retry holds are excluded; all required tags must match.",
+                    "order_by":["sort_order","created_at","project_id","number"]}),
+            )?;
             tx.commit()?;
             return Ok(Some(job));
         }
@@ -1113,6 +1140,149 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_queue_survives_followups_and_pickup_explains_its_choice() {
+        // Reservation validates the provider executable but never launches it.
+        // Isolate the override from other parallel tests and the developer's CLI.
+        let fixture = std::env::current_exe().unwrap();
+        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(fixture.as_os_str()) {
+            let output = std::process::Command::new(&fixture)
+                .args(["--exact", "issues::store::registry::tests::recovery_queue_survives_followups_and_pickup_explains_its_choice", "--nocapture"])
+                .env("HEY_BOSS_CODEX", &fixture)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("hb-recovery-{}", random_id().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            let request = |operation: Value| -> Request {
+                serde_json::from_value(json!({"version":1,
+                    "project":{"id":"named:Recovery","name":"Recovery"},
+                    "actor":{"id":"codex:test","kind":"codex","session_id":"test","machine":"unit","host":"test","pid":null,"process_start":null,"cwd":root,"source":"test"},
+                    "operation":operation})).unwrap()
+            };
+            for (title, top, draft, tags) in [
+                ("Recovery second", false, false, vec!["mcp"]),
+                ("Recovery first", true, false, vec!["mcp"]),
+                ("Ordinary follow-up", false, false, vec![]),
+                ("Explicit priority", true, false, vec![]),
+                ("Draft", true, true, vec!["mcp"]),
+                ("Reserved", true, false, vec!["mcp"]),
+                ("Live claim", true, false, vec!["mcp"]),
+                ("Other device", true, false, vec!["mcp"]),
+                ("Retry hold", true, false, vec!["mcp"]),
+            ] {
+                store.execute(&request(json!({"action":"create","title":title,"body":"","labels":tags,"at_top":top,"draft":draft}))).unwrap();
+            }
+            store
+                .execute(&request(json!({"action":"claim","number":7,"force":false})))
+                .unwrap();
+            store.db.execute_batch("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES
+                ('reserved','named:Recovery',6,'{}','reserved','reserved',1,'test','unit',0,0),
+                ('live','named:Recovery',7,'{}','codex:test','running',1,'test','unit',0,0);
+                INSERT INTO fleet_allocations(project_id,issue_number,node) VALUES('named:Recovery',8,'other-device');
+                INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_allowed,retry_at) VALUES
+                ('held','named:Recovery',9,'{}','old','failed',1,'test','unit',0,0,1,0,9223372036854775807);").unwrap();
+            let settings = Settings {
+                enabled: true,
+                directory: root.to_string_lossy().into(),
+                projects: vec!["named:Recovery".into()],
+                ..Settings::default()
+            };
+            let numbers = |store: &Store, settings: &Settings| {
+                candidates(&store.db, settings, 100)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, n)| n)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(numbers(&store, &settings), vec![4, 2, 1, 3]);
+            let tagged = Settings {
+                tags: vec!["mcp".into()],
+                ..settings.clone()
+            };
+            assert_eq!(numbers(&store, &tagged), vec![2, 1]);
+            let before = store
+                .db
+                .prepare("SELECT id,actor_id,state,job FROM worker_runs ORDER BY id")
+                .unwrap()
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let id = store.register_worker(None, &tagged, "unit").unwrap();
+            let selected = reserve(&mut store, "unit", Some(&id)).unwrap().unwrap();
+            assert_eq!(selected.issue["number"], 2);
+            let history = store
+                .execute(&request(
+                    json!({"action":"history","number":2,"limit":20,"offset":0}),
+                ))
+                .unwrap();
+            let event = history["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["action"] == "worker_selected")
+                .expect("durable selection reason");
+            assert_eq!(event["data"]["required_tags"], json!(["mcp"]));
+            assert_eq!(event["data"]["worker_id"], id);
+            assert!(event["data"]["sort_order"].is_i64());
+            let after = store
+                .db
+                .prepare("SELECT id,actor_id,state,job FROM worker_runs WHERE id<>?1 ORDER BY id")
+                .unwrap()
+                .query_map([&selected.id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                before, after,
+                "existing claims and reservations remain intact"
+            );
+            assert_eq!(
+                store
+                    .execute(&request(json!({"action":"view","number":7})))
+                    .unwrap()["issue"]["assignee"],
+                "codex:test"
+            );
+            assert_eq!(numbers(&store, &settings), vec![4, 1, 3]);
+            let unrestricted = Settings {
+                concurrency: 3,
+                ..settings
+            };
+            let unrestricted_id = store.register_worker(None, &unrestricted, "unit").unwrap();
+            for expected in [4, 1, 3] {
+                let job = reserve(&mut store, "unit", Some(&unrestricted_id))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(job.issue["number"], expected);
+            }
+            assert!(numbers(&store, &unrestricted).is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn reserved_subtasks_exclude_siblings_and_keep_context() {
         let root =
