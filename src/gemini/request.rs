@@ -419,14 +419,23 @@ pub fn convert_request(
             if tool.get("strict").and_then(Value::as_bool) == Some(true) {
                 bail!("Strict function schema enforcement has no Gemini equivalent");
             }
-            if tool
-                .get("format")
-                .and_then(|v| v.get("type"))
-                .and_then(Value::as_str)
-                .is_some_and(|s| s != "text")
-            {
-                bail!("Custom grammar enforcement has no Gemini equivalent");
-            }
+            // Gemini cannot constrain output to a grammar, so Codex tools such as
+            // apply_patch carry their grammar in the description for the model to follow.
+            let grammar = match tool.get("format") {
+                None | Some(Value::Null) => None,
+                Some(format) => match format.get("type").and_then(Value::as_str) {
+                    None | Some("text") => None,
+                    Some("grammar") => Some(format!(
+                        "Input must match this {} grammar:\n{}",
+                        format
+                            .get("syntax")
+                            .and_then(Value::as_str)
+                            .unwrap_or("custom"),
+                        string(format, "definition")?
+                    )),
+                    Some(other) => bail!("Custom tool format {other} has no Gemini equivalent"),
+                },
+            };
             let name = format!("{namespace}{}", string(tool, "name")?);
             if names.contains_key(&name) {
                 bail!("Duplicate tool name {name}");
@@ -441,8 +450,15 @@ pub fn convert_request(
                     .unwrap_or(json!({"type":"object","properties":{}}))
             };
             let mut declaration = json!({"name":native,"parametersJsonSchema":schema});
-            if let Some(description) = tool.get("description") {
-                declaration["description"] = description.clone();
+            let description = tool.get("description").and_then(Value::as_str);
+            match (description, grammar) {
+                (Some(d), Some(g)) => declaration["description"] = json!(format!("{d}\n\n{g}")),
+                (None, Some(g)) => declaration["description"] = json!(g),
+                _ => {
+                    if let Some(description) = tool.get("description") {
+                        declaration["description"] = description.clone();
+                    }
+                }
             }
             declarations.push(declaration);
             names.insert(name.clone(), native.clone());

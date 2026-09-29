@@ -392,7 +392,11 @@ fn unsupported_semantics_fail_explicitly() {
         ),
         (
             "tools",
-            json!([{"type":"custom","name":"patch","format":{"type":"grammar","syntax":"lark","definition":"..."}}]),
+            json!([{"type":"custom","name":"patch","format":{"type":"regex"}}]),
+        ),
+        (
+            "tools",
+            json!([{"type":"custom","name":"patch","format":{"type":"grammar","syntax":"lark"}}]),
         ),
         ("parallel_tool_calls", json!(false)),
         ("service_tier", json!("priority")),
@@ -653,4 +657,36 @@ fn incremental_text_retains_native_content_metadata_and_signed_replay() {
         replay.body["contents"][0]["parts"],
         json!([{"text":"a🌍b","thoughtSignature":"signed-fragments"}])
     );
+}
+
+#[test]
+fn custom_grammar_tools_declare_grammar_in_description() {
+    let mut r = request();
+    r["tools"] = json!([
+        {"type":"custom","name":"apply_patch","description":"Edit files.",
+         "format":{"type":"grammar","syntax":"lark","definition":"start: \"*** Begin Patch\""}},
+        {"type":"custom","name":"bare","format":{"type":"grammar","syntax":"regex","definition":"^ok$"}},
+        {"type":"custom","name":"plain","description":"Plain.","format":{"type":"text"}}
+    ]);
+    let converted = convert_request(&r, &config(), &codec()).unwrap();
+    let declarations = converted.body["tools"][0]["functionDeclarations"]
+        .as_array()
+        .unwrap();
+    let described = |name: &str| {
+        declarations
+            .iter()
+            .find(|d| converted.tools[d["name"].as_str().unwrap()].name == name)
+            .unwrap()["description"]
+            .clone()
+    };
+    assert_eq!(
+        described("apply_patch"),
+        "Edit files.\n\nInput must match this lark grammar:\nstart: \"*** Begin Patch\""
+    );
+    assert_eq!(
+        described("bare"),
+        "Input must match this regex grammar:\n^ok$"
+    );
+    assert_eq!(described("plain"), "Plain.");
+    assert!(converted.tools.values().all(|t| t.custom));
 }
