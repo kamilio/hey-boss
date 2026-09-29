@@ -4,7 +4,58 @@ Observed on 2026-09-29 UTC (2026-09-28 CDT), using the existing SSH alias
 `kamils-macbook-pro.local`. This is an environmental incident; no contributing
 CLI defect was identified.
 
-## Current status: closure blocked by another timeout
+## Current status
+
+Issue 695 remains open. The post-wake verification from 01:47:10.323 through
+01:51:17.652 UTC failed after nine samples / 247.552 seconds. The supervisor
+recorded another heartbeat timeout at 01:51:00.265; last heartbeat was
+1790646643.933 and last sync 1790646643.109, with three last-reported changes.
+The final power-history read showed no new sleep after the full wake described
+below. Therefore that wake was insufficient and sleep does not explain every
+failure. Do not repeat it automatically or infer a CLI defect without a
+reproduction. Sustained resource/transport recovery is still required.
+
+At 01:51:40 UTC, direct disk inventory showed 37,465,700 KiB free. The journal
+watermark was 276096 with zero pending rows; all 276096 unique supervisor
+receipts were present, minimum 1 and maximum 276096. The 639 supervisor and
+355 companion conflicts and their timestamps remained unchanged. No journal,
+claim, worker or saved worktree was discarded.
+
+An independent deployment subsequently appeared in fleet history (installing
+at 01:51:23.399, failed at 01:51:30.420). Desired build became
+`9f723b4557ff38ee`; the connected supervisor and companion still reported
+`638e6fc0d9eab8c4`, and the companion reported `Software deployment failed`.
+This task launched no installer and did not retry or interfere with that
+rollout. Earlier installation audits remain timestamped evidence, not proof
+that this new deployment finished. Existing retry reconnected at 01:52:09.282,
+which is not sufficient to establish durable recovery.
+
+The post-wake monitor, two-second assertion and read-only SSH commands have
+exited. No browser, test server or temporary file was created on this retry.
+Unrelated checkout edits, including newly observed Swift changes, are retained.
+
+## Sleep correlation and bounded wake recovery
+
+Further read-only power-history inspection identified an environmental
+interruption missed by the instantaneous power-assertion snapshots: Mac.lan
+entered maintenance sleep at 01:37:16 UTC and woke at 01:37:30. The
+01:37:28.117 heartbeat timeout fell inside that sleep interval. Its history
+showed repeated maintenance-sleep/background-wake cycles, including a further
+12-second sleep at 01:38:15. The local supervisor had no corresponding sleep.
+The remote lid was closed; the power registry reported
+`AppleClamshellCausesSleep = No`, with an existing Amphetamine assertion.
+Those settings alone did not prove the machine stayed awake.
+
+At 01:46:38 UTC, a bounded `/usr/bin/caffeinate -u -t 2` assertion on Mac.lan
+promoted its background wake to **FullWake**, confirmed by the power log.
+The command exited normally at 01:46:40. This non-disruptive wake changed no
+persistent power setting, restarted no process, and left no task-owned
+keep-awake process. Existing Amphetamine and fleet services were preserved.
+This correlates the final timeout with actual host sleep; it does not prove
+that every earlier SSH failure had the same cause or justify changing CLI
+timeouts. The second deletion request remains cancelled.
+
+## Earlier pre-closure failure
 
 The immediate pre-closure guard found Mac.lan disconnected again at
 01:37:28.117 UTC with **Companion heartbeat timed out**, after the successful
@@ -13,9 +64,9 @@ observation below. Its last heartbeat was 1790645833.058, last sync
 command was never invoked, and a fresh issue read confirmed #695 still open.
 The five-minute pass is valid for its measured interval but does not establish
 sustained recovery in light of this subsequent failure. No additional action
-was authorized or performed; the cancelled deletion request stays cancelled.
-Continuation must address the recurring transport/heartbeat failure before
-closure, preserving the reconciled journals and existing worker state.
+had been performed at that checkpoint; the cancelled deletion request stayed
+cancelled. The subsequent sleep diagnosis and bounded wake recovery are
+recorded above.
 
 ## Successful observation before the next failure
 
