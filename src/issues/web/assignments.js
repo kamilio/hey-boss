@@ -11,7 +11,7 @@
   }
   function describe(issue, {actorName, bossName}) {
     const a = current(issue), machine = a.machine_name || a.machine;
-    if (a.kind === "github") return {label:"GitHub watcher", detail:a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for required failures or all checks to finish." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
+    if (a.kind === "github") return {label:"GitHub watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for required failures or all checks to finish." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
     if (a.kind === "machine") return {label:machine || "Machine", detail:"Waiting for an agent.", icon:"monitor"};
     if (a.kind === "agent") return {label:actorName(a.actor), detail:machine ? `Working on ${machine}.` : "Agent is working.", icon:"user"};
     if (a.kind === "boss") return {label:bossName, detail:"Assigned to you.", icon:"user"};
@@ -39,7 +39,7 @@
       const evidence = snapshot.evidence || {}, required = evidence.required || [];
       const failed = required.filter(c => c.state === "failure");
       const incomplete = (evidence.source_errors?.length || evidence.ci_errors?.length || evidence.policy_errors?.length);
-      const label = snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : failed.length ? `${failed.length} required check${failed.length === 1 ? "" : "s"} failed` : evidence.complete ? "All checks finished" : "Checks in progress";
+      const label = failed.length ? `${failed.length} required check${failed.length === 1 ? "" : "s"} failed${snapshot.error ? " (last recorded)" : ""}` : snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : evidence.complete ? "All checks finished" : "Checks in progress";
       const checks = required.map(c => `<li><span class="github-check-state ${c.state === "failure" ? "failed" : ""}">${esc(checkState(c.state))}</span>${link(c.url, c.context)}</li>`).join("");
       const feedback = [...(evidence.reviews || []).filter(r => r.body), ...(evidence.comments || []).filter(c => c.body), ...(evidence.review_comments || []).filter(c => c.body)].slice(0, 5);
       const reviews = feedback.length ? `<details class="github-feedback"><summary>Recent review feedback</summary>${feedback.map(r => `<article><p>${esc(r.body)}</p>${r.html_url ? link(r.html_url, "View on GitHub") : ""}</article>`).join("")}</details>` : "";

@@ -62,3 +62,11 @@ test('a failed refresh shows its PR error instead of claiming stale checks have 
   assert.match(html, /Status unavailable/);
   assert.doesNotMatch(html, /All checks finished/);
 });
+
+test('review fetch errors keep the required failure visible', () => {
+  const html = assignments.status({...base, github_status: {prs: {
+    'https://github.com/o/r/pull/1': {error: 'Review access denied', evidence: {required: [{context: 'tests', state: 'failure'}], complete: false}}
+  }}}, helpers);
+  assert.match(html, /1 required check failed/);
+  assert.match(html, /Review access denied/);
+});
