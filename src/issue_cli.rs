@@ -2185,10 +2185,15 @@ fn run_commit_hook(
     let Ok(project) = issues::identity::project(&cwd, &machine) else {
         return Ok(());
     };
+    // Hooks must know the checkout's repository, even when the worker was
+    // launched for another project. Without a remote, there is no safe link.
+    if !project.id.starts_with("github.com/") {
+        return Ok(());
+    }
     let project_override = options.project.clone().or_else(worker_project);
     let effective_project = project_override.as_deref().unwrap_or(&project.id);
     let Ok(resolved) =
-        issues::commits::resolve_commit_input(commit, effective_project, Some(&cwd), None)
+        issues::commits::resolve_commit_input(commit, &project.id, Some(&cwd), None)
     else {
         return Ok(());
     };

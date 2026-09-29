@@ -259,9 +259,10 @@ pub fn canonical_commit_url(
     sha: &str,
     fallback_url: Option<&str>,
 ) -> String {
+    // The attachment's destination may be a different project from the commit.
     if let Some((owner, repo)) = url_repo
-        .or_else(|| github_repo_from_project(project_id))
         .or(git_repo)
+        .or_else(|| github_repo_from_project(project_id))
     {
         return format!("https://github.com/{owner}/{repo}/commit/{sha}");
     }
