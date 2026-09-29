@@ -601,6 +601,10 @@ pub(super) fn acknowledge_claim(
     if target.as_deref() != Some("github") {
         return Ok(());
     }
+    db.execute(
+        "UPDATE issues SET github_ack_event=?3 WHERE project_id=?1 AND number=?2",
+        params![project, number, status["event"].as_str()],
+    )?;
     let run:Option<String>=db.query_row("SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 AND finished_at IS NULL",params![project,number,actor.id],|r|r.get(0)).optional()?;
     if let Some(run) = run
         && let Some(id) = steering_id(&run, &status)
@@ -608,6 +612,35 @@ pub(super) fn acknowledge_claim(
         db.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES(?1,?2,'session','','delivered',?3)",params![id,run,crate::issues::worker::now()])?;
     }
     Ok(())
+}
+
+pub(super) fn ready_assignment(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    assignee: Option<&str>,
+) -> Result<(Option<String>, bool)> {
+    // Managed workers retain ownership until their process finishes. A manual
+    // Ready handoff has no worker completion callback to return it to watching.
+    if live_claim(db, assignee)? {
+        return Ok((assignee.map(str::to_owned), false));
+    }
+    let (_, status) = saved(db, project, number)?;
+    let acknowledged: Option<String> = db.query_row(
+        "SELECT github_ack_event FROM issues WHERE project_id=?1 AND number=?2",
+        params![project, number],
+        |r| r.get(0),
+    )?;
+    let pending = status["event"]
+        .as_str()
+        .is_some_and(|event| Some(event) != acknowledged.as_deref());
+    if !pending {
+        db.execute(
+            "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
+            params![project, number],
+        )?;
+    }
+    Ok(((!pending).then(|| WATCHER.into()), pending))
 }
 
 fn steering_update(db: &Connection, run: &str) -> Result<Option<(String, Value)>> {
@@ -711,18 +744,23 @@ pub(super) fn release_worker(
     Ok(())
 }
 
-pub(super) fn release_claim(db: &Connection, job: &crate::issues::worker::Job) -> Result<()> {
-    let now = crate::issues::worker::now();
-    let changed = db.execute("UPDATE issues SET assignee=NULL,version=version+1,updated_at=max(updated_at,?4) WHERE project_id=?1 AND number=?2 AND assignee=?3",params![job.project.id,job.number(),job.actor.id,now])?;
+pub(super) fn release_claim(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    actor: &str,
+    now: i64,
+) -> Result<()> {
+    let changed = db.execute("UPDATE issues SET assignee=NULL,version=version+1,updated_at=max(updated_at,?4) WHERE project_id=?1 AND number=?2 AND assignee=?3",params![project,number,actor,now])?;
     if changed > 0 {
         event(
             db,
-            &job.project.id,
-            job.number(),
-            &job.actor.id,
+            project,
+            number,
+            actor,
             "unassigned",
             now,
-            &json!({"previous_assignee":job.actor.id,"forced":false}),
+            &json!({"previous_assignee":actor,"forced":false}),
         )?;
     }
     Ok(())
@@ -1054,6 +1092,41 @@ mod tests {
         let issue = get_issue(&f.store.db, "named:test", 1, false).unwrap();
         assert_eq!(issue.state, "open");
         assert!(issue.assignee.is_none());
+    }
+    #[test]
+    fn manual_ready_returns_to_watcher_unless_new_findings_have_not_been_claimed() {
+        for late in [false, true] {
+            let mut f = Fixture::new();
+            f.assign("github").unwrap();
+            f.observation(Some("first"));
+            f.call(json!({"action":"claim","number":1,"force":false}))
+                .unwrap();
+            if late {
+                f.observation(Some("later"));
+            }
+            let result = f
+                .call(json!({"action":"ready","number":1,"force":false}))
+                .unwrap();
+            assert_eq!(
+                result["issue"]["state"],
+                if late { "open" } else { "ready" }
+            );
+            assert_eq!(
+                result["issue"]["assignee"],
+                if late { Value::Null } else { json!(WATCHER) }
+            );
+            assert_eq!(result["issue"]["assignment"]["kind"], "github");
+            assert_eq!(result["prs_enabled"], false);
+            if late {
+                f.call(json!({"action":"claim","number":1,"force":false}))
+                    .unwrap();
+                let ready = f
+                    .call(json!({"action":"ready","number":1,"force":false}))
+                    .unwrap();
+                assert_eq!(ready["issue"]["assignee"], WATCHER);
+                assert_eq!(ready["issue"]["state"], "ready");
+            }
+        }
     }
     #[test]
     fn watcher_requires_a_link_and_cannot_steal_a_claim() {

@@ -178,17 +178,14 @@ pub(super) fn handoff(
     if issue.state == "ready" && issue.assignee.as_deref() == Some("human:boss") {
         return Ok(None);
     }
-    let assignee = if watching {
-        issue
-            .assignee
-            .clone()
-            .or_else(|| Some("watcher:github".into()))
+    let (assignee, pending) = if watching {
+        assignments::ready_assignment(db, &project.id, issue.number, issue.assignee.as_deref())?
     } else {
         register_boss(db, actor, now)?;
-        Some("human:boss".into())
+        (Some("human:boss".into()), false)
     };
     let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":assignee,"previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
-    issue.state = "ready".into();
+    issue.state = if pending { "open" } else { "ready" }.into();
     issue.assignee = assignee;
     issue.manual_blocked = false;
     Ok(Some(data))
