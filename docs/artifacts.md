@@ -54,7 +54,7 @@ project store, rather than the exported file.
 hey-boss artifact create --title 'Migration plan' --file plan.md --issue 12
 hey-boss artifact list --query migration --json
 hey-boss artifact view a-ID --json
-hey-boss artifact edit a-ID --file updated.md --if-version 1
+hey-boss artifact edit a-ID --file updated.md
 hey-boss artifact link a-ID --issue 15
 hey-boss artifact link a-ID --node release
 hey-boss artifact links --node release
@@ -63,18 +63,17 @@ hey-boss artifact comment a-ID --body 'Covered' --parent 1
 hey-boss artifact resolve a-ID 1
 hey-boss artifact resolve a-ID 1 --reopen
 hey-boss artifact export a-ID > plan.md
-hey-boss artifact archive a-ID --if-version 2
+hey-boss artifact archive a-ID
 hey-boss artifact list --archived
-hey-boss artifact restore a-ID --if-version 3
+hey-boss artifact restore a-ID
 hey-boss artifact unlink a-ID --issue 12
-hey-boss artifact delete a-ID --if-version 4
+hey-boss artifact delete a-ID
 ```
 
 `--project`, `--host`, `--agent`, `--request-id` and `--json` follow issue CLI
 conventions. Mutation retries must retain the identical request ID and payload.
-Edits, archive/restore, and permanent deletion require a current `--if-version`.
-The CLI's `delete` command is explicit and does not prompt; check the ID and
-revision before running it. Interrupted web actions retain their request identity
+The CLI captures the current revision for edits, archive/restore, and deletion.
+The CLI's `delete` command is explicit and does not prompt; check the ID before running it. Interrupted web actions retain their request identity
 for retry. List pages contain
 50 documents, ordered by recent activity; use `--offset` for additional pages.
 Documents have a 1 MiB Markdown limit, comments a 1 MiB limit, and selection

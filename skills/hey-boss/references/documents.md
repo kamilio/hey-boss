@@ -9,18 +9,18 @@ for plans and other documents that need stable links and discussion.
 hey-boss artifact create --title 'Release plan' --file plan.md --issue NUMBER
 hey-boss artifact list --query 'Release'
 hey-boss artifact view ID --json
-hey-boss artifact edit ID --file updated.md --if-version VERSION
+hey-boss artifact edit ID --file updated.md
 hey-boss artifact export ID
 ```
 
 `--file -` reads stdin; `--body` accepts inline Markdown. `export` writes Markdown
-to stdout. Use the current version from `view` when editing.
+to stdout.
 
 `--issue NUMBER` or `--node ALIAS_OR_ID` on create/link attaches the same document;
 `unlink ID --issue NUMBER` or `--node NODE` preserves it. `links` reads attachments
 to a resource. `comment ID --body TEXT --quote SELECTED_TEXT` or
 `--parent COMMENT_ID` adds discussion. `resolve ID COMMENT_ID` and `--reopen`
-retain thread history. `archive/restore ID --if-version VERSION` retain stable
+retain thread history. `archive/restore ID` retain stable
 references.
 
 ## Mindmaps
@@ -36,7 +36,7 @@ hey-boss mm show --bodies preview --json
 ```
 
 `mm issue --title` supplies a map-only label; it does not rename the issue.
-Use `--if-version VERSION --request-id ID` to guard and deduplicate map edits. PR URLs also work
+Use `--request-id ID` to deduplicate map edits. PR URLs also work
 as link selectors: `pr:https://github.com/org/repo/pull/2`.
 
 ## File attachments

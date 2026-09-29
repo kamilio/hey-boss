@@ -227,7 +227,7 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
     let before = f.issue("peer", &["view", "1", "--supervisor"], 0);
     assert_eq!(before["issue"]["version"], 1);
     // The original reported command works, including stable automatic replay.
-    let args = ["edit", "1", "--draft", "--if-version", "1"];
+    let args = ["edit", "1", "--draft", "--request-id", "draft-once"];
     let saved = f.issue("peer", &args, 0);
     assert_eq!(saved["store"]["host"], "supervisor");
     assert_eq!(saved["issue"]["draft"], true);
@@ -277,9 +277,10 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         "conflict"
     );
     assert_eq!(
-        f.issue("peer", &["edit", "4", "--draft"], 2)["error"]["code"],
-        "invalid_input"
+        f.issue("peer", &["edit", "4", "--draft"], 0)["issue"]["draft"],
+        true
     );
+    f.issue("main", &["undraft", "4"], 0);
     assert_eq!(
         f.issue(
             "peer",
@@ -408,18 +409,14 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
             before["issue"]
         );
     }
-    for args in [
-        vec!["reopen", "6", "--if-version", "3"],
-        vec!["reopen", "6", "--request-id", "no-version"],
-        vec![
-            "reopen",
-            "6",
-            "--if-version",
-            "0",
-            "--request-id",
-            "zero-version",
-        ],
-    ] {
+    for args in [vec![
+        "reopen",
+        "6",
+        "--if-version",
+        "0",
+        "--request-id",
+        "zero-version",
+    ]] {
         let mut args = args;
         args.push("--supervisor");
         assert_eq!(f.issue("peer", &args, 2)["error"]["code"], "invalid_input");
@@ -574,8 +571,6 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         );
     }
     for args in [
-        vec!["blocked-by", "4", "--if-version", "1"],
-        vec!["blocked-by", "4", "--request-id", "dependency-no-version"],
         vec![
             "blocked-by",
             "4",

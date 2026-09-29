@@ -138,7 +138,7 @@ pub(super) fn capabilities() -> Value {
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
     json!({"ok":true,"route":route,"capabilities":capabilities,"supervisor_build":build,
-        "usage":"Use hey-boss issue view NUMBER --supervisor --json for a current version. Guarded title/body/label edits, blocked-by and reopen use --supervisor --if-version VERSION --request-id ID. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft --if-version VERSION uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
+        "usage":"Title/body/label edits, blocked-by and reopen use --supervisor. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
         "recovery":"If a capability is false, run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities again."})
 }
 

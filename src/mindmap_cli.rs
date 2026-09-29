@@ -26,7 +26,7 @@ pub struct Options {
     #[arg(long, global = true)]
     request_id: Option<String>,
     /// Reject mutations if the selected map has changed.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     if_version: Option<i64>,
     #[command(subcommand)]
     action: Option<Action>,
@@ -218,8 +218,7 @@ const BATCH_HELP: &str = r#"JSON input format:
   Automatic PR rows (automatic:true in mm show --json) are display resources,
   not editable stored nodes. Before edit/alias/move or placement anchors, run:
     hey-boss mm pr URL --under issue:NUMBER --title TITLE
-  Use the same --project as the batch. Reload mm show --json for the new
-  --if-version before retrying. Link entries can create typed PR nodes directly.
+  Use the same --project as the batch. Reload mm show --json before retrying. Link entries can create typed PR nodes directly.
 
   edit:  "title" (string) or "clear_label":true is required.
          "title" changes topic/PR text or an issue's map-only label.
@@ -259,10 +258,10 @@ Example edits.json (all selectors must already exist):
    "kind":"related","description":null}
 ]
 
-Apply (replace 42 with the version from hey-boss mm show --json):
-  hey-boss mm batch --file edits.json --if-version 42 \
+Apply:
+  hey-boss mm batch --file edits.json \
     --request-id organize-replies --json
-  hey-boss mm batch --file - --if-version 42 \
+  hey-boss mm batch --file - \
     --request-id organize-replies --json < edits.json
 
 Selectors bind before any edits. Later entries must use the original alias
@@ -463,9 +462,7 @@ pub fn run(options: &Options) -> Result<()> {
     let operation = options.operation()?;
     operation.validate()?;
     if !operation.writes() && (options.if_version.is_some() || options.request_id.is_some()) {
-        return Err(Error::invalid(
-            "--if-version and --request-id apply only to mutations",
-        ));
+        return Err(Error::invalid("--request-id applies only to mutations"));
     }
     let cwd = std::env::current_dir()?.canonicalize()?;
     let machine = issues::identity::machine()?;

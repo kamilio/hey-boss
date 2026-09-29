@@ -28,7 +28,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs, and label-only batches with assignment: keep. Dependency edits require --if-version and do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, allocation, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs, and label-only batches with assignment: keep. Dependency edits do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }

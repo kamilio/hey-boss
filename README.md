@@ -160,11 +160,10 @@ reduce the page size if the 16 MiB transport limit rejects a response. Status
 requires an upgraded supervisor and never claims, releases, syncs or controls work.
 `hey-boss fleet capabilities` gives a small report of the existing authenticated
 supervisor tunnel, supported issue operations, and supervisor build. Use
-`issue view NUMBER --supervisor --json` to read the current version, then
-`issue edit NUMBER --draft --if-version VERSION` to draft eligible work from a
+`issue edit NUMBER --draft` to draft eligible work from a
 companion. It routes automatically without reverse SSH or a claim; retries derive
 a stable request ID unless supplied explicitly. Other metadata edits use
-`--supervisor --if-version VERSION --request-id ID`. Unsupported supervisors return
+`--supervisor`. Unsupported supervisors return
 `fleet_capability_unsupported` before sending; run `hey-boss upgrade` on the
 supervisor, reconnect, and inspect capabilities again. See
 [fleet tunnel editing](docs/fleet-tunnel-editing.md).
@@ -206,7 +205,7 @@ work to Boss; an active agent keeps its claim. Existing merged-fix auto-close
 behavior still applies. Stale or unavailable evidence stays an error, not a
 successful check result.
 
-For example, `hey-boss issue assign 12 github --if-version 4` enables watching.
+For example, `hey-boss issue assign 12 github` enables watching.
 Other destinations are `boss`, `unassigned`, and `machine:ID`. `issue view` exposes
 the assignment, available machines, and last GitHub status. Allocation inspection
 remains available for diagnostics.
@@ -447,8 +446,8 @@ Issue-store reads, store opening, and transaction acquisition retry transient
 SQLite contention within a six-second window (an in-progress SQLite wait may
 take up to two additional seconds). Exhaustion returns `database_busy`, including
 in JSON output, with retry guidance. Mutations are never replayed automatically;
-guarded edits check `--if-version` after acquiring the writer lock and still
-reject a newer revision. Read the latest revision before retrying a guarded edit.
+the CLI captures required revision guards internally and the writer rejects
+concurrent changes. Review the latest state before retrying a conflicted edit.
 
 Read an item from a copied web link with `hey-boss lookup 'URL'`. For example:
 
@@ -495,7 +494,7 @@ from the CLI:
 
 ```sh
 hey-boss issue block 12 --by 8 --by 9 --comment 'Needs both fixes'
-hey-boss issue blocked-by 12 8 9 --if-version 4
+hey-boss issue blocked-by 12 8 9
 hey-boss issue list --state blocked
 hey-boss issue blocked-by 12  # Remove explicit blocker links
 ```

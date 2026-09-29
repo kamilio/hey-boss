@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 #[command(
-    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions already have an authenticated supervisor tunnel: inspect `hey-boss fleet capabilities`.\nUse `issue view NUMBER --supervisor --json` for the current version, then guarded edits or reopen with\n--supervisor --if-version VERSION --request-id ID. Ordinary `issue edit NUMBER --draft\n--if-version VERSION` uses that tunnel automatically. No SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
+    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions use the supervisor tunnel for assignment and drafting.\nUse --supervisor for remote metadata edits; no SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
 )]
 pub struct Options {
     /// Full project ID or an unambiguous short name; defaults to this checkout.
@@ -55,7 +55,7 @@ enum GlobalSettingsAction {
         selected_skills: Option<Vec<String>>,
         #[arg(long)]
         sync_skills: bool,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
     },
 }
@@ -167,7 +167,7 @@ impl ListFilters {
 
 #[derive(Subcommand)]
 enum Action {
-    /// Inspect a saved creation receipt without retrying it. Use the original --agent and --project.
+    /// Inspect a saved mutation receipt without retrying it. Use the original --agent and --project.
     Request {
         /// Original request ID (not --request-id).
         id: String,
@@ -179,7 +179,7 @@ enum Action {
     },
     /// Atomically update guarded labels and ownership; the entire array is one group.
     #[command(
-        after_help = "JSON array (up to 100 issues / 1 MiB):\n  [{\"number\":1,\"if_version\":3,\"expected_assignee\":\"codex:session\",\"add_labels\":[\"rework needed\"],\"remove_labels\":[\"PR ready\"],\"assignment\":\"unassign\"}]\nexpected_assignee is required; use null for unassigned. assignment: keep (default), unassign, boss.\nApplying requires --request-id.\nGuard rejection returns applied:false and per-issue rejected/blocked results; no issue changes.\nThe caller assesses readiness; this command never closes issues or controls workers."
+        after_help = "JSON array (up to 100 issues / 1 MiB):\n  [{\"number\":1,\"expected_assignee\":\"codex:session\",\"add_labels\":[\"rework needed\"],\"remove_labels\":[\"PR ready\"],\"assignment\":\"unassign\"}]\nexpected_assignee defaults to null (unassigned). assignment: keep (default), unassign, boss.\nUse --request-id for explicit retries.\nGuard rejection returns applied:false and per-issue rejected/blocked results; no issue changes.\nThe caller assesses readiness; this command never closes issues or controls workers."
     )]
     Batch {
         /// JSON array file; '-' reads stdin.
@@ -282,7 +282,7 @@ enum Action {
         number: i64,
         #[arg(long)]
         destination: String,
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
     /// Move an issue before/after another issue; omit both to move to the end.
@@ -292,7 +292,7 @@ enum Action {
         before: Option<i64>,
         #[arg(long)]
         after: Option<i64>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_order_version: Option<i64>,
     },
     /// Show the complete Markdown body and the latest 20 comments.
@@ -344,7 +344,7 @@ enum Action {
     },
     /// Replace supplied fields; omitted fields are preserved.
     #[command(
-        after_help = "On a companion, --draft uses the existing supervisor tunnel and requires --if-version.\nRead the current version with `hey-boss issue view NUMBER --supervisor --json`.\nUse --request-id ID for explicit retries; otherwise draft edits derive a stable ID from the guarded edit.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
+        after_help = "On a companion, --draft uses the existing supervisor tunnel.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
     )]
     Edit {
         #[arg(long)]
@@ -361,7 +361,7 @@ enum Action {
         #[arg(long = "remove-label")]
         remove_labels: Vec<String>,
         /// Reject the edit if another writer has changed this version.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
     },
     /// Make a draft runnable, syncing its bound plan first.
@@ -387,12 +387,12 @@ enum Action {
         number: i64,
         target: String,
         /// Current issue version from issue view.
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
     /// Hand an attached PR to Boss and unblock dependents; caller assesses usability.
     #[command(
-        after_help = "Ready records development usability, not passing CI, merge, completion, or production approval.\nFor a draft source, --keep-draft preserves its no-worker scope while unblocking eligible dependents.\nIt requires an unreserved draft and all three guards from the same fresh issue view, plus --request-id.\nIt never undrafts or launches a worker. Ordinary drafts remain unschedulable.\nReopen the source to withdraw its handoff; the draft flag is retained."
+        after_help = "Ready records development usability, not passing CI, merge, completion, or production approval.\nFor a draft source, --keep-draft preserves its no-worker scope while unblocking eligible dependents.\nIt requires an unreserved draft; the CLI captures the handoff state automatically.\nIt never undrafts or launches a worker. Ordinary drafts remain unschedulable.\nReopen the source to withdraw its handoff; the draft flag is retained."
     )]
     Ready {
         number: i64,
@@ -400,19 +400,19 @@ enum Action {
         #[arg(long)]
         force: bool,
         /// Version from issue view --json; supply all three guards together.
-        #[arg(long, requires_all = ["expected_assignee", "expected_reservation", "request_id"])]
+        #[arg(long, hide = true, requires_all = ["expected_assignee", "expected_reservation", "request_id"])]
         if_version: Option<i64>,
         /// Exact assignee from ready_guard; use unassigned for null.
-        #[arg(long, requires = "if_version")]
+        #[arg(long, hide = true, requires = "if_version")]
         expected_assignee: Option<String>,
         /// Opaque ready_guard.expected_reservation from the same view.
-        #[arg(long, requires = "if_version")]
+        #[arg(long, hide = true, requires = "if_version")]
         expected_reservation: Option<String>,
-        /// Reconcile a manual hold atomically; guards required, dependencies retained.
-        #[arg(long, requires = "if_version")]
+        /// Reconcile a manual hold atomically; dependencies retained.
+        #[arg(long)]
         clear_manual_hold: bool,
         /// Record a development handoff while retaining draft/no-worker scope.
-        #[arg(long, requires = "if_version")]
+        #[arg(long)]
         keep_draft: bool,
     },
     /// Assign an open issue to Boss.
@@ -467,13 +467,12 @@ enum Action {
         force: bool,
     },
     /// Set the issues blocking this issue; omit blockers to remove all links.
-    /// With --supervisor, requires issue_dependencies support, --if-version and
-    /// --request-id. Only unassigned, unreserved work is eligible; --force is not
+    /// With --supervisor, requires issue_dependencies support. Only unassigned, unreserved work is eligible; --force is not
     /// supported and there is no local fallback.
     BlockedBy {
         number: i64,
         blockers: Vec<i64>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
         #[arg(long)]
         force: bool,
@@ -497,7 +496,7 @@ enum Action {
         #[arg(long)]
         clear_manual_hold: bool,
         /// Reject reopening if another writer has changed this version.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
     },
     /// Soft-delete an issue; its number and history are retained.
@@ -520,7 +519,7 @@ enum AttemptAction {
         number: i64,
         #[arg(long)]
         file: PathBuf,
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
     /// Read current process, log and Git evidence; save JSON for review before reconciliation.
@@ -533,7 +532,7 @@ enum AttemptAction {
         /// Reviewed success/failure and retained Git/log outcome.
         #[arg(long)]
         outcome: String,
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
 }
@@ -557,7 +556,7 @@ enum SubtaskAction {
         body: Body,
         #[arg(long = "label")]
         labels: Vec<String>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
         /// Issues that block this new subtask; starts in Blocked state immediately.
         #[arg(long = "blocked-by", visible_alias = "by", value_delimiter = ',')]
@@ -571,9 +570,9 @@ enum SubtaskAction {
     Add {
         number: i64,
         child: i64,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_child_version: Option<i64>,
     },
     /// Unlink a subtask while preserving its issue and history.
@@ -581,9 +580,9 @@ enum SubtaskAction {
     Remove {
         number: i64,
         child: i64,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_child_version: Option<i64>,
     },
 }
@@ -744,8 +743,15 @@ impl Options {
                 }
                 .read()?
                 .unwrap();
+                let mut edits: Vec<Value> = serde_json::from_str(&raw)?;
+                for edit in &mut edits {
+                    if let Some(object) = edit.as_object_mut() {
+                        object.entry("if_version").or_insert(json!(0));
+                        object.entry("expected_assignee").or_insert(Value::Null);
+                    }
+                }
                 Operation::Batch {
-                    edits: serde_json::from_str(&raw)?,
+                    edits: serde_json::from_value(json!(edits))?,
                 }
             }
             Action::Subtask { command } => match command {
@@ -1380,11 +1386,13 @@ pub fn run(options: &Options) -> Result<()> {
                 .ok()
                 .filter(|s| !s.is_empty())
         });
-        let mut value = match &host {
-            Some(host) => issues::remote::call(host, &request).map_err(|mut error| {
+        let mut value = crate::cli_request::execute(&request, host.as_deref(), options.supervisor)
+            .map_err(|mut error| {
                 if let Some(info) = &mut error.details {
                     let original = info["inspect_command"].as_str().map(str::to_owned);
-                    scope_allocation(info, host);
+                    if let Some(host) = &host {
+                        scope_allocation(info, host);
+                    }
                     if let Some(original) = original {
                         error.message = error.message.replace(
                             &format!("Inspect: {original}\n"),
@@ -1393,16 +1401,7 @@ pub fn run(options: &Options) -> Result<()> {
                     }
                 }
                 error
-            })?,
-            None => {
-                let mut store = Store::open(&issues::database_path()?)?;
-                if options.supervisor {
-                    store.execute_supervisor(&request)?
-                } else {
-                    store.execute(&request)?
-                }
-            }
-        };
+            })?;
         if interactive {
             let file = match &options.action {
                 Action::Create { body, .. } | Action::Edit { body, .. } => body.file.as_deref(),

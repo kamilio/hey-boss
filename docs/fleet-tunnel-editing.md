@@ -8,22 +8,21 @@ issue metadata.
 hey-boss fleet capabilities
 hey-boss fleet status
 hey-boss issue view 1 --project github.com/quora-internal/ans --supervisor --json
-hey-boss issue edit 1 --project github.com/quora-internal/ans --draft --if-version 1 --json
+hey-boss issue edit 1 --project github.com/quora-internal/ans --draft --json
 ```
 
-Use the version from the authoritative read. The last command automatically
+The last command automatically
 routes through the tunnel on companions; the response identifies `store.host` as
 `supervisor` and returns its request ID. Explicit `--request-id` values are kept;
 otherwise a stable key covers the actor, project, version and exact draft edit.
-Repeat the identical command after an uncertain response. A different version or
-edit is a different operation. Stale versions fail without mutation.
+Repeat the identical command after an uncertain response. A different edit is a different operation. Concurrent changes fail without mutation.
 
 Drafting requires open or blocked, unassigned work with no active worker
 reservation. It retains the original actor and all normal project and label
 authorization. It never claims work or takes over a reservation. Undrafting,
 assignment and other lifecycle operations are not added to the metadata route.
 
-Guarded `issue reopen NUMBER --supervisor --if-version VERSION --request-id ID`
+Guarded `issue reopen NUMBER --supervisor --request-id ID`
 uses the same tunnel when `issue_reopen` is advertised. It requires unassigned,
 unreserved work with no unfinished attempt. Unresolved dependencies remain
 blocked; see [Chief reopen guards](chief-metadata-routing.md) for manual holds
@@ -31,10 +30,10 @@ and retry behavior.
 
 Title, body and label edits use the explicit `--supervisor` route described in
 [Chief metadata routing](chief-metadata-routing.md). That route also supports
-drafting with an explicit request ID and version. Ordinary reads remain local
+drafting. Ordinary reads remain local
 replica snapshots, which can lag behind the authoritative store.
 
-`issue blocked-by NUMBER [BLOCKERS...] --supervisor --if-version VERSION
+`issue blocked-by NUMBER [BLOCKERS...] --supervisor
 --request-id ID` replaces dependency links; omit blockers to clear them. It
 requires `issue_dependencies` support and unassigned, unreserved work with no
 unfinished worker attempt, even when the caller owns the claim. `--force` is

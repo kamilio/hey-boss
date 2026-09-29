@@ -13,7 +13,7 @@ connection; no socket inspection or SSH configuration is necessary.
 ```sh
 hey-boss issue view 1341 --supervisor --project github.com/poe-platform/poe-code --json
 hey-boss issue edit 1341 --supervisor --remove-label 'rework needed' \
-  --if-version 8 --request-id chief-cleanup-1341-v8 \
+  --request-id chief-cleanup-1341-v8 \
   --project github.com/poe-platform/poe-code --json
 ```
 
@@ -25,10 +25,10 @@ and can lag until the next pull.
 | Operation | Supported with `--supervisor` |
 | --- | --- |
 | `view`, `allocation` | Authoritative read |
-| `edit` title, body, labels | Requires `--if-version` and `--request-id` |
-| `edit --draft` | Requires `issue_draft`, a current `--if-version`, and an eligible, unassigned, unreserved issue |
-| `batch` label changes | Requires version and expected owner for every entry, `assignment: keep`, and `--request-id` |
-| `reopen` | Requires `issue_reopen`, current `--if-version`, `--request-id`, and unassigned, unreserved work with no unfinished worker attempt |
+| `edit` title, body, labels | CLI captures the current revision |
+| `edit --draft` | Requires `issue_draft` and an eligible, unassigned, unreserved issue |
+| `batch` label changes | Requires `assignment: keep`; expected owner defaults to unassigned |
+| `reopen` | Requires `issue_reopen` and unassigned, unreserved work with no unfinished worker attempt |
 | Other lifecycle operations, claims, assignment, reservations, worker controls | Rejected before mutation |
 | Interactive editing, web server, RPC, migration and other commands | Rejected |
 
@@ -39,11 +39,11 @@ version/owner checks. This route preserves the original actor and normal
 authorization, including the restriction on the `yolo` label; it does not act as
 Boss or acquire/release work.
 
-Ordinary `issue edit NUMBER --draft --if-version VERSION --request-id ID` routes
+Ordinary `issue edit NUMBER --draft --request-id ID` routes
 through the tunnel automatically on a companion. Without an explicit request ID,
 this automatic route derives a stable ID from the actor, project and guarded
 operation. Explicit `--supervisor` uses the same draft eligibility guards and
-requires an explicit request ID. Read the authoritative issue again after the
+captures the guards and request ID automatically. Read the authoritative issue again after the
 edit to verify its draft state. Assigned and reserved work remains protected.
 
 The companion checks the operation before forwarding, and the supervisor checks
@@ -61,10 +61,10 @@ ordinary metadata/offline path and explicit SSH route retain their existing rule
 Unsupported lifecycle work must use those established paths with their normal
 ownership and allocation checks. Never claim an issue merely to edit its labels.
 
-To expose incomplete delivery, read the authoritative version, then use:
+To expose incomplete delivery, use:
 
 ```sh
-hey-boss issue reopen NUMBER --supervisor --if-version VERSION --request-id ID --project FULL_ID --json
+hey-boss issue reopen NUMBER --supervisor --request-id ID --project FULL_ID --json
 ```
 
 Reopen retains the original actor and existing history. Closed issues with

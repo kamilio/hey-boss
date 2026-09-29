@@ -350,7 +350,7 @@ fn source_handoff_preserves_separate_repair_claim_and_labels() {
 }
 
 #[test]
-fn ready_cli_exposes_guards_and_rejects_incomplete_snapshots() {
+fn ready_cli_hides_legacy_guards_and_rejects_incomplete_explicit_snapshots() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_hey-boss"))
         .args(["issue", "ready", "--help"])
         .output()
@@ -361,16 +361,15 @@ fn ready_cli_exposes_guards_and_rejects_incomplete_snapshots() {
         "--if-version",
         "--expected-assignee",
         "--expected-reservation",
-        "--clear-manual-hold",
-        "--keep-draft",
     ] {
+        assert!(!help.contains(flag), "{help}");
+    }
+    for flag in ["--clear-manual-hold", "--keep-draft"] {
         assert!(help.contains(flag), "{help}");
     }
     for args in [
         vec!["--if-version", "1"],
         vec!["--expected-assignee", "unassigned"],
-        vec!["--clear-manual-hold"],
-        vec!["--keep-draft"],
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .args(["issue", "ready", "1"])

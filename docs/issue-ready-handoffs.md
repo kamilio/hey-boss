@@ -4,12 +4,8 @@ Ready means the caller considers the attached PR usable by dependent work. It
 assigns the issue to Boss and unblocks eligible dependents. It does not assert
 passing CI, completion, merge, or deployment, and performs no GitHub or Git action.
 
-Read `hey-boss issue view NUMBER --json` immediately before handoff. Its
-`ready_guard` contains `if_version`, `expected_assignee`, and
-`expected_reservation`. Pass that snapshot to `issue ready NUMBER` using
-`--if-version`, `--expected-assignee` (use `unassigned` for null), and
-`--expected-reservation`, plus a stable `--request-id`. All three guards are
-required together. The reservation token covers allocation and unfinished worker
+Run `hey-boss issue ready NUMBER`. The CLI reads the authoritative revision,
+assignee, and reservation snapshot and supplies the guards internally. The reservation token covers allocation and unfinished worker
 attempt identities, including claim timestamps and reservation expiry.
 
 The authoritative transaction checks every guard before changing the issue,
@@ -41,7 +37,7 @@ remain protected. An exact owner guard permits a metadata handoff of a manual
 assignment without making the caller claim the issue. Legacy unguarded Ready is
 limited to the authoritative store and the caller's ownership permissions.
 
-On companions, read with `--supervisor` and use the same guarded command. Ready
+On companions, use the same command. Ready
 routes through the existing supervisor tunnel; it never queues a lifecycle change
 for offline replay. `fleet capabilities` reports `issue_ready`; older peers must
 be upgraded. The web Ready action sends the displayed snapshot and retains retry

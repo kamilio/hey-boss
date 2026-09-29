@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use hey_boss::{
     artifacts::Operation,
-    issues::{self, Error, Result, Store},
+    issues::{self, Error, Result},
 };
 use serde_json::Value;
 use std::{io::Read, path::PathBuf};
@@ -120,7 +120,7 @@ enum Action {
         title: Option<String>,
         #[command(flatten)]
         text: Text,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         if_version: Option<i64>,
         /// Open this artifact in the native Liquid Glass editor on macOS.
         #[arg(long, conflicts_with_all = ["title", "body", "file", "if_version"])]
@@ -128,18 +128,18 @@ enum Action {
     },
     Archive {
         id: String,
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
     Restore {
         id: String,
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
     /// Permanently delete a document, its comments, links and attached files.
     Delete {
         id: String,
-        #[arg(long)]
+        #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
     Comment {
@@ -290,8 +290,7 @@ pub fn run(options: &Options) -> Result<()> {
             id: id.clone(),
             title: title.clone(),
             body: text.read()?,
-            if_version: if_version
-                .ok_or_else(|| Error::invalid("Editing text requires --if-version"))?,
+            if_version: if_version.unwrap_or(0),
         },
         Action::Archive { id, if_version } | Action::Restore { id, if_version } => {
             Operation::Archive {
@@ -372,7 +371,9 @@ pub fn run(options: &Options) -> Result<()> {
             files,
         }
     };
-    op.validate()?;
+    if matches!(options.action, Action::Rpc) {
+        op.validate()?;
+    }
     let cwd = std::env::current_dir()?.canonicalize()?;
     let machine = issues::identity::machine()?;
     let mut actor = if op.writes() {
@@ -398,14 +399,12 @@ pub fn run(options: &Options) -> Result<()> {
         operation: issues::Operation::Artifact { operation: op },
         request_id: options.request_id.clone(),
     };
-    let value = match options.host.clone().or_else(|| {
+    let host = options.host.clone().or_else(|| {
         std::env::var("HEY_BOSS_ISSUE_HOST")
             .ok()
             .filter(|h| !h.is_empty())
-    }) {
-        Some(host) => issues::remote::call(&host, &request)?,
-        None => Store::open(&issues::database_path()?)?.execute(&request)?,
-    };
+    });
+    let value = crate::cli_request::execute(&request, host.as_deref(), false)?;
     if matches!(options.action, Action::Export { .. }) {
         let body = value["artifact"]["body"].as_str().unwrap();
         if let Action::Export {
