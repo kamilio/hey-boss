@@ -912,7 +912,8 @@ until a new check runs. Compare both IDs after deployment before trusting teleme
 With `configure --aggressive true`, clean linked worktrees become eligible after
 4 hours without tracked-source or Git activity. Tracked edits, unpushed commits,
 locks and active processes prevent removal. Untracked/ignored output neither blocks
-cleanup nor resets idle time; SQLite and filesystem protections still apply.
+cleanup nor resets idle time. Unpublished SQLite files and filesystem protections
+still prevent removal; unchanged, published database fixtures are removable.
 Clean sparse checkouts are supported. Primary checkouts and missing-checkout metadata
 stay intact. Removal retains branches and never overrides ownership locks. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.

@@ -1526,7 +1526,29 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
             ));
         }
         if super::databases::protected(&entry)? {
-            return Err(super::preserved("SQLite database or sidecar preserved"));
+            // A clean, published fixture can be reconstructed from Git. Local
+            // databases remain protected, including ignored files and sidecars.
+            let tracked = if metadata.is_file() {
+                let relative = entry.strip_prefix(path).map_err(io::Error::other)?;
+                let listed = output(
+                    git(path, &["--literal-pathspecs", "ls-files", "-z", "--"]).arg(relative),
+                    Duration::from_secs(15),
+                )?;
+                if !listed.status.success() {
+                    return Err(io::Error::other(
+                        "Cannot verify database tracking; preserved",
+                    ));
+                }
+                listed.stdout.strip_suffix(&[0]) == Some(relative.as_os_str().as_bytes())
+            } else {
+                false
+            };
+            if !tracked {
+                return Err(super::preserved(format!(
+                    "SQLite database or sidecar preserved: {}",
+                    entry.display()
+                )));
+            }
         }
         if metadata.is_dir() {
             for child in std::fs::read_dir(&entry)? {
@@ -2150,11 +2172,13 @@ mod aggressive_tests {
             )
             .is_ok()
         );
-        // Even a clean tracked SQLite file prevents partial checkout deletion.
+        // Published database fixtures are reproducible source; unpublished
+        // databases still prevent deletion of the surrounding checkout.
         std::fs::write(work.join("History"), b"SQLite format 3\0fixture").unwrap();
         git_text(&work, &["add", "History"]).unwrap();
         git_text(&work, &["commit", "-m", "database fixture"]).unwrap();
         publish_fixture(&work);
+        std::fs::write(work.join("local.sqlite"), b"SQLite format 3\0local data").unwrap();
         assert!(
             remove_checkout(&work)
                 .unwrap_err()
@@ -2162,9 +2186,7 @@ mod aggressive_tests {
                 .contains("SQLite")
         );
         assert!(work.join("file").exists());
-        git_text(&work, &["rm", "History"]).unwrap();
-        git_text(&work, &["commit", "-m", "owner completed"]).unwrap();
-        publish_fixture(&work);
+        std::fs::remove_file(work.join("local.sqlite")).unwrap();
         let head = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
         remove_checkout(&work).unwrap();
         assert_eq!(git_text(&main, &["rev-parse", "owned"]).unwrap(), head);
