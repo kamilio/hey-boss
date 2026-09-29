@@ -2,6 +2,11 @@
 
 Licensed under [MIT](LICENSE).
 
+`hey-boss utils gcn` runs `git commit --no-verify`; `hey-boss utils gpn` runs `git push --no-verify`, forwarding all further arguments unchanged without a daemon.
+Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
+
+`command | hey-boss utils copy` sends UTF-8 text (up to 128 KiB) to your connected main Mac's clipboard; `hey-boss utils paste > file` retrieves it without adding a newline. `pbcopy`/`pbpaste` are aliases. Clipboard transfers use the existing companion bridge, are never queued or cached, and fail when disconnected.
+
 The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Code,
 and Pi sessions through one API, including resume, activity, steering, interruption,
 explicit approvals/input, and provider-neutral goal continuation. Issue workers

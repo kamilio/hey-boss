@@ -22,6 +22,7 @@ func audit() {
         withExtendedLifetime(editor) { app.run() }
         return
     }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_POE_CORPUS"] { auditPoeMarkdownCorpus(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NATIVE_READER"] == "1" {
@@ -1941,11 +1942,14 @@ func auditDesktopActions() {
     defer { server.stop() }
     let port = server.port
     let actions = DesktopActions(cli: nil)
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    actions.pasteboard = { precondition(Thread.isMainThread); return pasteboard }
     var opened: [URL] = []; var cancelled = 0
     actions.openWebsite = { url, completion in opened.append(url); completion(true) }
     actions.forward = { host, remote in precondition(host == "devbox" && remote == 4123); return port }
     actions.cancel = { host, local, remote in precondition(host == "devbox" && local == port && remote == 4123); cancelled += 1 }
-    func invoke(_ id: String, _ method: String, _ params: [String: Any], owner: String = "devbox", version: Int = 1, generation: String = "first") -> [String: Any] {
+    func invoke(_ id: String, _ method: String, _ params: Any, owner: String = "devbox", version: Int = 1, generation: String = "first") -> [String: Any] {
         let payload = try! JSONSerialization.data(withJSONObject: ["version":version,"id":id,"method":method,"params":params], options: [.sortedKeys])
         let requestData = try! JSONSerialization.data(withJSONObject: ["command":"action","sync":false,"bridge_host":owner,"bridge_generation":generation,"question":String(decoding:payload,as:UTF8.self)])
         let request = try! JSONDecoder().decode(Request.self, from: requestData)
@@ -1956,6 +1960,13 @@ func auditDesktopActions() {
             lock.lock(); let result = response; lock.unlock()
             if let result {
                 let json = try! JSONSerialization.jsonObject(with: Data((result["result"] as! String).utf8)) as! [String: Any]
+                if method.hasPrefix("clipboard.") {
+                    actions.queue.sync {
+                        let key = owner + ":" + generation + ":" + id
+                        precondition(actions.completed[key] == nil && !actions.completionOrder.contains(key), "Clipboard payloads and results must never be cached")
+                        precondition(!actions.inFlight.contains(key) && actions.requests[key] == nil)
+                    }
+                }
                 return json
             }
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
@@ -1964,6 +1975,9 @@ func auditDesktopActions() {
     }
     let capabilities = invoke("caps", "capabilities", [:])["result"] as! [String: Any]
     precondition((capabilities["methods"] as! [String]).contains("browser.request"))
+    precondition((capabilities["methods"] as! [String]).contains("clipboard.copy"))
+    precondition((capabilities["methods"] as! [String]).contains("clipboard.paste"))
+    precondition(capabilities["clipboard_byte_limit"] as? Int == 128 * 1024)
     let params: [String: Any] = ["url":"http://127.0.0.1:4123/review/token?mode=edit"]
     let first = invoke("open", "browser.open", params)["result"] as! [String: Any]
     let session = first["session"] as! String
@@ -1992,6 +2006,70 @@ func auditDesktopActions() {
     let fresh = invoke("generation-open", "browser.open", params, generation:"second")["result"] as! [String: Any]
     precondition(fresh["session"] as! String != old["session"] as! String)
     precondition(invoke("generation-close", "browser.close", ["session":fresh["session"]!], generation:"second")["result"] != nil)
+
+    let cachedBeforeClipboard = actions.queue.sync { actions.completionOrder }
+    func copy(_ text: String) {
+        let result = invoke("clipboard-copy", "clipboard.copy", ["base64":Data(text.utf8).base64EncodedString()])["result"] as? [String: Bool]
+        precondition(result == ["copied":true])
+        precondition(Data(pasteboard.string(forType: .string)!.utf8) == Data(text.utf8), "Copy must preserve exact UTF-8 bytes")
+    }
+    func paste(_ text: String) {
+        let result = invoke("clipboard-paste", "clipboard.paste", [:])["result"] as? [String: String]
+        precondition(result == ["base64":Data(text.utf8).base64EncodedString()], "Same-ID paste must read the current clipboard, preserving exact bytes")
+    }
+    let unicode = "Zażółć — 東京 🌍 e\u{301}\n\r\n\t leading and trailing \n"
+    copy(unicode); paste(unicode)
+    copy("a\u{0}b\t\r\n"); paste("a\u{0}b\t\r\n")
+    pasteboard.clearContents(); precondition(pasteboard.setString("changed externally\n", forType: .string))
+    paste("changed externally\n")
+    // An explicit second copy with the same ID must execute, not replay an old response.
+    copy(unicode); paste(unicode)
+    copy(""); paste("")
+    pasteboard.clearContents(); paste("")
+    precondition(pasteboard.setData(Data([0, 1, 2]), forType: .init("org.hey-boss.audit.binary")))
+    paste("")
+
+    let limit = 128 * 1024
+    let boundary = String(repeating: "🌍", count: limit / 4)
+    precondition(boundary.utf8.count == limit)
+    copy(String(repeating: "a", count: limit)); paste(String(repeating: "a", count: limit))
+    copy(boundary); paste(boundary)
+    let marker = Data([3, 2, 1]), markerType = NSPasteboard.PasteboardType("org.hey-boss.audit.marker")
+    precondition(pasteboard.setData(marker, forType: markerType))
+    let unchanged = pasteboard.changeCount
+    func rejected(_ method: String, _ params: Any) {
+        let response = invoke("clipboard-rejected", method, params)
+        precondition(response["error"] != nil && response["result"] == nil)
+        precondition(pasteboard.changeCount == unchanged, "Invalid input must not clear or change the clipboard")
+        precondition(Data(pasteboard.string(forType: .string)!.utf8) == Data(boundary.utf8))
+        precondition(pasteboard.data(forType: markerType) == marker)
+    }
+    for invalid in ["%%%", "YQ", "YQ=", "YQ===", "YQ==\n", "Y Q==", "YQ==YQ==", "YR==", "____"] {
+        rejected("clipboard.copy", ["base64":invalid])
+    }
+    for invalid: [UInt8] in [[0xff], [0xc0, 0xaf], [0xe2, 0x82], [0xed, 0xa0, 0x80]] {
+        rejected("clipboard.copy", ["base64":Data(invalid).base64EncodedString()])
+    }
+    rejected("clipboard.copy", ["base64":Data((boundary + "a").utf8).base64EncodedString()])
+    rejected("clipboard.copy", ["base64":Data(String(repeating: "a", count: limit + 1).utf8).base64EncodedString()])
+    for malformed: [String: Any] in [[:], ["text":"do not copy"], ["base64":42], ["base64":true], ["base64":NSNull()], ["base64":["YQ=="]], ["base64":"", "extra":true]] {
+        rejected("clipboard.copy", malformed)
+    }
+    for malformed: [String: Any] in [["base64":""], ["extra":true]] { rejected("clipboard.paste", malformed) }
+    for malformed: Any in [NSNull(), "text", 42, true, [] as [Any]] {
+        rejected("clipboard.copy", malformed); rejected("clipboard.paste", malformed)
+    }
+    // Oversize native text is rejected on paste without changing it or retaining the result.
+    pasteboard.clearContents(); precondition(pasteboard.setString(boundary + "a", forType: .string))
+    let oversizeChangeCount = pasteboard.changeCount
+    precondition(invoke("clipboard-paste", "clipboard.paste", [:])["error"] != nil)
+    precondition(pasteboard.changeCount == oversizeChangeCount && Data(pasteboard.string(forType: .string)!.utf8) == Data((boundary + "a").utf8))
+    copy("after error"); paste("after error")
+    actions.queue.sync {
+        precondition(actions.completionOrder == cachedBeforeClipboard)
+        precondition(Set(actions.completed.keys) == Set(cachedBeforeClipboard), "Clipboard actions must leave browser caches intact")
+    }
+    print("Passed: private main-thread clipboard, exact Unicode/newlines/empty text, non-text paste, 128 KiB boundary, invalid base64/UTF-8/params preserve clipboard, uncached same-ID copy/paste, browser cache preservation")
     print("Passed: connection generation isolation, desktop capabilities, remote browser forward, exact path/query, idempotent open, conflicting IDs, Unicode POST round trip, owner/origin isolation, unsafe headers, bounded responses, no cross-origin redirects, unsupported versions/actions, session release")
 }
 

@@ -86,14 +86,14 @@ fn forward_live(
         != Some("1")
     {
         return Err(if request.command == "action" {
-            "Desktop companion is not connected. Connect this machine from the Mac before opening a website; the request was not queued.".into()
+            "Desktop companion is not connected. Connect this machine from the Mac before using desktop actions; the request was not queued.".into()
         } else {
             "reconnect with an upgraded Mac companion to negotiate the bridge protocol".into()
         });
     }
     let mut stream = UnixStream::connect(state.join("bridge.sock")).map_err(|e| {
         if request.command == "action" {
-            format!("Desktop companion is not connected: {e}. Connect this machine from the Mac before opening a website; the request was not queued.")
+            format!("Desktop companion is not connected: {e}. Connect this machine from the Mac before using desktop actions; the request was not queued.")
         } else { e.to_string() }
     })?;
     stream
@@ -111,7 +111,7 @@ fn forward_live(
     payload["source_host"] = serde_json::Value::String(server_hostname());
     if request.command == "action" {
         let host = std::fs::read_to_string(state.join("bridge-host"))
-            .map_err(|_| "reconnect the companion to enable browser actions")?;
+            .map_err(|_| "reconnect the companion to enable desktop actions")?;
         payload["bridge_host"] = host.into();
         payload["bridge_generation"] = std::fs::read_to_string(state.join("bridge-generation"))
             .map_err(|_| "reconnect the companion to negotiate action sessions")?
