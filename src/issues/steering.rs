@@ -123,7 +123,9 @@ impl Store {
         error: Option<&str>,
     ) -> Result<bool> {
         let changed = self.db.execute(
-            "UPDATE agent_steering SET state=?2,error=?3 WHERE request_id=?1 AND (?2<>'sending' OR state='queued')",
+            // Automatic snapshots already live in the watcher record. Keep the
+            // delivery receipt, but release its payload once acknowledged.
+            "UPDATE agent_steering SET state=?2,error=?3,text=CASE WHEN ?2='delivered' AND substr(request_id,1,7)='github:' THEN '' ELSE text END WHERE request_id=?1 AND (?2<>'sending' OR state='queued')",
             params![request, state, error],
         )?;
         Ok(changed != 0)
