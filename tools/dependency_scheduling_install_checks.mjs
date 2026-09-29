@@ -94,7 +94,9 @@ try {
   assert.equal(allocation.worker_reservation.actor_id,'codex:other-worker');
   assert.equal(allocation.worker_reservation.state,'awaiting_claim');
   assert(allocation.summary.includes('codex:other-worker'));
-  assert(issue(['ready','3'],4).error.message.includes('reserved for another worker'));
+  const reserved=issue(['ready','3'],4).error;
+  assert.equal(reserved.code,'conflict');
+  assert(reserved.message.includes('verification-reservation'),reserved.message);
   assert.equal(sql("SELECT count(*) FROM worker_runs WHERE id='verification-reservation' AND finished_at IS NULL")[0][0],1);
   const web=start(['issue','web','--port','0','--no-discovery','--project','Dependency installation QA','--json']);
   const info=await new Promise((yes,no)=>{
