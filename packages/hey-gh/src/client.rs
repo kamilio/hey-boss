@@ -814,6 +814,16 @@ impl Client {
         }
         Ok(response)
     }
+    // Looking up a memo before deciding whether it is reusable is not evidence
+    // consumption. Callers record validation only if they actually use it.
+    pub(crate) async fn peek_derived(&self, key: &str) -> Result<Option<Response>> {
+        let (key, prefix) = derived_repository_key(key);
+        let key = self.derived_entity_key(&key).await?;
+        self.0
+            .store
+            .get_repository_alias(&self.0.scope, &key, prefix.as_deref())
+            .await
+    }
     pub(crate) async fn save_derived(&self, key: &str, data: Value) -> Result<()> {
         let (key, _) = derived_repository_key(key);
         let key = self.derived_entity_key(&key).await?;

@@ -137,42 +137,14 @@ fn ci_signals(
                     }
                 }
             }
-            let failures: Vec<Value> = latest
-                .into_values()
-                .filter(|c| {
-                    matches!(c["state"].as_str(), Some("failure" | "error"))
-                        || (c["status"] == "completed"
-                            && matches!(
-                                c["conclusion"].as_str(),
-                                Some(
-                                    "failure"
-                                        | "cancelled"
-                                        | "timed_out"
-                                        | "action_required"
-                                        | "stale"
-                                        | "startup_failure"
-                                )
-                            ))
-                })
-                .map(|c| {
-                    json!([
-                        c["id"],
-                        c["name"],
-                        c["context"],
-                        c["conclusion"],
-                        c["state"],
-                        c["app"]["id"]
-                    ])
-                })
-                .collect();
-            if !failures.is_empty() {
-                blocking.push(fingerprint(&json!([
-                    ci.head_sha,
-                    required.context,
-                    required.app_id,
-                    sha,
-                    failures
-                ])));
+            if let Some(key) = crate::policy::failure_key(
+                &ci.head_sha,
+                &required.context,
+                required.app_id,
+                sha,
+                latest.into_values(),
+            ) {
+                blocking.push(key);
             }
         }
     }
@@ -212,6 +184,31 @@ fn ci_signals(
             "complete":false,"ci_complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
+    }
+}
+
+/// Policy collection reads check results and statuses, but never workflow jobs
+/// or reviews. Its failure identities therefore wake work before those sources.
+pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
+    let mut blocking = Vec::new();
+    if policy.pull_request_state.as_deref() == Some("open") && policy.errors.is_empty() {
+        blocking.extend(
+            policy
+                .checks
+                .iter()
+                .filter(|check| check.state == "failure")
+                .filter_map(|check| check.failure_key.clone()),
+        );
+    }
+    blocking.sort();
+    blocking.dedup();
+    Observation {
+        head: policy.head_sha.clone(),
+        blocking,
+        completed: None,
+        feedback: Vec::new(),
+        evidence: json!({"repository":policy.repository,"number":policy.pull_number,"head":policy.head_sha,
+            "complete":false,"required":policy.checks,"required_state":policy.state,"policy_errors":policy.errors}),
     }
 }
 
@@ -373,6 +370,34 @@ mod tests {
         );
         assert!(stale.blocking.is_empty());
         assert_eq!(stale.evidence["ci_complete"], false);
+    }
+
+    #[test]
+    fn policy_failure_can_wake_without_waiting_for_workflow_job_details() {
+        let (report, policy) = fixture();
+        let mut data = serde_json::to_value(policy).unwrap();
+        data["pull_request_state"] = json!("open");
+        data["checks"][0]["failure_key"] =
+            json!(observe(&report, &serde_json::from_value(data.clone()).unwrap()).blocking[0]);
+        let policy = serde_json::from_value(data.clone()).unwrap();
+        assert_eq!(
+            observe_required(&policy).blocking,
+            observe(&report, &policy).blocking
+        );
+        assert!(observe_required(&policy).completed.is_none());
+        data["pull_request_state"] = json!("closed");
+        assert!(
+            observe_required(&serde_json::from_value(data.clone()).unwrap())
+                .blocking
+                .is_empty()
+        );
+        data["pull_request_state"] = json!("open");
+        data["errors"] = json!([{"source":"policy","message":"Permission denied"}]);
+        assert!(
+            observe_required(&serde_json::from_value(data).unwrap())
+                .blocking
+                .is_empty()
+        );
     }
 
     #[test]
