@@ -133,12 +133,12 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
     json!({"ok":true,"route":route,"capabilities":capabilities,"supervisor_build":build,
-        "usage":"Use hey-boss issue view NUMBER --supervisor --json for a current version. Guarded title/body/label edits and reopen use --supervisor --if-version VERSION --request-id ID. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft --if-version VERSION uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
+        "usage":"Use hey-boss issue view NUMBER --supervisor --json for a current version. Guarded title/body/label edits, blocked-by and reopen use --supervisor --if-version VERSION --request-id ID. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft --if-version VERSION uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
         "recovery":"If a capability is false, run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities again."})
 }
 
@@ -226,6 +226,7 @@ impl Relay {
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
                             "issue_reopen": message["capabilities"]["issue_reopen"] == true,
+                            "issue_dependencies": message["capabilities"]["issue_dependencies"] == true,
                             "issue_ready": message["capabilities"]["issue_ready"] == true,
                             "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
                             "issue_assignment": message["capabilities"]["issue_assignment"] == true,
@@ -260,6 +261,7 @@ impl Relay {
                                 )
                                 .then_some("issue_reopen"),
                             )
+                            .chain(matches!(metadata.operation, crate::issues::Operation::SetBlockers { .. }).then_some("issue_dependencies"))
                             .chain(
                                 matches!(
                                     metadata.operation,
@@ -508,6 +510,16 @@ mod tests {
         let details = error.details.unwrap();
         assert_eq!(details["required_capability"], "issue_reopen");
         assert_eq!(details["sent"], false);
+        let dependencies = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"dependencies-old","operation":{"action":"set_blockers","number":1,"blockers":[],"if_version":1}}});
+        let error = call(&ctx.state, &ctx.path, dependencies).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        let details = error.details.unwrap();
+        assert_eq!(details["required_capability"], "issue_dependencies");
+        assert_eq!(details["sent"], false);
+        assert_eq!(
+            call(&ctx.state, &ctx.path, json!({"kind":"capabilities"})).unwrap()["capabilities"]["issue_dependencies"],
+            false
+        );
         let error = call(
             &ctx.state,
             &root.join("unrelated.db"),

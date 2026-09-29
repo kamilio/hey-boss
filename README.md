@@ -164,6 +164,10 @@ a stable request ID unless supplied explicitly. Other metadata edits use
 supervisor, reconnect, and inspect capabilities again. See
 [fleet tunnel editing](docs/fleet-tunnel-editing.md).
 
+`issue blocked-by NUMBER [BLOCKERS...]` supports the same explicit guarded route
+when `issue_dependencies` is advertised. Omit blockers to clear links. The issue
+must be unassigned and unreserved; dependency edits never claim or release work.
+
 Use `hey-boss issue allocation NUMBER --json` to inspect a fleet reservation
 without claiming, syncing, or changing workers. Claim denials preserve exit 4
 and distinguish `fleet_reserved` from `fleet_allocation_missing`; their structured

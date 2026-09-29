@@ -13,6 +13,11 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             if_version: Some(version),
             ..
         } if *version > 0 => {}
+        Operation::SetBlockers {
+            if_version: Some(version),
+            force: false,
+            ..
+        } if *version > 0 => {}
         Operation::Ready { guard: Some(_), .. } => {}
         Operation::Assign { if_version, .. } if *if_version > 0 => {}
         Operation::Batch { edits }
@@ -21,7 +26,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, version-guarded title/body/label edits, drafting and reopening unassigned, unreserved issues, guarded Ready handoffs, and label-only batches with assignment: keep. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, allocation, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs, and label-only batches with assignment: keep. Dependency edits require --if-version and do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }
@@ -35,7 +40,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
 
 /// Called under the authority's write lock, after checking durable retry receipts.
 /// No expiry or missing heartbeat proves an unfinished attempt safe to release.
-pub(super) fn guard_reopen(
+pub(super) fn guard_unowned(
     db: &crate::database::Connection,
     project: &str,
     number: i64,
@@ -46,7 +51,7 @@ pub(super) fn guard_reopen(
     )?;
     if protected {
         return Err(Error::conflict(
-            "Supervisor reopen requires an unassigned, unreserved issue with no unfinished worker attempt. Ownership and reservations were preserved; inspect issue allocation through --supervisor",
+            "Supervisor reopen and dependency edits require an unassigned, unreserved issue with no unfinished worker attempt. Ownership and reservations were preserved; inspect issue allocation through --supervisor",
         ));
     }
     Ok(())

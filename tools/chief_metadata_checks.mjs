@@ -237,6 +237,36 @@ try {
     check('Reopened states replicate without a claim or companion receipt');
     console.log(JSON.stringify({status:'passed',completed:checks.length,expected:23,checks}));
   }
+  if(process.argv.includes('--dependencies')) {
+    assert.equal(capabilities.capabilities.issue_dependencies,true);
+    for(const title of ['Dependency to reconcile','Upstream contract','Independent task'])
+      await issue(main,['create','--title',title]);
+    const edit=async(number,blockers,key,code=0)=>{
+      const current=await issue(peer,['view',number,'--supervisor']);
+      return issue(peer,['blocked-by',number,...blockers,'--supervisor','--if-version',String(current.issue.version),'--request-id',key],code);
+    };
+    const added=await edit('5',['6'],'dependencies-add');
+    assert.deepEqual(added.issue.blocker_numbers,[6]);
+    assert.equal(added.issue.state,'blocked');
+    const cleared=await edit('5',[],'dependencies-clear');
+    assert.deepEqual(cleared.issue.blocker_numbers,[]);
+    assert.equal(cleared.issue.state,'open');
+    assert.equal(cleared.issue.assignee,null);
+    await edit('5',['6'],'dependencies-restore');
+    const before=await ownership();
+    assert.equal((await edit('2',['6'],'dependencies-live-owner',4)).error.code,'conflict');
+    assert.deepEqual(await ownership(),before);
+    assert.deepEqual(await sql(main,"SELECT DISTINCT actor FROM requests WHERE request_id LIKE 'dependencies-%'"),[['codex:chief-fixture']]);
+    assert.deepEqual(await sql(peer,"SELECT count(*) FROM requests WHERE request_id LIKE 'dependencies-%'"),[[0]]);
+    check('Guarded dependency add/remove preserves actor, ownership and authority receipts');
+    for(let attempt=0;;attempt++) {
+      const items=(await issue(peer,['list','--state','all','--all'])).issues;
+      if(items.some(i=>i.number===5&&i.state==='blocked'&&i.blocker_numbers.includes(6))&&items.some(i=>i.number===7&&i.state==='open'))break;
+      assert(attempt<200,'Dependency states did not converge');await wait(100);
+    }
+    check('Dependency states replicate to the companion viewer');
+    console.log(JSON.stringify({status:'passed',completed:checks.length,checks}));
+  }
   if(serve) {
     const web=start(peer,['issue','--project','Chief metadata QA','--agent','codex:chief-fixture','--json','web','--port','59651','--no-discovery']);web.stdout.resume();
     for(let attempt=0;;attempt++) {

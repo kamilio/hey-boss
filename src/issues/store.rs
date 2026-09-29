@@ -1305,7 +1305,10 @@ impl Store {
             })?;
             return crate::fleet::authoritative_metadata(r, Path::new(path));
         }
-        if matches!(r.operation, Operation::Reopen { .. }) {
+        if matches!(
+            r.operation,
+            Operation::Reopen { .. } | Operation::SetBlockers { .. }
+        ) {
             self.execute_once(r, Instant::now() + CONTENTION_BUDGET, true)
         } else {
             self.execute(r)
@@ -1470,7 +1473,7 @@ impl Store {
         &mut self,
         r: &Request,
         deadline: Instant,
-        supervisor_reopen: bool,
+        supervisor_unowned: bool,
     ) -> Result<Value> {
         validate(r)?;
         if let Operation::ReadPlan { plan } = &r.operation {
@@ -1566,8 +1569,8 @@ impl Store {
         if let Some(response) = cached_response(&tx, &project, r, &payload)? {
             return self.finish_replay(r, response);
         }
-        if supervisor_reopen {
-            super::authority::guard_reopen(&tx, &project.id, r.operation.number().unwrap())?;
+        if supervisor_unowned {
+            super::authority::guard_unowned(&tx, &project.id, r.operation.number().unwrap())?;
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -18,7 +18,7 @@ pub struct Options {
     /// Authoritative SSH host (also HEY_BOSS_ISSUE_HOST); never falls back locally.
     #[arg(long, global = true)]
     host: Option<String>,
-    /// Use the connected supervisor for guarded metadata or reopen (no SSH or work claim).
+    /// Use the connected supervisor for guarded metadata, dependency edits or reopen (no SSH or work claim).
     #[arg(long, global = true, conflicts_with = "host")]
     supervisor: bool,
     /// Print structured results and operational errors.
@@ -451,9 +451,10 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
-    /// Block an issue and clear its claim. Use rarely: make every effort to resolve
-    /// it first, ask the user for help via hey-boss notif ask, and describe the blocker.
     /// Set the issues blocking this issue; omit blockers to remove all links.
+    /// With --supervisor, requires issue_dependencies support, --if-version and
+    /// --request-id. Only unassigned, unreserved work is eligible; --force is not
+    /// supported and there is no local fallback.
     BlockedBy {
         number: i64,
         blockers: Vec<i64>,
@@ -462,6 +463,8 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
+    /// Block an issue and clear its claim. Use rarely: make every effort to resolve
+    /// it first, ask the user for help via hey-boss notif ask, and describe the blocker.
     Block {
         number: i64,
         /// Issue that must be Ready (PR projects) or Closed first; repeat for multiple blockers.
@@ -1053,6 +1056,7 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Allocation { .. }
                 | Action::Assign { .. }
                 | Action::Reopen { .. }
+                | Action::BlockedBy { .. }
                 | Action::Batch { .. }
                 | Action::Edit {
                     interactive: false,
@@ -1060,7 +1064,7 @@ pub fn run(options: &Options) -> Result<()> {
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, guarded metadata edits, guarded reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, allocation, guarded metadata edits, guarded blocked-by edits, guarded reopen and label-only batches; this command is not supported",
             ));
         }
     }
