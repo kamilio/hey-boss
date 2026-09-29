@@ -4,15 +4,28 @@ Observed on 2026-09-29 UTC (2026-09-28 CDT), using the existing SSH alias
 `kamils-macbook-pro.local`. This is an environmental incident; no contributing
 CLI defect was identified.
 
-## Verified recovery
+## Current status: closure blocked by another timeout
 
-Recovery passed verification at 01:36 UTC. The fresh observation from
+The immediate pre-closure guard found Mac.lan disconnected again at
+01:37:28.117 UTC with **Companion heartbeat timed out**, after the successful
+observation below. Its last heartbeat was 1790645833.058, last sync
+1790645832.49, and last-reported pending count zero. Consequently the close
+command was never invoked, and a fresh issue read confirmed #695 still open.
+The five-minute pass is valid for its measured interval but does not establish
+sustained recovery in light of this subsequent failure. No additional action
+was authorized or performed; the cancelled deletion request stays cancelled.
+Continuation must address the recurring transport/heartbeat failure before
+closure, preserving the reconciled journals and existing worker state.
+
+## Successful observation before the next failure
+
+The five-minute observation passed at 01:36 UTC. The fresh observation from
 01:31:03.463 through 01:36:07.950 had 11 connected samples over 304.788 seconds,
 advancing heartbeat and sync, no errors, and a final pending count of zero.
 Maximum sampled heartbeat age was 5.602 seconds; maximum sync age was
 8.406 seconds. Retained event history covering 01:26:06.223–01:36:25.613
 contained no disconnect or reconnect, including between the sampled checks.
-This supersedes the earlier failed observations recorded below.
+The later pre-closure failure above prevents treating this as final recovery.
 
 Direct disk readings during the successful check were 25,173,644 KiB free
 at 01:31:39 and 24,700,988 KiB at 01:35:54 (about 23.6 GiB at the end).
@@ -206,4 +219,4 @@ The resumed monitors and read-only SSH checks have exited; Playwright lists
 no browsers, port 4789 has no listener, and the issue-specific output directory
 is absent. At that checkpoint, issue 695 remained open because sustained
 fleet connectivity had not passed verification. The later successful check
-is recorded under Verified recovery above.
+and its subsequent pre-closure failure are recorded above.
