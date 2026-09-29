@@ -636,6 +636,7 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         f.issue("main", &["view", "4"], 0)["issue"],
         claimed["issue"]
     );
+    check_pr_attachments(&f);
     let supervisor = f.services.last_mut().unwrap();
     unsafe {
         libc::kill(supervisor.id() as i32, libc::SIGTERM);
@@ -687,6 +688,38 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         "fleet_unavailable"
     );
     assert_eq!(f.sql("peer", replica_snapshot), before);
+    let links_before = f.sql("peer", "SELECT * FROM issue_pull_requests");
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "pr",
+                "add",
+                "4",
+                "https://github.com/example/repo/pull/123",
+                "--supervisor",
+                "--request-id",
+                "pr-offline"
+            ],
+            1
+        )["error"]["code"],
+        "fleet_unavailable"
+    );
+    assert_eq!(
+        f.issue("peer", &["pr", "list", "4", "--supervisor"], 1)["error"]["code"],
+        "fleet_unavailable"
+    );
+    assert_eq!(
+        f.sql("peer", "SELECT * FROM issue_pull_requests"),
+        links_before
+    );
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id='pr-offline'"
+        ),
+        json!([[0]])
+    );
     assert_eq!(
         f.sql(
             "peer",
@@ -718,4 +751,161 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         ),
         json!([[0]])
     );
+}
+
+fn check_pr_attachments(f: &Fleet) {
+    assert_eq!(
+        f.cli("peer", &["fleet", "capabilities"], 0)["capabilities"]["issue_pr_attachments"],
+        true
+    );
+    let help = f
+        .command("peer", &["issue", "pr", "add", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("--supervisor")
+    );
+    let ownership = "SELECT number,state,assignee FROM issues ORDER BY number";
+    let allocations = "SELECT * FROM fleet_allocations ORDER BY issue_number";
+    let attempts = "SELECT id,state,finished_at FROM worker_runs ORDER BY id";
+    let before = (
+        f.sql("main", ownership),
+        f.sql("main", allocations),
+        f.sql("main", attempts),
+    );
+    // Assigned, reserved and unfinished attempts all accept additive metadata.
+    // No stale replica version or owner is used to acquire/release their work.
+    for number in ["2", "3", "11"] {
+        let key = format!("pr-attach-{number}");
+        let url = "https://github.com/example/repo/pull/123";
+        let args = [
+            "pr",
+            "add",
+            number,
+            url,
+            "--purpose",
+            "prerequisite",
+            "--supervisor",
+            "--request-id",
+            &key,
+        ];
+        let version = f.issue("peer", &["view", number, "--supervisor"], 0)["issue"]["version"]
+            .as_i64()
+            .unwrap();
+        let saved = f.issue("peer", &args, 0);
+        assert_eq!(saved["changed"], true);
+        assert_eq!(saved["store"]["host"], "supervisor");
+        assert_eq!(saved["pull_requests"][0]["purpose"], "prerequisite");
+        assert_eq!(f.issue("peer", &args, 0), saved);
+        let read = f.issue("peer", &["pr", "list", number, "--supervisor"], 0);
+        assert_eq!(read["pull_requests"], saved["pull_requests"]);
+        assert_eq!(read["store"]["host"], "supervisor");
+        let receipt = f.issue("peer", &["request", &key, "--supervisor"], 0);
+        assert_eq!(receipt["request"]["state"], "recorded");
+        assert_eq!(receipt["request"]["replica"], false);
+        assert_eq!(
+            receipt["request"]["response"]["pull_requests"],
+            saved["pull_requests"]
+        );
+        // Reusing a key for different content conflicts; a fresh key cannot
+        // reclassify an existing URL or increment the issue version.
+        let mut changed = args;
+        changed[5] = "fix";
+        assert_eq!(f.issue("peer", &changed, 4)["error"]["code"], "conflict");
+        // Request IDs are scoped to actor/project, not issue number.
+        let duplicate_key = format!("pr-duplicate-{number}");
+        changed[8] = &duplicate_key;
+        let duplicate = f.issue("peer", &changed, 0);
+        assert_eq!(duplicate["changed"], false);
+        assert_eq!(duplicate["pull_requests"], saved["pull_requests"]);
+        let after = f.issue("peer", &["view", number, "--supervisor"], 0);
+        assert_eq!(after["issue"]["version"], version + 1);
+        // A newer purpose and version must survive replay of an older receipt.
+        f.issue(
+            "main",
+            &[
+                "pr",
+                "classify",
+                number,
+                url,
+                "--purpose",
+                "supporting-evidence",
+            ],
+            0,
+        );
+        assert_eq!(f.issue("peer", &args, 0), saved);
+        assert_eq!(
+            f.issue("peer", &["pr", "list", number, "--supervisor"], 0)["pull_requests"][0]["purpose"],
+            "supporting-evidence"
+        );
+    }
+    assert_eq!(
+        (
+            f.sql("main", ownership),
+            f.sql("main", allocations),
+            f.sql("main", attempts)
+        ),
+        before
+    );
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id LIKE 'pr-%'"
+        ),
+        json!([[0]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT count(*) FROM events WHERE action='pr_attached'"
+        ),
+        json!([[3]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT DISTINCT actor FROM requests WHERE request_id LIKE 'pr-%'"
+        ),
+        json!([["codex:tunnel-test"]])
+    );
+    // Stable automatic retry keys also work when --request-id is omitted.
+    let args = [
+        "pr",
+        "add",
+        "2",
+        "https://github.com/example/repo/pull/124",
+        "--supervisor",
+    ];
+    let saved = f.issue("peer", &args, 0);
+    assert_eq!(f.issue("peer", &args, 0), saved);
+    for args in [
+        vec![
+            "pr",
+            "remove",
+            "2",
+            "https://github.com/example/repo/pull/124",
+            "--supervisor",
+        ],
+        vec![
+            "pr",
+            "classify",
+            "2",
+            "https://github.com/example/repo/pull/124",
+            "--purpose",
+            "fix",
+            "--supervisor",
+        ],
+        vec![
+            "pr",
+            "add",
+            "2",
+            "https://github.com/example/repo/commit/0123456789012345678901234567890123456789",
+            "--supervisor",
+        ],
+    ] {
+        assert_eq!(f.issue("peer", &args, 2)["error"]["code"], "invalid_input");
+    }
 }

@@ -42,8 +42,22 @@ version checks still apply. Successful retries return the original response;
 reuse of an ID with different content fails. No claim or reservation is created
 or released. Dependency state follows the existing Ready/Closed scheduling rules.
 
+`issue pr add NUMBER URL --purpose prerequisite --supervisor --request-id ID`
+attaches a PR when `issue_pr_attachments` is advertised. Use
+`issue pr list NUMBER --supervisor` for authoritative read-back and
+`issue request ID --supervisor` for the saved result. The CLI derives a stable
+retry key when omitted. Reuse the original key and identical command after an
+uncertain response; changing the operation under that key conflicts.
+
+PR attachment is additive: a duplicate URL keeps its existing purpose, and the
+operation never claims, releases or changes assignment, reservations or unfinished
+attempts. It needs no issue-version or owner snapshot, so unrelated concurrent
+edits do not prevent attachment. Replaying an older receipt returns that result
+without overwriting newer links or purposes. PR reclassification, removal and
+the local CLI's commit-URL alias are outside this capability.
+
 `fleet capabilities` reports the negotiated `authority_rpc`, `issue_metadata`
-and `issue_draft`/`issue_reopen`/`issue_dependencies` flags, route and supervisor build without fetching fleet
+and `issue_draft`/`issue_reopen`/`issue_dependencies`/`issue_pr_attachments` flags, route and supervisor build without fetching fleet
 history. It also works when the supervisor predates metadata or draft support.
 Missing support produces `fleet_capability_unsupported`, with the missing flag,
 known build and `sent: false`. Run `hey-boss upgrade` on the supervisor to update
@@ -56,3 +70,5 @@ unit tests and existing fleet integration tests. Installed binaries can run the
 supports the desktop/phone visual checks in `tools/fleet_tunnel_browser_checks.js`.
 Use `--dependencies --serve` for dependency routing and replication qualification,
 then run `tools/dependency_tunnel_browser_checks.js` for desktop/phone checks.
+Use `--pr-attachments --serve` and `tools/pr_tunnel_browser_checks.js` to verify
+installed PR routing, replicated links and their desktop/phone presentation.

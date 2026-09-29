@@ -168,6 +168,12 @@ a stable request ID unless supplied explicitly. Other metadata edits use
 supervisor, reconnect, and inspect capabilities again. See
 [fleet tunnel editing](docs/fleet-tunnel-editing.md).
 
+`issue pr add NUMBER URL --purpose prerequisite --supervisor --request-id ID`
+and `issue pr list NUMBER --supervisor` use negotiated `issue_pr_attachments`
+support. Adding a link preserves existing purposes, ownership and reservations;
+retries return the saved authoritative result. PR classify/remove remain outside
+this capability. Use `issue request ID --supervisor` to inspect a retry receipt.
+
 `issue blocked-by NUMBER [BLOCKERS...]` supports the same explicit guarded route
 when `issue_dependencies` is advertised. Omit blockers to clear links. The issue
 must be unassigned and unreserved; dependency edits never claim or release work.

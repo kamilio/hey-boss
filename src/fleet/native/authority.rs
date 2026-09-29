@@ -133,12 +133,12 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
     json!({"ok":true,"route":route,"capabilities":capabilities,"supervisor_build":build,
-        "usage":"Title/body/label edits, blocked-by and reopen use --supervisor. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
+        "usage":"Title/body/label edits, blocked-by and reopen use --supervisor. PR add/list use --supervisor with issue_pr_attachments support; add preserves existing purposes and ownership. PR classify/remove and commit URLs are not supported on that route. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
         "recovery":"If a capability is false, run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities again."})
 }
 
@@ -224,6 +224,7 @@ impl Relay {
                             "authority_rpc": message["capabilities"]["authority_rpc"] == true,
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
+                            "issue_pr_attachments": message["capabilities"]["issue_pr_attachments"] == true,
                             "issue_request_status": message["capabilities"]["issue_request_status"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
                             "issue_reopen": message["capabilities"]["issue_reopen"] == true,
@@ -247,6 +248,7 @@ impl Relay {
                         for capability in ["authority_rpc", "issue_metadata"]
                             .into_iter()
                             .chain(matches!(metadata.operation, crate::issues::Operation::RequestStatus { .. }).then_some("issue_request_status"))
+                            .chain(matches!(metadata.operation, crate::issues::Operation::AddPullRequest { .. } | crate::issues::Operation::PullRequests { .. }).then_some("issue_pr_attachments"))
                             .chain(
                                 matches!(
                                     metadata.operation,
@@ -476,6 +478,18 @@ mod tests {
         assert_eq!(capabilities["route"], "supervisor_tunnel");
         assert_eq!(capabilities["capabilities"]["issue_metadata"], false);
         relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
+        for operation in [
+            json!({"action":"add_pull_request","number":1,"url":"https://github.com/example/repo/pull/123","purpose":"prerequisite"}),
+            json!({"action":"pull_requests","number":1}),
+        ] {
+            let request = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"pr-old","operation":operation}});
+            let error = call(&ctx.state, &ctx.path, request).unwrap_err();
+            assert_eq!(error.code, "fleet_capability_unsupported");
+            let details = error.details.unwrap();
+            assert_eq!(details["required_capability"], "issue_pr_attachments");
+            assert_eq!(details["supervisor_build"], "old-metadata-build");
+            assert_eq!(details["sent"], false);
+        }
         let refresh = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"refresh-old","operation":{"action":"refresh_github","number":1}}});
         let error = call(&ctx.state, &ctx.path, refresh).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");
