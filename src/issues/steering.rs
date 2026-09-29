@@ -29,6 +29,11 @@ impl Store {
             .as_str()
             .ok_or_else(|| Error::invalid("Missing steering request ID"))?;
         identifier(request, "request ID", 128)?;
+        if request.starts_with("github:") {
+            return Err(Error::invalid(
+                "The github: request prefix is reserved for watcher updates",
+            ));
+        }
         let text = input["text"]
             .as_str()
             .filter(|s| !s.trim().is_empty() && s.len() <= 32_000)

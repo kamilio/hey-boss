@@ -1335,6 +1335,7 @@ mod tests {
             json!({"scope":"unknown","text":"Focus","request_id":"invalid"}),
             json!({"scope":"session","text":"  ","request_id":"blank"}),
             json!({"scope":"session","text":"Focus"}),
+            json!({"scope":"session","text":"Focus","request_id":"github:reserved"}),
         ] {
             assert!(f.store.worker_steer(&f.job.id, &input).is_err());
         }
@@ -1657,6 +1658,65 @@ mod tests {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
         assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn github_watcher_coalesces_queued_snapshots_but_preserves_human_and_inflight_messages() {
+        let mut f = watching_fixture();
+        watch_event(&mut f, "second");
+        let first = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+        f.store
+            .worker_steering_result(first["request_id"].as_str().unwrap(), "sending", None)
+            .unwrap();
+        watch_event(&mut f, "third");
+        let obsolete = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+        f.store.worker_steer(&f.job.id, &json!({"scope":"session","text":"Keep this human instruction","request_id":"human-message"})).unwrap();
+        watch_event(&mut f, "fourth");
+        let human = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+        assert_eq!(human["request_id"], "human-message");
+        assert!(
+            !f.store
+                .worker_steering_result(obsolete["request_id"].as_str().unwrap(), "sending", None)
+                .unwrap()
+        );
+        f.store
+            .worker_steering_result("human-message", "delivered", None)
+            .unwrap();
+        let latest = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+        assert!(latest["text"].as_str().unwrap().contains("fourth"));
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT state FROM agent_steering WHERE request_id=?1",
+                    [first["request_id"].as_str().unwrap()],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "sending"
+        );
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM agent_steering WHERE run_id=?1 AND state='queued'",
+                    [&f.job.id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        f.store
+            .worker_steering_result(latest["request_id"].as_str().unwrap(), "delivered", None)
+            .unwrap();
+        // A transport can return an older in-flight message to the queue after
+        // the latest snapshot has already arrived. Do not resend stale data.
+        f.store
+            .worker_steering_result(first["request_id"].as_str().unwrap(), "queued", None)
+            .unwrap();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+        f.store.worker_finish(&f.job, "completed", "Fixed").unwrap();
+        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
     }
 
     #[test]

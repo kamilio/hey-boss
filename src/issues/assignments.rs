@@ -604,17 +604,36 @@ pub(super) fn acknowledge_claim(
     Ok(())
 }
 
-pub(super) fn queue_steering(db: &Connection, run: &str) -> Result<()> {
-    let status:Option<String>=db.query_row("SELECT w.status FROM issues i JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number JOIN worker_runs r ON r.project_id=i.project_id AND r.issue_number=i.number AND r.actor_id=i.assignee WHERE r.id=?1 AND r.finished_at IS NULL AND r.claimed_at IS NOT NULL AND r.stop_requested=0 AND i.assignment_target='github' AND i.state='open' AND i.deleted_at IS NULL AND json_type(w.status,'$.event')='text' AND NOT EXISTS(SELECT 1 FROM agent_steering s WHERE s.request_id='github:'||r.id||':'||json_extract(w.status,'$.event'))",[run],|r|r.get(0)).optional()?;
+fn steering_update(db: &Connection, run: &str) -> Result<Option<(String, Value)>> {
+    let status:Option<String>=db.query_row("SELECT w.status FROM issues i JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number JOIN worker_runs r ON r.project_id=i.project_id AND r.issue_number=i.number AND r.actor_id=i.assignee WHERE r.id=?1 AND r.finished_at IS NULL AND r.claimed_at IS NOT NULL AND r.stop_requested=0 AND i.assignment_target='github' AND i.state='open' AND i.deleted_at IS NULL AND json_type(w.status,'$.event')='text'",[run],|r|r.get(0)).optional()?;
     let Some(status) = status else {
-        return Ok(());
+        return Ok(None);
     };
     let status: Value = serde_json::from_str(&status)?;
     let Some(id) = steering_id(run, &status) else {
-        return Ok(());
+        return Ok(None);
     };
+    let prefix = format!("github:{run}:");
+    let needed: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM agent_steering WHERE request_id=?1) OR EXISTS(SELECT 1 FROM agent_steering WHERE run_id=?2 AND state='queued' AND request_id<>?1 AND substr(request_id,1,length(?3))=?3)",params![id,run,prefix],|r|r.get(0))?;
+    Ok(needed.then_some((id, status)))
+}
+
+pub(super) fn queue_steering(db: &Connection, run: &str) -> Result<()> {
+    if steering_update(db, run)?.is_none() {
+        return Ok(());
+    }
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    // Recheck the current event and ownership after acquiring the writer lock.
+    // Only unsent watcher snapshots can be replaced; human instructions and
+    // messages already handed to the transport retain their delivery state.
+    let Some((id, status)) = steering_update(&tx, run)? else {
+        return tx.commit().map_err(Into::into);
+    };
+    let prefix = format!("github:{run}:");
+    tx.execute("UPDATE agent_steering SET state='superseded',text='' WHERE run_id=?1 AND state='queued' AND request_id<>?2 AND substr(request_id,1,length(?3))=?3",params![run,id,prefix])?;
     let text = serde_json::to_string(&json!({"github_status":public_status(status,true)}))?;
-    db.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,created_at) VALUES(?1,?2,'session',?3,?4)",params![id,run,text,crate::issues::worker::now()])?;
+    tx.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,created_at) VALUES(?1,?2,'session',?3,?4)",params![id,run,text,crate::issues::worker::now()])?;
+    tx.commit()?;
     Ok(())
 }
 
