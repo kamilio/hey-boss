@@ -154,11 +154,23 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn cross_repository_hook_and_explicit_attachments_keep_the_true_repository() {
+fn explicit_commit_attachments_preserve_repository_and_respect_pr_projects() {
     let f = Fixture::new();
     let first = f.git(&["rev-parse", "HEAD"]);
     let url = format!("https://{UPSTREAM}/commit/{first}");
-    f.issue(CONSUMER, &["commit", "hook"], true);
+    for removed in ["hook", "install-hooks"] {
+        let output = f
+            .command()
+            .args(["issue", "commit", removed])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "automatic capture must be unavailable"
+        );
+    }
+    assert!(f.commits(CONSUMER).is_empty());
+    f.issue(CONSUMER, &["commit", "add", "1", "HEAD"], true);
     let commits = f.commits(CONSUMER);
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0]["url"], url);
@@ -170,9 +182,9 @@ fn cross_repository_hook_and_explicit_attachments_keep_the_true_repository() {
         "worker destination must not change"
     );
 
-    // Manual HEAD attachment and repeated post-rewrite capture deduplicate.
+    // Repeated explicit HEAD attachments deduplicate.
     f.issue(CONSUMER, &["commit", "add", "1", "HEAD"], false);
-    f.issue(CONSUMER, &["commit", "hook"], true);
+    f.issue(CONSUMER, &["commit", "add", "1", "HEAD"], true);
     assert_eq!(f.commits(CONSUMER).len(), 1);
     assert_eq!(f.commits(CONSUMER)[0]["url"], url);
     f.issue(UPSTREAM, &["commit", "add", "1", "HEAD"], false);
@@ -207,17 +219,119 @@ fn cross_repository_hook_and_explicit_attachments_keep_the_true_repository() {
         "Rebased upstream fix",
     ]);
     let rewritten = f.git(&["rev-parse", "HEAD"]);
-    f.issue(CONSUMER, &["commit", "hook"], true);
+    f.issue(CONSUMER, &["commit", "add", "1", "HEAD"], true);
     assert!(
         f.commits(CONSUMER)
             .iter()
             .any(|c| c["url"] == format!("https://{UPSTREAM}/commit/{rewritten}"))
     );
 
-    // No remote: automatic capture must not invent a URL in the launching repo.
+    // Git commits themselves never attach anything, even inside a worker checkout.
     f.git(&["remote", "remove", "origin"]);
     f.git(&["commit", "--allow-empty", "-m", "Unpublished local fix"]);
     let before = f.commits(CONSUMER);
-    f.issue(CONSUMER, &["commit", "hook"], true);
+    f.git(&["commit", "--allow-empty", "-m", "Another local fix (#1)"]);
     assert_eq!(f.commits(CONSUMER), before);
+
+    f.issue(CONSUMER, &["settings", "set", "--prs-enabled"], false);
+    for args in [
+        vec!["commit", "add", "1", &url],
+        vec!["pr", "add", "1", &url],
+    ] {
+        let output = f
+            .command()
+            .args([
+                "issue",
+                "--project",
+                CONSUMER,
+                "--agent",
+                "test:commits",
+                "--json",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "PR projects reject both commit attachment routes"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Attach a PR"));
+    }
+    assert_eq!(f.commits(CONSUMER), before);
+    for commit in before {
+        f.issue(
+            CONSUMER,
+            &["commit", "remove", "1", commit["sha"].as_str().unwrap()],
+            false,
+        );
+    }
+    assert!(f.commits(CONSUMER).is_empty());
+    f.issue(
+        CONSUMER,
+        &[
+            "pr",
+            "add",
+            "1",
+            "https://github.com/example/consumer/pull/1",
+        ],
+        false,
+    );
+
+    // Upgrades retire global capture while preserving the user's hook settings
+    // and compatibility dispatchers inherited by already-running agents.
+    let home = f.root.join("home");
+    let managed = home.join(".config/hey-boss/git-hooks");
+    let config = home.join("gitconfig");
+    fs::create_dir_all(&managed).unwrap();
+    let git_config = |args: &[&str]| {
+        Command::new("git")
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for (current, previous, expected) in [
+        (managed.to_str().unwrap(), "", ""),
+        (managed.to_str().unwrap(), "/custom hooks", "/custom hooks"),
+        ("/user replacement", "/custom hooks", "/user replacement"),
+    ] {
+        assert!(git_config(&["core.hooksPath", current]).status.success());
+        fs::write(managed.join(".previous-global-hooks-path"), previous).unwrap();
+        fs::write(
+            managed.join("post-commit"),
+            "#!/bin/sh\nhey-boss issue commit hook\n",
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let output = f
+                .command()
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", &config)
+                .env("GIT_CONFIG_COUNT", "0")
+                .args([
+                    "issue",
+                    "migrate",
+                    "--installation",
+                    env!("CARGO_BIN_EXE_hey-boss"),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&git_config(&["--get", "core.hooksPath"]).stdout).trim(),
+                expected
+            );
+            assert!(
+                !fs::read_to_string(managed.join("post-commit"))
+                    .unwrap()
+                    .contains("issue commit hook")
+            );
+        }
+    }
 }

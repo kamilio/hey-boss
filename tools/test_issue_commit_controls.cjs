@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync('src/issues/web/app.js', 'utf8');
+const context = vm.createContext({esc:String,icon:()=>'',traceLinkForOrigin:()=>null});
+vm.runInContext(source.slice(source.indexOf('function listCommits('),source.indexOf('function renderList('))+source.slice(source.indexOf('function renderCommits('),source.indexOf('async function changeCommit(')),context);
+const issue = {number:1,commits:[{sha:'abcdef1234567',url:'https://github.com/example/repo/commit/abcdef1234567'}]};
+assert.equal(context.listCommits(issue,true),'','PR projects do not show commit chips');
+assert.equal(context.renderCommits(issue,true),'','PR projects do not offer commit attachment');
+assert.match(context.listCommits(issue,false),/abcdef1/);
+assert.match(context.renderCommits(issue,false),/Attach a commit/);
+assert.doesNotMatch(context.renderCommits({...issue,deleted_at:1},false),/Attach a commit/);
+console.log('Project commit controls passed');
