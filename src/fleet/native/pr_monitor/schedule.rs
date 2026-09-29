@@ -15,6 +15,16 @@ struct Entry {
 }
 
 impl Schedule {
+    pub fn watch_success(&mut self, url: &str, now: i64) {
+        self.entries.insert(
+            url.into(),
+            Entry {
+                attempted_at: now,
+                next_at: now + 30_000,
+                failures: 0,
+            },
+        );
+    }
     pub fn due(&mut self, prs: &[crate::issues::TrackedPullRequest], now: i64) -> Vec<String> {
         let active = prs
             .iter()

@@ -4,8 +4,9 @@ use crate::issues::Store;
 use hey_gh::{ApiClient, Freshness};
 use std::time::Duration;
 mod schedule;
+mod watches;
 
-const INTERVAL: Duration = Duration::from_secs(60);
+const INTERVAL: Duration = Duration::from_secs(30);
 
 // LaunchAgents do not inherit the interactive shell's Homebrew/user PATH.
 fn gh_program(home: &std::path::Path) -> std::path::PathBuf {
@@ -26,21 +27,7 @@ fn gh_program(home: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn selector(url: &str) -> Option<(String, u64)> {
-    let tail = url.strip_prefix("https://github.com/")?;
-    let parts: Vec<_> = tail.trim_end_matches('/').split('/').collect();
-    if parts.len() != 4
-        || parts[2] != "pull"
-        || parts[..2].iter().any(|s| {
-            s.is_empty()
-                || !s
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
-        })
-    {
-        return None;
-    }
-    let number = parts[3].parse::<u64>().ok().filter(|n| *n > 0)?;
-    Some((format!("{}/{}", parts[0], parts[1]), number))
+    hey_gh::watcher::pull_request_selector(url)
 }
 
 fn merged(data: &serde_json::Value, repository: &str, number: u64) -> bool {
@@ -76,6 +63,9 @@ pub(super) fn run(ctx: Context) {
         // fall back to a private GitHub queue that bypasses its quota backoff.
         if let Err(error) = ensure_daemon(&ctx, &mut daemon) {
             eprintln!("PR monitor: cannot start hey-gh serve: {error}");
+        }
+        if let Err(error) = watches::poll(&ctx, &runtime, &client) {
+            eprintln!("GitHub watcher: {error}");
         }
         if let Err(error) = poll(&ctx, &runtime, &client) {
             eprintln!("PR monitor: {error}");
