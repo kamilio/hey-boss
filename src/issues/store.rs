@@ -711,7 +711,7 @@ fn validate(r: &Request) -> Result<()> {
             labels(add_labels)?;
             labels(remove_labels)?;
             if if_version.is_some_and(|v| v < 1) {
-                return Err(Error::invalid("--if-version must be positive"));
+                return Err(Error::invalid("Revision guard must be positive"));
             }
             if add_labels.iter().any(|l| remove_labels.contains(l)) {
                 return Err(Error::invalid("Cannot add and remove the same label"));
@@ -787,7 +787,7 @@ fn validate(r: &Request) -> Result<()> {
     match &r.operation {
         Operation::CreateSubtask { if_version, .. } => {
             if if_version.is_some_and(|v| v < 1) {
-                return Err(Error::invalid("--if-version must be positive"));
+                return Err(Error::invalid("Revision guard must be positive"));
             }
         }
         Operation::AddSubtask {
@@ -1510,21 +1510,10 @@ impl Store {
                 "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
                 params![project.id, actor, id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
             let (operation, response) = match saved {
-                Some((payload, response)) => {
-                    let operation: Operation = serde_json::from_str(&payload)?;
-                    if !matches!(
-                        operation,
-                        Operation::Create { .. } | Operation::CreateSubtask { .. }
-                    ) {
-                        return Err(Error::invalid(
-                            "This receipt is not an issue creation; retry its original operation to reconcile it",
-                        ));
-                    }
-                    (
-                        serde_json::from_str::<Value>(&payload)?,
-                        serde_json::from_str::<Value>(&response)?,
-                    )
-                }
+                Some((payload, response)) => (
+                    serde_json::from_str::<Value>(&payload)?,
+                    serde_json::from_str::<Value>(&response)?,
+                ),
                 None => (Value::Null, Value::Null),
             };
             let recorded = !response.is_null();
@@ -1536,7 +1525,7 @@ impl Store {
             return Ok(json!({"ok":true,"project":project,"request":{
                 "id":id,"actor":actor,"state":if recorded {"recorded"} else {"not_recorded"},
                 "replica":replica,"operation":operation,"response":response,
-                "guidance":if recorded {"Saved creation result. Retry only the identical operation with the original project, actor and request ID."} else {"No receipt in this store snapshot. This does not prove non-creation: check the original host, project and actor, then retry only the identical request with its original ID."}
+                "guidance":if recorded {"Saved mutation result. Retry only the identical operation with the original project, actor and request ID."} else {"No receipt in this store snapshot. This does not prove the mutation was not saved: check the original host, project and actor, then retry only the identical request with its original ID."}
             }}));
         }
         if let Operation::ReadPlan { plan } = &r.operation {

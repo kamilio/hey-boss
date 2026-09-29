@@ -2014,7 +2014,6 @@ fn batch_help_examples_apply_from_file_and_retry_from_stdin() {
         "after",
         "null",
         "--file -",
-        "--if-version",
         "--request-id",
         "before any edits",
         "new alias",
@@ -2048,20 +2047,10 @@ fn batch_help_examples_apply_from_file_and_retry_from_stdin() {
             "existing-topic",
         ],
     );
-    let before = f.run("Atlas", &["show"]);
-    let version = before["version"].to_string();
     let file = batch_file(&f, edits);
     let saved = f.run(
         "Atlas",
-        &[
-            "batch",
-            "--file",
-            &file,
-            "--if-version",
-            &version,
-            "--request-id",
-            "help-example",
-        ],
+        &["batch", "--file", &file, "--request-id", "help-example"],
     );
     assert_eq!(saved["changed"], true);
     let after = f.run("Atlas", &["show"]);
@@ -2069,15 +2058,7 @@ fn batch_help_examples_apply_from_file_and_retry_from_stdin() {
         .cmd(
             "Atlas",
             "mm",
-            &[
-                "batch",
-                "--file",
-                "-",
-                "--request-id",
-                "help-example",
-                "--if-version",
-                &version,
-            ],
+            &["batch", "--file", "-", "--request-id", "help-example"],
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2213,7 +2194,7 @@ fn batch_automatic_pr_selectors_explain_explicit_nodes_and_preserve_guards() {
             "{message}"
         );
         assert!(message.contains("--under issue:NUMBER"), "{message}");
-        assert!(message.contains("--if-version"), "{message}");
+        assert!(!message.contains("--if-version"), "{message}");
         assert_eq!(f.run("Atlas", &["show"]), before);
         f.fail("Atlas", &["batch", "--file", &file, "--if-version", "0"], 4);
         assert_eq!(f.run("Atlas", &["show"]), before);

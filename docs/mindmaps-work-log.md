@@ -274,9 +274,7 @@ reference-node creations; the generic revision update now applies only to other
 node mutations. Regression coverage verifies both endpoint maps advance exactly once,
 the unrelated outline remains unchanged, identical links are no-ops, unlinking behaves
 the same way, and implicit foreign PR creation advances its owning map once.
-26 mindmap tests pass; formatting and diff whitespace checks pass. Documentation
-clarifies that optimistic guards check the selected map, so link authors should select
-an endpoint project when using `--if-version`.
+26 mindmap tests pass; formatting and diff whitespace checks pass. Optimistic guards check the selected map.
 
 Further useful audit work: measure terminal outline rendering at 10,000 nodes (it still
 rescans the node array at each hierarchy level), review optional readable PR titles

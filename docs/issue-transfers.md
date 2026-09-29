@@ -24,10 +24,10 @@ The terminal equivalent is:
 
 ```sh
 hey-boss issue view 12 --json
-hey-boss issue transfer 12 --destination PROJECT_ID --if-version VERSION
+hey-boss issue transfer 12 --destination PROJECT_ID
 ```
 
-Use the version from the latest read. A stale version rejects the move without
+The CLI captures the current revision. A concurrent edit rejects the move without
 changing either project. Reuse the same `--request-id` when retrying an uncertain
 request. Moves run atomically on the authoritative store; fleet replicas must
 use the supervisor. Agent claims and active worker reservations prevent moving.

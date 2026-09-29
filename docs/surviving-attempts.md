@@ -4,7 +4,7 @@ A blocked or interrupted agent is not evidence that its task process stopped.
 Report a surviving process on its owning machine before ending the agent:
 
 ```sh
-hey-boss issue attempt hold 123 --if-version 7 --file attempt.json
+hey-boss issue attempt hold 123 --file attempt.json
 ```
 
 The JSON contains `attempt_id`, `owner` (the original issue assignee), `pid`,
@@ -29,7 +29,7 @@ work. Capture and review the evidence on the process host:
 
 ```sh
 hey-boss issue attempt inspect 123 --json > evidence.json
-hey-boss issue attempt reconcile 123 --if-version 9 --file evidence.json \
+hey-boss issue attempt reconcile 123 --file evidence.json \
   --outcome 'Validation failed; reviewed the log and retained staged changes.'
 ```
 

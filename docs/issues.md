@@ -473,7 +473,6 @@ the associated agent.
 | `ready 1` | Mark an attached delivery PR Ready for Boss; unblock dependencies in PR-enabled projects |
 | `close 1` | Complete the issue, clear its claim, and record who closed it |
 | `reopen 1` | Reopen the issue without assigning it |
-| `reopen 1 --if-version N` | Reopen only if the issue still has revision N; conflicts exit 4 without changing the issue or history, including on `--host` |
 | `delete 1` | Soft-delete the issue and clear its claim |
 | `restore 1` | Recover a deleted issue in its previous open/closed state, unassigned |
 
@@ -511,7 +510,7 @@ hey-boss issue list --state closed --search reconnect
 hey-boss issue list --label bug --label network --limit 10 --offset 0
 hey-boss issue list --all --label bug --unassigned
 hey-boss issue history 1 --limit 20 --offset 0
-hey-boss issue edit 1 --body 'Updated description' --if-version 3
+hey-boss issue edit 1 --body 'Updated description'
 hey-boss issue list --state deleted
 hey-boss issue restore 1
 ```
@@ -543,9 +542,8 @@ it cannot be combined with `--limit` or `--offset`. The small copy button beside
 queue host, state, search, label, and assignee filters. **Assigned to me** targets
 Boss explicitly, so an agent running the copied command sees the same issues.
 
-Every change increments an issue's `version`. `edit --if-version N` rejects
-an outdated edit, preventing silent overwrites when an agent edits a description
-it previously read. Omit it for an unconditional edit.
+Every change increments an issue's `version`. Required transport guards are
+captured by the CLI; commands do not require manual revision arguments.
 
 ## JSON, exit codes, and retries
 
@@ -586,14 +584,13 @@ writes. Use `view` to fetch current state after replaying an older result.
 Use `issue batch --file triage.json` (or `--file -` for stdin) to couple label
 changes and ownership handoffs. The entire JSON array is **one guarded group**
 within one project on one authoritative host. Every entry requires a positive
-`number`, positive `if_version`, and `expected_assignee`: an exact actor ID,
-`"human:boss"`, or explicit `null` for unassigned. Missing guards are invalid.
+`number`. The CLI captures revisions; `expected_assignee` defaults to `null`
+(unassigned). Supply an exact actor ID or `"human:boss"` to change assigned work.
 
 ```json
 [
   {
     "number": 12,
-    "if_version": 7,
     "expected_assignee": "codex:session",
     "add_labels": ["rework needed"],
     "remove_labels": ["PR ready"],
@@ -601,7 +598,6 @@ within one project on one authoritative host. Every entry requires a positive
   },
   {
     "number": 13,
-    "if_version": 4,
     "expected_assignee": null,
     "add_labels": ["PR ready"],
     "remove_labels": ["rework needed"],
@@ -613,7 +609,7 @@ within one project on one authoritative host. Every entry requires a positive
 `assignment` accepts `keep` (default), `unassign`, or `boss`. Label arrays default
 to empty; each entry must request at least one label or assignment update.
 Unrelated labels, issue text, state, PR attachments and subtask relationships
-are preserved. The two guards explicitly authorize changing that exact owner's
+are preserved. The owner guard explicitly authorizes changing that exact owner's
 claim, even when it belongs to another actor; there is no force option. A newer
 claim or an unclaimed worker reservation cannot be overridden. Boss assignment
 requires an open, undrafted issue. The caller must assess PR readiness: batching
@@ -623,7 +619,7 @@ does not review or merge PRs, close issues, or control workers.
 hey-boss issue batch --file triage.json --request-id review-head-abc123 --json
 ```
 
-Applying requires a stable request ID. A changed issue advances once and gets one `triaged` audit event containing
+The CLI supplies a request ID; use `--request-id` to retain an explicit retry key. A changed issue advances once and gets one `triaged` audit event containing
 its before/after labels, assignee and version. No-op entries keep their versions.
 
 If any entry is missing, deleted, stale, invalid against current state, or
@@ -636,7 +632,7 @@ assignee and labels. Check `accepted`/`applied` as well as the exit code.
 Both accepted and rejected real group results are saved with the request ID in
 the same transaction. Identical retries with the same project and actor return
 the original result even after issues change; different payloads with that ID
-conflict. To reassess a rejected group, fetch current versions/owners and use a
+conflict. To reassess a rejected group, review current issue state and ownership and use a
 new ID. Invalid input and database/transport failures do not themselves save a
 result; an uncertain transport outcome must retry the identical request first.
 
@@ -860,9 +856,8 @@ hey-boss issue subtask list 12 --all --json
 hey-boss issue subtask remove 12 15
 ```
 
-`create` accepts Markdown stdin or `--body-file`, labels, version checks and the
-usual `--request-id`. Link/unlink accept `--if-version` for the parent and
-`--if-child-version` for the child. A child is created and linked atomically; failed
+`create` accepts Markdown stdin or `--body-file`, labels and the
+usual `--request-id`. A child is created and linked atomically; failed
 link validation rolls back its number, queue position, revisions and history.
 Web-created children prepend by default; **Add to bottom** appends instead.
 CLI-created children append. Dragging or using the
@@ -878,7 +873,7 @@ unstarted dependents become Blocked. Hierarchy mutations preserve parent and anc
 `issue reopen NUMBER` reports effective blocker numbers and sources (`linked`,
 or `subtask`). To clear a reconciled manual hold while keeping
 automatic dependency blocking, use
-`issue reopen NUMBER --clear-manual-hold --if-version VERSION`. The issue stays
+`issue reopen NUMBER --clear-manual-hold`. The issue stays
 Blocked until its dependencies are satisfied, then resumes automatically. This
 does not remove dependency links, change the hierarchy, or release a live claim.
 

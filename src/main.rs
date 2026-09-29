@@ -5,6 +5,7 @@ mod attachment_cli;
 mod auto_workers_cli;
 mod autoconnect;
 mod broker;
+mod cli_request;
 mod companion;
 mod health_cli;
 mod issue_cli;

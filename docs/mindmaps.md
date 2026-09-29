@@ -73,7 +73,7 @@ with `--bodies none`, `view NODE`, or `links NODE`.
 
 ```sh
 hey-boss mm issue 3 --issue-project Platform --id api --under release
-hey-boss mm issue 12 --under release --title 'Ship API' --if-version 5 --request-id ship-api
+hey-boss mm issue 12 --under release --title 'Ship API' --request-id ship-api
 hey-boss mm pr https://github.com/org/repo/pull/42 --title 'Implementation' --id implementation-pr
 hey-boss mm notice TASK_ID --under release
 hey-boss mm link design implementation --description 'Implements the design'
@@ -86,7 +86,7 @@ hey-boss mm unlink implementation Platform::api --kind depends-on
 Typed selectors `issue:12`, `pr:HTTP_URL` and `notice:TASK_ID` add missing reference nodes as roots when used in `mm link`. If either endpoint cannot resolve, the entire operation rolls back. Other commands require existing nodes. An issue reference is checked against the authoritative issue store. PR references use HTTP(S) URLs, with trailing slashes normalized. Notification IDs resolve through the local Mac Inbox bridge when viewing.
 
 `mm issue NUMBER --title LABEL` creates the reference, its nesting and a map-only
-label atomically with one `--if-version` guard and one map version increment.
+label atomically with one map version increment.
 Labels support up to 512 bytes and work with `--issue-project` references. The
 live issue and its attached PRs remain unchanged. If the reference already exists,
 an explicit title replaces only its map label; omitted `--id` and `--under` preserve
@@ -120,9 +120,7 @@ hey-boss mm show --json --project PROJECT
 
 Replace the URL, issue number and project with your values. The explicit node
 reuses the automatic relationship without duplicating the displayed PR; the
-attachment stays intact. Use the newly returned map version for the batch's
-`--if-version`. A rejected automatic PR selector changes nothing, and stale
-version guards still reject the whole batch. Link entries can create typed PR
+attachment stays intact. A rejected automatic PR selector changes nothing. Link entries can create typed PR
 endpoints directly, but organization selectors bind to the original stored map.
 The viewer explains this distinction in automatic PR details and offers file and
 artifact attachment controls only after the PR has a stored node.
@@ -179,18 +177,17 @@ of every node in the map. Mutations use the same durable transactions, author id
 and request ID machinery as issue commands. Use `--agent human:NAME` in a terminal when session detection is unavailable.
 
 ```sh
-hey-boss mm add 'Release' --id release --request-id release-topic --if-version 0 --json
-hey-boss mm edit release --title 'Release plan' --if-version 1 --json
+hey-boss mm add 'Release' --id release --request-id release-topic --json
+hey-boss mm edit release --title 'Release plan' --json
 ```
 
 Reuse a request ID only for an identical uncertain retry; a changed operation conflicts.
-`--if-version` checks the selected project's map revision. Select an endpoint project
-when using this guard for links. Adding/removing/updating a cross-link increments both
+Adding/removing/updating a cross-link increments both
 endpoint projects' map revisions. If both endpoints belong to other projects, the
 invoking project's revision stays unchanged. Live issue changes and Inbox state do
 not increment the outline revision; reload for their current state.
 
-Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not found, 4 conflict, 1 operational failure. `--request-id` and `--if-version` apply only to mutations.
+Exit codes follow issue commands: 2 invalid input/identity unavailable, 3 not found, 4 conflict, 1 operational failure. `--request-id` applies only to mutations.
 
 ## Viewer
 
@@ -228,14 +225,14 @@ Cards, outlines and Markdown exports use the label; details retain the original
 live title, issue project/number, body, labels, assignment and PR relationships.
 Search matches both titles. The underlying issue title and version stay unchanged.
 Cross-project issue references work the same way using their map alias or node ID.
-These edits support `--if-version` and `--request-id` like other map mutations;
+These edits support `--request-id` like other map mutations;
 body edits remain unavailable for live issue references.
 
 ### Atomic organization batches
 
 `mm batch --file edits.json` applies a JSON array of label edits, alias changes,
 moves and directed connection updates as one transaction. `--file -` reads stdin.
-Guard the batch with the map's current `--if-version`.
+The batch is applied atomically.
 `mm batch --help` documents the complete input format and copy-ready examples.
 Every object requires `command` (exactly `edit`, `alias`, `move` or `link`, not
 `action`). Edit, alias and move require `node` (an existing selector in the selected map).
@@ -253,7 +250,7 @@ Link requires `from`, `to` and `kind`.
 ```
 
 ```sh
-hey-boss mm batch --file edits.json --if-version 42 --request-id organize-replies --json
+hey-boss mm batch --file edits.json --request-id organize-replies --json
 ```
 
 All selectors resolve against the original map before any edits, so later entries

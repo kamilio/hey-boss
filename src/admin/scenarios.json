@@ -223,9 +223,7 @@
     "args": [
       "2",
       "--destination",
-      "named:Destination review",
-      "--if-version",
-      "1"
+      "named:Destination review"
     ],
     "setup": []
   },
@@ -384,41 +382,31 @@
     "args": [
       "{artifact}",
       "--title",
-      "Reviewed notes",
-      "--if-version",
-      "1"
+      "Reviewed notes"
     ],
     "setup": []
   },
   "artifact archive": {
     "args": [
-      "{artifact}",
-      "--if-version",
-      "1"
+      "{artifact}"
     ],
     "setup": []
   },
   "artifact restore": {
     "args": [
-      "{artifact}",
-      "--if-version",
-      "2"
+      "{artifact}"
     ],
     "setup": [
       [
         "artifact",
         "archive",
-        "{artifact}",
-        "--if-version",
-        "1"
+        "{artifact}"
       ]
     ]
   },
   "artifact delete": {
     "args": [
-      "{artifact}",
-      "--if-version",
-      "1"
+      "{artifact}"
     ],
     "setup": []
   },
