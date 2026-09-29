@@ -1131,6 +1131,22 @@ mod tests {
     use super::*;
     #[test]
     fn recovery_queue_survives_followups_and_pickup_explains_its_choice() {
+        // Reservation validates the provider executable but never launches it.
+        // Isolate the override from other parallel tests and the developer's CLI.
+        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(std::ffi::OsStr::new("/bin/true"))
+        {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "issues::store::registry::tests::recovery_queue_survives_followups_and_pickup_explains_its_choice", "--nocapture"])
+                .env("HEY_BOSS_CODEX", "/bin/true")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let root = std::env::temp_dir().join(format!("hb-recovery-{}", random_id().unwrap()));
         std::fs::create_dir(&root).unwrap();
         {
@@ -1274,6 +1290,7 @@ mod tests {
                     json!({"action":"create","title":"Feature","body":"","labels":[]}),
                 ))
                 .unwrap();
+            store.db.execute("INSERT INTO project_settings(project_id,prompt,version,subtask_scheduling) VALUES('named:Sequence',?1,1,'sequential')", [worker::DEFAULT_PROMPT]).unwrap();
             for _ in 0..2 {
                 store.execute(&request(json!({"action":"create_subtask","number":1,"title":"Step","body":"","labels":[]}))).unwrap();
             }
