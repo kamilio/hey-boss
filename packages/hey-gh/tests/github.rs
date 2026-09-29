@@ -7847,6 +7847,33 @@ async fn required_failure_observation_has_source_freshness_without_optional_read
         hey_gh::watcher::observe_required(&cached).blocking,
         observation.blocking
     );
+    // Repeated watcher reads reuse checks and policy. Only the final PR and
+    // base confirmations revalidate, preserving the collection race guard.
+    let hot_start = h.calls().len();
+    let started = std::time::Instant::now();
+    for _ in 0..8 {
+        let hot = client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap();
+        assert_eq!(
+            hey_gh::watcher::observe_required(&hot).blocking,
+            observation.blocking
+        );
+    }
+    let calls = h.calls();
+    let hot_calls = &calls[hot_start..];
+    eprintln!(
+        "8 hot required-policy observations: {:?}, {} conditional confirmations",
+        started.elapsed(),
+        hot_calls.len()
+    );
+    assert_eq!(hot_calls.len(), 16);
+    assert!(hot_calls.iter().all(|call| call.conditional
+        && matches!(
+            call.path.as_str(),
+            "/repos/acme/demo/pulls/7" | "/repos/acme/demo/branches/main"
+        )));
     h.phase(9);
     let rerun = client
         .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
