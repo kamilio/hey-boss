@@ -304,10 +304,10 @@ enum Action {
     },
     /// Create an open, unassigned issue. The body defaults to empty.
     Create {
-        /// Place the new issue at the front of the project queue (the default).
+        /// Explicitly place the new issue first (default only for human: identities).
         #[arg(long, conflicts_with = "at_bottom")]
         at_top: bool,
-        /// Append the new issue to the project queue.
+        /// Append the new issue to the project queue (the agent default).
         #[arg(long)]
         at_bottom: bool,
         #[arg(long)]
@@ -852,8 +852,8 @@ impl Options {
                 offset: *offset,
             },
             Action::Create {
-                at_top: _,
-                at_bottom,
+                at_top,
+                at_bottom: _,
                 title,
                 body,
                 labels,
@@ -878,7 +878,7 @@ impl Options {
                     title,
                     body,
                     labels: labels.clone(),
-                    at_top: !*at_bottom,
+                    at_top: *at_top,
                     blockers: blocked_by.clone(),
                     then_titles: then_titles.clone(),
                 }
@@ -1160,7 +1160,7 @@ pub fn run(options: &Options) -> Result<()> {
         if interactive {
             issues::planning::require_terminal()?;
         }
-        let operation = match &options.action {
+        let mut operation = match &options.action {
             Action::Edit {
                 number,
                 interactive: true,
@@ -1181,6 +1181,19 @@ pub fn run(options: &Options) -> Result<()> {
         } else {
             None
         };
+        // Resolve on the initiating device, before SSH/fleet transport. Explicit
+        // placement always wins; custom agent identities use the safe default too.
+        if let Action::Create {
+            at_top: false,
+            at_bottom: false,
+            ..
+        } = &options.action
+            && let Operation::Create { at_top, .. } = &mut operation
+        {
+            *at_top = actor
+                .as_ref()
+                .is_some_and(|actor| actor.id.starts_with("human:"));
+        }
         if matches!(
             operation,
             Operation::Create { .. } | Operation::CreateSubtask { .. }
@@ -1403,6 +1416,11 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(instructions) = value["instructions"].as_str() {
         println!("Instructions: {instructions}");
+    }
+    if let Some(placement) = value["placement"].as_str() {
+        println!(
+            "Queue placement: {placement} (use --at-top or --at-bottom to choose explicitly)."
+        );
     }
     if let Some(prs) = value["pull_requests"].as_array() {
         for pr in prs {
