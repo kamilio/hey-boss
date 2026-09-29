@@ -4,6 +4,44 @@ Observed on 2026-09-29 UTC (2026-09-28 CDT), using the existing SSH alias
 `kamils-macbook-pro.local`. This is an environmental incident; no contributing
 CLI defect was identified.
 
+## Verified recovery
+
+Recovery passed verification at 01:36 UTC. The fresh observation from
+01:31:03.463 through 01:36:07.950 had 11 connected samples over 304.788 seconds,
+advancing heartbeat and sync, no errors, and a final pending count of zero.
+Maximum sampled heartbeat age was 5.602 seconds; maximum sync age was
+8.406 seconds. Retained event history covering 01:26:06.223–01:36:25.613
+contained no disconnect or reconnect, including between the sampled checks.
+This supersedes the earlier failed observations recorded below.
+
+Direct disk readings during the successful check were 25,173,644 KiB free
+at 01:31:39 and 24,700,988 KiB at 01:35:54 (about 23.6 GiB at the end).
+The additional headroom came from external reclamation, not further deletion
+by this task. Only the original explicitly approved 1.13 GiB deletion was
+performed; the second request remains cancelled.
+
+The final companion journal snapshot had watermark 276014, zero pending rows,
+cursor 1175546, and last sync 1790645749.482. The supervisor held exactly
+276014 unique receipts, with minimum 1 and maximum 276014, proving complete
+receipt coverage through that watermark. Transient new outgoing changes
+observed during the check drained normally. Unresolved conflicts remain
+preserved at 639 supervisor and 355 companion, with the original timestamps.
+
+Direct owner status during this check confirmed worker
+`0fcf3068617e661427e6c332501e0a08`, original PID 18690, five active slots,
+zero free slots, pickup enabled, and a connected supervisor. No worker,
+claim, service, database, or saved worktree was reset. Existing automatic
+reconnection recovered the transport; its earlier timeout cause remains
+unproven, and no speculative code change was made.
+
+All three installed builds remain verified as `638e6fc0d9eab8c4`. Only this
+incident document changed; no executable/UI release or Fly deployment is
+required. The desktop/mobile visual checks and cleanup recorded below remain
+applicable. The final monitor and SSH reads exited normally and created no
+new browser sessions or temporary files.
+
+## Earlier observations
+
 ## Diagnosis and approved recovery
 
 Bounded, read-only `df`, `quota`, `diskutil`, directory-size and open-file
@@ -166,5 +204,6 @@ Playwright snapshots were removed after review. Existing checkout edits and
 artifacts from other tasks were left intact.
 The resumed monitors and read-only SSH checks have exited; Playwright lists
 no browsers, port 4789 has no listener, and the issue-specific output directory
-is absent. Issue 695 remains open because sustained fleet connectivity has
-not passed verification, despite recovered disk space and reconciled journals.
+is absent. At that checkpoint, issue 695 remained open because sustained
+fleet connectivity had not passed verification. The later successful check
+is recorded under Verified recovery above.
