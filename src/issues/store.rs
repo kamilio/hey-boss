@@ -1254,6 +1254,7 @@ impl Store {
         agent_launches::migrate(&db)?;
         status::migrate(&db)?;
         provenance::migrate(&db)?;
+        super::commits::migrate(&db)?;
         steering::migrate(&db)?;
         assignments::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
@@ -1638,7 +1639,10 @@ impl Store {
             | Operation::PullRequests { .. }
             | Operation::AddPullRequest { .. }
             | Operation::ClassifyPullRequest { .. }
-            | Operation::RemovePullRequest { .. } => {
+            | Operation::RemovePullRequest { .. }
+            | Operation::Commits { .. }
+            | Operation::AddCommit { .. }
+            | Operation::RemoveCommit { .. } => {
                 registry::execute(&tx, &project, &r.operation, actor)?
             }
             Operation::WorkerConfigure { .. }
@@ -2100,15 +2104,20 @@ impl Store {
         {
             issue["pull_requests"] =
                 json!(registry::pull_requests(&tx, &response_project.id, number)?);
+            issue["commits"] =
+                json!(super::commits::list(&tx, &response_project.id, number)?);
             if issue["assignee"] == "human:boss" {
                 issue["assignee_name"] = settings["boss_name"].clone();
             }
         }
         if let Some(issues) = result["issues"].as_array_mut() {
+            let mut commits_by_issue = super::commits::list_by_project(&tx, &project.id)?;
             for issue in issues {
                 if let Some(number) = issue["number"].as_i64() {
                     issue["pull_requests"] =
                         json!(registry::pull_requests(&tx, &project.id, number)?);
+                    issue["commits"] =
+                        json!(commits_by_issue.remove(&number).unwrap_or_default());
                     if issue["assignee"] == "human:boss" {
                         issue["assignee_name"] = settings["boss_name"].clone();
                     }

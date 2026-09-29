@@ -392,9 +392,23 @@ function renderOwnerFilter() {
 function listLabel(name) {
   return `<a class="list-label-filter" href="${esc(routeHash({ ...model.route, issue: null, label: name }))}" aria-label="Filter by label ${esc(name)}">${label(name)}</a>`;
 }
+function traceLinkForOrigin(origin, number, fallbackActor) {
+  const direct = HeyBossOrigin.conversation(origin, model.project.id);
+  if (direct) return direct;
+  const actor = origin?.actor_id || fallbackActor;
+  if (actor && !actor.startsWith("human:") && actor !== "watcher:github") {
+    return "/agents/session#" + new URLSearchParams({ project: model.project.id, issue: number, agent: actor });
+  }
+  return null;
+}
 function listAssignment(issue) {
   const a=IssueAssignments.current(issue);
-  if(a.kind==='unassigned') return '';
+  if(a.kind==='unassigned') {
+    const fallbackActor = issue.closed_by || (issue.commits && issue.commits.length ? issue.commits[issue.commits.length - 1].added_by : null);
+    const trace = traceLinkForOrigin(issue.commits?.length ? issue.commits[issue.commits.length - 1].origin : null, issue.number, fallbackActor);
+    if (!trace) return '';
+    return `<span class="list-assignee"><a class="list-agent-trace" href="${esc(trace)}" title="Open agent trace for issue #${issue.number}" aria-label="Open agent conversation for issue #${issue.number}">${icon('arrow-right')}</a></span>`;
+  }
   const description=IssueAssignments.describe(issue,{actorName,bossName:model.boss.name});
   const owner=a.kind==='github'?'watcher:github':a.kind==='machine'?'machine:'+a.machine:a.actor||issue.assignee||'human:boss';
   const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
@@ -527,6 +541,16 @@ function listPullRequests(issue) {
     })
     .join("");
 }
+function listCommits(issue) {
+  return (issue.commits || [])
+    .map((c) => {
+      const short = c.short_sha || (c.sha || "").slice(0, 7);
+      const label = c.title ? `${short} · ${c.title}` : short;
+      const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
+      return `<span class="issue-commit-chip"><a class="issue-pr-link issue-commit-link" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}" aria-label="Open commit ${esc(label)}">${icon("code")}<span class="pr-link-title">${esc(short)}</span></a>${trace ? `<a class="list-agent-trace issue-commit-trace" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}</span>`;
+    })
+    .join("");
+}
 function renderList(result) {
   if (model.orderDragging) return;
   const creation = model.creation;
@@ -570,7 +594,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -1066,7 +1090,7 @@ function renderDetail(value) {
   const description =
     i.body_html || '<p class="muted-text">No description provided.</p>';
   $("#detail-view").innerHTML =
-    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1>${renderIssueHeadingActions(i)}</div><div class="detail-meta"><span class="state-pill ${state} ${IssueBlockers.kind(i) === "hold" ? "on-hold" : ""}">${icon(deleted ? "trash" : i.attempt_hold ? "blocked" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.attempt_hold ? "Attempt protected" : i.state === "ready" ? i.draft ? "Development handoff" : "Ready" : i.state === "blocked" ? (i.manual_blocked ? "On hold" : "Waiting for dependencies") : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
+    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1>${renderIssueHeadingActions(i)}</div><div class="detail-meta"><span class="state-pill ${state} ${IssueBlockers.kind(i) === "hold" ? "on-hold" : ""}">${icon(deleted ? "trash" : i.attempt_hold ? "blocked" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.attempt_hold ? "Attempt protected" : i.state === "ready" ? i.draft ? "Development handoff" : "Ready" : i.state === "blocked" ? (i.manual_blocked ? "On hold" : "Waiting for dependencies") : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderCommits(i)}${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
   mountIssueSection(".issue-progress-card", "Progress", () => mountIssueProgress(i));
   placeIssueWork();
   document.title = `${i.title} · Hey Boss`;
@@ -1102,6 +1126,11 @@ function renderDetail(value) {
     $("#pr-form").onsubmit = (event) => {
       event.preventDefault();
       changePullRequest("add_pull_request", $("#pr-url").value, $("#pr-purpose").value);
+    };
+  if ($("#commit-form"))
+    $("#commit-form").onsubmit = (event) => {
+      event.preventDefault();
+      changeCommit("add_commit", $("#commit-ref").value);
     };
   $$('[data-pr-purpose]').forEach((select) => {
     select.onchange = () => changePullRequest("classify_pull_request", select.dataset.prPurpose, select.value, select);
@@ -1182,6 +1211,8 @@ $("#detail-view").addEventListener("click", async (e) => {
   }
   if (button.dataset.removePr)
     changePullRequest("remove_pull_request", button.dataset.removePr);
+  if (button.dataset.removeCommit)
+    changeCommit("remove_commit", button.dataset.removeCommit);
   if (button.dataset.action) performAction(button.dataset.action, button);
 });
 $("#detail-view").addEventListener("change", event => {
@@ -2007,8 +2038,47 @@ function prPurposeLabel(purpose) {
 function prPurposeOptions(purpose = "unspecified") {
   return Object.entries(PR_PURPOSES).map(([value, label]) => `<option value="${value}"${value === purpose ? " selected" : ""}>${label}</option>`).join("");
 }
+function renderCommits(issue) {
+  return `<div class="side-section"><h2 class="side-heading">Commits${icon("code")}</h2><p class="field-help pr-purpose-help">Deduplicated commits and agent traces.</p><div class="pr-links commit-links">${(issue.commits || []).map((c) => {
+    const short = c.short_sha || (c.sha || "").slice(0, 7);
+    const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
+    return `<div class="pr-link commit-link"><div class="pr-link-heading"><a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(c.sha)}">${icon("code")} <code>${esc(short)}</code>${c.title ? ` <span>${esc(c.title)}</span>` : ""}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove commit ${esc(short)}" data-remove-commit="${esc(c.sha)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}</div>`;
+  }).join("") || "<p>No commits attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add commit-add"><summary>${icon("plus")}Attach a commit</summary><form id="commit-form"><label class="field-label" for="commit-ref">Commit SHA, HEAD, or URL</label><input class="text-input" id="commit-ref" type="text" required placeholder="HEAD or https://github.com/…/commit/…"><button class="button small" type="submit">Attach commit</button></form></details><p id="commit-error" class="form-error" role="alert" hidden></p>`}</div>`;
+}
+async function changeCommit(action, commit) {
+  const project = model.project.id,
+    number = model.detail.issue.number,
+    host = model.route.host;
+  const current = () => model.project?.id === project && model.route.host === host && model.route.issue === number;
+  const button = $("#commit-form button");
+  if (button) button.disabled = true;
+  const errorEl = $("#commit-error");
+  if (errorEl) errorEl.hidden = true;
+  try {
+    await mutate({ action, number, commit }, project, host);
+    if (!current()) return;
+    await renderRoute();
+    if (!current()) return;
+    toast(action === "add_commit" ? "Commit attached" : "Commit removed");
+  } catch (error) {
+    if (!current()) return;
+    const el = $("#commit-error");
+    if (el) {
+      el.textContent = error.message;
+      el.hidden = false;
+    } else toast(error.message, true);
+  } finally {
+    if (current()) {
+      const btn = $("#commit-form button");
+      if (btn) btn.disabled = false;
+    }
+  }
+}
 function renderPullRequests(issue) {
-  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><p class="field-help pr-purpose-help">Link fixes, prerequisites, or supporting evidence.</p><div class="pr-links">${(issue.pull_requests || []).map((pr) => `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</div>`;
+  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><p class="field-help pr-purpose-help">Link fixes, prerequisites, or supporting evidence.</p><div class="pr-links">${(issue.pull_requests || []).map((pr) => {
+    const trace = traceLinkForOrigin(pr.origin, issue.number, pr.added_by);
+    return `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`;
+  }).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</div>`;
 }
 async function changePullRequest(action, url, purpose, control) {
   const project = model.project.id,

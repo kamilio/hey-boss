@@ -822,6 +822,10 @@ impl Codex {
             .env("HEY_BOSS_ISSUE_DB", path)
             .env("HEY_BOSS_ISSUE_PROJECT", &job.project.id)
             .env(
+                "HEY_BOSS_ISSUE_NUMBER",
+                job.issue["number"].as_i64().unwrap_or_default().to_string(),
+            )
+            .env(
                 "PATH",
                 std::env::join_paths(paths)
                     .map_err(|e| Error::new("worker_error", e.to_string()))?,
@@ -833,6 +837,12 @@ impl Codex {
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("PI_SESSION_ID")
             .env_remove("CLAUDECODE");
+        if let Ok(hooks_dir) = crate::issues::commits::ensure_git_hooks() {
+            command
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+                .env("GIT_CONFIG_VALUE_0", hooks_dir);
+        }
         let process = crate::agent_process::Process::spawn(&mut command)?;
         Ok(Self {
             process,

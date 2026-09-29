@@ -2098,6 +2098,28 @@ dialog::backdrop {
 .issue-pr-link:hover {
   text-decoration: underline;
 }
+.issue-commit-chip {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.issue-commit-link {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.issue-commit-trace {
+  width: 22px;
+  height: 22px;
+}
+.commit-trace-row {
+  margin-top: 4px;
+}
+#commit-form .button {
+  margin-top: 8px;
+}
 
 .issue-order-handle {
   position: relative;

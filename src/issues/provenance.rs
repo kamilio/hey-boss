@@ -51,13 +51,34 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn has_table(db: &Connection, name: &str) -> bool {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+fn has_column(db: &Connection, table: &str, column: &str) -> bool {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+        params![table, column],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
 /// Authorize a historical reference against persisted, visible resources.
 pub(crate) fn referenced(db: &Connection, host: &str, run: &str) -> Result<Option<Value>> {
     let (field, key) = run
         .strip_prefix("session:")
         .map(|s| ("session_id", s))
         .unwrap_or(("run.id", run));
-    for table in ["issues", "artifacts"] {
+    for table in ["issues", "artifacts", "issue_commits"] {
+        if table == "issue_commits" && !has_table(db, "issue_commits") {
+            continue;
+        }
         let origin: Option<String> = db.query_row(&format!("SELECT origin FROM {table} r JOIN projects p ON p.id=r.project_id WHERE json_extract(origin,'$.{field}')=?1 AND json_extract(origin,'$.host')=?2 AND p.hidden_at IS NULL LIMIT 1"),params![key,host],|r|r.get(0)).optional()?;
         if let Some(origin) = origin {
             return Ok(Some(serde_json::from_str(&origin)?));
@@ -92,7 +113,25 @@ pub(crate) fn assigned_run(
     number: i64,
     agent: &str,
 ) -> Result<Option<Value>> {
-    let saved = db.query_row("SELECT i.title,p.name,a.metadata FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=i.assignee WHERE i.project_id=?1 AND i.number=?2 AND i.assignee=?3 AND i.deleted_at IS NULL AND p.hidden_at IS NULL", params![project,number,agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+    let mut saved = db.query_row("SELECT i.title,p.name,a.metadata FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=i.assignee WHERE i.project_id=?1 AND i.number=?2 AND i.assignee=?3 AND i.deleted_at IS NULL AND p.hidden_at IS NULL", params![project,number,agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+    if saved.is_none() {
+        let mut linked = false;
+        if has_column(db, "issues", "closed_by") {
+            linked |= db.query_row("SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1 AND number=?2 AND closed_by=?3 AND deleted_at IS NULL)", params![project, number, agent], |r| r.get::<_, bool>(0)).unwrap_or(false);
+        }
+        if !linked && has_table(db, "issue_commits") {
+            linked |= db.query_row("SELECT EXISTS(SELECT 1 FROM issue_commits WHERE project_id=?1 AND issue_number=?2 AND added_by=?3)", params![project, number, agent], |r| r.get::<_, bool>(0)).unwrap_or(false);
+        }
+        if !linked && has_table(db, "issue_pull_requests") {
+            linked |= db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND added_by=?3)", params![project, number, agent], |r| r.get::<_, bool>(0)).unwrap_or(false);
+        }
+        if !linked && has_table(db, "worker_runs") {
+            linked |= db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3)", params![project, number, agent], |r| r.get::<_, bool>(0)).unwrap_or(false);
+        }
+        if linked {
+            saved = db.query_row("SELECT i.title,p.name,a.metadata FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=?3 WHERE i.project_id=?1 AND i.number=?2 AND i.deleted_at IS NULL AND p.hidden_at IS NULL", params![project,number,agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+        }
+    }
     let Some((title, name, metadata)) = saved else {
         return Ok(None);
     };
@@ -142,7 +181,10 @@ pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
     if let Some(assigned) = assigned_session(db, session)? {
         return Ok(Some(assigned));
     }
-    for table in ["issues", "artifacts"] {
+    for table in ["issues", "artifacts", "issue_commits"] {
+        if table == "issue_commits" && !has_table(db, "issue_commits") {
+            continue;
+        }
         let saved: Option<Value> = db.query_row(&format!("SELECT r.project_id,p.name,r.title,r.origin FROM {table} r JOIN projects p ON p.id=r.project_id WHERE json_extract(origin,'$.session_id')=?1 AND p.hidden_at IS NULL LIMIT 1"),[session],|r|{
             let raw:String=r.get(3)?;
             let origin:Value=serde_json::from_str(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Text,Box::new(e)))?;
@@ -165,7 +207,11 @@ pub(crate) fn enrich_conversation(db: &Connection, run: &str, result: &mut Value
     for (table, kind, id) in [
         ("issues", "issue", "number"),
         ("artifacts", "artifact", "id"),
+        ("issue_commits", "commit", "sha"),
     ] {
+        if table == "issue_commits" && !has_table(db, "issue_commits") {
+            continue;
+        }
         let mut stmt=db.prepare(&format!("SELECT r.project_id,r.{id},r.title FROM {table} r JOIN projects p ON p.id=r.project_id WHERE json_extract(origin,'$.{field}')=?1 AND p.hidden_at IS NULL ORDER BY r.created_at,r.{id} LIMIT 51"))?;
         let mut rows=stmt.query_map([key],|r|Ok(json!({"project_id":r.get::<_,String>(0)?,"kind":kind,"id":if kind=="issue" {r.get::<_,i64>(1)?.to_string()} else {r.get::<_,String>(1)?},"title":r.get::<_,String>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         more |= rows.len() > 50;
@@ -204,7 +250,8 @@ mod tests {
     #[test]
     fn assignment_resolves_standalone_session_without_recent_runs() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE projects(id TEXT,name TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas','Atlas',NULL); CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); CREATE TABLE agents(id TEXT,metadata TEXT); CREATE TABLE worker_runs(id TEXT,project_id TEXT,issue_number INTEGER,session_id TEXT,started_at INTEGER,job TEXT,state TEXT,finished_at INTEGER,actor_id TEXT); INSERT INTO issues VALUES('Atlas',4,'Repair','codex:exact',NULL,NULL);").unwrap();
+        db.execute_batch("CREATE TABLE projects(id TEXT,name TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas','Atlas',NULL); CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,closed_by TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); CREATE TABLE agents(id TEXT,metadata TEXT); CREATE TABLE worker_runs(id TEXT,project_id TEXT,issue_number INTEGER,session_id TEXT,started_at INTEGER,job TEXT,state TEXT,finished_at INTEGER,actor_id TEXT); CREATE TABLE events(id TEXT PRIMARY KEY,project_id TEXT,issue_number INTEGER,actor TEXT,action TEXT,data TEXT,created_at INTEGER); CREATE TABLE issue_pull_requests(project_id TEXT,issue_number INTEGER,url TEXT,added_by TEXT,purpose TEXT,created_at INTEGER); INSERT INTO issues VALUES('Atlas',4,'Repair','codex:exact',NULL,NULL,NULL);").unwrap();
+        crate::issues::commits::migrate(&db).unwrap();
         let actor = json!({"id":"codex:exact","kind":"codex","session_id":"exact","machine":"remote","host":"mac.local","pid":null,"process_start":null,"cwd":"/work","source":"test"});
         db.execute(
             "INSERT INTO agents VALUES('codex:exact',?1)",
@@ -283,6 +330,37 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&origin).unwrap()["session_id"],
             "exact-session"
+        );
+    }
+
+    #[test]
+    fn commit_origin_and_closed_by_resolve_agent_traces() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE projects(id TEXT,name TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas','Atlas',NULL); CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,closed_by TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); CREATE TABLE agents(id TEXT,metadata TEXT); CREATE TABLE worker_runs(id TEXT,project_id TEXT,issue_number INTEGER,session_id TEXT,started_at INTEGER,job TEXT,state TEXT,finished_at INTEGER,actor_id TEXT); CREATE TABLE events(id TEXT PRIMARY KEY,project_id TEXT,issue_number INTEGER,actor TEXT,action TEXT,data TEXT,created_at INTEGER); CREATE TABLE issue_pull_requests(project_id TEXT,issue_number INTEGER,url TEXT,added_by TEXT,purpose TEXT,created_at INTEGER);").unwrap();
+        crate::issues::commits::migrate(&db).unwrap();
+        let actor = json!({"id":"codex:commit-agent","kind":"codex","session_id":"commit-agent","machine":"remote","host":"mac.local","pid":null,"process_start":null,"cwd":"/work","source":"test"});
+        db.execute(
+            "INSERT INTO agents VALUES('codex:commit-agent',?1)",
+            [actor.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO issues VALUES('Atlas',10,'Main commit trace',NULL,'codex:commit-agent',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO issue_commits(project_id,issue_number,sha,url,title,added_by,created_at,origin) VALUES('Atlas',10,'1111111111111111111111111111111111111111','https://github.com/o/r/commit/1111111111111111111111111111111111111111','feat: direct to main','codex:commit-agent',2,?1)",
+            [json!({"session_id":"commit-agent","host":"mac.local","offset":512}).to_string()],
+        )
+        .unwrap();
+
+        assert!(referenced(&db, "mac.local", "session:commit-agent").unwrap().is_some());
+        assert_eq!(
+            assigned_run(&db, "Atlas", 10, "codex:commit-agent")
+                .unwrap()
+                .unwrap()["id"],
+            "session:commit-agent"
         );
     }
 }

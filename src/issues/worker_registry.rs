@@ -761,11 +761,45 @@ pub(super) fn execute(
             }
             project_settings(db, p)
         }
+        Operation::Commits { number } => {
+            get_issue(db, &p.id, *number, true)?;
+            Ok(json!({"ok":true,"project":p,"number":number,"commits":crate::issues::commits::list(db,&p.id,*number)?,"changed":false}))
+        }
+        Operation::AddCommit {
+            number,
+            commit,
+            title,
+        } => {
+            get_issue(db, &p.id, *number, true)?;
+            let (changed, commits) = crate::issues::commits::add(
+                db,
+                p,
+                *number,
+                commit,
+                title.as_deref(),
+                actor.unwrap(),
+                now(),
+            )?;
+            Ok(json!({"ok":true,"project":p,"number":number,"commits":commits,"changed":changed}))
+        }
+        Operation::RemoveCommit { number, commit } => {
+            get_issue(db, &p.id, *number, true)?;
+            let (changed, commits) =
+                crate::issues::commits::remove(db, p, *number, commit, actor.unwrap(), now())?;
+            Ok(json!({"ok":true,"project":p,"number":number,"commits":commits,"changed":changed}))
+        }
         Operation::PullRequests { number }
         | Operation::AddPullRequest { number, .. }
         | Operation::ClassifyPullRequest { number, .. }
         | Operation::RemovePullRequest { number, .. } => {
             get_issue(db, &p.id, *number, true)?;
+            if let Operation::AddPullRequest { url, .. } = op
+                && crate::issues::commits::is_commit_url(url)
+            {
+                let (changed, commits) =
+                    crate::issues::commits::add(db, p, *number, url, None, actor.unwrap(), now())?;
+                return Ok(json!({"ok":true,"project":p,"number":number,"pull_requests":pull_requests(db,&p.id,*number)?,"commits":commits,"changed":changed}));
+            }
             let mut changed = 0;
             if let Operation::AddPullRequest { url, .. }
             | Operation::ClassifyPullRequest { url, .. }
@@ -783,10 +817,15 @@ pub(super) fn execute(
                     return Err(Error::invalid("Invalid PR URL"));
                 }
                 let actor = actor.unwrap();
+                let current_now = now();
                 let (action, data) = match op {
                     Operation::AddPullRequest { purpose, .. } => {
-                        changed = db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",params![p.id,number,url,actor.id,now(),purpose.as_str()])?;
-                        ("pr_attached", json!({"url":url,"purpose":purpose}))
+                        changed = db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",params![p.id,number,url,actor.id,current_now,purpose.as_str()])?;
+                        let origin = crate::issues::provenance::capture(db, actor, current_now)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                            .unwrap_or(Value::Null);
+                        ("pr_attached", json!({"url":url,"purpose":purpose,"origin":origin}))
                     }
                     Operation::ClassifyPullRequest { purpose, .. } => {
                         let previous: String = db.query_row("SELECT purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND url=?3",params![p.id,number,url],|r|r.get(0)).optional()?.ok_or_else(|| Error::new("not_found", "PR is not attached to this issue"))?;
@@ -802,8 +841,8 @@ pub(super) fn execute(
                     }
                 };
                 if changed > 0 {
-                    db.execute("UPDATE issues SET version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2",params![p.id,number,now()])?;
-                    event(db, &p.id, *number, &actor.id, action, now(), &data)?;
+                    db.execute("UPDATE issues SET version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2",params![p.id,number,current_now])?;
+                    event(db, &p.id, *number, &actor.id, action, current_now, &data)?;
                     if matches!(op, Operation::RemovePullRequest { .. }) {
                         assignments::links_changed(db, &p.id, *number, actor)?;
                     }
@@ -817,8 +856,16 @@ pub(super) fn execute(
     }
 }
 pub(super) fn pull_requests(db: &Connection, p: &str, n: i64) -> Result<Vec<Value>> {
-    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
-    Ok(stmt.query_map(params![p,n],|r|Ok(json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"purpose":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"checked_at":r.get::<_,Option<i64>>(5)?,"error":r.get::<_,Option<String>>(6)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error,(SELECT json_extract(e.data,'$.origin') FROM events e WHERE e.project_id=issue_pull_requests.project_id AND e.issue_number=issue_pull_requests.issue_number AND e.action='pr_attached' AND json_valid(e.data) AND json_extract(e.data,'$.url')=issue_pull_requests.url AND json_type(e.data,'$.origin')='object' ORDER BY e.id DESC LIMIT 1) FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
+    Ok(stmt.query_map(params![p,n],|r|{
+        let origin_raw: Option<String> = r.get(7)?;
+        let origin = origin_raw.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok());
+        let mut row = json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"purpose":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"checked_at":r.get::<_,Option<i64>>(5)?,"error":r.get::<_,Option<String>>(6)?});
+        if let Some(origin) = origin {
+            row["origin"] = origin;
+        }
+        Ok(row)
+    })?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 pub(super) fn claim_lock(
     db: &Connection,

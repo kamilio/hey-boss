@@ -1,1 +1,1 @@
-Commit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close {{number}}` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.
+Commit your changes. Attach every commit with `hey-boss issue commit add {{number}} HEAD`. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close {{number}}` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.
