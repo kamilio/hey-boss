@@ -1178,6 +1178,7 @@ pub fn run(options: &Options) -> Result<()> {
         if !matches!(
             options.action,
             Action::View { .. }
+                | Action::Request { .. }
                 | Action::Allocation { .. }
                 | Action::Assign { .. }
                 | Action::Reopen { .. }
@@ -1189,7 +1190,7 @@ pub fn run(options: &Options) -> Result<()> {
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, guarded metadata edits, guarded blocked-by edits, guarded reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, request, allocation, guarded metadata edits, guarded blocked-by edits, guarded reopen and label-only batches; this command is not supported",
             ));
         }
     }

@@ -193,7 +193,11 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         "UPDATE fleet_meta SET node='tunnel-main' WHERE id=1",
     );
     for title in ["Eligible", "Assigned", "Reserved", "Stale", "Unauthorized"] {
-        f.issue("main", &["create", "--title", title], 0);
+        f.issue(
+            "main",
+            &["create", "--title", title, "--request-id", title],
+            0,
+        );
     }
     f.issue("main", &["claim", "2"], 0);
     f.sql("main", "INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,reservation_expires,job,owner_pid,owner_start,machine) VALUES('reserved','named:Tunnel QA',3,'codex:worker','starting',1,1,9223372036854775807,'{}',123,'test','other')");
@@ -201,6 +205,13 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
     assert_eq!(caps["route"], "supervisor_tunnel");
     assert_eq!(caps["capabilities"]["issue_draft"], true);
     assert_eq!(caps["capabilities"]["issue_metadata"], true);
+    assert_eq!(caps["capabilities"]["issue_request_status"], true);
+    let receipt = f.issue("peer", &["request", "Eligible", "--supervisor"], 0);
+    assert_eq!(receipt["store"]["host"], "supervisor");
+    assert_eq!(receipt["request"]["state"], "recorded");
+    assert_eq!(receipt["request"]["response"]["issue"]["number"], 1);
+    let missing = f.issue("peer", &["request", "unknown", "--supervisor"], 0);
+    assert_eq!(missing["request"]["state"], "not_recorded");
     assert!(caps["usage"].as_str().unwrap().contains("--supervisor"));
     let status = f.cli("peer", &["fleet", "status", "--json"], 0);
     assert_eq!(status["capabilities"]["issue_draft"], true);
