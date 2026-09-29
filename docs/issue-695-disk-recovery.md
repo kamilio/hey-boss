@@ -48,6 +48,16 @@ process working directories there, so it was excluded before any action.
 Correction notification `595501c8-968b-4465-989a-15f9395d0d32` records that
 reduced scope. Nothing in `poe-code-3` was deleted.
 
+On resumption, the issue state and approval were read before any mutation.
+The first deletion remained complete and the second target remained untouched.
+At 00:16:49 UTC, disk headroom had temporarily recovered to 1,533,672 KiB,
+but fell to 1,224,728 KiB at 00:18:54 and 889,452 KiB at 00:20:15. A second
+19-sample connection check ran from 00:17:36 to 00:20:43 (186.642 seconds).
+Although the first 18 samples were connected with advancing heartbeat/sync,
+the final sample disconnected with OS error 28. Recovery therefore remains
+incomplete; the same approval is pending, with no new approval request,
+additional deletion or worker-control action performed on resumption.
+
 ## Journal and conflict verification
 
 Before deletion, a read-only companion database snapshot showed journal
@@ -55,6 +65,9 @@ watermark 275153 and zero outstanding rows. The supervisor had exactly 275153
 durable receipts spanning sequences 1 through 275153, with no sequence gaps.
 All 2000 receipts after the latest conflicting sequence (273153) were applied.
 This covers the original reported backlog of 113 changes and subsequent work.
+The resumed check extended gap-free receipt coverage through sequence 275260;
+the companion had zero pending rows at that snapshot. Conflict counts and
+their latest timestamps were unchanged.
 
 The 639 unresolved supervisor conflicts and 355 unresolved companion conflicts
 predate this incident; their latest timestamps were 1790621906225 and
@@ -66,6 +79,8 @@ legacy state constraints (24), and offline project registration (1).
 Direct owner status at 00:09:57 UTC reported the same worker PID 18690, five
 occupied slots and zero free slots. These are timestamped observations, not a
 claim of current capacity while the supervisor reports disconnection.
+Another direct owner snapshot at 00:17:02 UTC confirmed PID 18690 with all
+five slots occupied and pickup enabled, before the later disconnection.
 
 ## Installed software and visual checks
 
@@ -80,6 +95,11 @@ warning and Needs attention filter correctly identified Mac.lan as offline,
 with last-known activity instead of current available capacity. Screenshots
 were visually inspected; no horizontal overflow or console warnings/errors
 were found.
+The resumed session also verified the connected desktop and phone layouts,
+including dark appearance: current capacity replaced last-known activity and
+the stale offline warning disappeared. These layouts likewise had no overflow
+or console errors. The subsequent transport failure was detected by CLI
+observation and is not hidden by the successful visual checks.
 
 The issue-specific Chrome session, temporary web server, screenshots and
 Playwright snapshots were removed after review. Existing checkout edits and
