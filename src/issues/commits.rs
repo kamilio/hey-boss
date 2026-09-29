@@ -811,6 +811,173 @@ pub fn target_issues_for_hook(
 mod tests {
     use super::*;
 
+    struct HookFixture(PathBuf);
+    impl HookFixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "hey-boss-hook-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for HookFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn hooks_recover_regular_file_without_losing_previous_recovery() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = HookFixture::new();
+        let dir = fixture.0.join("git-hooks");
+        std::fs::write(&dir, "not a directory").unwrap();
+        std::fs::create_dir(fixture.0.join("git-hooks.recovery")).unwrap();
+        std::fs::write(fixture.0.join("git-hooks.recovery/original"), "older").unwrap();
+        provision_git_hooks(&dir).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(
+            std::fs::read(fixture.0.join("git-hooks.recovery/original")).unwrap(),
+            b"older"
+        );
+        assert_eq!(
+            std::fs::read(fixture.0.join("git-hooks.recovery-1/original")).unwrap(),
+            b"not a directory"
+        );
+        for hook in MANAGED_HOOKS {
+            let path = dir.join(hook);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), hook_script(hook));
+            assert_ne!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o111,
+                0
+            );
+        }
+        let previous = dir.join(".previous-global-hooks-path");
+        std::fs::write(&previous, "/previous/hooks\n").unwrap();
+        let custom = dir.join("custom-hook");
+        std::fs::write(&custom, "keep me").unwrap();
+        let modified = std::fs::metadata(dir.join("pre-commit"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        provision_git_hooks(&dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.join("pre-commit"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        assert_eq!(std::fs::read(previous).unwrap(), b"/previous/hooks\n");
+        assert_eq!(std::fs::read(custom).unwrap(), b"keep me");
+        assert!(!fixture.0.join("git-hooks.recovery-2").exists());
+    }
+
+    #[test]
+    fn hooks_preserve_directory_symlinks_and_recover_broken_symlinks() {
+        use std::os::unix::fs::symlink;
+        let fixture = HookFixture::new();
+        let dir = fixture.0.join("git-hooks");
+        let target = fixture.0.join("actual-hooks");
+        std::fs::create_dir(&target).unwrap();
+        symlink(&target, &dir).unwrap();
+        provision_git_hooks(&dir).unwrap();
+        assert!(std::fs::symlink_metadata(&dir).unwrap().is_symlink());
+        assert!(target.join("pre-commit").is_file());
+        std::fs::remove_file(&dir).unwrap();
+        symlink(fixture.0.join("missing"), &dir).unwrap();
+        provision_git_hooks(&dir).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(
+            std::fs::read_link(fixture.0.join("git-hooks.recovery/original")).unwrap(),
+            fixture.0.join("missing")
+        );
+    }
+
+    #[test]
+    fn hooks_chain_repo_and_previous_global_hooks_and_preserve_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = HookFixture::new();
+        let dir = fixture.0.join("git-hooks");
+        std::fs::write(&dir, "not a directory").unwrap();
+        provision_git_hooks(&dir).unwrap();
+        let repo = fixture.0.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_COUNT", "0")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet"]);
+        let previous = fixture.0.join("previous hooks");
+        std::fs::create_dir(&previous).unwrap();
+        std::fs::write(
+            dir.join(".previous-global-hooks-path"),
+            previous.to_str().unwrap(),
+        )
+        .unwrap();
+        let write_hook = |path: &std::path::Path, script: &str| {
+            std::fs::write(path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let log = fixture.0.join("calls");
+        for local in [".git/hooks", "custom hooks"] {
+            let local_dir = repo.join(local);
+            std::fs::create_dir_all(&local_dir).unwrap();
+            if local != ".git/hooks" {
+                git(&["config", "core.hooksPath", local]);
+            }
+            write_hook(
+                &local_dir.join("pre-commit"),
+                "#!/bin/sh\nprintf 'repo:%s\\n' \"$1\" >> \"$HOOK_LOG\"\nexit \"${HOOK_STATUS:-0}\"\n",
+            );
+            write_hook(
+                &previous.join("pre-commit"),
+                "#!/bin/sh\nprintf 'global:%s\\n' \"$1\" >> \"$HOOK_LOG\"\n",
+            );
+            for status in [0, 17] {
+                std::fs::write(&log, "").unwrap();
+                let result = Command::new("git")
+                    .args(["hook", "run", "pre-commit", "--", "argument with spaces"])
+                    .current_dir(&repo)
+                    .env("GIT_CONFIG_COUNT", "1")
+                    .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+                    .env("GIT_CONFIG_VALUE_0", &dir)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("HOOK_LOG", &log)
+                    .env("HOOK_STATUS", status.to_string())
+                    .status()
+                    .unwrap();
+                assert_eq!(result.code(), Some(status));
+                assert_eq!(
+                    std::fs::read_to_string(&log).unwrap(),
+                    if status == 0 {
+                        "repo:argument with spaces\nglobal:argument with spaces\n"
+                    } else {
+                        "repo:argument with spaces\n"
+                    }
+                );
+            }
+        }
+    }
+
     fn test_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
@@ -1036,9 +1203,54 @@ fi
 }
 
 pub fn ensure_git_hooks() -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = hooks_dir().ok_or_else(|| Error::invalid("HOME is not set"))?;
-    std::fs::create_dir_all(&dir)?;
+    provision_git_hooks(&dir)?;
+    Ok(dir)
+}
+
+fn provision_git_hooks(dir: &std::path::Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| Error::invalid("Invalid hooks directory"))?;
+    std::fs::create_dir_all(parent)?;
+    // Multiple workers can launch together. Keep recovery and wrapper updates
+    // under the same lock so one launch cannot move another's repaired directory.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.with_extension("lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if !dir.is_dir() {
+        match std::fs::symlink_metadata(dir) {
+            Ok(_) => {
+                // Reserve a fresh recovery directory; never overwrite an earlier
+                // recovery or discard the obstructing file/symlink.
+                for attempt in 0u64.. {
+                    let suffix = if attempt == 0 {
+                        String::new()
+                    } else {
+                        format!("-{attempt}")
+                    };
+                    let backup = dir.with_extension(format!("recovery{suffix}"));
+                    match std::fs::create_dir(&backup) {
+                        Ok(()) => {
+                            std::fs::rename(dir, backup.join("original"))?;
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        std::fs::create_dir_all(dir)?;
+    }
     for &hook in MANAGED_HOOKS {
         let path = dir.join(hook);
         let content = hook_script(hook);
@@ -1052,7 +1264,7 @@ pub fn ensure_git_hooks() -> Result<PathBuf> {
             std::fs::set_permissions(&path, perms)?;
         }
     }
-    Ok(dir)
+    Ok(())
 }
 
 pub fn install_global_git_hooks() -> Result<PathBuf> {
