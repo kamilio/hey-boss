@@ -1411,6 +1411,7 @@ extension NSAttributedString.Key {
     static let nativeImageURL = NSAttributedString.Key("HeyBossImageURL")
     static let nativeImageAlt = NSAttributedString.Key("HeyBossImageAlt")
     static let nativeAnchor = NSAttributedString.Key("HeyBossAnchor")
+    static let nativeTaskLine = NSAttributedString.Key("HeyBossTaskLine")
     static let reviewComment = NSAttributedString.Key("HeyBossReviewComment")
 }
 final class NativeMarkdownRenderer {
@@ -1489,8 +1490,11 @@ final class NativeMarkdownRenderer {
                     for child in node.children ?? [] { if let checked = task(child) { return checked } }
                     return nil
                 }
-                let marker = task(item).map { $0 ? "☑" : "☐" } ?? node.start.map { "\($0 + index)." } ?? "•"
-                append(marker + "\t",itemAttributes,item)
+                let checked = task(item)
+                let marker = checked.map { $0 ? "☑" : "☐" } ?? node.start.map { "\($0 + index)." } ?? "•"
+                var markerAttributes = itemAttributes
+                if checked != nil { markerAttributes[.nativeTaskLine] = item.lineStart }
+                append(marker,markerAttributes,item); append("\t",itemAttributes,item)
                 children(item,itemAttributes); newline(itemAttributes,item)
             }
         case "listItem": children(node,attributes)
@@ -5471,6 +5475,45 @@ struct ArtifactImageInput {
 
 final class ArtifactMarkdownText: NSTextView {
     var importImages: (([ArtifactImageInput], Int) -> Void)?
+    static let taskPattern = try! NSRegularExpression(pattern: #"^[ \t]*(?:>[ \t]*)*(?:[-*+]|[0-9]+[.)])[ \t]+(\[[ xX]\])(?=[ \t\r\n]|$)"#)
+    func taskMarker(at offset: Int) -> NSRange? {
+        let source = string as NSString
+        guard offset >= 0, offset <= source.length else { return nil }
+        let line = source.lineRange(for: NSRange(location: offset, length: 0))
+        let value = source.substring(with: line)
+        guard let match = Self.taskPattern.firstMatch(in: value, range: NSRange(location: 0, length: (value as NSString).length)) else { return nil }
+        // A task-looking line inside a fenced code example is still plain text.
+        var fence: (Character, Int)?
+        source.substring(to: line.location).enumerateLines { value, _ in
+            let trimmed = value.trimmingCharacters(in: .whitespaces)
+            guard let first = trimmed.first, first == "`" || first == "~" else { return }
+            let count = trimmed.prefix(while: { $0 == first }).count
+            guard count >= 3 else { return }
+            if let current = fence {
+                if first == current.0, count >= current.1, trimmed.dropFirst(count).trimmingCharacters(in: .whitespaces).isEmpty { fence = nil }
+            } else { fence = (first, count) }
+        }
+        guard fence == nil else { return nil }
+        return NSRange(location: line.location + match.range(at: 1).location, length: 3)
+    }
+    @discardableResult func toggleTask(at offset: Int) -> Bool {
+        guard isEditable, let marker = taskMarker(at: offset) else { return false }
+        let state = NSRange(location: marker.location + 1, length: 1)
+        let checked = (string as NSString).substring(with: state) != " "
+        replace(state, with: checked ? " " : "x", selection: selectedRange())
+        return true
+    }
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let offset = characterIndexForInsertion(at: point)
+        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+           isEditable, let marker = taskMarker(at: offset), let manager = layoutManager, let container = textContainer {
+            let glyphs = manager.glyphRange(forCharacterRange: marker, actualCharacterRange: nil)
+            let rect = manager.boundingRect(forGlyphRange: glyphs, in: container).offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+            if rect.contains(point) { window?.makeFirstResponder(self); toggleTask(at: offset); return }
+        }
+        super.mouseDown(with: event)
+    }
     static func escapedLabel(_ label: String) -> String {
         label.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]").replacingOccurrences(of: "\n", with: " ")
     }
@@ -5514,9 +5557,11 @@ final class ArtifactMarkdownText: NSTextView {
         return super.performDragOperation(sender)
     }
     func replace(_ range: NSRange, with replacement: String, selection: NSRange) {
+        breakUndoCoalescing()
         guard isEditable, shouldChangeText(in: range, replacementString: replacement) else { return }
         textStorage?.replaceCharacters(in: range, with: replacement)
         didChangeText(); setSelectedRange(selection); scrollRangeToVisible(selection)
+        breakUndoCoalescing()
     }
     func wrap(_ marker: String) {
         let selection = selectedRange(), source = string as NSString, width = (marker as NSString).length
@@ -5597,7 +5642,7 @@ final class ArtifactEditorWindow: NSWindow {
                 case "a": text.selectAll(nil); return true
                 case "c": text.copy(nil); return true
                 case "v": text.paste(nil); return true
-                case "x": text.cut(nil); return true
+                case "x" where !flags.contains(.shift): text.cut(nil); return true
                 case "z": if flags.contains(.shift) { text.undoManager?.redo() } else { text.undoManager?.undo() }; return true
                 default: break
                 }
@@ -5651,6 +5696,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     var importingImage = false
     var imageFailure: String?
     var previewImages: [URL: NSImage] = [:]
+    var previewSource: String?
     var onClose: () -> Void = {}
     var onOpen: (ArtifactLaunch) -> Void = { _ in }
     var scrollObserver: NSObjectProtocol?
@@ -5736,7 +5782,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         text.isAutomaticTextReplacementEnabled = false; text.isAutomaticSpellingCorrectionEnabled = false
         text.isAutomaticLinkDetectionEnabled = false; text.isContinuousSpellCheckingEnabled = true
         text.usesFindBar = true; text.isIncrementalSearchingEnabled = true; text.setAccessibilityLabel("Markdown editor")
-        reader.isEditable = false; reader.usesFindBar = true; reader.setAccessibilityLabel("Markdown preview")
+        reader.isEditable = false; reader.usesFindBar = true; reader.delegate = self; reader.setAccessibilityLabel("Markdown preview")
+        reader.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .cursor: NSCursor.pointingHand]
         readerScroll.isHidden = true
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor),
@@ -5778,7 +5825,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             item.menu = NSMenu(title: "Format")
             // The native toolbar pull-down reserves its first item as the button title.
             item.menu.addItem(withTitle: "Format", action: nil, keyEquivalent: "")
-            let commands: [(String, String, Bool)] = [("Bold", "b", false), ("Italic", "i", false), ("Link…", "k", false), ("Inline Code", "c", true), ("Heading 1", "1", false), ("Heading 2", "2", false), ("Heading 3", "3", false), ("Bullet List", "8", true), ("Numbered List", "7", true), ("Task List", "l", true)]
+            let commands: [(String, String, Bool)] = [("Bold", "b", false), ("Italic", "i", false), ("Strikethrough", "x", true), ("Link…", "k", false), ("Inline Code", "c", true), ("Heading 1", "1", false), ("Heading 2", "2", false), ("Heading 3", "3", false), ("Bullet List", "8", true), ("Numbered List", "7", true), ("Checklist", "l", true), ("Toggle Checked", "\r", false)]
             for (label, key, shift) in commands {
                 let entry = NSMenuItem(title: label, action: #selector(formatCommand(_:)), keyEquivalent: key)
                 entry.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; entry.target = self; item.menu.addItem(entry)
@@ -5793,7 +5840,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         default: return nil
         }
     }
-    @objc func formatCommand(_ sender: NSMenuItem) { writeMode(); _ = command(sender.keyEquivalent, shift: sender.keyEquivalentModifierMask.contains(.shift)) }
+    @objc func formatCommand(_ sender: NSMenuItem) {
+        if sender.keyEquivalent != "\r" { writeMode() }
+        _ = command(sender.keyEquivalent, shift: sender.keyEquivalentModifierMask.contains(.shift))
+    }
     func configureText(_ view: NSTextView, scroll: NSScrollView) {
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.borderType = .noBorder
         view.frame = NSRect(x: 0, y: 0, width: 750, height: 600)
@@ -5984,6 +6034,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         // Colors are temporary. Fonts must live in storage for TextKit to measure headings.
         // Attribute-only edits never enter the plain-text undo or autosave stream.
         manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
+        manager.removeTemporaryAttribute(.strikethroughStyle, forCharacterRange: range)
         let rules: [(String, NSColor, NSFont?)] = [
             ("(?m)^# .+$", .labelColor, .systemFont(ofSize: 30, weight: .bold)),
             ("(?m)^## .+$", .labelColor, .systemFont(ofSize: 22, weight: .semibold)),
@@ -5996,6 +6047,17 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         ]
         let visibleSource = source.substring(with: range)
         let desired = NSMutableAttributedString(string: visibleSource, attributes: [.font: NSFont.systemFont(ofSize: 16), .paragraphStyle: text.defaultParagraphStyle ?? NSParagraphStyle.default])
+        let strikes = try! NSRegularExpression(pattern: #"(?<![\\~])~~([^~\n]+)~~(?!~)"#)
+        let code = try! NSRegularExpression(pattern: #"`+[^`\n]*`+"#)
+        let codeRanges = code.matches(in: visibleSource, range: NSRange(location: 0, length: desired.length)).map(\.range)
+        for match in strikes.matches(in: visibleSource, range: NSRange(location: 0, length: desired.length)) {
+            guard !codeRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { continue }
+            let interior = match.range(at: 1)
+            manager.addTemporaryAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, forCharacterRange: NSRange(location: range.location + interior.location, length: interior.length))
+            for offset in [match.range.location, NSMaxRange(match.range) - 2] {
+                manager.addTemporaryAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor, forCharacterRange: NSRange(location: range.location + offset, length: 2))
+            }
+        }
         for (pattern, color, font) in rules {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             for match in regex.matches(in: visibleSource, range: NSRange(location: 0, length: (visibleSource as NSString).length)) {
@@ -6070,7 +6132,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     func renderPreview() {
         renderGeneration += 1; let generation = renderGeneration, source = session.body, executable = backend.cli
-        reader.string = "Rendering…"
+        let selection = reader.selectedRange(), position = readerScroll.contentView.bounds.origin
+        if previewSource == nil { reader.string = "Rendering…" }
+        previewSource = nil
         NativeMarkdownRenderer.queue.addOperation { [weak self] in
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-editor-preview-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -6084,9 +6148,46 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 if done.wait(timeout: .now() + 15) != .success { process.terminate(); if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }; throw StorageError(description: "Preview timed out") }
                 guard process.terminationStatus == 0 else { throw StorageError(description: "Preview unavailable") }
                 let node = try JSONDecoder().decode(NativeMarkdownNode.self, from: Data(contentsOf: output))
-                onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.textStorage?.setAttributedString(NativeMarkdownRenderer.render(node, localImages: true)); self.loadPreviewImages(generation: generation); self.reader.setSelectedRange(NSRange(location: 0, length: 0)); self.reader.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
+                onMain {
+                    guard let self, generation == self.renderGeneration else { return }
+                    self.installPreview(node, source: source); self.loadPreviewImages(generation: generation)
+                    self.reader.setSelectedRange(NSRange(location: min(selection.location, (self.reader.string as NSString).length), length: 0))
+                    self.readerScroll.contentView.scroll(to: position); self.readerScroll.reflectScrolledClipView(self.readerScroll.contentView)
+                }
             } catch { onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.string = source; self.status.stringValue = "Preview unavailable · showing source" } }
         }
+    }
+    func installPreview(_ node: NativeMarkdownNode, source: String) {
+        let rendered = NSMutableAttributedString(attributedString: NativeMarkdownRenderer.render(node, localImages: true))
+        rendered.enumerateAttribute(.nativeTaskLine, in: NSRange(location: 0, length: rendered.length)) { value, range, _ in
+            guard let line = value as? Int else { return }
+            rendered.addAttributes([.link: "hey-boss-checklist:\(line)", .toolTip: "Check or uncheck (⌘Return)"], range: range)
+        }
+        reader.textStorage?.setAttributedString(rendered); previewSource = source
+    }
+    @discardableResult func togglePreviewTask(at index: Int) -> Bool {
+        guard previewSource == text.string, let storage = reader.textStorage, index >= 0, index < storage.length,
+              let line = storage.attribute(.sourceStart, at: index, effectiveRange: nil) as? Int, line > 0 else { return false }
+        let source = text.string as NSString
+        var offset = 0
+        for _ in 1..<line {
+            guard offset < source.length else { return false }
+            offset = NSMaxRange(source.lineRange(for: NSRange(location: offset, length: 0)))
+        }
+        guard let marker = text.taskMarker(at: offset), text.toggleTask(at: offset) else { return false }
+        let checked = (text.string as NSString).substring(with: NSRange(location: marker.location + 1, length: 1)) != " "
+        // Completion changes one character, so source lines and preview layout stay valid.
+        storage.enumerateAttribute(.nativeTaskLine, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if value as? Int == line { storage.replaceCharacters(in: range, with: checked ? "☑" : "☐") }
+        }
+        previewSource = text.string
+        return true
+    }
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard textView === reader, charIndex >= 0, charIndex < reader.textStorage!.length,
+              reader.textStorage?.attribute(.nativeTaskLine, at: charIndex, effectiveRange: nil) != nil else { return false }
+        _ = togglePreviewTask(at: charIndex)
+        return true
     }
     func loadPreviewImages(generation: Int) {
         guard let storage = reader.textStorage else { return }
@@ -6249,8 +6350,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             target.performTextFinderAction(item)
         case ("b", false) where window.firstResponder === text: bold()
         case ("i", false) where window.firstResponder === text: italic()
+        case ("x", true) where window.firstResponder === text: text.wrap("~~")
         case ("k", false) where window.firstResponder === text: link()
         case ("l", true) where window.firstResponder === text: task()
+        case ("\r", false) where window.firstResponder === text: return text.toggleTask(at: text.selectedRange().location)
+        case ("\r", false) where window.firstResponder === reader: return togglePreviewTask(at: reader.selectedRange().location)
+        case ("z", _) where window.firstResponder === reader:
+            if shift { text.undoManager?.redo() } else { text.undoManager?.undo() }
+            renderPreview()
         case ("7", true), ("&", true):
             guard window.firstResponder === text else { return false }; text.prefixLines("1. ")
         case ("8", true), ("*", true):
@@ -6270,7 +6377,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         let groups: [(String, [(String, String, Bool)])] = [
             ("File", [("New note", "n", false), ("Open Markdown…", "o", false), ("Export Markdown…", "s", true), ("Close", "w", false)]),
             ("Edit", [("Undo", "z", false), ("Redo", "z", true), ("Cut", "x", false), ("Copy", "c", false), ("Paste", "v", false), ("Select All", "a", false), ("Find…", "f", false), ("Find Next", "g", false), ("Find Previous", "g", true)]),
-            ("Format", [("Bold", "b", false), ("Italic", "i", false), ("Link", "k", false), ("Inline Code", "c", true), ("Task List", "l", true), ("Bullet List", "8", true), ("Numbered List", "7", true)] + (1...6).map { ("Heading \($0)", String($0), false) }),
+            ("Format", [("Bold", "b", false), ("Italic", "i", false), ("Strikethrough", "x", true), ("Link", "k", false), ("Inline Code", "c", true), ("Checklist", "l", true), ("Toggle Checked", "\r", false), ("Bullet List", "8", true), ("Numbered List", "7", true)] + (1...6).map { ("Heading \($0)", String($0), false) }),
             ("View", [("Toggle Focus", "f", true), ("Quick Switch…", "p", false), ("Toggle Reading View", "e", false)])
         ]
         for (title, commands) in groups {
@@ -6299,7 +6406,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         guard let view = window.firstResponder as? NSTextView else { return }
         switch key {
         case "z": if shift { view.undoManager?.redo() } else { view.undoManager?.undo() }
-        case "x": view.cut(nil)
+        case "x" where !shift: view.cut(nil)
         case "c": view.copy(nil)
         case "v": view.paste(nil)
         case "a": view.selectAll(nil)

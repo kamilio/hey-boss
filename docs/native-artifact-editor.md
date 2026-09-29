@@ -8,6 +8,8 @@ The editor starts in focus mode with a native Liquid Glass window toolbar, an ed
 
 ⌘K opens a native link popup with text and URL fields; placing the caret inside a link lets you edit or remove it. Return confirms and Escape cancels. Drop image files into the editor or paste copied images with ⌘V. Imports run in the background and insert at the drop position even while you type. Artifacts store images as attachments; local Markdown keeps a sibling `.assets` folder. Images render in Read view. Each image must fit within 10 MiB; TIFF and HEIC images are converted to PNG.
 
+⌘⇧X toggles strikethrough (`~~text~~`) and shows the strike while editing. ⌘⇧L turns selected lines into a checklist. Click a checkbox in Edit or Read view, or use ⌘Return on the item, to check or uncheck it. Return continues a checklist with an unchecked item; Return on an empty item ends the list. Completion supports undo and saves automatically.
+
 Changes save automatically after a brief typing pause and when the window loses focus or closes. The editor journals pending text and a stable request ID before sending a revision-checked write through the Rust artifact API. Closed notes continue syncing; unsent drafts reopen after an app restart. A conflicting external edit is preserved: export a copy or reload the saved version. Reload keeps the old draft in the private recovery directory.
 
 Artifact Markdown is limited to 1 MiB; local files support 64 MiB. Editing uses one native text storage with noncontiguous layout and visible-range syntax coloring. Preview parsing runs off the UI thread through the shared Rust Markdown renderer.
