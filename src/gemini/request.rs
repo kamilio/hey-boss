@@ -538,7 +538,17 @@ pub fn convert_request(
                 )?;
             }
             "reasoning" => {
-                let carrier = string(item, "encrypted_content")?;
+                // Reasoning from another provider (a thread that switched routes,
+                // e.g. an overwrite moved from OpenAI to Gemini) is opaque here and
+                // carries no Gemini signatures; drop it. Our own carriers stay strict.
+                let Some(carrier) = item
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .filter(|c| c.starts_with(super::replay::CARRIER_PREFIX))
+                else {
+                    index += 1;
+                    continue;
+                };
                 let replay = codec.open(&model, carrier)?;
                 let expected = replay["items"]
                     .as_array()

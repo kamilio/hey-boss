@@ -221,9 +221,6 @@ fn reasoning_cannot_be_tampered_lost_or_crossed_between_models() {
     let mut missing = r.clone();
     missing["input"].as_array_mut().unwrap().pop();
     assert!(convert_request(&missing, &config(), &codec()).is_err());
-    let mut foreign = r.clone();
-    foreign["input"][0]["encrypted_content"] = json!("OpenAI-encrypted-state");
-    assert!(convert_request(&foreign, &config(), &codec()).is_err());
     let mut tampered = r.clone();
     let mut carrier = tampered["input"][0]["encrypted_content"]
         .as_str()
@@ -689,4 +686,22 @@ fn custom_grammar_tools_declare_grammar_in_description() {
     );
     assert_eq!(described("plain"), "Plain.");
     assert!(converted.tools.values().all(|t| t.custom));
+}
+
+#[test]
+fn reasoning_from_another_provider_is_dropped_after_a_route_switch() {
+    let mut r = request();
+    r["input"] = json!([
+        {"role":"user","content":"list files"},
+        {"type":"reasoning","summary":[],"encrypted_content":"gAAAAAOpenAI-encrypted-state"},
+        {"type":"reasoning","summary":[{"type":"summary_text","text":"no carrier"}]},
+        {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Listing."}]},
+        {"role":"user","content":"continue"}
+    ]);
+    let body = convert_request(&r, &config(), &codec()).unwrap().body;
+    let contents = body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3);
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(contents[1]["parts"], json!([{"text":"Listing."}]));
+    assert!(!body.to_string().contains("OpenAI-encrypted-state"));
 }
