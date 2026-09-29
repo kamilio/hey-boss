@@ -86,9 +86,7 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
         SkillAction::Show => print!("{}", hey_boss::skill::MARKDOWN),
         SkillAction::Install => return install_skill(home, options.json),
         SkillAction::List { project_dir } => {
-            let cwd = project_dir
-                .clone()
-                .or_else(|| std::env::current_dir().ok());
+            let cwd = project_dir.clone().or_else(|| std::env::current_dir().ok());
             let report = hey_boss::skill::audit_report(home, cwd.as_deref());
             if options.json {
                 println!("{report}");
@@ -99,7 +97,11 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
         SkillAction::Sync { names, hosts } => {
             let paths = hey_boss::skill::sync_skills(
                 home,
-                if names.is_empty() { None } else { Some(names.as_slice()) },
+                if names.is_empty() {
+                    None
+                } else {
+                    Some(names.as_slice())
+                },
             )?;
             let mut synced_hosts = Vec::new();
             for host in hosts {
@@ -112,25 +114,33 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
                     json!({"ok":true,"paths":paths,"hosts":synced_hosts,"selected":hey_boss::skill::selected_skills(home)})
                 );
             } else {
-                println!("Synced {} skill files across Codex, Claude, and Agents.", paths.len());
+                println!(
+                    "Synced {} skill files across Codex, Claude, and Agents.",
+                    paths.len()
+                );
                 for host in &synced_hosts {
                     println!("Synced skill bundle to host {host}.");
                 }
             }
         }
         SkillAction::Select { names } => {
-            let mut current: Vec<String> = hey_boss::skill::selected_skills(home).into_iter().collect();
+            let mut current: Vec<String> =
+                hey_boss::skill::selected_skills(home).into_iter().collect();
             current.extend(names.iter().cloned());
             let updated = hey_boss::skill::set_selected_skills(home, &current)?;
             let paths = hey_boss::skill::sync_skills(home, None)?;
             if options.json {
                 println!("{}", json!({"ok":true,"selected":updated,"paths":paths}));
             } else {
-                println!("Selected skills: {}", updated.into_iter().collect::<Vec<_>>().join(", "));
+                println!(
+                    "Selected skills: {}",
+                    updated.into_iter().collect::<Vec<_>>().join(", ")
+                );
             }
         }
         SkillAction::Unselect { names } => {
-            let remove: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+            let remove: std::collections::BTreeSet<&str> =
+                names.iter().map(String::as_str).collect();
             let remaining: Vec<String> = hey_boss::skill::selected_skills(home)
                 .into_iter()
                 .filter(|s| !remove.contains(s.as_str()))
@@ -139,7 +149,10 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
             if options.json {
                 println!("{}", json!({"ok":true,"selected":updated}));
             } else {
-                println!("Selected skills: {}", updated.into_iter().collect::<Vec<_>>().join(", "));
+                println!(
+                    "Selected skills: {}",
+                    updated.into_iter().collect::<Vec<_>>().join(", ")
+                );
             }
         }
     }
@@ -150,7 +163,12 @@ fn push_skill_bundle_ssh(home: &Path, host: &str) -> io::Result<()> {
     use std::process::{Command, Stdio};
     let archive = hey_boss::skill::archive_for_home(Some(home))?;
     let mut child = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", host, &hey_boss::skill::remote_install_script()])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            host,
+            &hey_boss::skill::remote_install_script(),
+        ])
         .stdin(Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -158,13 +176,18 @@ fn push_skill_bundle_ssh(home: &Path, host: &str) -> io::Result<()> {
     }
     let status = child.wait()?;
     if !status.success() {
-        return Err(io::Error::other(format!("SSH skill sync failed for {host}")));
+        return Err(io::Error::other(format!(
+            "SSH skill sync failed for {host}"
+        )));
     }
     Ok(())
 }
 
 fn print_skill_audit(report: &serde_json::Value) {
-    println!("Global Skills (policy max: {} lines):", report["max_lines_policy"]);
+    println!(
+        "Global Skills (policy max: {} lines):",
+        report["max_lines_policy"]
+    );
     if let Some(skills) = report["global_skills"].as_array() {
         for s in skills {
             let mark = if s["selected"] == true { "[x]" } else { "[ ]" };
@@ -189,9 +212,14 @@ fn print_skill_audit(report: &serde_json::Value) {
             }
         }
     }
-    if let Some(proj) = report["project_skills"].as_array().filter(|p| !p.is_empty()) {
-        println!("
-Project Skills:");
+    if let Some(proj) = report["project_skills"]
+        .as_array()
+        .filter(|p| !p.is_empty())
+    {
+        println!(
+            "
+Project Skills:"
+        );
         for s in proj {
             println!(
                 "  • {} ({} lines)",

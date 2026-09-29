@@ -3770,7 +3770,8 @@ mod tests {
         let main = Fixture::new();
         main.capture();
         main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name) VALUES('named:Native fleet','Instructions',0,1,'Boss')", []).unwrap();
-        let mut expected = rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()[0].clone();
+        let mut expected =
+            rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()[0].clone();
         // Older senders had implicit sequential ordering. New projects default
         // to explicit dependencies, but legacy replay retains its old behavior.
         expected["subtask_scheduling"] = json!("sequential");

@@ -14,12 +14,7 @@ pub const AGENT_ROOTS: &[(&str, &str)] = &[
     ("agents", ".agents"),
     ("claude", ".claude"),
 ];
-pub const DEFAULT_SELECTED_SKILLS: &[&str] = &[
-    "hey-boss",
-    "stacked-prs",
-    "hey-gh",
-    "stop-slop",
-];
+pub const DEFAULT_SELECTED_SKILLS: &[&str] = &["hey-boss", "stacked-prs", "hey-gh", "stop-slop"];
 
 // Publish references before the entrypoint so its links already resolve.
 pub const FILES: &[(&str, &str)] = &[
@@ -135,8 +130,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(&pending)?;
-    let result =
-        io::Write::write_all(&mut file, bytes).and_then(|_| fs::rename(&pending, path));
+    let result = io::Write::write_all(&mut file, bytes).and_then(|_| fs::rename(&pending, path));
     if result.is_err() {
         let _ = fs::remove_file(&pending);
     }
@@ -167,11 +161,7 @@ fn extract_description(markdown: &str) -> String {
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("description:") {
-                return rest
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string();
+                return rest.trim().trim_matches('"').trim_matches('\'').to_string();
             }
             continue;
         }
@@ -182,7 +172,9 @@ fn extract_description(markdown: &str) -> String {
     String::new()
 }
 
-fn collect_skill_files(skill_dir: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
+type SkillBundle = Vec<(String, Vec<u8>)>;
+
+fn collect_skill_files(skill_dir: &Path) -> io::Result<SkillBundle> {
     let mut out = Vec::new();
     let skill_md = skill_dir.join("SKILL.md");
     if !skill_md.is_file() {
@@ -190,9 +182,7 @@ fn collect_skill_files(skill_dir: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
     }
     let refs_dir = skill_dir.join("references");
     if refs_dir.is_dir() {
-        let mut entries: Vec<_> = fs::read_dir(&refs_dir)?
-            .filter_map(|e| e.ok())
-            .collect();
+        let mut entries: Vec<_> = fs::read_dir(&refs_dir)?.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let p = entry.path();
@@ -380,9 +370,7 @@ pub fn discover_project_skills(project_dir: &Path) -> Vec<SkillEntry> {
 
 pub fn audit_report(home: &Path, project_dir: Option<&Path>) -> Value {
     let global_skills = discover_global_skills(home);
-    let project_skills = project_dir
-        .map(discover_project_skills)
-        .unwrap_or_default();
+    let project_skills = project_dir.map(discover_project_skills).unwrap_or_default();
     let selected: Vec<String> = selected_skills(home).into_iter().collect();
     json!({
         "ok": true,
@@ -393,7 +381,7 @@ pub fn audit_report(home: &Path, project_dir: Option<&Path>) -> Value {
     })
 }
 
-fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<Vec<(String, Vec<u8>)>>> {
+fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<SkillBundle>> {
     if name == "hey-boss" {
         return Ok(Some(
             FILES
@@ -410,7 +398,10 @@ fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<Vec
                 return Ok(Some(files));
             }
         }
-        let flat = home.join(root_dir).join("skills").join(format!("{name}.md"));
+        let flat = home
+            .join(root_dir)
+            .join("skills")
+            .join(format!("{name}.md"));
         if flat.is_file() {
             return Ok(Some(vec![("SKILL.md".into(), fs::read(&flat)?)]));
         }
@@ -637,17 +628,17 @@ mod tests {
                 }
                 assert_eq!(
                     std::fs::read_to_string(
-                        remote_home
-                            .0
-                            .join(root)
-                            .join("skills/stacked-prs/SKILL.md")
+                        remote_home.0.join(root).join("skills/stacked-prs/SKILL.md")
                     )
                     .unwrap(),
                     "# Stacked PRs\nUse gh stack.\n"
                 );
             }
         }
-        assert_eq!(std::fs::read_to_string(remote_custom).unwrap(), "User notes");
+        assert_eq!(
+            std::fs::read_to_string(remote_custom).unwrap(),
+            "User notes"
+        );
     }
 
     #[test]
@@ -673,9 +664,9 @@ mod tests {
         let before = discover_global_skills(&home.0);
         let stacked_entry = before.iter().find(|s| s.name == "stacked-prs").unwrap();
         assert!(stacked_entry.selected);
-        assert_eq!(stacked_entry.agents["codex"], true);
-        assert_eq!(stacked_entry.agents["claude"], false);
-        assert_eq!(stacked_entry.agents["agents"], false);
+        assert!(stacked_entry.agents["codex"]);
+        assert!(!stacked_entry.agents["claude"]);
+        assert!(!stacked_entry.agents["agents"]);
         assert!(
             stacked_entry
                 .warnings
@@ -685,12 +676,7 @@ mod tests {
 
         let bloated_entry = before.iter().find(|s| s.name == "bloated-skill").unwrap();
         assert!(!bloated_entry.selected);
-        assert!(
-            bloated_entry
-                .warnings
-                .iter()
-                .any(|w| w.kind == "too_long")
-        );
+        assert!(bloated_entry.warnings.iter().any(|w| w.kind == "too_long"));
         assert!(
             bloated_entry
                 .warnings
@@ -706,12 +692,12 @@ mod tests {
         let stacked_after = after.iter().find(|s| s.name == "stacked-prs").unwrap();
         assert!(stacked_after.in_sync);
         assert!(stacked_after.warnings.is_empty());
-        assert_eq!(stacked_after.agents["codex"], true);
-        assert_eq!(stacked_after.agents["claude"], true);
-        assert_eq!(stacked_after.agents["agents"], true);
+        assert!(stacked_after.agents["codex"]);
+        assert!(stacked_after.agents["claude"]);
+        assert!(stacked_after.agents["agents"]);
 
         let bloated_after = after.iter().find(|s| s.name == "bloated-skill").unwrap();
-        assert_eq!(bloated_after.agents["codex"], false);
-        assert_eq!(bloated_after.agents["claude"], true);
+        assert!(!bloated_after.agents["codex"]);
+        assert!(bloated_after.agents["claude"]);
     }
 }
