@@ -395,8 +395,8 @@ fn unsupported_semantics_fail_explicitly() {
             "tools",
             json!([{"type":"custom","name":"patch","format":{"type":"grammar","syntax":"lark"}}]),
         ),
-        ("parallel_tool_calls", json!(false)),
-        ("service_tier", json!("priority")),
+        ("parallel_tool_calls", json!("no")),
+        ("service_tier", json!("turbo")),
         ("truncation", json!("auto")),
         ("include", json!(["message.output_text.logprobs"])),
         ("reasoning", json!({"effort":"unknown"})),
@@ -704,4 +704,37 @@ fn reasoning_from_another_provider_is_dropped_after_a_route_switch() {
     assert_eq!(contents[1]["role"], "model");
     assert_eq!(contents[1]["parts"], json!([{"text":"Listing."}]));
     assert!(!body.to_string().contains("OpenAI-encrypted-state"));
+}
+
+#[test]
+fn text_verbosity_is_accepted_but_not_invented() {
+    for verbosity in [json!("low"), json!("medium"), json!("high"), Value::Null] {
+        let mut r = request();
+        r["text"] = json!({"verbosity":verbosity});
+        let body = convert_request(&r, &config(), &codec()).unwrap().body;
+        assert!(!body.to_string().contains("verbosity"));
+    }
+    let mut r = request();
+    r["text"] = json!({"verbosity":"extreme"});
+    assert!(convert_request(&r, &config(), &codec()).is_err());
+}
+
+#[test]
+fn service_tier_hints_are_accepted_but_not_forwarded() {
+    for tier in ["auto", "default", "flex", "scale", "priority"] {
+        let mut r = request();
+        r["service_tier"] = json!(tier);
+        let body = convert_request(&r, &config(), &codec()).unwrap().body;
+        assert!(
+            !body.to_string().contains(tier) || tier == "default",
+            "{tier}"
+        );
+    }
+}
+
+#[test]
+fn sequential_tool_call_preference_is_accepted() {
+    let mut r = request();
+    r["parallel_tool_calls"] = json!(false);
+    assert!(convert_request(&r, &config(), &codec()).is_ok());
 }

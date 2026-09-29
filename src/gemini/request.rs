@@ -355,12 +355,14 @@ pub fn convert_request(
     {
         bail!("Automatic truncation would lose input; unsupported");
     }
-    if request
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !["auto", "default"].contains(&s))
-    {
-        bail!("Requested service_tier has no Gemini equivalent");
+    // A latency/billing hint (Codex fast mode sends priority). Gemini has no
+    // equivalent, so any known tier is accepted and served normally.
+    if request.get("service_tier").is_some_and(|tier| {
+        !tier.is_null()
+            && !["auto", "default", "flex", "scale", "priority"]
+                .contains(&tier.as_str().unwrap_or(""))
+    }) {
+        bail!("Unknown service_tier");
     }
     if let Some(include) = request.get("include") {
         for field in include
@@ -817,7 +819,11 @@ pub fn convert_request(
             .as_object()
             .ok_or_else(|| anyhow!("text must be an object"))?
         {
-            if key != "format" && !(key == "verbosity" && value == "medium") {
+            // Gemini has no verbosity control; Codex sends low or high per model.
+            let verbosity = key == "verbosity"
+                && (value.is_null()
+                    || ["low", "medium", "high"].contains(&value.as_str().unwrap_or("")));
+            if key != "format" && !verbosity {
                 bail!("Unsupported text option {key}");
             }
         }
@@ -859,11 +865,8 @@ pub fn convert_request(
             body["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"] = json!([name]);
         }
     }
-    if request.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false)
-        && !tools.is_empty()
-    {
-        bail!("Gemini cannot enforce parallel_tool_calls:false; refusing a lossy conversion");
-    }
+    // Gemini cannot limit a turn to one call. parallel_tool_calls:false is
+    // accepted anyway: clients such as Codex execute every returned call in order.
     if body.pointer("/toolConfig/functionCallingConfig/mode") == Some(&json!("ANY"))
         && body.pointer("/generationConfig/responseMimeType") == Some(&json!("application/json"))
     {
