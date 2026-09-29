@@ -4,6 +4,7 @@ mod fallback;
 mod gemini;
 mod guidance;
 pub(crate) mod logs;
+mod messages;
 mod overview;
 mod recovery;
 mod sse;
@@ -209,6 +210,16 @@ fn token(request: &Request) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .or_else(|| {
+            messages::is_path(request.uri().path())
+                .then(|| {
+                    request
+                        .headers()
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok())
+                })
+                .flatten()
+        })
+        .or_else(|| {
             request
                 .headers()
                 .get(header::COOKIE)
@@ -259,6 +270,12 @@ async fn authenticate(
     }
     if path == "/logs" {
         return (StatusCode::UNAUTHORIZED, axum::response::Html(LOGIN)).into_response();
+    }
+    if messages::is_path(path) {
+        return messages::error(
+            StatusCode::UNAUTHORIZED,
+            "A valid host access key is required",
+        );
     }
     error(
         StatusCode::UNAUTHORIZED,
@@ -555,6 +572,19 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 fn requested_effort<'a>(path: &str, value: &'a Value) -> Option<&'a str> {
+    if messages::is_path(path) {
+        return value
+            .pointer("/output_config/effort")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/reasoning/effort").and_then(Value::as_str))
+            .or_else(
+                || match value.pointer("/thinking/type").and_then(Value::as_str) {
+                    Some("disabled") => Some("none"),
+                    Some("enabled" | "adaptive") => Some("medium"),
+                    _ => None,
+                },
+            );
+    }
     if path.trim_end_matches('/').ends_with("/chat/completions") {
         value
             .get("reasoning_effort")
@@ -928,6 +958,8 @@ async fn forward(State(service): State<Arc<Service>>, request: Request) -> Respo
     let proxy = Arc::new(snapshot);
     let response = if chat::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
         chat::forward(proxy, request).await
+    } else if messages::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
+        messages::forward(proxy, request).await
     } else {
         fallback::forward(proxy, request).await
     };

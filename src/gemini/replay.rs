@@ -21,6 +21,14 @@ impl ReasoningCodec {
             .cloned()
             .ok_or_else(|| anyhow!("Invalid Gemini replay items"))
     }
+    /// Authenticated native turn carrier for the Messages facade. The separate
+    /// domain prevents a Messages carrier from being replayed as Responses.
+    pub fn seal_messages(&self, model: &str, parts: &Value, content: &Value) -> Result<String> {
+        self.seal(&format!("messages:{model}"), parts, content)
+    }
+    pub fn open_messages(&self, model: &str, carrier: &str) -> Result<Value> {
+        self.open(&format!("messages:{model}"), carrier)
+    }
     pub(crate) fn seal(&self, model: &str, parts: &Value, items: &Value) -> Result<String> {
         let nonce: [u8; 12] = rand::random();
         let data = serde_json::to_vec(&serde_json::json!({"parts":parts,"items":items}))?;

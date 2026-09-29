@@ -46,7 +46,7 @@ pub(crate) fn readable_tool_prefix(name: &str) -> String {
         .take(32)
         .collect()
 }
-pub(crate) fn native_tool_name(name: &str) -> String {
+pub fn native_tool_name(name: &str) -> String {
     let hash = Sha256::digest(name.as_bytes());
     let readable = readable_tool_prefix(name);
     format!("hey_{readable}_{}", &format!("{hash:x}")[..16])

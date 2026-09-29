@@ -305,6 +305,7 @@ pub struct Alias {
 pub enum ApiShape {
     Responses,
     ChatCompletions,
+    Messages,
     Completions,
 }
 
@@ -318,6 +319,10 @@ impl ApiShape {
                 Some(Self::ChatCompletions)
             }
             "/v1/completions" | "/completions" => Some(Self::Completions),
+            "/v1/custom/messages"
+            | "/custom/v1/messages"
+            | "/v1/custom/messages/count_tokens"
+            | "/custom/v1/messages/count_tokens" => Some(Self::Messages),
             _ => None,
         }
     }

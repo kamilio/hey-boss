@@ -113,6 +113,10 @@ For a chat-only client using a Responses model or Gemini, set its base URL to **
 
 Model routing and credential changes apply to new requests without restarting. Invalid edits leave the last valid config active. See the complete [overwrite example](examples/overwrites.config.json).
 
+## Custom Messages / Claude Code
+
+Use `http://127.0.0.1:8080/custom` as the Anthropic SDK or Claude Code base URL. Its `/v1/messages` call reaches the custom Messages shim. Gemini requests and replies translate directly to/from native Gemini, including SSE, tools, signed history, and token counting for compaction. [Setup and compatibility details](docs/custom-messages.md).
+
 ## Set up Gemini
 
 Choose either a Gemini API key or Google Cloud Application Default Credentials (ADC). After setup, send Responses requests with a `gemini/` model prefix:

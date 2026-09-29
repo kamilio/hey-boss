@@ -300,7 +300,7 @@ impl Store {
             .pointer("/usage")
             .or_else(|| value.pointer("/response/usage"));
         let Some(usage) = usage else { return };
-        let input = usage
+        let mut input = usage
             .get("input_tokens")
             .or_else(|| usage.get("prompt_tokens"))
             .and_then(Value::as_u64);
@@ -316,10 +316,22 @@ impl Store {
             .or_else(|| usage.get("prompt_tokens_details"));
         let cached = details
             .and_then(|v| v.get("cached_tokens"))
+            .or_else(|| usage.get("cache_read_input_tokens"))
             .and_then(Value::as_u64);
         let writes = details
             .and_then(|v| v.get("cache_write_tokens"))
+            .or_else(|| usage.get("cache_creation_input_tokens"))
             .and_then(Value::as_u64);
+        // Messages excludes cache reads/writes from input_tokens. Normalize to
+        // the inclusive input count used by the dashboard and other adapters.
+        if usage.get("cache_read_input_tokens").is_some()
+            || usage.get("cache_creation_input_tokens").is_some()
+        {
+            input = input.map(|n| {
+                n.saturating_add(cached.unwrap_or(0))
+                    .saturating_add(writes.unwrap_or(0))
+            });
+        }
         let reasoning = usage
             .pointer("/output_tokens_details/reasoning_tokens")
             .or_else(|| usage.pointer("/completion_tokens_details/reasoning_tokens"))

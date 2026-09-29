@@ -32,9 +32,9 @@ An alias's `api_key` is the project name, never the key itself. A reasoning rout
 
 ## API-specific overwrites
 
-An alias may include `api_shape`: `responses`, `chat_completions`, or legacy `completions`. It gates the whole rule, including model, API key, reasoning overrides, and reasoning routes. Unscoped rules retain their previous behavior. The same `from` can appear in disjoint shapes; duplicate or overlapping shapes are invalid.
+An alias may include `api_shape`: `responses`, `chat_completions`, `messages`, or legacy `completions`. It gates the whole rule, including model, API key, reasoning overrides, and reasoning routes. Unscoped rules retain their previous behavior. The same `from` can appear in disjoint shapes; duplicate or overlapping shapes are invalid.
 
-Shapes are identified from the endpoint, not payload fields. Responses includes HTTP, streaming, WebSockets, and `/v1/responses/compact`. Chat Completions includes `/v1/chat/completions` and the custom adapter at `/v1/custom/chat/completions`. Scoped rules do not affect model metadata, audio, Realtime, or native Gemini endpoints. Matching ignores a trailing slash and query parameters. Alias targets are still resolved only once.
+Shapes are identified from the endpoint, not payload fields. Responses includes HTTP, streaming, WebSockets, and `/v1/responses/compact`. Chat Completions includes `/v1/chat/completions` and the custom adapter at `/v1/custom/chat/completions`. Messages covers both custom Messages paths and their token-count endpoints. Scoped rules do not affect model metadata, audio, Realtime, or native Gemini endpoints. Matching ignores a trailing slash and query parameters. Alias targets are still resolved only once.
 
 ## Model budget registry
 

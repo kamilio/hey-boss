@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 
 #[derive(Default)]
-pub(super) struct PartialCalls {
+pub struct PartialCalls {
     active: Vec<(u64, Value)>,
     queue: VecDeque<(Option<u64>, Option<Value>)>,
     serial: u64,

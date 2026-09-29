@@ -7,7 +7,9 @@ mod stream;
 mod validate;
 
 pub use error::ResponseError;
+pub use partial::PartialCalls;
 pub use replay::ReasoningCodec;
+pub use request::native_tool_name;
 pub use request::{ConvertedRequest, Tool, convert_request};
 pub use response::{convert_response, usage};
 pub use stream::ResponseStream;

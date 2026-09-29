@@ -78,6 +78,113 @@ async fn bounded_body(mut response: reqwest::Response, limit: usize) -> Result<V
     Ok(bytes)
 }
 
+/// Shared authenticated/retrying native transport. No wire-format conversion.
+pub(super) async fn send_native(
+    proxy: &Arc<Proxy>,
+    config: &ProviderConfig,
+    url: &str,
+    body: &Value,
+) -> std::result::Result<reqwest::Response, Box<Response>> {
+    let mut recovery = Recovery::for_request(proxy);
+    loop {
+        let credentials = match credential_headers(proxy, config).await {
+            Ok(v) => v,
+            Err(e) => {
+                proxy.service.logs.observe(
+                    proxy.log_id,
+                    &json!({"error":{"code":"gemini_credential_error"}}),
+                );
+                return Err(Box::new(transport_error(
+                    &e.to_string(),
+                    "gemini_credential_error",
+                )));
+            }
+        };
+        let mut attempt =
+            logs::Attempt::new(proxy.service.logs.clone(), proxy.log_id, "gemini_http");
+        proxy.service.logs.retries(proxy.log_id, recovery.retries);
+        let response = recovery
+            .run(
+                proxy
+                    .client
+                    .post(url)
+                    .headers(credentials)
+                    .json(body)
+                    .send(),
+            )
+            .await;
+        let response = match response {
+            Ok(Ok(r)) => r,
+            Err(()) => {
+                attempt.finish("timeout", None, Some("proxy_recovery_timeout"));
+                return Err(Box::new(recovery::timeout_response()));
+            }
+            Ok(Err(e)) => {
+                attempt.finish("connection_error", None, Some("gemini_connect_failed"));
+                if proxy.fallback_attempt {
+                    let mut response =
+                        transport_error("Could not reach Gemini upstream", "gemini_connect_failed");
+                    if recovery::connection_failure(&e) || e.is_timeout() {
+                        response
+                            .extensions_mut()
+                            .insert(super::fallback::EligibleFailure);
+                    }
+                    return Err(Box::new(response));
+                }
+                if recovery::connection_failure(&e)
+                    && recovery.retry(&proxy.config, &HeaderMap::new()).await
+                {
+                    continue;
+                }
+                return Err(Box::new(transport_error(
+                    "Could not reach Gemini upstream; retry the request",
+                    "gemini_connect_failed",
+                )));
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            // Native status/code, rather than arbitrary error message matching.
+            let bytes = match recovery.run(bounded_body(response, 1024 * 1024)).await {
+                Ok(Ok(b)) => b,
+                _ => {
+                    return Err(Box::new(transport_error(
+                        "Could not read Gemini error; retry the request",
+                        "gemini_error_read_failed",
+                    )));
+                }
+            };
+            let native: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            let code = native
+                .pointer("/error/status")
+                .and_then(Value::as_str)
+                .unwrap_or("gemini_http_error");
+            let normalized = ResponseError::from_native(&native, Some(status.as_u16()));
+            attempt.finish("http_error", Some(status.as_u16()), Some(code));
+            if normalized.retryable && recovery.retry(&proxy.config, &headers).await {
+                continue;
+            }
+            let mut response = (
+                status,
+                axum::Json(json!({"error":normalized.error,"gemini":native})),
+            )
+                .into_response();
+            if let Some(delay) = headers.get(header::RETRY_AFTER) {
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, delay.clone());
+            }
+            response
+                .extensions_mut()
+                .insert(super::fallback::Upstream { gemini: true });
+            return Err(Box::new(response));
+        }
+        attempt.finish("accepted", Some(response.status().as_u16()), None);
+        return Ok(response);
+    }
+}
+
 pub(super) async fn forward(
     proxy: Arc<Proxy>,
     parts: axum::http::request::Parts,
@@ -117,100 +224,9 @@ pub(super) async fn forward(
         Ok(v) => v,
         Err(e) => return error(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    let mut recovery = Recovery::for_request(&proxy);
-    let mut upstream = loop {
-        let credentials = match credential_headers(&proxy, config).await {
-            Ok(v) => v,
-            Err(e) => {
-                proxy.service.logs.observe(
-                    proxy.log_id,
-                    &json!({"error":{"code":"gemini_credential_error"}}),
-                );
-                return transport_error(&e.to_string(), "gemini_credential_error");
-            }
-        };
-        let mut attempt =
-            logs::Attempt::new(proxy.service.logs.clone(), proxy.log_id, "gemini_http");
-        proxy.service.logs.retries(proxy.log_id, recovery.retries);
-        let response = recovery
-            .run(
-                proxy
-                    .client
-                    .post(&url)
-                    .headers(credentials)
-                    .json(&converted.body)
-                    .send(),
-            )
-            .await;
-        let response = match response {
-            Ok(Ok(r)) => r,
-            Err(()) => {
-                attempt.finish("timeout", None, Some("proxy_recovery_timeout"));
-                return recovery::timeout_response();
-            }
-            Ok(Err(e)) => {
-                attempt.finish("connection_error", None, Some("gemini_connect_failed"));
-                if proxy.fallback_attempt {
-                    let mut response =
-                        transport_error("Could not reach Gemini upstream", "gemini_connect_failed");
-                    if recovery::connection_failure(&e) || e.is_timeout() {
-                        response
-                            .extensions_mut()
-                            .insert(super::fallback::EligibleFailure);
-                    }
-                    return response;
-                }
-                if recovery::connection_failure(&e)
-                    && recovery.retry(&proxy.config, &HeaderMap::new()).await
-                {
-                    continue;
-                }
-                return transport_error(
-                    "Could not reach Gemini upstream; retry the request",
-                    "gemini_connect_failed",
-                );
-            }
-        };
-        if !response.status().is_success() {
-            let status = response.status();
-            let headers = response.headers().clone();
-            // Native status/code, rather than arbitrary error message matching.
-            let bytes = match recovery.run(bounded_body(response, 1024 * 1024)).await {
-                Ok(Ok(b)) => b,
-                _ => {
-                    return transport_error(
-                        "Could not read Gemini error; retry the request",
-                        "gemini_error_read_failed",
-                    );
-                }
-            };
-            let native: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            let code = native
-                .pointer("/error/status")
-                .and_then(Value::as_str)
-                .unwrap_or("gemini_http_error");
-            let normalized = ResponseError::from_native(&native, Some(status.as_u16()));
-            attempt.finish("http_error", Some(status.as_u16()), Some(code));
-            if normalized.retryable && recovery.retry(&proxy.config, &headers).await {
-                continue;
-            }
-            let mut response = (
-                status,
-                axum::Json(json!({"error":normalized.error,"gemini":native})),
-            )
-                .into_response();
-            if let Some(delay) = headers.get(header::RETRY_AFTER) {
-                response
-                    .headers_mut()
-                    .insert(header::RETRY_AFTER, delay.clone());
-            }
-            response
-                .extensions_mut()
-                .insert(super::fallback::Upstream { gemini: true });
-            return response;
-        }
-        attempt.finish("accepted", Some(response.status().as_u16()), None);
-        break response;
+    let mut upstream = match send_native(&proxy, config, &url, &converted.body).await {
+        Ok(response) => response,
+        Err(response) => return *response,
     };
     let id = format!("{:032x}", rand::random::<u128>());
     if !converted.stream {
