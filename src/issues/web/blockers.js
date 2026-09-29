@@ -1,15 +1,16 @@
 "use strict";
 const IssueBlockers = (() => {
   function kind(issue) {
+    if (issue.attempt_hold && !issue.deleted_at) return "hold";
     if (issue.deleted_at || issue.state !== "blocked") return "";
     return issue.manual_blocked ? "hold" : "dependencies";
   }
   function matches(issue, filter) {
     if (!filter) return true;
     if (!kind(issue)) return false;
-    return filter === "hold" ? !!issue.manual_blocked : !!issue.blocked_by?.length;
+    return filter === "hold" ? !!issue.manual_blocked || !!issue.attempt_hold : !!issue.blocked_by?.length;
   }
-  const description = issue => kind(issue) === "hold"
+  const description = issue => issue.attempt_hold ? "Task attempt protected" : kind(issue) === "hold"
     ? `On hold${issue.blocked_by?.length ? " · also waiting for dependencies" : ""}`
     : "Waiting for dependencies";
   let context = null, generation = 0, busy = false;

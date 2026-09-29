@@ -39,6 +39,8 @@ assert.equal(projects[1].active[0].online,false);
 assert.deepEqual(projectView({machines:[]},now),[]);
 console.log('Project grouping checks passed');
 const {agentState, scheduledRetries} = require('../src/issues/web/fleet.js');
+assert.equal(agentState({run:{state:'attempt_held',finished_at:null},online:true}),'Task attempt protected');
+assert.equal(agentState({run:{state:'attempt_held',finished_at:null,retry_at:Date.now()+30000},online:false}),'Task attempt protected');
 const held={run:{...projectRun,number:1,state:'infrastructure_blocked',finished_at:2},online:true};
 assert.equal(agentState(held),'Approval service unavailable');
 assert.equal(agentState({...held,online:false}),'Approval service unavailable','A finished infrastructure hold remains meaningful offline');
