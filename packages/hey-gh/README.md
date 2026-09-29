@@ -155,8 +155,10 @@ and a complete `pullRequest` replacement. The response's `cursor` is the
 checkpoint after the entire returned page. Apply the page and persist that
 cursor atomically; keep paging while `hasMore` is true. An empty `changes` page
 with `hasMore=true` is valid because unrelated source events share the underlying
-feed. Repeating a request replays the same historical replacements, not today's
-state substituted into old events.
+feed. Updates are coalesced: only the latest value of each resource is retained.
+A repeated request can therefore return newer current data after another poll;
+intermediate versions are not an audit history. Each returned replacement keeps
+its own latest observation cursor and timestamp.
 
 `kind` is `baseline`, `opened`, `updated`, `closed`, `merged`, `reopened`, or
 `removed`. Closures and merges include terminal state and available
@@ -332,7 +334,7 @@ reads and refreshes still work independently.
 
 PR cursors are scoped to account/endpoints/database and the `-R` selection.
 Keep the same selection on later reads; changing it requires a new bootstrap.
-They survive restarts and use the same retention as the lower-level feed below.
+They survive restarts and use the same cursor retention as the lower-level feed below.
 An expired cursor returns `cursor_expired` (HTTP 410): run `hey-gh pr` without a
 cursor, replace local state, and adopt its new cursor. Source-feed cursors from
 `hey-gh snapshot` are a different API and cannot be used as PR cursors.
@@ -425,7 +427,7 @@ hey-gh snapshot
 hey-gh changes --cursor 'CURSOR_FROM_SNAPSHOT' --wait 30
 ```
 
-Every change contains `cursor`, `resource`, `changed_fields`, `observed_at_ms`, and `data`. Cursors are opaque and scoped to the database, GitHub endpoints, API version, and credential fingerprint. They survive daemon restarts. Repeated requests replay the same events: consumers should checkpoint their state and cursor atomically.
+Every change contains `cursor`, `resource`, `changed_fields`, `observed_at_ms`, and `data`. Cursors are opaque and scoped to the database, GitHub endpoints, API version, and credential fingerprint. They survive daemon restarts. Consumers should apply complete replacements and checkpoint state and cursor atomically. Repeated requests converge to current data; they do not replay superseded versions.
 
 Resources use these names:
 
@@ -474,18 +476,17 @@ local cache failures as GitHub HTTP failures or duplicate diagnostic prefixes.
 
 Unchanged JSON, including HTTP `304` revalidation, produces no duplicate events. A first observation creates a baseline event. Changed comment bodies, added replies, deleted comments, CI reruns, and conflict changes appear when their next successful refresh observes them. `changed_fields` identifies changed top-level fields; consumers can compare comment IDs/bodies for individual changes.
 
-History retains at most 10,000 events per credential scope and seven days of observations; pruning happens during observation writes. Old cursors return HTTP `410` with code `cursor_expired`. Recover by replacing local state with `/v1/snapshot` and its cursor. Latest snapshots remain available after history is pruned. Invalid, foreign, and future cursors return `400`. Resetting the database or changing the token/account/API version requires a new bootstrap.
+Only current resource data is retained. A small cursor journal keeps at most 10,000 metadata entries per credential scope and seven days of observations; it contains no historical payloads. Pruning happens during observation writes. Old cursors return HTTP `410` with code `cursor_expired`. Recover by replacing local state with `/v1/snapshot` and its cursor. Current data remains available after cursor metadata is pruned. The legacy `snapshot` API name refers to this current data, not stored historical versions. Invalid, foreign, and future cursors return `400`. Resetting the database or changing the token/account/API version requires a new bootstrap.
 
-These are event-count and age limits, not a total database byte limit. History
-stores complete replacements, so large comment or CI collections can require
-gigabytes. SQLite can reuse pages freed by pruning, but the database file does
-not automatically shrink. Incremental page byte limits bound each read, not the
-combined size of retained history, latest snapshots, and cached responses.
+These are cursor-count and age limits, not a total database byte limit. Large
+current comment or CI collections and cached responses still consume space.
+Incremental vacuum reclaims freed pages; page byte limits bound individual reads,
+not the combined size of current data and cached responses.
 
 PR HTTP cursor preflight reads only feed identity and retention metadata, avoiding
 decoding the page twice. The page read checks retention again in its own transaction.
 
-This feed records observations, not every GitHub transition between polls. It cannot reconstruct a comment created and deleted between refreshes. Webhook ingestion is a future addition. Snapshot timestamps identify the last observed change, not a freshness guarantee; use watch diagnostics and report validation timestamps to assess freshness.
+This feed synchronizes current data. If several updates affect a resource before a consumer reads it, only its latest observation is returned. Activity and changed-field details describe that latest observation, not every change since the consumer cursor. It cannot reconstruct a comment created and deleted between refreshes. Webhook ingestion is a future addition. Snapshot timestamps identify the last observed change, not a freshness guarantee; use watch diagnostics and report validation timestamps to assess freshness.
 
 ## CI correctness
 
@@ -610,6 +611,13 @@ Private credential-scoped candidate permission errors cool down for five minutes
 so inaccessible candidates cannot repeatedly consume the whole probe budget.
 Explicit refresh probes access again.
  Remaining quota and reset headers adjust pacing. Primary exhaustion pauses its bucket; secondary limits impose a shared cooldown. Retries honor `Retry-After` (seconds or HTTP dates) and reset times, use bounded backoff and jitter, and never retry ordinary authorization failures. Work that cannot finish within its deadline fails explicitly. HTTP bodies (16 MiB by default), collected data (64 MiB), bootstrap data (256 MiB), incremental page bodies (64 MiB, or one larger observation up to 256 MiB), pagination, attempts, and report execution time are bounded. Queue overload and rate limits become `503` responses with `Retry-After`; report deadlines become `504`.
+
+Storage keeps one current value per source and compact cursor metadata. Historical
+payloads are removed automatically when an older database is first opened by this
+version. The migration preserves current data, cached responses, watch registrations,
+feed cursors, and validation state, then compacts the file. Stop older daemon/SDK
+processes before upgrading a shared database; the new journal schema does not support
+old writers. Incremental vacuum reclaims freed pages on subsequent observation writes.
 
 REST responses persist in SQLite with ETags, Last-Modified values, and pagination links. Pagination validates each page separately and rejects cycles and cross-origin links. GraphQL read queries use local freshness caching and the same scheduler; GraphQL errors or partial results are never cached as successful responses. Mutations are unsupported.
 

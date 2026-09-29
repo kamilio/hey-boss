@@ -1238,7 +1238,7 @@ async fn cursors_replay_changes_survive_restarts_and_reject_other_scopes() {
             break;
         }
     }
-    assert_eq!(delivered.len(), 4);
+    assert_eq!(delivered.len(), 3);
     assert!(
         delivered.iter().any(
             |c| c.resource.starts_with("ci://") && c.changed_fields.contains(&"summary".into())
@@ -5789,12 +5789,10 @@ async fn account_policy_is_invalidated_when_base_branch_tip_or_test_merge_change
         );
         assert_eq!(event.pull_request["headRefOid"], HEAD);
         assert_eq!(event.pull_request["state"], "OPEN");
-        assert!(changes.changes.iter().any(|change| {
-            change
-                .activity
-                .iter()
-                .any(|a| a["kind"] == "required_checks_changed")
-        }));
+        // Policy invalidation may precede another update to this PR. The
+        // current-data feed coalesces both; the final replacement must still
+        // withhold the stale policy, without retaining the earlier activity.
+        assert_eq!(changes.changes.len(), 1);
         assert_eq!(h.calls().len(), calls, "cursor reads stay offline");
         c.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
             .await
