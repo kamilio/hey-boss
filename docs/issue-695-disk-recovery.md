@@ -38,8 +38,9 @@ The 19-sample observation from 00:09:52 through 00:12:56 UTC failed: the
 companion briefly reconnected and drained pending changes, then disconnected
 again. The incident remains open.
 
-Further approval request `2f46d586-e1be-4af3-93a2-e3bee5075fb4` is pending.
-The proposed action is to pause new pickups on existing worker
+Further approval request `2f46d586-e1be-4af3-93a2-e3bee5075fb4` was left pending
+during the disk outage and later cancelled without execution (see below).
+The proposed action was to pause new pickups on existing worker
 `0fcf3068617e661427e6c332501e0a08`, preserve its active sessions, and remove only
 the unused `~/Workspace/poe-code-extract-jq-into-974/node_modules` (1.12 GiB).
 New pickups would remain paused until the owner resumes them. The original
@@ -69,6 +70,29 @@ changes, but the full stability check had failed. No additional cleanup or
 worker control was performed. The same approval remained pending; revalidate
 the need for its deletion before using it now that disk headroom has improved.
 
+At 01:17 UTC, space had recovered externally; this task performed no additional
+reclamation. Another planned five-minute check ran from 01:17:57.935 through
+01:21:36.130 UTC, stopping after eight samples (218.195 seconds). Available
+space stayed above 27,044,820 KiB and reached 33,165,528 KiB. The final sample
+nevertheless reported an **SSH server-not-responding timeout**, with
+30,849,080 KiB still available and three last-reported pending changes.
+The retained event timestamps place the disconnect at 01:21:18.642 and the
+automatic reconnect at 01:22:24.002. Stable recovery remains unverified.
+
+A direct owner check at 01:22:43 UTC found 30,723,560 KiB available. The
+one-minute load average was 38.72 on ten logical CPUs; a subsequent snapshot
+showed 1,898 MiB of swap in use. Sleep was inhibited by existing power
+assertions. These observations warrant resource/transport investigation but
+do not establish the cause of the SSH timeout or a contributing CLI defect.
+No power setting, worker, service, or authentication configuration was changed.
+
+The additional deletion was no longer justified by current free space, so
+request `2f46d586-e1be-4af3-93a2-e3bee5075fb4` was dismissed and independently
+verified **cancelled**. Cancellation is not approval: neither the proposed
+deletion nor the pickup pause was executed. Resume with current read-only
+resource and transport diagnosis; obtain explicit authority for any newly
+proposed deletion or disruptive action. Do not replay the cancelled request.
+
 ## Journal and conflict verification
 
 Before deletion, a read-only companion database snapshot showed journal
@@ -97,6 +121,14 @@ five slots occupied and pickup enabled, before the later disconnection.
 At 00:28:49 UTC, direct owner status again confirmed that same PID, five active
 slots, pickup enabled, and zero pending changes.
 
+After the latest timeout, the direct owner snapshot had journal watermark
+275932, zero pending rows, cursor 1175150, and last sync 1790644963.702.
+The supervisor held exactly 275932 unique receipts spanning sequences 1
+through 275932, including the new backlog. Both conflict counts and their
+latest timestamps remained unchanged. The owner again reported original
+worker PID 18690, five active slots, zero free slots, and pickup enabled;
+this is a timestamped observation, not a guarantee of later capacity.
+
 ## Installed software and visual checks
 
 Read-only installation audits found the MacBook, Mac.lan and devbox current at
@@ -110,6 +142,12 @@ Bounded direct version checks reconfirmed the same build on the MacBook and
 Mac.lan; devbox instead failed with `Connection closed by UNKNOWN port 65535`.
 Its earlier successful audit must not be presented as current reachability.
 No SSH trust setting, authentication helper, service or live build was changed.
+
+The final direct audit reused devbox's existing authenticated SSH control
+socket, with configuration loading disabled for that one read to avoid
+invoking a new authentication helper. It succeeded and reconfirmed build
+`638e6fc0d9eab8c4`; current direct version checks therefore cover all three
+machines. No executable change was introduced by this continuation.
 
 The installed worker dashboard was inspected in an isolated Chrome session at
 1440 × 1000 and 390 × 844, in light and dark appearance. The expanded fleet
@@ -126,3 +164,7 @@ observation and is not hidden by the successful visual checks.
 The issue-specific Chrome session, temporary web server, screenshots and
 Playwright snapshots were removed after review. Existing checkout edits and
 artifacts from other tasks were left intact.
+The resumed monitors and read-only SSH checks have exited; Playwright lists
+no browsers, port 4789 has no listener, and the issue-specific output directory
+is absent. Issue 695 remains open because sustained fleet connectivity has
+not passed verification, despite recovered disk space and reconciled journals.
