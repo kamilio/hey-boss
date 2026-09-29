@@ -1,76 +1,40 @@
-// Run against an isolated supervisor issue server seeded with a fleet reservation.
+// Run against an isolated issue server seeded with a machine assignment.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
   page.on('pageerror', error => errors.push(error.message));
-  await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread:0}}));
-  await page.waitForSelector('.fleet-allocation');
+  await page.waitForSelector('.issue-assignment');
   const original = await page.evaluate(() => structuredClone(model.detail));
-  const card = page.locator('.issue-readiness');
-  const render = async (allocation, issue = {}) => page.evaluate(({allocation, issue}) => renderDetail({...model.detail, issue: {...model.detail.issue, ...issue}, allocation}), {allocation, issue});
-  check(original.allocation.reason === 'reserved_elsewhere', 'Real reservation reaches issue details');
-  check(await card.locator('.readiness-status').innerText() === 'Reserved', 'Readiness names the reservation instead of saying ready');
-  check((await card.innerText()).includes(original.allocation.reserved_machine), 'Readiness includes the reserved device');
-  check(await page.locator('.fleet-allocation.side-section').count() === 0, 'Reservation and readiness share one section');
-  check(!(await card.innerText()).includes('Safe resume steps') && !(await card.innerText()).includes('Copy inspection command'), 'Removed controls stay absent');
-  const tooltip = card.locator('.fleet-allocation-help');
-  check(!await tooltip.isVisible(), 'Reservation explanation is hidden initially');
-  await card.locator('.fleet-allocation-label').focus();
-  check(await tooltip.isVisible(), 'Keyboard focus reveals reservation explanation');
-  const help = await tooltip.innerText();
-  check(help.includes('waits for its claim') && help.includes('15 minutes') && help.includes('claim deadline') && help.includes('offline'), 'Tooltip explains startup and claim deadlines and protects claimed offline work');
-  await page.getByRole('button', {name:'Edit',exact:true}).focus();
-  check(!await tooltip.isVisible(), 'Explanation hides after leaving the label');
-  await page.setViewportSize({width:1440,height:1000});
-  await page.emulateMedia({colorScheme:'light'});
-  await page.screenshot({path:'output/playwright/allocation-release/desktop-light.png'});
-  await page.emulateMedia({colorScheme:'dark'});
-  await page.screenshot({path:'output/playwright/allocation-release/desktop-dark.png'});
+  const assignment = original.issue.assignment;
+  check(assignment.kind === 'machine', 'The real machine destination reaches issue details');
+  const select = page.getByLabel('Assignment', {exact:true});
+  check(await select.inputValue() === 'machine:' + assignment.machine, 'One control shows the assigned machine');
+  check(await page.getByRole('button',{name:'Release reservation',exact:true}).count() === 0, 'No separate allocation control remains');
+  await select.focus();
+  check(await select.evaluate(node => node === document.activeElement), 'Assignment supports keyboard focus');
+  for (const issue of [{draft:true},{state:'blocked'},{state:'closed'}]) {
+    await page.evaluate(({original,issue}) => renderDetail({...original,issue:{...original.issue,...issue}}), {original,issue});
+    check(await select.isDisabled(), 'Paused or closed work cannot be reassigned: ' + JSON.stringify(issue));
+  }
+  await page.evaluate(original => renderDetail(original), original);
   await page.setViewportSize({width:390,height:844});
-  await card.scrollIntoViewIfNeeded();
-  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Readiness fits phone width');
-  await page.screenshot({path:'output/playwright/allocation-release/mobile-dark.png'});
-  await render({...original.allocation,role:'agent',authoritative:false});
-  check(await card.getByRole('button',{name:'Release reservation',exact:true}).count() === 0, 'Replica directs release to supervisor');
-  await render({...original.allocation,role:'agent',authoritative:false,reserved_machine:null,reserved_host:null});
-  check(await card.locator('.readiness-status').innerText() === 'Waiting for supervisor', 'Unsynchronized replica does not claim readiness');
-  await render({...original.allocation,reason:'allocation_expired'});
-  check(await card.locator('.readiness-status').innerText() === 'Reservation expired', 'Expired reservation does not imply protected pickup');
-  check(await card.locator('.fleet-allocation').count() === 0, 'Expired device reservation is hidden');
-  await render(original.allocation,{assignee:'codex:working'});
-  check(await card.locator('.readiness-status').innerText() === 'Assigned', 'Assigned work retains its readiness state');
-  check(await card.getByRole('button',{name:'Release reservation',exact:true}).isDisabled(), 'Assigned work cannot be released in UI');
-  await render(original.allocation,{assignee:null,draft:true});
-  check(await card.locator('.readiness-status').innerText() === 'Draft · not ready for agents', 'Draft remains paused despite reservation');
-  await render(original.allocation,{draft:false,state:'blocked'});
-  check(await card.locator('.readiness-status').innerText() === 'Blocked · pickup paused', 'Blocked state takes precedence over reservation');
-  await render(original.allocation,{state:'closed'});
-  check(await card.locator('.fleet-allocation').count() === 0, 'Closed issue has no release action');
-  await page.evaluate(original => renderDetail(original),original);
-  const release = card.getByRole('button',{name:'Release reservation',exact:true});
-  await release.focus(); await page.keyboard.press('Enter');
-  const dialog = page.locator('#confirm-dialog');
-  await dialog.waitFor({state:'visible'});
-  check((await dialog.innerText()).includes('offline agent may still be working'), 'Release confirms the offline work risk');
-  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
-  check((await page.evaluate(async () => api({action:'view',number:model.detail.issue.number}))).allocation.reserved_machine === original.allocation.reserved_machine, 'Cancel keeps the reservation');
+  await select.scrollIntoViewIfNeeded();
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'The assignment fits a phone screen');
   let request;
   page.on('request', value => {
     if (value.url().endsWith('/api/action')) {
       const body = value.postDataJSON();
-      if (body.operation.action === 'release_allocation') request = body;
+      if (body.operation?.action === 'assign') request = body;
     }
   });
-  await release.click();
-  await dialog.getByRole('button',{name:'Release reservation',exact:true}).click();
-  await page.waitForFunction(() => model.detail?.allocation?.reserved_machine === null);
-  check(request.operation.expected_machine === original.allocation.reserved_machine && request.operation.if_version === original.issue.version && !!request.request_id, 'Release sends reservation and revision guards with an idempotent request ID');
-  check(await card.locator('.readiness-status').innerText() === 'Ready for agents', 'Successful release restores general readiness');
-  await page.getByRole('button',{name:'View activity',exact:true}).click();
-  await page.locator('#activity-timeline').getByText('released the fleet reservation', {exact:false}).first().waitFor();
-  check((await page.locator('#activity-timeline').innerText()).includes('released the fleet reservation'), 'Release appears in activity');
+  await select.selectOption('unassigned');
+  await page.waitForFunction(() => model.detail?.issue?.assignment?.kind === 'unassigned');
+  check(request.operation.target === 'unassigned' && request.operation.if_version === original.issue.version && !!request.request_id, 'Destination changes carry revision and retry guards');
   const state = await page.evaluate(async () => api({action:'view',number:model.detail.issue.number}));
-  check(state.allocation.reserved_machine === null && state.issue.version === original.issue.version + 1, 'Release commits on real isolated supervisor');
+  check(state.allocation.reserved_machine === null, 'Clearing assignment releases the real reservation');
+  await select.selectOption('machine:' + assignment.machine);
+  await page.waitForFunction(machine => model.detail?.issue?.assignment?.machine === machine, assignment.machine);
+  check((await select.inputValue()) === 'machine:' + assignment.machine, 'The machine can be assigned again');
   check(errors.length === 0, 'No browser errors');
   return {passed:checks.length,checks};
 }

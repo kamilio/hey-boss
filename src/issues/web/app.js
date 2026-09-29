@@ -1205,14 +1205,9 @@ async function changeAssignment(select) {
 async function performAction(action, button) {
   const i = model.detail.issue,
     project = model.project.id;
-  const allocation = model.detail.allocation, host = model.route.host || null;
+  const host = model.route.host || null;
   const readyGuard = action === "ready" ? model.detail?.ready_guard : null;
   let force = false;
-  if (action === "release_allocation") {
-    if (!allocation?.authoritative || !allocation.reserved_machine) return;
-    const yes = await confirmDialog("Release this fleet reservation?", `This issue is reserved for ${allocation.reserved_host || allocation.reserved_machine}. Releasing it lets another device pick it up. An offline agent may still be working; stop that work before releasing.`, "Release reservation");
-    if (!yes) return;
-  }
   if (action === "block") {
     const yes = await confirmDialog("Block this issue?", "Blocking should be rare. Make every effort to resolve the issue first, raise questions and ask for help via hey-boss notif ask. Workers will pause pickup until you reopen it. Add a comment explaining the blocker.", "Block issue");
     if (!yes) return;
@@ -1244,10 +1239,6 @@ async function performAction(action, button) {
   }
   const operation = { action: action === "clear_manual_hold" ? "reopen" : action, number: i.number };
   if (action === "clear_manual_hold") { operation.clear_manual_hold = true; operation.if_version = i.version; }
-  if (action === "release_allocation") {
-    operation.expected_machine = allocation.reserved_machine;
-    operation.if_version = i.version;
-  }
   if (["claim", "assign_boss", "ready", "unassign", "close", "block", "delete"].includes(action))
     operation.force = force;
   if (action === "close") operation.comment = null;
@@ -1272,7 +1263,6 @@ async function performAction(action, button) {
         claim: "Assigned to you",
         assign_boss: `Assigned to ${model.boss.name}`,
         unassign: "Claim released",
-        release_allocation: "Fleet reservation released",
         ready: i.draft ? "Development handoff recorded; draft retained" : "PR ready for review",
         block: "Issue blocked",
         close: "Issue closed",
