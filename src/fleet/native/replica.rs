@@ -4321,7 +4321,7 @@ mod tests {
     #[test]
     fn fleet_allocates_only_the_first_unfinished_subtask_and_syncs_progress() {
         let main = Fixture::new();
-        main.db.execute("INSERT INTO project_settings(project_id,prompt,version,subtask_scheduling) VALUES('named:Native fleet','',1,'sequential')", []).unwrap();
+        main.db.execute("INSERT INTO project_settings(project_id,prompt,version,subtask_scheduling) VALUES('named:Native fleet',?1,1,'sequential')", [crate::issues::worker::DEFAULT_PROMPT]).unwrap();
         main.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
             VALUES('named:Native fleet',2,'First','','open','human:fixture',0,0,1,'[]',2),
                   ('named:Native fleet',3,'Second','','open','human:fixture',0,0,1,'[]',3);
