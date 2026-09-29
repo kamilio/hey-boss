@@ -36,7 +36,17 @@ impl Store {
         checked_at: i64,
         error: Option<&str>,
     ) -> Result<()> {
-        self.db.execute("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE url=?1 AND status<>'merged'", params![url,status,checked_at,error])?;
+        self.db.execute("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE url=?1 AND status<>'merged' AND (checked_at IS NULL OR checked_at<=?3)", params![url,status,checked_at,error])?;
+        Ok(())
+    }
+
+    pub(crate) fn record_open_pr_if_changed(&mut self, url: &str, checked_at: i64) -> Result<()> {
+        // The watcher owns lifecycle checks for its PRs. Reconfirming an open
+        // PR every 30 seconds must not append idle writes to the fleet journal.
+        let changed: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE url=?1 AND status<>'merged' AND (status<>'open' OR error IS NOT NULL) AND (checked_at IS NULL OR checked_at<=?2))", params![url,checked_at], |row| row.get(0))?;
+        if changed {
+            self.record_pr_status(url, Some("open"), checked_at, None)?;
+        }
         Ok(())
     }
 
@@ -137,6 +147,59 @@ mod tests {
             .unwrap();
         (store, actor, root)
     }
+    #[test]
+    fn unchanged_watcher_open_status_does_not_wait_for_a_writer() {
+        let (mut store, _, root) = fixture();
+        let url = "https://github.com/o/r/pull/1";
+        store.record_open_pr_if_changed(url, 200).unwrap();
+        store
+            .db
+            .busy_timeout(std::time::Duration::from_millis(25))
+            .unwrap();
+        let mut writer = Connection::open(root.join("issues.db")).unwrap();
+        let lock = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        store.record_open_pr_if_changed(url, 300).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT min(checked_at) FROM issue_pull_requests WHERE url=?1",
+                    [url],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            200
+        );
+        drop(lock);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn older_metadata_cannot_roll_back_a_newer_pr_status_or_replace_its_error() {
+        let (mut store, _, root) = fixture();
+        let url = "https://github.com/o/r/pull/1";
+        store
+            .record_pr_status(url, Some("open"), 200, None)
+            .unwrap();
+        store
+            .record_pr_status(url, Some("closed"), 100, None)
+            .unwrap();
+        store
+            .record_pr_status(url, None, 150, Some("Old read failed"))
+            .unwrap();
+        let rows: i64 = store.db.query_row("SELECT count(*) FROM issue_pull_requests WHERE url=?1 AND status='open' AND checked_at=200 AND error IS NULL", [url], |row| row.get(0)).unwrap();
+        assert_eq!(rows, 5);
+        store
+            .record_pr_status(url, Some("closed"), 300, None)
+            .unwrap();
+        assert_eq!(store.db.query_row("SELECT count(*) FROM issue_pull_requests WHERE url=?1 AND status='closed' AND checked_at=300", [url], |row| row.get::<_,i64>(0)).unwrap(), 5);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn tracks_distinct_active_issue_prs_and_resumes_when_reopened() {
         let (store, _, root) = fixture();

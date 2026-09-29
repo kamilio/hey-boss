@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
+    let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    let request = |operation| crate::issues::Request {
+        version: 1,
+        project: crate::issues::Project {
+            id: "named:test".into(),
+            name: "test".into(),
+        },
+        project_override: None,
+        actor: Some(ctx.actor().unwrap()),
+        operation: serde_json::from_value(operation).unwrap(),
+        request_id: None,
+    };
+    store
+        .execute(&request(
+            json!({"action":"create","title":"Task","body":"","labels":[]}),
+        ))
+        .unwrap();
+    store.execute(&request(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/1","purpose":"fix"}))).unwrap();
+    let view = store
+        .execute(&request(json!({"action":"view","number":1})))
+        .unwrap();
+    let assignment = request(
+        json!({"action":"assign","number":1,"target":"github","if_version":view["issue"]["version"]}),
+    );
+    drop(store);
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let client =
+        ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
+    let database = ctx.path.clone();
+    let serving = std::thread::spawn(move || {
+        let incoming = server
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .expect("Ordinary metadata read");
+        assert!(incoming.url().ends_with("metadata?max_age_seconds=300"));
+        Store::open(&database)
+            .unwrap()
+            .execute(&assignment)
+            .unwrap();
+        let (_, _, mut metadata) = evidence(true, false);
+        metadata["data"]["state"] = json!("closed");
+        metadata["data"]["merged"] = json!(false);
+        metadata["validated_at_ms"] = json!(crate::issues::worker::now() - 60_000);
+        incoming
+            .respond(
+                tiny_http::Response::from_string(metadata.to_string()).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                ),
+            )
+            .unwrap();
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    crate::fleet::native::pr_monitor::poll(&ctx, &runtime, &client).unwrap();
+    serving.join().unwrap();
+    let view = Store::open(&ctx.path)
+        .unwrap()
+        .execute(&request(json!({"action":"view","number":1})))
+        .unwrap();
+    assert_eq!(view["issue"]["assignee"], "watcher:github");
+    assert_eq!(view["issue"]["assignment"]["kind"], "github");
+    assert_ne!(view["issue"]["pull_requests"][0]["status"], "closed");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
     let request = |operation| crate::issues::Request {
@@ -24,12 +93,20 @@ fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
         .execute(&request(json!({"action":"view","number":1})))
         .unwrap();
     store.execute(&request(json!({"action":"assign","number":1,"target":"github","if_version":view["issue"]["version"]}))).unwrap();
+    store
+        .execute(&request(
+            json!({"action":"create","title":"Ordinary PR","body":"","labels":[]}),
+        ))
+        .unwrap();
+    store.execute(&request(json!({"action":"add_pull_request","number":2,"url":"https://github.com/o/r/pull/2","purpose":"fix"}))).unwrap();
     drop(store);
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let client =
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
     let serving = std::thread::spawn(move || {
         let (ci, policy, metadata) = evidence(true, false);
+        let mut ordinary_metadata = metadata.clone();
+        ordinary_metadata["data"]["number"] = json!(2);
         let receive = || {
             server
                 .recv_timeout(Duration::from_secs(3))
@@ -45,12 +122,15 @@ fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
         assert!(
             paths
                 .iter()
-                .any(|url| url.ends_with("metadata?max_age_seconds=300"))
+                .any(|url| url.ends_with("/2/metadata?max_age_seconds=300")),
+            "General polling must leave watched PRs to their watcher: {paths:?}"
         );
         let respond = |request: tiny_http::Request| {
             let path = request.url().split('?').next().unwrap();
             let value = if path.ends_with("required-checks") {
                 &policy
+            } else if path.ends_with("/2/metadata") {
+                &ordinary_metadata
             } else if path.ends_with("metadata") {
                 &metadata
             } else if path.ends_with("ci") {

@@ -149,7 +149,12 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
     actor.id = "human:pr-monitor".into();
     store.close_merged_pull_requests(&actor)?;
     store.reconcile_github_assignments(&actor)?;
-    let prs = store.tracked_pull_requests()?;
+    let watched: std::collections::HashSet<_> = store.github_watch_urls()?.into_iter().collect();
+    let prs: Vec<_> = store
+        .tracked_pull_requests()?
+        .into_iter()
+        .filter(|pr| !watched.contains(&pr.url))
+        .collect();
     drop(store);
     let path = ctx.state.join("pr-monitor-schedule.json");
     let mut schedule: schedule::Schedule = serde_json::from_value(
@@ -180,12 +185,18 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
             continue;
         };
         let result = tokio_read(client, &repository, number).await;
+        let mut store = Store::open(&ctx.path)?;
+        // A task may enter watching while this ordinary read is in flight.
+        // Its cached metadata must not race the watcher's fresher observation.
+        if store.github_watch_urls()?.contains(&url) {
+            continue;
+        }
         match result {
             Ok(response) => {
                 let checked_at = i64::try_from(response.validated_at_ms)?;
                 let data = response.data;
                 let status = pr_status(&data, &repository, number);
-                Store::open(&ctx.path)?.record_pr_status(
+                store.record_pr_status(
                     &url,
                     status,
                     checked_at,
@@ -214,7 +225,7 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
             Err(error) => {
                 schedule.failure(&url, crate::issues::worker::now(), &error);
                 ctx.atomic_json(&path, &serde_json::to_value(&schedule)?)?;
-                Store::open(&ctx.path)?.record_pr_status(
+                store.record_pr_status(
                     &url,
                     None,
                     crate::issues::worker::now(),
