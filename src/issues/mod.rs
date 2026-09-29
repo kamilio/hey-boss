@@ -261,6 +261,10 @@ pub enum Operation {
         boss_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_close_merged_prs: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_skills: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sync_skills: bool,
         if_version: Option<i64>,
     },
     ProjectSettings,
