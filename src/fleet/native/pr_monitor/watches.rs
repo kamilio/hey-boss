@@ -31,7 +31,19 @@ pub(super) fn poll(
 }
 
 fn fresh(validated_at: u64) -> bool {
-    validated_at >= crate::issues::worker::now().saturating_sub(120_000) as u64
+    timestamp(validated_at)
+        .is_ok_and(|at| at >= crate::issues::worker::now().saturating_sub(120_000))
+}
+
+fn timestamp(value: u64) -> hey_gh::Result<i64> {
+    i64::try_from(value)
+        .ok()
+        .filter(|at| *at > 0 && *at <= crate::issues::worker::now().saturating_add(30_000))
+        .ok_or_else(|| {
+            hey_gh::Error::Invalid(
+                "GitHub observation timestamp is invalid or in the future".into(),
+            )
+        })
 }
 
 fn storage(error: crate::issues::Error) -> hey_gh::Error {
@@ -80,7 +92,7 @@ async fn poll_required(
             .record_github_observation(
                 url,
                 &hey_gh::watcher::observe_required(&policy),
-                observed as i64,
+                timestamp(observed)?,
             )
             .map_err(storage)?;
         true
@@ -104,7 +116,7 @@ async fn poll_required(
         }
         let mut store = Store::open(&ctx.path).map_err(storage)?;
         store
-            .record_pr_status(url, status, response.validated_at_ms as i64, None)
+            .record_pr_status(url, status, timestamp(response.validated_at_ms)?, None)
             .map_err(storage)?;
         let mut actor = ctx
             .actor()
@@ -176,7 +188,7 @@ async fn poll_details(
         hey_gh::watcher::observe_ci(repository, number, &metadata.data, &ci.data, &policy);
     Store::open(&ctx.path)
         .map_err(storage)?
-        .record_github_observation(url, &observation, ci.observed_at_ms as i64)
+        .record_github_observation(url, &observation, timestamp(ci.observed_at_ms)?)
         .map_err(storage)?;
     if observation.evidence["ci_complete"] != true || ctx.stopped() {
         return Ok(());
@@ -192,18 +204,18 @@ async fn poll_details(
     .unwrap_or(Err(hey_gh::Error::Deadline));
     let mut store = Store::open(&ctx.path).map_err(storage)?;
     match result {
-        Ok(report) if fresh(report.oldest_validation_at_ms) => store
+        Ok(report) if fresh(report.oldest_validation_at_ms) && timestamp(report.observed_at_ms).is_ok() => store
             .record_github_observation(
                 url,
                 &hey_gh::watcher::observe(&report, &policy),
-                report.observed_at_ms as i64,
+                timestamp(report.observed_at_ms)?,
             )
             .map_err(storage)?,
         Ok(_) => store
             .record_github_error(
                 url,
                 "reviews",
-                "GitHub review evidence is stale; waiting for fresh validation",
+                "GitHub review evidence has stale or invalid timestamps; waiting for fresh validation",
             )
             .map_err(storage)?,
         Err(error) => store
