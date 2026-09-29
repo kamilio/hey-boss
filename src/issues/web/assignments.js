@@ -34,12 +34,14 @@
     const watch = issue.github_status;
     if (!watch && current(issue).kind !== "github") return "";
     const prs = Object.entries(watch?.prs || {});
+    const paused = watch?.monitoring === false ? `<p class="assignment-hint">${watch.stopped_reason === "no_open_pull_requests" ? "No open GitHub pull requests remain." : "Monitoring paused. Last recorded status:"}</p>` : "";
     const error = watch?.error ? `<p class="github-status-error" role="status"><strong>Status unavailable</strong><br>${esc(watch.error)}</p>` : "";
     const entries = prs.map(([url, snapshot]) => {
       const evidence = snapshot.evidence || {}, required = evidence.required || [];
       const failed = required.filter(c => c.state === "failure");
       const incomplete = (evidence.source_errors?.length || evidence.ci_errors?.length || evidence.policy_errors?.length);
-      const label = failed.length ? `${failed.length} required check${failed.length === 1 ? "" : "s"} failed${snapshot.error ? " (last recorded)" : ""}` : snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : evidence.complete ? "All checks finished" : "Checks in progress";
+      const terminal = {closed:"Pull request closed without merging", merged:"Pull request merged", removed:"Pull request removed from this issue"}[snapshot.lifecycle];
+      const label = terminal || (failed.length ? `${failed.length} required check${failed.length === 1 ? "" : "s"} failed${snapshot.error ? " (last recorded)" : ""}` : snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : evidence.complete ? "All checks finished" : "Checks in progress");
       const checks = required.map(c => `<li><span class="github-check-state ${c.state === "failure" ? "failed" : ""}">${esc(checkState(c.state))}</span>${link(c.url, c.context)}</li>`).join("");
       const feedback = [...(evidence.reviews || []).filter(r => r.body), ...(evidence.comments || []).filter(c => c.body), ...(evidence.review_comments || []).filter(c => c.body)].slice(0, 5);
       const reviews = feedback.length ? `<details class="github-feedback"><summary>Recent review feedback</summary>${feedback.map(r => `<article><p>${esc(r.body)}</p>${r.html_url ? link(r.html_url, "View on GitHub") : ""}</article>`).join("")}</details>` : "";
@@ -47,7 +49,7 @@
       const observed = date && Number.isFinite(date.getTime()) ? `<p class="github-observed">Observed <time datetime="${date.toISOString()}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}</time></p>` : "";
       return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}</h4><p class="github-check-summary${failed.length ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${checks ? `<details><summary>Required checks</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${observed}</article>`;
     }).join("");
-    return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${watch?.monitoring === false ? '<p class="assignment-hint">Monitoring paused. Last recorded status:</p>' : ""}${error}${entries || (!error ? '<p class="assignment-detail">Waiting for the first GitHub status.</p>' : "")}</section>`;
+    return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries || (!error && !paused ? '<p class="assignment-detail">Waiting for the first GitHub status.</p>' : "")}</section>`;
   }
   const api = {current, describe, render, status};
   if (typeof module !== "undefined") module.exports = api;

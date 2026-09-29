@@ -2,6 +2,17 @@
 use super::*;
 
 const WATCHER: &str = "watcher:github";
+#[path = "assignment_lifecycle.rs"]
+mod lifecycle;
+
+pub(super) fn links_changed(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    actor: &Actor,
+) -> Result<()> {
+    lifecycle::reconcile_issue(db, project, number, actor)
+}
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     if db.query_row("SELECT count(*)=4 FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_assignment_summary','issue_github_destinations')",[],|r|r.get::<_,bool>(0))? { return Ok(()); }
@@ -122,8 +133,8 @@ pub(super) fn assign(
             }
         ],
     )?;
+    let (_, mut status) = saved(db, &project.id, issue.number)?;
     if !retain_claim {
-        let (_, status) = saved(db, &project.id, issue.number)?;
         db.execute(
             "UPDATE issues SET github_ack_event=?3 WHERE project_id=?1 AND number=?2",
             params![project.id, issue.number, status["event"].as_str()],
@@ -131,6 +142,18 @@ pub(super) fn assign(
         db.execute(
             "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
             params![project.id, issue.number],
+        )?;
+    }
+    if target == "github"
+        && status
+            .as_object_mut()
+            .unwrap()
+            .remove("stopped_reason")
+            .is_some()
+    {
+        db.execute(
+            "UPDATE issue_github_watches SET status=?3 WHERE project_id=?1 AND issue_number=?2",
+            params![project.id, issue.number, status.to_string()],
         )?;
     }
     if let Some(machine) = machine {
@@ -302,9 +325,11 @@ pub(super) fn enrich_result(
         if meta.target.as_deref() == Some("github")
             || status.get("event").is_some()
             || status.get("error").is_some()
+            || status.get("stopped_reason").is_some()
         {
             let monitoring = meta.target.as_deref() == Some("github")
-                && issue["state"] != "closed" && issue["deleted_at"].is_null();
+                && issue["state"] != "closed"
+                && issue["deleted_at"].is_null();
             issue["github_status"] = public_status(status, monitoring);
         }
     }
@@ -410,7 +435,7 @@ struct ObservationUpdate {
 }
 
 fn watch_tasks(db: &Connection, url: &str) -> Result<Vec<(String, i64, Value)>> {
-    let tasks=db.prepare("SELECT i.project_id,i.number,w.status FROM issues i JOIN projects p ON p.id=i.project_id JOIN issue_pull_requests pr ON pr.project_id=i.project_id AND pr.issue_number=i.number LEFT JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number WHERE pr.url=?1 AND i.assignment_target='github' AND i.state<>'closed' AND i.deleted_at IS NULL AND i.draft=0 AND p.hidden_at IS NULL")?.query_map([url],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let tasks=db.prepare("SELECT i.project_id,i.number,w.status FROM issues i JOIN projects p ON p.id=i.project_id JOIN issue_pull_requests pr ON pr.project_id=i.project_id AND pr.issue_number=i.number LEFT JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number WHERE pr.url=?1 AND pr.status NOT IN ('closed','merged') AND i.assignment_target='github' AND i.state<>'closed' AND i.deleted_at IS NULL AND i.draft=0 AND p.hidden_at IS NULL")?.query_map([url],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     tasks
         .into_iter()
         .map(|(project, number, stored)| {
@@ -807,11 +832,80 @@ mod tests {
     fn parked_watcher_is_not_another_agents_claim_and_closed_tasks_stop_monitoring() {
         let mut f = Fixture::new();
         f.assign("github").unwrap();
-        let closed = f.call(json!({"action":"close","number":1,"force":false,"comment":null})).unwrap();
+        let closed = f
+            .call(json!({"action":"close","number":1,"force":false,"comment":null}))
+            .unwrap();
         assert_eq!(closed["issue"]["state"], "closed");
         let view = f.call(json!({"action":"view","number":1})).unwrap();
         assert_eq!(view["issue"]["github_status"]["monitoring"], false);
         assert!(f.store.github_watch_urls().unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_the_last_watchable_pr_returns_waiting_work_to_boss() {
+        let mut f = Fixture::new();
+        f.call(json!({"action":"add_pull_request","number":1,"url":"https://example.com/not-github","purpose":"supporting-evidence"})).unwrap();
+        f.assign("github").unwrap();
+        f.call(json!({"action":"remove_pull_request","number":1,"url":"https://github.com/o/r/pull/1"})).unwrap();
+        let view = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(view["issue"]["assignee"], "human:boss");
+        assert_eq!(view["issue"]["github_status"]["monitoring"], false);
+        assert_eq!(
+            view["issue"]["github_status"]["stopped_reason"],
+            "no_open_pull_requests"
+        );
+        let version = view["issue"]["version"].clone();
+        f.store
+            .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            f.call(json!({"action":"view","number":1})).unwrap()["issue"]["version"],
+            version
+        );
+        f.request.actor.as_mut().unwrap().id = "human:boss".into();
+        f.call(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/2","purpose":"fix"})).unwrap();
+        f.assign("github").unwrap();
+        let resumed = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(resumed["issue"]["github_status"]["monitoring"], true);
+        assert!(
+            resumed["issue"]["github_status"]
+                .get("stopped_reason")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_pr_reconciliation_preserves_an_active_claim_and_other_open_prs() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.call(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/2","purpose":"fix"})).unwrap();
+        f.store
+            .record_pr_status("https://github.com/o/r/pull/1", Some("closed"), 100, None)
+            .unwrap();
+        f.store
+            .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            get_issue(&f.store.db, "named:test", 1, false)
+                .unwrap()
+                .assignee
+                .as_deref(),
+            Some(WATCHER)
+        );
+        f.call(json!({"action":"claim","number":1,"force":false}))
+            .unwrap();
+        f.store
+            .record_pr_status("https://github.com/o/r/pull/2", Some("closed"), 100, None)
+            .unwrap();
+        f.store
+            .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+            .unwrap();
+        let view = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(
+            view["issue"]["assignee"],
+            f.request.actor.as_ref().unwrap().id
+        );
+        assert_eq!(view["issue"]["github_status"]["monitoring"], false);
     }
 
     #[test]
@@ -899,6 +993,9 @@ mod tests {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
         f.observation(None);
+        f.store
+            .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+            .unwrap();
     }
 
     #[test]

@@ -29,25 +29,57 @@ fn evidence(pending: bool, stale: bool) -> (Value, Value, Value) {
 
 #[test]
 fn required_failure_is_saved_before_review_collection_can_fail() {
-    scenario(false, false, false);
+    scenario(Scenario::ReviewsDenied);
 }
 
 #[test]
 fn pending_optional_checks_do_not_require_review_collection() {
-    scenario(true, false, false);
+    scenario(Scenario::Pending);
 }
 
 #[test]
 fn stale_ci_never_wakes_work_or_starts_review_collection() {
-    scenario(false, true, false);
+    scenario(Scenario::Stale);
 }
 
 #[test]
 fn required_failure_survives_unavailable_workflow_details() {
-    scenario(false, false, true);
+    scenario(Scenario::CiDenied);
 }
 
-fn scenario(pending: bool, stale: bool, ci_denied: bool) {
+#[derive(Clone, Copy)]
+enum Scenario {
+    ReviewsDenied,
+    Pending,
+    Stale,
+    CiDenied,
+    Closed,
+    Merged,
+    KeepMergedOpen,
+}
+
+#[test]
+fn closed_unmerged_pr_returns_waiting_issue_to_boss() {
+    scenario(Scenario::Closed);
+}
+#[test]
+fn merged_fix_pr_keeps_existing_automatic_completion() {
+    scenario(Scenario::Merged);
+}
+#[test]
+fn disabling_automatic_completion_returns_merged_work_to_boss() {
+    scenario(Scenario::KeepMergedOpen);
+}
+
+fn scenario(scenario: Scenario) {
+    let pending = matches!(scenario, Scenario::Pending);
+    let stale = matches!(scenario, Scenario::Stale);
+    let ci_denied = matches!(scenario, Scenario::CiDenied);
+    let terminal = matches!(
+        scenario,
+        Scenario::Closed | Scenario::Merged | Scenario::KeepMergedOpen
+    );
+    let merged = matches!(scenario, Scenario::Merged | Scenario::KeepMergedOpen);
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
     let request = |operation| crate::issues::Request {
         version: 1,
@@ -70,14 +102,28 @@ fn scenario(pending: bool, stale: bool, ci_denied: bool) {
         .execute(&request(json!({"action":"view","number":1})))
         .unwrap();
     store.execute(&request(json!({"action":"assign","number":1,"target":"github","if_version":linked["issue"]["version"]}))).unwrap();
+    if matches!(scenario, Scenario::KeepMergedOpen) {
+        store
+            .execute(&request(
+                json!({"action":"configure_global","auto_close_merged_prs":false,"if_version":1}),
+            ))
+            .unwrap();
+    }
     drop(store);
-    let (ci, policy, metadata) = evidence(pending, stale);
+    let (ci, mut policy, mut metadata) = evidence(pending, stale);
+    if terminal {
+        policy["pull_request_state"] = json!("closed");
+        metadata["data"]["state"] = json!("closed");
+        metadata["data"]["merged"] = json!(merged);
+    }
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let client =
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
     let database = ctx.path.clone();
     let serving = std::thread::spawn(move || {
-        let expected = if stale {
+        let expected = if terminal {
+            2
+        } else if stale {
             1
         } else if pending || ci_denied {
             3
@@ -156,17 +202,30 @@ fn scenario(pending: bool, stale: bool, ci_denied: bool) {
     let view = store
         .execute(&request(json!({"action":"view","number":1})))
         .unwrap();
-    if stale {
+    if terminal && !matches!(scenario, Scenario::Merged) {
+        assert_eq!(view["issue"]["assignee"], "human:boss");
+        assert_eq!(view["issue"]["state"], "open");
+    } else if stale {
         assert_eq!(view["issue"]["assignee"], "watcher:github");
     } else {
         assert!(view["issue"]["assignee"].is_null());
     }
     let status = &view["issue"]["github_status"]["prs"]["https://github.com/o/r/pull/1"];
-    if stale || !pending {
+    if !terminal && (stale || !pending) {
         assert!(status["error"].is_string(), "{view}");
     }
-    if !stale {
+    if !stale && !terminal {
         assert_eq!(status["evidence"]["required"][0]["state"], "failure");
+    }
+    if terminal {
+        assert_eq!(view["issue"]["github_status"]["monitoring"], false);
+        assert_eq!(
+            view["issue"]["pull_requests"][0]["status"],
+            if merged { "merged" } else { "closed" }
+        );
+        if matches!(scenario, Scenario::Merged) {
+            assert_eq!(view["issue"]["state"], "closed");
+        }
     }
     // A due-time checkpoint prevents immediate duplicate network reads, including
     // after process recovery. No server remains for this cycle.
