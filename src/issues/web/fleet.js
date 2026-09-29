@@ -609,7 +609,7 @@ if (typeof document !== 'undefined') (() => {
         const receipts=data.steering||[];
         $('steering-updates').hidden=!receipts.length;$('steering-count').textContent=receipts.length?'('+receipts.length+')':'';
         $('steering-list').replaceChildren(...receipts.map(receipt=>{
-          const row=element('li'),state=({queued:'Queued',sending:'Delivery unconfirmed',delivered:'Delivered',rejected:'Not delivered',uncertain:'Delivery unconfirmed'})[receipt.state]||'Delivery unconfirmed';
+          const row=element('li'),state=({queued:'Queued',sending:'Delivery unconfirmed',delivered:'Delivered',rejected:'Not delivered',superseded:'Replaced by newer GitHub status',uncertain:'Delivery unconfirmed'})[receipt.state]||'Delivery unconfirmed';
           row.append(element('div','steering-receipt',state+' · '+({session:'This agent',issue:'This issue',project:'This project'})[receipt.scope]),element('p','steering-instruction',receipt.text));
           if(receipt.error)row.append(element('p','steering-problem',receipt.error));
           return row;
