@@ -11,6 +11,43 @@ let projectSettingsVersion = 0,
   projectPreviewTimer,
   projectPreviewSequence = 0,
   projectSettingsSequence = 0;
+const projectSettingsTabs = [...document.querySelectorAll('.project-settings-tabs [role="tab"]')];
+function selectProjectSettingsTab(tab, focus = false) {
+  for (const item of projectSettingsTabs) {
+    const selected = item === tab;
+    item.setAttribute("aria-selected", String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    document.getElementById(item.getAttribute("aria-controls")).hidden = !selected;
+  }
+  $(".project-settings-body").scrollTop = 0;
+  if (focus) tab.focus();
+  tab.scrollIntoView({block: "nearest", inline: "nearest"});
+}
+for (const [index, tab] of projectSettingsTabs.entries()) {
+  tab.onclick = () => selectProjectSettingsTab(tab);
+  tab.onkeydown = event => {
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % projectSettingsTabs.length;
+    else if (event.key === "ArrowLeft") next = (index + projectSettingsTabs.length - 1) % projectSettingsTabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = projectSettingsTabs.length - 1;
+    else return;
+    event.preventDefault();
+    selectProjectSettingsTab(projectSettingsTabs[next], true);
+  };
+}
+// Native validation must be able to focus the first invalid field, even in a closed tab/details.
+$("#project-settings-form").addEventListener("invalid", event => {
+  if (event.target !== $("#project-settings-form :invalid")) {
+    event.preventDefault();
+    return;
+  }
+  const panel = event.target.closest('[role="tabpanel"]');
+  if (panel) selectProjectSettingsTab(document.getElementById(panel.getAttribute("aria-labelledby")));
+  for (let parent = event.target.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === "DETAILS") parent.open = true;
+  }
+}, true);
 function projectSettingsDraft() {
   return {
     prompt: $("#project-prompt").value,
@@ -56,6 +93,7 @@ $("#project-settings-trigger").onclick = async () => {
   $("#project-goal-indicator").hidden = true;
   $("#project-settings-form button[type=submit]").disabled = true;
   $("#project-settings-dialog").showModal();
+  selectProjectSettingsTab(projectSettingsTabs[0]);
   try {
     const value = await api(
       { action: "project_settings" },
