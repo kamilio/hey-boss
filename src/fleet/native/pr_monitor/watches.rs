@@ -1,5 +1,6 @@
 //! The CI pass publishes before review collection starts.
 use super::{ApiClient, Context, Duration, Freshness, Result, Store, schedule, selector};
+mod queue;
 
 pub(super) fn poll(
     ctx: &Context,
@@ -25,32 +26,8 @@ pub(super) fn poll(
     let mut schedule: schedule::Schedule = serde_json::from_value(
         ctx.read_json(&path, serde_json::json!({"cooldown_until":0,"entries":{}}))?,
     )?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
-    for url in schedule.due(&tracked, crate::issues::worker::now()) {
-        if ctx.stopped() || tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        let Some((repository, number)) = selector(&url) else {
-            continue;
-        };
-        let result = runtime.block_on(poll_one(ctx, client, &url, &repository, number, deadline));
-        match result {
-            Ok(()) => schedule.watch_success(&url, crate::issues::worker::now()),
-            Err(error) => {
-                schedule.failure(&url, crate::issues::worker::now(), &error);
-                Store::open(&ctx.path)?.record_github_error(
-                    &url,
-                    "required_checks",
-                    &error.to_string(),
-                )?;
-            }
-        }
-        ctx.atomic_json(&path, &serde_json::to_value(&schedule)?)?;
-        if schedule.cooldown_until > crate::issues::worker::now() {
-            break;
-        }
-    }
-    Ok(())
+    let due = schedule.due(&tracked, crate::issues::worker::now());
+    runtime.block_on(queue::poll(ctx, client, due, &mut schedule, &path))
 }
 
 fn fresh(validated_at: u64) -> bool {
@@ -61,14 +38,19 @@ fn storage(error: crate::issues::Error) -> hey_gh::Error {
     hey_gh::Error::Invalid(format!("Cannot retain GitHub observation: {error}"))
 }
 
-async fn poll_one(
+struct RequiredEvidence {
+    policy: hey_gh::RequiredChecksReport,
+    published: bool,
+}
+
+async fn poll_required(
     ctx: &Context,
     client: &ApiClient,
     url: &str,
     repository: &str,
     number: u64,
     batch_deadline: tokio::time::Instant,
-) -> hey_gh::Result<()> {
+) -> hey_gh::Result<Option<RequiredEvidence>> {
     let freshness = Freshness::MaxAge(Duration::from_secs(30));
     let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20));
     let policy = tokio::time::timeout_at(
@@ -132,8 +114,28 @@ async fn poll_one(
         store
             .reconcile_github_assignments(&actor)
             .map_err(storage)?;
-        return Ok(());
+        return Ok(None);
     }
+    Ok(Some(RequiredEvidence {
+        policy,
+        published: published_required,
+    }))
+}
+
+async fn poll_details(
+    ctx: &Context,
+    client: &ApiClient,
+    url: &str,
+    repository: &str,
+    number: u64,
+    batch_deadline: tokio::time::Instant,
+    required: RequiredEvidence,
+) -> hey_gh::Result<()> {
+    let RequiredEvidence {
+        policy,
+        published: published_required,
+    } = required;
+    let freshness = Freshness::MaxAge(Duration::from_secs(30));
     let result = tokio::time::timeout_at(
         batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20)),
         async {

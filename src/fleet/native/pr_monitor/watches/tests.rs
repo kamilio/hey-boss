@@ -1,6 +1,126 @@
 use super::*;
 use serde_json::{Value, json};
 
+#[test]
+fn slow_optional_details_do_not_hold_up_other_required_checks() {
+    queue_scenario(true);
+}
+
+#[test]
+fn slow_required_policy_does_not_starve_other_pr_details() {
+    queue_scenario(false);
+}
+
+fn queue_scenario(hold_details: bool) {
+    let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    let request = |operation| crate::issues::Request {
+        version: 1,
+        project: crate::issues::Project {
+            id: "named:test".into(),
+            name: "test".into(),
+        },
+        project_override: None,
+        actor: Some(ctx.actor().unwrap()),
+        operation: serde_json::from_value(operation).unwrap(),
+        request_id: None,
+    };
+    store
+        .execute(&request(
+            json!({"action":"create","title":"Task","body":"","labels":[]}),
+        ))
+        .unwrap();
+    let count = if hold_details { 6 } else { 8 };
+    for number in 1..=count {
+        store.execute(&request(json!({"action":"add_pull_request","number":1,"url":format!("https://github.com/o/r/pull/{number}"),"purpose":"fix"}))).unwrap();
+    }
+    let view = store
+        .execute(&request(json!({"action":"view","number":1})))
+        .unwrap();
+    store.execute(&request(json!({"action":"assign","number":1,"target":"github","if_version":view["issue"]["version"]}))).unwrap();
+    drop(store);
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let client =
+        ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
+    let serving = std::thread::spawn(move || {
+        let (ci, policy, metadata) = evidence(true, false);
+        let respond = |request: tiny_http::Request, value: &Value| {
+            request
+                .respond(
+                    tiny_http::Response::from_string(value.to_string()).with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    ),
+                )
+                .unwrap();
+        };
+        let mut required = std::collections::BTreeSet::new();
+        let mut held = Vec::new();
+        let mut saw_ci = false;
+        for _ in 0..count * 3 {
+            let incoming = server
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .expect("Other PRs must progress while one detail read waits");
+            let path = incoming.url().split('?').next().unwrap();
+            let number: u64 = path.split('/').nth(5).unwrap().parse().unwrap();
+            if path.ends_with("required-checks") {
+                required.insert(number);
+                let mut policy = policy.clone();
+                policy["pull_number"] = json!(number);
+                if !hold_details && number > 4 && !saw_ci {
+                    held.push((incoming, policy));
+                } else {
+                    respond(incoming, &policy);
+                }
+                if hold_details && required.len() == count {
+                    for (waiting, value) in held.drain(..) {
+                        respond(waiting, &value);
+                    }
+                }
+            } else if path.ends_with("metadata") {
+                let mut metadata = metadata.clone();
+                metadata["data"]["number"] = json!(number);
+                respond(incoming, &metadata);
+            } else if path.ends_with("ci") {
+                saw_ci = true;
+                if !hold_details {
+                    for (waiting, value) in held.drain(..) {
+                        respond(waiting, &value);
+                    }
+                }
+                if hold_details && number == 1 && required.len() < count {
+                    held.push((incoming, ci.clone()));
+                } else {
+                    respond(incoming, &ci);
+                }
+            } else {
+                panic!("Unexpected request: {path}");
+            }
+        }
+        assert_eq!(required.len(), count);
+        assert!(held.is_empty());
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    poll(&ctx, &runtime, &client).unwrap();
+    serving.join().unwrap();
+    let mut store = Store::open(&ctx.path).unwrap();
+    let view = store
+        .execute(&request(json!({"action":"view","number":1})))
+        .unwrap();
+    assert_eq!(
+        view["issue"]["github_status"]["prs"]
+            .as_object()
+            .unwrap()
+            .len(),
+        count
+    );
+    assert!(view["issue"]["assignee"].is_null());
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn evidence(pending: bool, stale: bool) -> (Value, Value, Value) {
     let now = crate::issues::worker::now();
     let validated = if stale { now - 300_000 } else { now };
