@@ -1185,9 +1185,14 @@ async function changeAssignment(select) {
   const issue=model.detail.issue,project=model.project.id,host=model.route.host||null;
   const target=select.value,assignment=IssueAssignments.current(issue);
   if(target==='active') return;
+  const hadFocus=select===document.activeElement;
+  const restoreFocus=()=>{
+    if(hadFocus && document.activeElement===document.body && model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) $('#issue-assignment')?.focus({preventScroll:true});
+  };
   if((target==='boss'||target==='unassigned') && assignment.actor && assignment.actor!=='human:boss') {
     await performAction(target==='boss'?'assign_boss':'unassign',select);
     if(select.isConnected) await renderRoute();
+    restoreFocus();
     return;
   }
   saveComment();
@@ -1199,6 +1204,8 @@ async function changeAssignment(select) {
   } catch(error) {
     toast(error.message,true);
     if(select.isConnected) { select.disabled=false; select.value=assignment.kind==='github'?'github':assignment.kind==='boss'?'boss':assignment.kind==='machine'?'machine:'+assignment.machine:assignment.kind==='agent'?'active':'unassigned'; }
+  } finally {
+    restoreFocus();
   }
 }
 
