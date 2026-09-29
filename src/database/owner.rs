@@ -582,7 +582,7 @@ fn execute(
             reply.changes = db.execute(&sql, rusqlite::params_from_iter(values))?;
         }
         Command::Batch { sql } => {
-            db.execute_batch(&sql)?;
+            super::execute_batch(db, &sql)?;
         }
         Command::Backup { path } => {
             crate::issues::planning::protect_database_paths(Path::new(db.path().unwrap()), [&path])

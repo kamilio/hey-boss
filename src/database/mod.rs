@@ -53,6 +53,18 @@ pub(crate) fn remote_enabled() -> bool {
 fn error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message.into())))
 }
+
+/// A standalone batch owns any transaction it opens. On failure it must not
+/// leave that transaction behind for the next request. An existing transaction
+/// still belongs to its caller, including when a nested BEGIN is rejected.
+pub(super) fn execute_batch(db: &rusqlite::Connection, sql: &str) -> Result<()> {
+    let standalone = db.is_autocommit();
+    let result = db.execute_batch(sql);
+    if result.is_err() && standalone && !db.is_autocommit() {
+        db.execute_batch("ROLLBACK")?;
+    }
+    result
+}
 fn permission_denied(error: &rusqlite::Error) -> bool {
     matches!(error, rusqlite::Error::ToSqlConversionFailure(source)
         if source.downcast_ref::<std::io::Error>()
@@ -217,10 +229,17 @@ impl Connection {
     }
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
         match &self.backend {
-            Backend::Local(db) => db.execute_batch(sql),
+            Backend::Local(db) => execute_batch(db, sql),
             Backend::Remote(remote) => {
-                remote.call(Command::Batch { sql: sql.into() })?;
-                Ok(())
+                // Also clean up when talking to an older installed owner.
+                let standalone = !remote.transaction.get();
+                let result = remote.call(Command::Batch { sql: sql.into() });
+                if result.is_err() && standalone && remote.transaction.get() {
+                    let _ = remote.call(Command::Batch {
+                        sql: "ROLLBACK".into(),
+                    });
+                }
+                result.map(|_| ())
             }
         }
     }
@@ -391,12 +410,22 @@ impl Remote {
                 self.transaction.set(reply.transaction);
                 self.last_id.set(reply.last_id);
                 if let Some(failure) = &reply.error {
+                    if matches!(&command, Command::Batch { sql } if sql == "ROLLBACK") {
+                        *state = None;
+                        self.transaction.set(false);
+                    }
                     return Err(failure.restore());
                 }
                 Ok(reply)
             }
             Err(e) => {
                 *state = None;
+                // Dropping the transport makes the service roll back its lease.
+                // A lost rollback reply must not pin this client forever to a
+                // dead transaction. No mutation is replayed on reconnection.
+                if matches!(&command, Command::Batch { sql } if sql == "ROLLBACK") {
+                    self.transaction.set(false);
+                }
                 Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                     std::io::Error::new(
                         e.kind(),

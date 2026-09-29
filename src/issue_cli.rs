@@ -167,6 +167,11 @@ impl ListFilters {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Inspect a saved creation receipt without retrying it. Use the original --agent and --project.
+    Request {
+        /// Original request ID (not --request-id).
+        id: String,
+    },
     /// Protect and reconcile a reported task process on the machine that owns it.
     Attempt {
         #[command(subcommand)]
@@ -697,6 +702,7 @@ impl Options {
     }
     fn operation(&self) -> Result<Operation> {
         Ok(match &self.action {
+            Action::Request { id } => Operation::RequestStatus { id: id.clone() },
             Action::Attempt { command } => match command {
                 AttemptAction::Hold {
                     number,
@@ -1539,6 +1545,37 @@ pub(crate) fn print_text(value: &Value) {
     let project = &value["project"];
     if value["scope"] != "global" {
         println!("{} ({})", line(&project["name"]), line(&project["id"]));
+    }
+    if let Some(receipt) = value.get("request") {
+        println!(
+            "Request: {}\nActor: {}\nStatus: {}",
+            line(&receipt["id"]),
+            line(&receipt["actor"]),
+            if receipt["state"] == "recorded" {
+                "Recorded"
+            } else {
+                "No saved receipt"
+            }
+        );
+        if receipt["replica"] == true {
+            println!("Store: companion snapshot; use --supervisor to inspect the supervisor.");
+        }
+        if let Some(issue) = receipt["response"].get("issue") {
+            println!(
+                "Saved result: #{} {}",
+                issue["number"],
+                line(&issue["title"])
+            );
+        }
+        if receipt["state"] == "recorded" {
+            println!("Inspect the original operation with --json.");
+        } else {
+            println!("No receipt in this store snapshot.");
+            println!("This does not prove non-creation.");
+            println!("Check the original host, project and actor.");
+        }
+        println!("Retry only the identical command and request ID.");
+        return;
     }
     if value.get("issue").is_none()
         && let Some(allocation) = value.get("allocation")

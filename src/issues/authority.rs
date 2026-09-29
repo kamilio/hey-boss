@@ -3,7 +3,9 @@ use super::{BatchAssignment, Error, Operation, Request, Result};
 
 pub(crate) fn validate(request: &Request) -> Result<()> {
     match &request.operation {
-        Operation::View { .. } | Operation::Allocation { .. } => return Ok(()),
+        Operation::View { .. } | Operation::Allocation { .. } | Operation::RequestStatus { .. } => {
+            return Ok(());
+        }
         Operation::Edit {
             draft: None | Some(true),
             if_version: Some(version),
