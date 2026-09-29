@@ -2196,8 +2196,7 @@ fn run_commit_hook(
     }
     let project_override = options.project.clone().or_else(worker_project);
     let effective_project = project_override.as_deref().unwrap_or(&project.id);
-    let Ok(resolved) =
-        issues::commits::resolve_commit_input(commit, &project.id, Some(&cwd), None)
+    let Ok(resolved) = issues::commits::resolve_commit_input(commit, &project.id, Some(&cwd), None)
     else {
         return Ok(());
     };
