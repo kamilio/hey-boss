@@ -14,7 +14,7 @@ async page => {
   await page.route('**/api/fleet/events',route=>route.fulfill({contentType:'text/event-stream',body:'event: connected\ndata: {}\n\n'}));
   for(const theme of ['light','dark'])for(const width of [1440,390,320]) {
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme:theme});
-    await page.goto(base+'/agents');await page.waitForSelector('.is-held');
+    await page.goto(base+'/agents#view=conversations&scope=all');await page.waitForSelector('.is-held');
     check(await page.locator('.is-held:visible').count()===3,`${theme} ${width}: all outstanding holds are visible outside history`);
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth),`${theme} ${width}: overview fits`);
     check(await fits(),`${theme} ${width}: cards and actions stay inside visible bounds`);
@@ -37,13 +37,13 @@ async page => {
   }
   // A resumed attempt supersedes the hold in the overview, retaining history.
   runs=[...runs,{...runs[0],id:'resumed',state:'running',started_at:3000,finished_at:null,retry_at:null}];
-  await page.goto(base+'/agents');await page.waitForSelector('.agent-card:not(.history-card)');
+  await page.goto(base+'/agents#view=conversations&scope=all');await page.waitForSelector('.agent-card:not(.history-card)');
   check(await page.locator('.is-held:visible').count()===2,'Resuming one issue clears only its outstanding hold');
   await page.locator('.project-history summary').click();
   check(await page.locator('.is-held:visible').count()===5,'Saved holds remain accessible in expanded history');
   await page.setViewportSize({width:360,height:900});
   runs=runs.map(run=>({...run,project_name:'DatabaseAndProxyRecovery'.repeat(4)}));
-  await page.goto(base+'/agents');await page.waitForSelector('.is-held');
+  await page.goto(base+'/agents#view=conversations&scope=all');await page.waitForSelector('.is-held');
   check(await fits(),'Long project names keep retry cards and issue navigation visible');
   check(await page.locator('.project-heading').first().evaluate(e=>e.querySelector('.project-issues').getBoundingClientRect().top>=e.querySelector('h2').getBoundingClientRect().bottom),'Narrow headings give long project names the full row before issue navigation');
   await page.screenshot({path:'output/playwright/issue138-delivery/long-project.png',fullPage:false});

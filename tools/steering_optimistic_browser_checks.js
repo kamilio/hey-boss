@@ -6,7 +6,7 @@ async page => {
  page.on('pageerror',error=>errors.push(error.message));
  async function open(base,mobile){
   if(mobile){const pair=await(await page.request.get(base+'/fixture-pairing')).json();await page.request.post(base+'/api/pair',{data:{code:pair.code,deviceName:'Optimistic QA'}});}
-  await page.goto(base+'/agents',{waitUntil:'domcontentloaded'});await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();
+  await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();
   await page.waitForSelector('#steer-open:not([hidden])');
  }
  for(const [base,mobile] of [['http://127.0.0.1:59682',false],['http://127.0.0.1:59782',true]]){

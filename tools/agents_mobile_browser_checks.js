@@ -4,7 +4,7 @@ async page => {
  const {code}=await(await page.request.get(base+'/fixture-pairing')).json();
  const paired=await page.request.post(base+'/api/pair',{data:{code}});check(paired.ok(),'Synthetic phone paired');
  await page.setViewportSize({width:390,height:844});await page.emulateMedia({colorScheme:'light'});
- await page.goto(base+'/agents',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
+ await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
  check(await page.locator('.project-section').count()===3,'Paired web overview receives bridged projects');
  check(!await page.locator('#device-settings').isVisible(),'Phone view keeps service controls secondary');
  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Paired overview fits phone');
