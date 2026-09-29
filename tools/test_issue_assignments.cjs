@@ -91,3 +91,10 @@ test('required failure count includes results omitted from the summary', () => {
   assert.match(html,/200 required checks failed/);
   assert.match(html,/236 required checks omitted/);
 });
+
+test('a bounded multi-PR status discloses omitted PRs and source errors', () => {
+  const html = assignments.status({...base,github_status:{omitted_prs:6,prs:{'https://github.com/o/r/pull/1':{evidence:{complete:false,truncated:true,omitted:{source_errors:2},required:[]}}}}},helpers);
+  assert.match(html,/6 additional pull requests/);
+  assert.match(html,/Status incomplete/);
+  assert.match(html,/2 source errors/);
+});
