@@ -925,6 +925,40 @@ pub fn ensure_git_hooks() -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn write_hook_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let (pending, mut file) = loop {
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let pending = path.with_file_name(format!(".hook-{}-{serial}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&pending)
+        {
+            Ok(file) => break (pending, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = (|| {
+        file.write_all(content.as_bytes())?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        // Git readers do not take the installer lock. Publish a complete,
+        // executable inode and leave any already-open script intact. Close the
+        // writer first so immediate execution cannot fail with ETXTBSY on Linux.
+        drop(file);
+        std::fs::rename(&pending, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    result
+}
+
 fn provision_git_hooks(dir: &std::path::Path) -> Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
@@ -973,7 +1007,8 @@ fn provision_git_hooks(dir: &std::path::Path) -> Result<()> {
         let content = hook_script(hook);
         let unchanged = std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str());
         if !unchanged {
-            std::fs::write(&path, content)?;
+            write_hook_atomically(&path, &content)?;
+            continue;
         }
         let mut perms = std::fs::metadata(&path)?.permissions();
         if perms.mode() & 0o111 == 0 {
@@ -1036,6 +1071,134 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn hooks_replace_scripts_without_changing_open_readers() {
+        use std::io::Read;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = HookFixture::new();
+        let dir = fixture.0.join("git-hooks");
+        std::fs::create_dir(&dir).unwrap();
+        let old = "#!/bin/sh\n# Previous dispatcher\nexit 0\n";
+        let mut readers = Vec::new();
+        for hook in MANAGED_HOOKS {
+            let path = dir.join(hook);
+            std::fs::write(&path, old).unwrap();
+            readers.push(std::fs::File::open(path).unwrap());
+        }
+
+        provision_git_hooks(&dir).unwrap();
+
+        for (hook, mut reader) in MANAGED_HOOKS.iter().zip(readers) {
+            let mut observed = String::new();
+            reader.read_to_string(&mut observed).unwrap();
+            assert_eq!(observed, old, "an executing {hook} must retain its script");
+            let path = dir.join(hook);
+            assert_ne!(
+                reader.metadata().unwrap().ino(),
+                std::fs::metadata(&path).unwrap().ino()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), hook_script(hook));
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert!(
+                Command::new("sh")
+                    .arg("-n")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            MANAGED_HOOKS.len()
+        );
+    }
+
+    #[test]
+    fn hooks_failed_publication_preserves_destination_and_cleans_staging() {
+        let fixture = HookFixture::new();
+        let path = fixture.0.join("pre-commit");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), "original").unwrap();
+        assert!(write_hook_atomically(&path, &hook_script("pre-commit")).is_err());
+        assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn hooks_concurrent_publication_keeps_complete_executable_scripts() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Barrier;
+        let fixture = HookFixture::new();
+        let path = fixture.0.join("post-checkout");
+        let versions: Vec<_> = ["old", "new"]
+            .iter()
+            .map(|version| {
+                format!(
+                    "#!/bin/sh\n{}printf '%s\\n' '{version}'\n",
+                    "# padding\n".repeat(4096)
+                )
+            })
+            .collect();
+        write_hook_atomically(&path, &versions[0]).unwrap();
+        let barrier = Barrier::new(5);
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let (path, versions, barrier) = (&path, &versions, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for iteration in 0..100 {
+                        write_hook_atomically(path, &versions[(iteration + writer) % 2]).unwrap();
+                    }
+                });
+            }
+            barrier.wait();
+            for _ in 0..100 {
+                let mut file = std::fs::File::open(&path).unwrap();
+                assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o755);
+                let mut observed = String::new();
+                file.read_to_string(&mut observed).unwrap();
+                assert!(versions.contains(&observed), "reader saw a partial script");
+                let output = Command::new(&path).output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stdout == b"old\n" || output.stdout == b"new\n");
+            }
+        });
+        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn hooks_concurrent_installers_repair_permissions_without_rewriting_scripts() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = HookFixture::new();
+        let dir = fixture.0.join("git-hooks");
+        provision_git_hooks(&dir).unwrap();
+        let path = dir.join("post-checkout");
+        let original = std::fs::metadata(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| provision_git_hooks(&dir).unwrap());
+            }
+        });
+        let repaired = std::fs::metadata(&path).unwrap();
+        assert_eq!(repaired.ino(), original.ino());
+        assert_eq!(repaired.modified().unwrap(), original.modified().unwrap());
+        assert_eq!(repaired.permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            MANAGED_HOOKS.len()
+        );
     }
 
     #[test]
