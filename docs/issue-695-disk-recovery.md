@@ -6,6 +6,33 @@ CLI defect was identified.
 
 ## Current status
 
+At 02:04 UTC, verification was interrupted by an independent supervisor
+upgrade. The resumed check found fresh heartbeats and no connection events
+since the 01:52:09.282 reconnect, then stopped after six live samples when a
+new supervisor epoch (`89813471c28ca34cc579f04b054cb4df`) reported a reconnect
+at 02:03:54.306. This is a rollout boundary, not evidence of another ENOSPC
+or heartbeat timeout. The intended 15-minute uninterrupted check did not
+complete. The new supervisor reports build `9f723b4557ff38ee`; Mac.lan remains
+connected on `638e6fc0d9eab8c4` with deployment `updating`. Do not run a competing
+installer. Resume final stability and journal verification after this rollout
+settles; issue 695 stays open in the meantime.
+
+At 02:01:32 UTC, Mac.lan had 99,737,448 KiB free (about 95.1 GiB), journal
+watermark 276160, and zero pending rows. All 276160 unique supervisor receipts
+were present, minimum 1 and maximum 276160. Conflict counts and timestamps
+were unchanged. The connected owner still reported original worker PID 18690,
+five active slots, zero free slots and pickup enabled. This task performed no
+further reclamation, wake, restart or worker-control action.
+
+Direct installed-version reads confirmed the new local binary and previous
+Mac.lan binary. Devbox's existing SSH control connection failed with a broken
+pipe; its earlier successful audit remains historical. The rollout and its
+verification belong to the existing deployment, not a new executable change
+for this incident. The resumed monitor and audit commands exited; no temporary
+files or browser sessions were created. Unrelated edits remain preserved.
+
+## Earlier post-wake verification
+
 Issue 695 remains open. The post-wake verification from 01:47:10.323 through
 01:51:17.652 UTC failed after nine samples / 247.552 seconds. The supervisor
 recorded another heartbeat timeout at 01:51:00.265; last heartbeat was
