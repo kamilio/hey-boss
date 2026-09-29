@@ -168,7 +168,7 @@ pub struct Change {
     pub resource: String,
     pub changed_fields: Vec<String>,
     pub observed_at_ms: u64,
-    /// A complete snapshot, rather than a patch requiring client-side history.
+    /// The current resource value. Superseded observations are coalesced.
     pub data: Value,
 }
 
@@ -233,10 +233,13 @@ impl Store {
             options.mode(0o600);
         }
         options.open(path).map_err(storage)?;
-        let conn = Connection::open(path).map_err(storage)?;
+        let mut conn = Connection::open(path).map_err(storage)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(storage)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;
+        // New databases return freed pages incrementally instead of retaining
+        // their historical high-water size. Existing databases are converted
+        // after the payload migration below.
+        conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS cache (
                 scope TEXT NOT NULL, key TEXT NOT NULL, response TEXT NOT NULL,
                 PRIMARY KEY(scope, key));
@@ -271,7 +274,7 @@ impl Store {
                 last_error TEXT, PRIMARY KEY(scope,resource));
             CREATE TABLE IF NOT EXISTS changes (
                 cursor INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL,
-                resource TEXT NOT NULL, observed_at_ms INTEGER NOT NULL, data TEXT NOT NULL, fields TEXT NOT NULL);
+                resource TEXT NOT NULL, observed_at_ms INTEGER NOT NULL, fields TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS changes_scope_cursor ON changes(scope, cursor);
             CREATE INDEX IF NOT EXISTS changes_scope_time ON changes(scope, observed_at_ms);
             CREATE TABLE IF NOT EXISTS feeds (scope TEXT PRIMARY KEY, head INTEGER NOT NULL DEFAULT 0, floor INTEGER NOT NULL DEFAULT 0);
@@ -280,6 +283,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS watches (
                 scope TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
                 PRIMARY KEY(scope, id));").map_err(storage)?;
+        migrate_current_data(&mut conn)?;
         conn.execute(
             "INSERT OR IGNORE INTO metadata(key,value) VALUES('database_id',?1)",
             [digest(&format!("{}-{}", now_ms(), fastrand::u128(..)))],
@@ -576,7 +580,7 @@ impl Store {
         }).await
     }
 
-    /// Append the snapshot and event in one transaction; retain a bounded log.
+    /// Replace current data and append compact cursor metadata atomically.
     pub async fn observe(&self, scope: &str, resource: &str, value: &Value) -> Result<String> {
         self.observe_many(scope, &[(resource.to_owned(), value.clone())])
             .await
@@ -651,7 +655,7 @@ impl Store {
                 }
                 let fields:Vec<String>=value.as_object().map(|object|object.iter().filter(|(k,v)|previous.as_ref().and_then(|p|p.get(*k))!=Some(*v)).map(|(k,_)|k.clone()).collect()).unwrap_or_else(||vec!["data".into()]);
                 let stamp=now_ms();
-                tx.execute("INSERT INTO changes(scope,resource,observed_at_ms,data,fields) VALUES(?1,?2,?3,?4,?5)",params![scope,resource,stamp,data,serde_json::to_string(&fields).map_err(storage)?]).map_err(storage)?;
+                tx.execute("INSERT INTO changes(scope,resource,observed_at_ms,fields) VALUES(?1,?2,?3,?4)",params![scope,resource,stamp,serde_json::to_string(&fields).map_err(storage)?]).map_err(storage)?;
                 let sequence=tx.last_insert_rowid();
                 tx.execute("INSERT INTO snapshots(scope,resource,hash,data,cursor,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(scope,resource) DO UPDATE SET hash=excluded.hash,data=excluded.data,cursor=excluded.cursor,observed_at_ms=excluded.observed_at_ms",params![scope,resource,hash,data,sequence,stamp]).map_err(storage)?;
                 tx.execute("INSERT INTO feeds(scope,head) VALUES(?1,?2) ON CONFLICT(scope) DO UPDATE SET head=excluded.head",params![scope,sequence]).map_err(storage)?;
@@ -674,6 +678,9 @@ impl Store {
             let sequence:u64=tx.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
             let cursor=format!("{}.{}",feed_prefix(&tx,&scope)?,sequence);
             tx.commit().map_err(storage)?;
+            // Bound maintenance work per observation; the WAL checkpoint will
+            // return these pages to the filesystem without a full vacuum.
+            let _ = conn.execute_batch("PRAGMA incremental_vacuum(64);");
             Ok(cursor)
         }).await
     }
@@ -735,9 +742,9 @@ impl Store {
         self.run(move |conn| {
             let tx = conn.transaction().map_err(storage)?;
             let (prefix, sequence, head) = cursor_position(&tx, &scope, cursor.as_deref())?;
-            let mut stmt = tx.prepare("SELECT cursor,resource,observed_at_ms,length(CAST(data AS BLOB)),length(CAST(fields AS BLOB)) FROM changes WHERE scope=?1 AND cursor>?2 ORDER BY cursor LIMIT ?3").map_err(storage)?;
-            let rows = stmt.query_map(params![scope, sequence, limit + 1], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?, r.get::<_, usize>(3)?, r.get::<_, usize>(4)?))).map_err(storage)?;
-            let mut body = tx.prepare("SELECT data,fields FROM changes WHERE scope=?1 AND cursor=?2").map_err(storage)?;
+            let mut stmt = tx.prepare("SELECT c.cursor,c.resource,c.observed_at_ms,length(CAST(s.data AS BLOB)),length(CAST(c.fields AS BLOB)) FROM changes c LEFT JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor>?2 ORDER BY c.cursor LIMIT ?3").map_err(storage)?;
+            let rows = stmt.query_map(params![scope, sequence, limit + 1], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?, r.get::<_, Option<usize>>(3)?, r.get::<_, usize>(4)?))).map_err(storage)?;
+            let mut body = tx.prepare("SELECT s.data,c.fields FROM changes c JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor=?2").map_err(storage)?;
             let mut changes = Vec::new();
             let mut position = sequence;
             let mut bytes = 0usize;
@@ -748,6 +755,13 @@ impl Store {
                     has_more = true;
                     break;
                 }
+                // Historical payloads do not exist. Advance over their small
+                // cursor markers, returning a resource only at its latest
+                // observation with that observation's own timestamp/cursor.
+                let Some(data_bytes) = data_bytes else {
+                    position = sequence;
+                    continue;
+                };
                 // Only PR selectors have GitHub's case-insensitive repository
                 // naming. Other prefixes can contain case-sensitive branch refs.
                 let matches = if resource_prefix.starts_with("pr-status://") {
@@ -922,6 +936,55 @@ impl Store {
     }
 }
 
+// `snapshots` is the legacy name for the single current value per resource;
+// it has never been a version archive. Only `changes` formerly duplicated bodies.
+fn migrate_current_data(conn: &mut Connection) -> Result<()> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(storage)?;
+    let legacy: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('changes') WHERE name='data')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if legacy {
+        tx.execute_batch(
+            "ALTER TABLE changes RENAME TO historical_changes;
+            CREATE TABLE changes (
+                cursor INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL,
+                resource TEXT NOT NULL, observed_at_ms INTEGER NOT NULL, fields TEXT NOT NULL);
+            INSERT INTO changes(cursor,scope,resource,observed_at_ms,fields)
+                SELECT cursor,scope,resource,observed_at_ms,fields FROM historical_changes;
+            DROP TABLE historical_changes;
+            CREATE INDEX changes_scope_cursor ON changes(scope,cursor);
+            CREATE INDEX changes_scope_time ON changes(scope,observed_at_ms);
+            INSERT OR REPLACE INTO metadata(key,value) VALUES('compact_current_data','pending');",
+        )
+        .map_err(storage)?;
+        // Preserve the high-water sequence even when all markers were pruned.
+        tx.execute("UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT MAX(head) FROM feeds),0)) WHERE name='changes'", []).map_err(storage)?;
+    }
+    let pending: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='compact_current_data')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    tx.commit().map_err(storage)?;
+    if pending {
+        conn.execute_batch(
+            "PRAGMA auto_vacuum=INCREMENTAL; VACUUM;
+            PRAGMA wal_checkpoint(TRUNCATE);
+            DELETE FROM metadata WHERE key='compact_current_data';",
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
 fn storage(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -985,6 +1048,248 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn repeated_large_updates_keep_only_current_payload_and_page_over_old_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let store = Store::open(
+            &path,
+            std::time::Duration::from_secs(3600),
+            100,
+            1024 * 1024,
+        )
+        .unwrap();
+        let start = store.bootstrap("account").await.unwrap().cursor;
+        for index in 0..40 {
+            store
+                .observe(
+                    "account",
+                    "source",
+                    &serde_json::json!({"index":index,"body":"x".repeat(64*1024)}),
+                )
+                .await
+                .unwrap();
+        }
+        let latest = store.bootstrap("account").await.unwrap();
+        let mut cursor = start;
+        let mut values = Vec::new();
+        let mut empty_pages = 0;
+        loop {
+            let page = store.changes("account", Some(&cursor), 7).await.unwrap();
+            if page.changes.is_empty() {
+                empty_pages += 1;
+            }
+            assert_ne!(page.next_cursor, cursor);
+            cursor = page.next_cursor;
+            values.extend(page.changes);
+            if !page.has_more {
+                break;
+            }
+        }
+        assert!(empty_pages > 0);
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].data["index"], 39);
+        assert_eq!(values[0].cursor, latest.cursor);
+        assert_eq!(cursor, latest.cursor);
+        assert_eq!(latest.snapshots.len(), 1);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() < 512 * 1024,
+            "forty 64-KiB updates must not store forty bodies"
+        );
+        drop(store);
+        let reopened = Store::open(
+            &path,
+            std::time::Duration::from_secs(3600),
+            100,
+            1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(reopened.bootstrap("account").await.unwrap().cursor, cursor);
+        assert!(
+            reopened
+                .changes("account", Some(&cursor), 100)
+                .await
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_removes_history_compacts_and_preserves_current_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let open = || {
+            Store::open(
+                &path,
+                std::time::Duration::from_secs(3600),
+                100,
+                1024 * 1024,
+            )
+            .unwrap()
+        };
+        let store = open();
+        let start = store.bootstrap("account").await.unwrap().cursor;
+        for index in 0..30 {
+            store
+                .observe(
+                    "account",
+                    "source",
+                    &serde_json::json!({"index":index,"body":"x".repeat(32*1024)}),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .observe("other", "source", &serde_json::json!({"private":true}))
+            .await
+            .unwrap();
+        let current = store.bootstrap("account").await.unwrap();
+        let watch = Watch {
+            id: "watch".into(),
+            repository: "acme/repo".into(),
+            pull_number: 7,
+            interval_seconds: 60,
+            kind: WatchKind::PullRequests,
+            branches: vec![],
+            all_branches: false,
+        };
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO watches(scope,id,value) VALUES('account','watch',?1)",
+            [serde_json::to_string(&watch).unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cache(scope,key,response) VALUES('account','cache-key','preserve-me')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO snapshot_validation VALUES('account','source',1234)",
+            [],
+        )
+        .unwrap();
+        drop(store);
+        // Construct the previous on-disk format, including a high-water file
+        // size left behind by pruning and duplicate historical payloads.
+        conn.execute_batch("PRAGMA auto_vacuum=NONE; VACUUM;
+            ALTER TABLE changes ADD COLUMN data TEXT NOT NULL DEFAULT '';
+            UPDATE changes SET data=(SELECT data FROM snapshots s WHERE s.scope=changes.scope AND s.resource=changes.resource);
+            CREATE TABLE old_allocation(data BLOB);
+            INSERT INTO old_allocation VALUES(zeroblob(4194304));
+            DROP TABLE old_allocation;
+            PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+        drop(conn);
+        let migrated = open();
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            after < before / 4,
+            "migration must physically return historical/free pages: {before} -> {after}"
+        );
+        assert_eq!(
+            serde_json::to_value(migrated.bootstrap("account").await.unwrap()).unwrap(),
+            serde_json::to_value(&current).unwrap()
+        );
+        assert_eq!(migrated.watches("account").await.unwrap()[0].id, "watch");
+        assert_eq!(
+            migrated
+                .validation_clock("account", "source")
+                .await
+                .unwrap(),
+            1234
+        );
+        let page = migrated
+            .changes("account", Some(&start), 100)
+            .await
+            .unwrap();
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].data["index"], 29);
+        assert_eq!(page.next_cursor, current.cursor);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT response FROM cache WHERE scope='account'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "preserve-me"
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(
+            !conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('changes') WHERE name='data')",
+                    [],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        let next = migrated
+            .observe("account", "source", &serde_json::json!({"index":30}))
+            .await
+            .unwrap();
+        assert_ne!(next, current.cursor);
+        assert_eq!(
+            migrated
+                .changes("account", Some(&current.cursor), 100)
+                .await
+                .unwrap()
+                .changes
+                .len(),
+            1
+        );
+        drop(migrated);
+        assert_eq!(open().bootstrap("account").await.unwrap().cursor, next);
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_preserves_sequence_when_the_journal_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let open = || Store::open(&path, std::time::Duration::from_secs(3600), 100, 4096).unwrap();
+        let store = open();
+        let head = store
+            .observe("account", "source", &serde_json::json!({"v":1}))
+            .await
+            .unwrap();
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE changes ADD COLUMN data TEXT NOT NULL DEFAULT ''; DELETE FROM changes;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = open();
+        store
+            .observe("account", "source", &serde_json::json!({"v":2}))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .changes("account", Some(&head), 100)
+                .await
+                .unwrap()
+                .changes
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn cursor_validation_checks_identity_bounds_and_retention_without_decoding_bodies() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.sqlite");
@@ -1005,7 +1310,7 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         let conn = Connection::open(&path).unwrap();
-        conn.execute("UPDATE changes SET data='broken',fields='broken'", [])
+        conn.execute("UPDATE snapshots SET data='broken'", [])
             .unwrap();
         store.validate_cursor("account", &start).await.unwrap();
         assert!(matches!(
@@ -1478,7 +1783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn change_pages_bound_bytes_and_replay_every_event_without_skipping() {
+    async fn change_pages_bound_bytes_without_skipping_current_resources() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(
             &dir.path().join("cache.sqlite"),
@@ -1494,7 +1799,7 @@ mod tests {
                 store
                     .observe(
                         "account",
-                        "source",
+                        &format!("source{index}"),
                         &serde_json::json!({"index":index,"body":"x".repeat(size)}),
                     )
                     .await
@@ -1631,11 +1936,6 @@ mod tests {
         let db = Connection::open(&path).unwrap();
         let malformed = "{\"pullRequest\":{\"number\":1,\"comments\":[not-json]}}";
         db.execute(
-            "UPDATE changes SET data=?1 WHERE resource=?2",
-            params![malformed, resource],
-        )
-        .unwrap();
-        db.execute(
             "UPDATE snapshots SET data=?1 WHERE resource=?2",
             params![malformed, resource],
         )
@@ -1659,11 +1959,6 @@ mod tests {
                 .await,
             Err(Error::Storage(_))
         ));
-        db.execute(
-            "UPDATE changes SET data=?1 WHERE resource=?2",
-            params![data.to_string(), resource],
-        )
-        .unwrap();
         db.execute(
             "UPDATE snapshots SET data=?1 WHERE resource=?2",
             params![data.to_string(), resource],
@@ -1751,7 +2046,7 @@ mod tests {
         Connection::open(&path)
             .unwrap()
             .execute(
-                "UPDATE changes SET data='not-json' WHERE resource LIKE 'comments://%'",
+                "UPDATE snapshots SET data='not-json' WHERE resource LIKE 'comments://%'",
                 [],
             )
             .unwrap();
