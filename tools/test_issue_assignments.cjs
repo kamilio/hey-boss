@@ -71,6 +71,13 @@ test('review fetch errors keep the required failure visible', () => {
   assert.match(html, /Review access denied/);
 });
 
+test('policy errors stay visible alongside last observed required failures', () => {
+  const html = assignments.status({...base, github_status:{prs:{'https://github.com/o/r/pull/1':{evidence:{required:[{context:'tests',state:'failure'}],policy_errors:[{source:'branch_protection',message:'Policy access denied <retry>'}],complete:false}}}}},helpers);
+  assert.match(html,/1 required check failed \(policy incomplete\)/);
+  assert.match(html,/Policy access denied &lt;retry&gt;/);
+  assert.doesNotMatch(html,/<retry>|All checks finished/);
+});
+
 test('mismatched source heads label old checks instead of attributing failure to the new head', () => {
   const html = assignments.status({...base, github_status:{prs:{'https://github.com/o/r/pull/1':{evidence:{sources_match:false,required:[{context:'tests',state:'failure'}],complete:false}}}}},helpers);
   assert.match(html,/Refreshing changed pull request/);
