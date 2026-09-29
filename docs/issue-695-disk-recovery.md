@@ -58,6 +58,17 @@ the final sample disconnected with OS error 28. Recovery therefore remains
 incomplete; the same approval is pending, with no new approval request,
 additional deletion or worker-control action performed on resumption.
 
+A later resumed check found larger temporary headroom: 2,982,868 KiB at
+00:28:05 UTC. A planned five-minute observation began at 00:28:46 with
+6,196,696 KiB free, peaked at 6,820,032 KiB, then stopped after eight samples
+(214.15 seconds) at 00:32:20 with a **companion heartbeat timeout**, despite
+5,099,824 KiB still free. This is a distinct observed failure, not evidence of
+another ENOSPC at that instant or proof of a particular CLI defect. The existing
+retry reconnected by 00:33:45 with a fresh sync and zero reported pending
+changes, but the full stability check had failed. No additional cleanup or
+worker control was performed. The same approval remained pending; revalidate
+the need for its deletion before using it now that disk headroom has improved.
+
 ## Journal and conflict verification
 
 Before deletion, a read-only companion database snapshot showed journal
@@ -68,6 +79,8 @@ This covers the original reported backlog of 113 changes and subsequent work.
 The resumed check extended gap-free receipt coverage through sequence 275260;
 the companion had zero pending rows at that snapshot. Conflict counts and
 their latest timestamps were unchanged.
+The next resumed read extended complete receipt coverage through 275349,
+including the 40 changes observed pending at 00:24 UTC.
 
 The 639 unresolved supervisor conflicts and 355 unresolved companion conflicts
 predate this incident; their latest timestamps were 1790621906225 and
@@ -81,6 +94,8 @@ occupied slots and zero free slots. These are timestamped observations, not a
 claim of current capacity while the supervisor reports disconnection.
 Another direct owner snapshot at 00:17:02 UTC confirmed PID 18690 with all
 five slots occupied and pickup enabled, before the later disconnection.
+At 00:28:49 UTC, direct owner status again confirmed that same PID, five active
+slots, pickup enabled, and zero pending changes.
 
 ## Installed software and visual checks
 
@@ -88,6 +103,13 @@ Read-only installation audits found the MacBook, Mac.lan and devbox current at
 commit `a996bc002d1df0d5dbc6dc743facd82837eeff53`, build
 `638e6fc0d9eab8c4`. This recovery changes no executable or web assets and requires
 no software reinstall or Fly release.
+
+A later audit refresh hung after its direct child exited, matching existing
+open issue #471. Only the task-owned read-only audit process was terminated.
+Bounded direct version checks reconfirmed the same build on the MacBook and
+Mac.lan; devbox instead failed with `Connection closed by UNKNOWN port 65535`.
+Its earlier successful audit must not be presented as current reachability.
+No SSH trust setting, authentication helper, service or live build was changed.
 
 The installed worker dashboard was inspected in an isolated Chrome session at
 1440 × 1000 and 390 × 844, in light and dark appearance. The expanded fleet
