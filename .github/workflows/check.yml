@@ -35,6 +35,7 @@ jobs:
           swift package_hey_boss.swift out/hey-boss-daemon "out/Hey Boss.app"
           codesign --verify --strict "out/Hey Boss.app"
           plutil -lint "out/Hey Boss.app/Contents/Info.plist"
+      - run: node tools/test_desktop_transport.cjs
       - run: cargo build --locked --release
       - run: cargo package --locked --allow-dirty --workspace --exclude hey-gh-node
   linux:
