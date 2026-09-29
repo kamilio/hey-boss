@@ -72,12 +72,14 @@ fn ci_signals(
     ci: &crate::CiReport,
     policy: &RequiredChecksReport,
 ) -> Observation {
-    let current = pull_request["state"] == "open"
+    let sources_match = !ci.head_sha.is_empty()
         && pull_request["head"]["sha"] == ci.head_sha
         && policy.head_sha == ci.head_sha
         && policy.merge_sha == ci.merge_sha
         && policy.repository.eq_ignore_ascii_case(repository)
-        && policy.pull_number == number
+        && policy.pull_number == number;
+    let current = pull_request["state"] == "open"
+        && sources_match
         && policy.errors.is_empty()
         && ci.errors.is_empty();
     let checks = selected(
@@ -187,6 +189,9 @@ fn ci_signals(
         feedback: Vec::new(),
         evidence: evidence::bounded(
             json!({"repository":repository,"number":number,"head":ci.head_sha,
+            "sources_match":sources_match,
+            "source_heads":{"pull_request":pull_request["head"]["sha"],"ci":ci.head_sha,"required":policy.head_sha},
+            "source_merges":{"ci":ci.merge_sha,"required":policy.merge_sha},
             "complete":false,"ci_complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
@@ -465,6 +470,29 @@ mod tests {
             message: "denied".into(),
         });
         assert!(observe(&r, &p).blocking.is_empty());
+    }
+    #[test]
+    fn mixed_heads_are_explicit_in_evidence_and_never_generate_signals() {
+        let (mut report, mut policy) = fixture();
+        report.data.ci.summary.pending = 0;
+        policy.head_sha = "previous-head".into();
+        let observed = observe(&report, &policy);
+        assert_eq!(observed.evidence["sources_match"], false);
+        assert_eq!(
+            observed.evidence["source_heads"]["required"],
+            "previous-head"
+        );
+        assert_eq!(observed.evidence["source_heads"]["ci"], "head");
+        assert!(observed.blocking.is_empty());
+        assert!(observed.completed.is_none());
+        policy.head_sha = "head".into();
+        policy.merge_sha = Some("previous-merge".into());
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], false);
+        policy.merge_sha = None;
+        report.data.pull_request["head"]["sha"] = json!("next-head");
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], false);
+        report.data.pull_request["head"]["sha"] = json!("head");
+        assert_eq!(observe(&report, &policy).evidence["sources_match"], true);
     }
     #[test]
     fn rerun_is_a_new_failure_and_empty_ci_is_not_completion() {
