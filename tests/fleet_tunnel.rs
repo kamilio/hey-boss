@@ -409,18 +409,16 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
             before["issue"]
         );
     }
-    for args in [vec![
+    let args = [
         "reopen",
         "6",
         "--if-version",
         "0",
         "--request-id",
         "zero-version",
-    ]] {
-        let mut args = args;
-        args.push("--supervisor");
-        assert_eq!(f.issue("peer", &args, 2)["error"]["code"], "invalid_input");
-    }
+        "--supervisor",
+    ];
+    assert_eq!(f.issue("peer", &args, 2)["error"]["code"], "invalid_input");
     assert_eq!(
         f.sql(
             "main",
