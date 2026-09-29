@@ -12,7 +12,13 @@ impl Fixture {
             .join("out")
             .join(format!("sequence-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let store = Store::open(&root.join("issues.db")).unwrap();
+        let mut store = Store::open(&root.join("issues.db")).unwrap();
+        // This suite exercises opt-in legacy sequences, not the new-project default.
+        store
+            .execute(&Self::request(
+                json!({"action":"configure_project","subtask_scheduling":"sequential"}),
+            ))
+            .unwrap();
         Self { root, store }
     }
     fn request(op: Value) -> Request {
