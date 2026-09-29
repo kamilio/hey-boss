@@ -6,7 +6,7 @@ async page => {
  page.on('pageerror',e=>errors.push(e.message));
  const fits=()=>page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth);
  await page.setViewportSize({width:1440,height:1000});await page.emulateMedia({colorScheme:'light'});
- await page.goto(base+'/agents',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
+ await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
  check(await page.locator('.project-section').count()===3,'Tasks grouped into three projects');
  check(await page.locator('.project-section').first().locator('.agent-card:not(.history-card)').count()===2,'Agents on separate devices appear together under their project');
  check(await page.locator('.location-label').allTextContents().then(v=>v.includes('Devbox')),'Device is a simple label');
@@ -16,7 +16,7 @@ async page => {
  await page.locator('.project-history summary').focus();await page.locator('#refresh').click();await page.waitForTimeout(600);
  check(await page.locator('.project-history').evaluate(e=>e.open),'Refresh preserves history expansion');
  await page.screenshot({path:shots+'overview-desktop.png',fullPage:true});
- await page.goto(base+'/agents#project=named%3AAtlas',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
+ await page.goto(base+'/agents#view=conversations&project=named%3AAtlas',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
  check(await page.locator('.project-section').count()===1,'Project filter shows only selected project');
  await page.locator('#show-all').click();await page.waitForSelector('.agent-card');check(await page.locator('.project-section').count()===3,'All projects restores overview');
  await page.locator('.agent-card').first().focus();await page.keyboard.press('Enter');await page.waitForSelector('.chat-message.assistant');
@@ -58,7 +58,7 @@ async page => {
  await page.reload();await page.waitForSelector('#error:not([hidden])');check((await page.locator('#error').innerText()).includes('disconnected'),'Failed remote load gives an actionable error');
  await page.unroute('**/api/fleet/conversation?*');
  await page.route('**/api/fleet/status',route=>route.fulfill({json:{ok:true,machines:[],signals:[],conflicts:[]}}));
- await page.goto(base+'/agents',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agents-empty');check(await fits(),'Empty state fits');await page.screenshot({path:shots+'empty-mobile.png',fullPage:true});
+ await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agents-empty');check(await fits(),'Empty state fits');await page.screenshot({path:shots+'empty-mobile.png',fullPage:true});
  await page.unroute('**/api/fleet/status');
  check(errors.length===0,'No JavaScript errors');
  return {passed:checks.length,checks,requests:calls};

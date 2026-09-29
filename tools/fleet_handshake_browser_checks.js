@@ -11,7 +11,7 @@ async page => {
   await page.route('**/api/bootstrap', r => r.fulfill({json:{ok:true,csrf:'synthetic',projects:[project],project}}));
   await page.route('**/api/fleet/status', r => r.fulfill({json:{ok:true,machines:[{host:'remote',hostname:'Connected MacBook',state,heartbeat:state==='connected'?Date.now()/1000:Date.now()/1000-60,error:state==='disconnected'?'Companion hello timed out after 15 seconds without protocol progress (last startup phase: database)':null,workers:[worker]}],signals:[],conflicts:[]}}));
   await page.route('**/api/fleet', r => {mutations.push(r.request().postData());return r.fulfill({status:405,json:{ok:false,error:'Read-only test'}});});
-  await page.goto(base+'/agents#project='+encodeURIComponent(project.id));
+  await page.goto(base+'/agents#view=conversations&project='+encodeURIComponent(project.id));
   await page.reload();
   if(!await page.locator('#device-settings').evaluate(el=>el.open))await page.locator('#device-settings>summary').click();
   await page.locator('.device-row').waitFor();

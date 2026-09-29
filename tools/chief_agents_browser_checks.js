@@ -3,7 +3,7 @@ async page => {
  const base='http://127.0.0.1:59641', shots='output/playwright/issue120';
  const checks=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
- await page.goto(base+'/agents#project=named%3AAtlas');
+ await page.goto(base+'/agents#view=conversations&project=named%3AAtlas');
  await page.waitForSelector('.chief-panel');
  check((await page.locator('.chief-panel').innerText()).includes('Waiting · 15 minutes left'),'Next pass countdown');
  check((await page.locator('.chief-owner').first().innerText()).includes('Atlas worker'),'Owning worker visible');
@@ -12,7 +12,7 @@ async page => {
  check((await page.locator('#session-title').innerText()).includes('Chief'),'Chief saved conversation loads through real history reader');
  check(!await page.locator('#session-issue').isVisible(),'Chief has no fabricated issue link');
  check(!await page.locator('#takeover-open').isVisible()&&!await page.locator('#steer-open').isVisible(),'Chief has no issue-only controls');
- await page.goto(base+'/agents#project=named%3AAtlas');
+ await page.goto(base+'/agents#view=conversations&project=named%3AAtlas');
  await page.waitForSelector('.chief-panel');
  for(const theme of ['light','dark'])for(const width of [1440,768,390,320]){
    await page.setViewportSize({width,height:950});

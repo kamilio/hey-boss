@@ -16,7 +16,7 @@ async page => {
   await page.route('**/api/fleet/status',r=>r.fulfill({json:{...snapshot,machines:snapshot.machines.map(m=>({...m,heartbeat:m.state==='connected'?Date.now()/1000:0}))}}));
   await page.route('**/api/fleet',r=>{requests.push(r.request().postDataJSON());return r.fulfill({json:{ok:true}});});
   await page.setViewportSize({width:1440,height:1000});
-  await page.goto('http://127.0.0.1:59641/agents#project=named%3AAtlas',{waitUntil:'domcontentloaded'});
+  await page.goto('http://127.0.0.1:59641/agents#view=conversations&project=named%3AAtlas',{waitUntil:'domcontentloaded'});
   if(!await page.locator('#device-settings').evaluate(e=>e.open))await page.locator('#device-settings>summary').click();
   await page.waitForSelector('.device-group');
   check(await page.locator('.device-group').count()===2,'Workers grouped by device');

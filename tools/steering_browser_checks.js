@@ -10,7 +10,7 @@ async page => {
  const stamp=Date.now();
  async function review(base,mobile){
   if(mobile){const pair=await(await page.request.get(base+'/fixture-pairing')).json();check((await page.request.post(base+'/api/pair',{data:{code:pair.code,deviceName:'Steering QA'}})).ok(),'Phone paired');}
-  await page.goto(base+'/agents',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
+  await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
   await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();await page.waitForSelector('#steer-open:not([hidden])');
   check(await page.locator('#takeover-open').isVisible(),'Steer alongside Take over');
   for(const [width,scheme] of [[1440,'light'],[390,'light'],[320,'dark'],[1440,'dark']]){
@@ -45,7 +45,7 @@ async page => {
   await page.locator('#steering-updates summary').click();await page.screenshot({path:shots+(mobile?'phone':'native')+'-delivered.png',fullPage:false});
  }
  await review(native,false);await review(phone,true);
- await page.goto(native+'/agents',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();await page.waitForSelector('#steer-open:not([hidden])');
+ await page.goto(native+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();await page.waitForSelector('#steer-open:not([hidden])');
  // Lose the response after the server saves the requirement. Retrying must
  // preserve the request ID and append the saved requirement exactly once.
  let lost;await page.route('**/api/fleet/steer',async route=>{lost=route.request().postDataJSON();await route.fetch();await route.abort('failed');});
