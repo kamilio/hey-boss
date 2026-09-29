@@ -8,13 +8,20 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+// Cross-device copies must be closed in every thread before spawning (Linux ETXTBSY).
+static FIXTURES: Mutex<()> = Mutex::new(());
 
-struct Fixture(PathBuf);
+struct Fixture {
+    root: PathBuf,
+    _guard: MutexGuard<'static, ()>,
+}
 impl Fixture {
     fn new() -> Self {
+        let guard = FIXTURES.lock().unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
             "hb-clipboard-{}-{}-{}",
             std::process::id(),
@@ -25,21 +32,24 @@ impl Fixture {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
-        std::fs::hard_link(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss"))
-            .or_else(|_| {
-                std::fs::copy(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).map(|_| ())
-            })
+        // Resolve symlinks before linking so current_exe stays inside the fixture.
+        let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_hey-boss")).unwrap();
+        std::fs::hard_link(&binary, root.join("hey-boss"))
+            .or_else(|_| std::fs::copy(&binary, root.join("hey-boss")).map(|_| ()))
             .unwrap();
         std::fs::write(root.join("hey-boss.state"), root.to_str().unwrap()).unwrap();
-        Self(root)
+        Self {
+            root,
+            _guard: guard,
+        }
     }
 
     fn run(&self, action: &str, input: &[u8]) -> Output {
-        let mut child = Command::new(self.0.join("hey-boss"))
+        let mut child = Command::new(self.root.join("hey-boss"))
             .args(["utils", action])
             .env_clear()
-            .env("HOME", &self.0)
-            .env("PATH", &self.0)
+            .env("HOME", &self.root)
+            .env("PATH", &self.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -55,7 +65,7 @@ impl Fixture {
         input: &[u8],
         reply: impl FnOnce(Value) -> Value + Send + 'static,
     ) -> Output {
-        let listener = UnixListener::bind(self.0.join("daemon.sock")).unwrap();
+        let listener = UnixListener::bind(self.root.join("daemon.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
         let peer = std::thread::spawn(move || {
             // Allow cold production CLI launches on heavily loaded CI hosts.
@@ -98,7 +108,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 fn success(request: &Value, result: Value) -> Value {
@@ -190,7 +200,7 @@ fn disconnected_desktop_fails_without_a_local_clipboard_fallback() {
         let fixture = Fixture::new();
         let output = fixture.run(alias, b"private test text");
         failed(&output);
-        assert!(!fixture.0.join("queue").exists());
+        assert!(!fixture.root.join("queue").exists());
     }
 }
 

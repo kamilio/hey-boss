@@ -10,15 +10,20 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+// Cross-device copies must be closed in every thread before spawning (Linux ETXTBSY).
+static FIXTURES: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     root: PathBuf,
+    _guard: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let guard = FIXTURES.lock().unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
             "hb-utils-{}-{}-{}",
             std::process::id(),
@@ -33,10 +38,9 @@ impl Fixture {
         fs::create_dir(root.join("bin")).unwrap();
         fs::create_dir(root.join("home")).unwrap();
         // No installation sidecars, and no large binary copies on the usual path.
-        fs::hard_link(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss"))
-            .or_else(|_| {
-                fs::copy(env!("CARGO_BIN_EXE_hey-boss"), root.join("hey-boss")).map(|_| ())
-            })
+        let binary = fs::canonicalize(env!("CARGO_BIN_EXE_hey-boss")).unwrap();
+        fs::hard_link(&binary, root.join("hey-boss"))
+            .or_else(|_| fs::copy(&binary, root.join("hey-boss")).map(|_| ()))
             .unwrap();
         let git = root.join("bin/git");
         fs::write(
@@ -54,7 +58,10 @@ esac
         )
         .unwrap();
         fs::set_permissions(git, fs::Permissions::from_mode(0o700)).unwrap();
-        Self { root }
+        Self {
+            root,
+            _guard: guard,
+        }
     }
 
     fn command(&self, action: &str) -> Command {
