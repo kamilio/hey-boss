@@ -105,7 +105,7 @@ fn run_inner(action: &super::Action) -> Result<()> {
             }
             service::install(&ctx, "controller")?;
             println!(
-                "Automatic fleet supervisor started. Workers view: http://127.0.0.1:4781/workers"
+                "Automatic fleet supervisor started. Workers view: http://hey-boss.test/workers"
             );
             Ok(())
         }

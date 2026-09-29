@@ -195,11 +195,10 @@ pub fn serve(config: Config) -> Result<()> {
         None,
     )?;
     app.project = serde_json::from_value(resolved["project"].clone())?;
-    let url = format!(
-        "http://{}/{}",
-        app.authority,
-        if config.mindmap { "mm" } else { "" }
-    );
+    let base_url = local_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("http://{}/", app.authority));
+    let url = format!("{base_url}{}", if config.mindmap { "mm" } else { "" });
     if config.json {
         println!(
             "{}",

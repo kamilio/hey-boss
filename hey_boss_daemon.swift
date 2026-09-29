@@ -4120,14 +4120,14 @@ final class IssuesShortcut {
 /// Opens the normal browser, reusing or starting the local issue service.
 final class IssuesLauncher {
     enum Page: String {
-        case issues = "/"
+        case issues = "/#view=issues&inbox_state=unread&state=ready&owner=all"
         case inbox = "/#view=inbox"
         case mindmaps = "/mm"
         case quickIssue = "/#quick-issue=1"
         case nativeMindmap = "/mm?focus=1"
     }
-    let url = URL(string: "http://127.0.0.1:4781/")!
-    var destination = URL(string: "http://127.0.0.1:4781/")!
+    let url = URL(string: "http://hey-boss.test/")!
+    var destination = URL(string: "http://hey-boss.test/")!
     var launching = false
     var child: Process?
     var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
@@ -4136,7 +4136,7 @@ final class IssuesLauncher {
         alert.addButton(withTitle: "OK"); NSApp.activate(ignoringOtherApps: true); alert.runModal()
     }
     var probe: (@escaping (Bool) -> Void) -> Void = { done in
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:4781/api/bootstrap")!)
+        var request = URLRequest(url: URL(string: "http://hey-boss.test/api/bootstrap")!)
         request.timeoutInterval = 1
         URLSession.shared.dataTask(with: request) { data, response, _ in
             let value = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
@@ -4174,7 +4174,7 @@ final class IssuesLauncher {
             guard let self else { return }
             if ready { self.finish() }
             else if remaining == 0 || self.child.map({ !$0.isRunning }) == true {
-                self.fail("The issue service could not start on port 4781. Check that this port is available and your hey-boss CLI is up to date.")
+                self.fail("The issue service is not available at http://hey-boss.test/. Check the local hostname and port 80 setup in docs/local-http.md.")
             } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.waitForServer(remaining: remaining - 1) } }
         }
     }
@@ -6617,7 +6617,7 @@ struct Daemon {
                         onMain {
                             let state: [String: Any] = ["items": overview.statusMenu.items.filter { !$0.isSeparatorItem }.map(\.title),
                                 "inbox_native": false, "inbox_count": overview.inboxCount,
-                                "inbox_url": "http://127.0.0.1:4781/#view=inbox", "issues_launching": overview.issuesLauncher.launching]
+                                "inbox_url": "http://hey-boss.test/#view=inbox", "issues_launching": overview.issuesLauncher.launching]
                             let data = try? JSONSerialization.data(withJSONObject: state, options: .sortedKeys)
                             reply.send(["task_id": "menu", "status": "ok", "result": String(decoding: data ?? Data(), as: UTF8.self)])
                         }

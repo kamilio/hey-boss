@@ -75,7 +75,7 @@ live issues, automatic issue→PR links and pending-only notifications.
 See [mindmap commands](docs/mindmaps.md) and [tool research](docs/mindmaps-research.md).
 
 Open the issue interface with `hey-boss issue web`, then visit
-[127.0.0.1:4781](http://127.0.0.1:4781/). It shares the CLI's SQLite database and
+[hey-boss.test](http://hey-boss.test/). It shares the CLI's SQLite database and
 includes a project switcher, Markdown editing, comments, claims, search, history,
 and light/dark themes. All web assets are embedded in the binary; no frontend
 build or separate service is needed. See the [web interface guide](docs/issues.md#web-interface)
@@ -453,7 +453,7 @@ reject a newer revision. Read the latest revision before retrying a guarded edit
 Read an item from a copied web link with `hey-boss lookup 'URL'`. For example:
 
 ```sh
-hey-boss lookup 'http://127.0.0.1:4781/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&issue=114'
+hey-boss lookup 'http://hey-boss.test/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&issue=114'
 hey-boss lookup 'https://hey-boss-mobile-kamil.fly.dev/artifacts#project=named%3AAtlas&artifact=a-ID' --json
 ```
 

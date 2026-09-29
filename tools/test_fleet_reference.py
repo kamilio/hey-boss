@@ -1683,7 +1683,7 @@ def main():
             STATE.mkdir(parents=True, exist_ok=True)
             (STATE / 'upgrade-source').write_text(str(source) + '\n')
         install_service(SUPERVISOR_ROLE)
-        print('Automatic fleet supervisor started. Workers view: http://127.0.0.1:4781/workers')
+        print('Automatic fleet supervisor started. Workers view: http://hey-boss.test/workers')
     elif args.command in ('supervisor', 'controller'):
         supervisor()
     elif args.command in ('companion', 'agent'):

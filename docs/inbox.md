@@ -1,6 +1,6 @@
 # Inbox
 
-The web app at `http://127.0.0.1:4781/#view=inbox` shares navigation with Issues.
+The web app at `http://hey-boss.test/#view=inbox` shares navigation with Issues.
 The menu-bar Inbox and `hey-boss inbox` open this page and start the web service
 when needed. The native Inbox window has been removed; native notification
 banners, questions, document previews, and agent overview remain available.
