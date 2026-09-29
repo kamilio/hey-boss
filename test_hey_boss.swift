@@ -198,9 +198,9 @@ func auditNativeMindmap() {
     viewer.window.close()
     viewer.open(cli: nil)
     precondition(viewer.window === window && viewer.window.isVisible, "Reopen reuses the native window")
-    let map = URL(string: "http://127.0.0.1:4781/mm#project=named%3AAtlas&node=topic")!
+    let map = URL(string: "http://hey-boss.test/mm#project=named%3AAtlas&node=topic")!
     precondition(viewer.policy(for: map) == .allow, "Map relationships remain native")
-    let issue = URL(string: "http://127.0.0.1:4781/#project=named%3AAtlas&issue=1")!
+    let issue = URL(string: "http://hey-boss.test/#project=named%3AAtlas&issue=1")!
     precondition(viewer.policy(for: issue) == .cancel && browserURLs.last == issue, "Issue links open in the browser")
     let pr = URL(string: "https://github.com/example/repo/pull/1")!
     precondition(viewer.policy(for: pr) == .cancel && browserURLs.last == pr, "PR links open in the browser")
@@ -218,7 +218,7 @@ func auditIssuesShortcut() {
     let item = overview.issuesMenuItem
     precondition(item.keyEquivalent == "o" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
-    precondition(urls.count == 1 && urls[0].absoluteString == "http://127.0.0.1:4781/")
+    precondition(urls.count == 1 && urls[0].absoluteString == "http://hey-boss.test/#view=issues&inbox_state=unread&state=ready&owner=all")
     let shortcut = IssuesShortcut { overview.showIssues() }
     withExtendedLifetime(shortcut) {
         var event: EventRef?
@@ -252,7 +252,7 @@ func auditIssuesShortcut() {
     launcher.probe = { $0(true) }
     launcher.openURL = { _ in false }
     launcher.open(cli: nil)
-    precondition(failures.count == 2 && failures.last!.contains("http://127.0.0.1:4781/"))
+    precondition(failures.count == 2 && failures.last!.contains("http://hey-boss.test/"))
     print("Passed: Issues menu shortcut, global callback, browser destination, unrelated hotkeys, cold start, repeated activation and error recovery")
 }
 
@@ -441,7 +441,7 @@ func auditInbox(root: URL, sample: Record) {
     launcher.probe = { probes += 1; $0(probes > 1) }
     launcher.open(cli: "/usr/bin/true")
     precondition(launches == 1 && urls.count == 4 && !launcher.launching)
-    precondition(urls.last?.path == "/" && urls.last?.fragment == nil, "Issues resets the destination")
+    precondition(urls.last?.path == "/" && urls.last?.fragment == "view=issues&inbox_state=unread&state=ready&owner=all", "Issues resets the destination to Ready")
     launcher.probe = { $0(false) }
     launcher.open(cli: nil)
     precondition(failures.count == 1 && !launcher.launching)

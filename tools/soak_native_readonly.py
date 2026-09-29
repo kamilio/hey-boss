@@ -24,7 +24,7 @@ def main():
   while time.monotonic()<deadline:
    assert call(a.socket,'protocol')['result']=='1';requests+=1
    menu=json.loads(call(a.socket,'menu_snapshot')['result']);requests+=1
-   assert menu['inbox_native'] is False and menu['inbox_url']=='http://127.0.0.1:4781/#view=inbox';assert isinstance(menu['inbox_count'],int)
+   assert menu['inbox_native'] is False and menu['inbox_url']=='http://hey-boss.test/#view=inbox';assert isinstance(menu['inbox_count'],int)
    if time.monotonic()>=next_sample:
     overview=json.loads(call(a.socket,'overview_snapshot')['result']);requests+=1;assert isinstance(overview,dict)
     service=subprocess.check_output(['launchctl','print','gui/'+str(os.getuid())+'/local.hey-boss'],text=True)

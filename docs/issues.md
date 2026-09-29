@@ -99,7 +99,7 @@ referenced inside Markdown are not imported.
 
 ```sh
 hey-boss issue web
-# Open http://127.0.0.1:4781/; Ctrl+C stops the server.
+# Open http://hey-boss.test/; Ctrl+C stops the server.
 hey-boss issue web --port 4782 --project github.com/kamilio/hey-boss
 hey-boss issue web --host devbox
 hey-boss issue projects --json

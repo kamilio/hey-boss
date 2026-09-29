@@ -1,13 +1,14 @@
 # Open Issues from anywhere
 
 Press **Command+Control+Option+Shift+O** anywhere on macOS to open Issues in
-your default browser. This uses the same modifiers as Quick Add, with **O**
-for Open. The shortcut is also displayed beside **Issues…** in the Hey Boss
-menu bar.
+your default browser at `http://hey-boss.test/`. This uses the same modifiers
+as Quick Add, with **O** for Open. The shortcut is also displayed beside **Issues…** in the Hey Boss
+menu bar. It opens Ready issues with all owners in the browser's selected project.
 
-The desktop app must be running. It reuses the local issue service on port
-4781, or starts it with the installed CLI when needed. Repeated activation
-while the service starts does not launch extra servers. Startup and browser
+The desktop app must be running. It reuses the local issue service, or starts
+it with the installed CLI when needed. The shortcut checks the same hostname
+it opens; configure the alias and port 80 using [local HTTP setup](local-http.md).
+Repeated activation while the service starts does not launch extra servers. Startup and browser
 errors use the existing Issues error dialog. Global registration needs no
 Accessibility permission; if another application owns the shortcut, the
 menu remains available.
