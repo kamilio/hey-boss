@@ -114,9 +114,8 @@ pub(super) async fn read(
                 cached_only,
             } => {
                 identity = json!({"repository":repository,"number":number});
-                // Policy does not expose source validation times and its cached
-                // reads can wait on refresh locks. Do not invent policy freshness
-                // or reuse an unvalidated satisfaction result on expiry.
+                // Cached policy reads can wait on refresh locks. Do not reuse a
+                // satisfaction result that did not return before this deadline.
                 let report = api
                     .required_checks_for_pr(&repository, number, policy(refresh, cached_only))
                     .await?;

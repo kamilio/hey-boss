@@ -765,8 +765,8 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             json!({"merge_base_commit":{"sha":if phase>=4 {OTHER_BASE} else if phase>=2 {NEW_HEAD} else {BASE}}})
         }
         p if p.contains("/check-runs") => {
-            json!({"total_count":1,"check_runs":[{"id":5,"name":"tests","head_sha":if mode=="account-policy-selectors" && p.contains(MERGE) {MERGE} else if p.contains(NEW_HEAD) {NEW_HEAD} else {HEAD},
-            "status":if phase>=2 {"completed"} else {"in_progress"},"conclusion":if phase>=2 {json!("success")} else {Value::Null}}]})
+            json!({"total_count":1,"check_runs":[{"id":if mode=="ruleset-only-policy" && phase>=9 {7} else {5},"name":"tests","head_sha":if mode=="account-policy-selectors" && p.contains(MERGE) {MERGE} else if p.contains(NEW_HEAD) {NEW_HEAD} else {HEAD},
+            "status":if phase>=2 {"completed"} else {"in_progress"},"conclusion":if mode=="ruleset-only-policy" && phase>=8 {json!("failure")} else if phase>=2 {json!("success")} else {Value::Null}}]})
         }
         p if p.ends_with("/status") => {
             json!({"state":if phase>=2 {"success"} else {"pending"},"statuses":[{"id":6,"context":"external","state":if phase>=2 {"success"} else {"pending"}}]})
@@ -7740,4 +7740,109 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
     .unwrap();
     api.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn required_failure_observation_has_source_freshness_without_optional_reads() {
+    let h = Harness::new().await;
+    h.mode("ruleset-only-policy");
+    h.phase(8);
+    let client = h.client();
+    let first = client
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(first.state, "failure", "{:?}", first.errors);
+    assert_eq!(first.pull_request_state.as_deref(), Some("open"));
+    assert!(first.observed_at_ms.is_some());
+    assert!(first.oldest_validation_at_ms.is_some());
+    assert!(!first.validations.is_empty());
+    let observation = hey_gh::watcher::observe_required(&first);
+    assert_eq!(observation.blocking.len(), 1);
+    assert!(observation.completed.is_none());
+    assert!(!h.calls().iter().any(|c| c.path.contains("/actions/")
+        || c.path.contains("/reviews")
+        || c.path.contains("/graphql")));
+    let requests = h.calls().len();
+    let cached = client
+        .required_checks_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(h.calls().len(), requests);
+    assert!(cached.oldest_validation_at_ms >= first.oldest_validation_at_ms);
+    assert!(cached.oldest_validation_at_ms <= first.observed_at_ms);
+    assert_eq!(
+        hey_gh::watcher::observe_required(&cached).blocking,
+        observation.blocking
+    );
+    h.phase(9);
+    let rerun = client
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_ne!(
+        hey_gh::watcher::observe_required(&rerun).blocking,
+        observation.blocking
+    );
+    let ci = client
+        .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(
+        !ci.complete,
+        "The optional workflow endpoint is inaccessible"
+    );
+    assert!(
+        !hey_gh::watcher::observe_required(&rerun)
+            .blocking
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn absent_policy_respects_requested_freshness_and_reports_cached_validation() {
+    let h = Harness::new().await;
+    h.mode("ruleset-only-policy");
+    h.phase(2);
+    let client = h.client();
+    let first = client
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(
+        first
+            .validations
+            .iter()
+            .any(|v| v.resource.starts_with("policy-error://")),
+        "A confirmed absent legacy policy is evidence too"
+    );
+    let before = h.calls().len();
+    let cached = client
+        .required_checks_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(h.calls().len(), before);
+    let cached_absence = cached
+        .validations
+        .iter()
+        .find(|v| v.resource.starts_with("policy-error://"))
+        .unwrap();
+    let original_absence = first
+        .validations
+        .iter()
+        .find(|v| v.resource == cached_absence.resource)
+        .unwrap();
+    assert_eq!(
+        cached_absence.validated_at_ms,
+        original_absence.validated_at_ms
+    );
+    client
+        .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::ZERO))
+        .await
+        .unwrap();
+    assert!(
+        h.calls()[before..]
+            .iter()
+            .any(|call| call.path.ends_with("/protection/required_status_checks"))
+    );
 }

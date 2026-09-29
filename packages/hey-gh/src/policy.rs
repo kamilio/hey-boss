@@ -16,6 +16,9 @@ pub struct RequiredCheck {
     pub state: String,
     pub sha: Option<String>,
     pub url: Option<String>,
+    /// Stable identity of the current failed result(s), including rerun IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_key: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequiredChecksReport {
@@ -38,6 +41,14 @@ pub struct RequiredChecksReport {
     pub rules: Vec<Value>,
     pub errors: Vec<SourceError>,
     pub cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_validation_at_ms: Option<u64>,
+    #[serde(default)]
+    pub validations: Vec<crate::ResourceValidation>,
 }
 
 impl Client {
@@ -51,14 +62,17 @@ impl Client {
         crate::client::INTERACTIVE_READ
             .scope(
                 self.policy_priority(repository, number),
-                crate::entity::scope(async {
-                    tokio::time::timeout(
-                        self.report_timeout(),
-                        self.collect_required_checks(repository, number, freshness),
-                    )
-                    .await
-                    .map_err(|_| Error::Deadline)?
-                }),
+                crate::report::VALIDATIONS.scope(
+                    std::cell::RefCell::new(Vec::new()),
+                    crate::entity::scope(async {
+                        tokio::time::timeout(
+                            self.report_timeout(),
+                            self.collect_required_checks(repository, number, freshness),
+                        )
+                        .await
+                        .map_err(|_| Error::Deadline)?
+                    }),
+                ),
             )
             .await
     }
@@ -67,15 +81,20 @@ impl Client {
     // same inaccessible policy reads. Explicit refresh probes permissions again.
     async fn policy_get(&self, path: &str, freshness: Freshness) -> Result<crate::Response> {
         let key = format!("policy-error://{}/{path}", self.hostname());
-        let previous = self.derived(&key).await?;
+        let previous = self.peek_derived(&key).await?;
+        let max_age = match freshness {
+            Freshness::MaxAge(age) => age.as_millis().min(300_000) as u64,
+            _ => 300_000,
+        };
         if !matches!(freshness, Freshness::Revalidate)
             && let Some(cached) = &previous
             && (matches!(freshness, Freshness::CachedOnly)
-                || crate::now_ms().saturating_sub(cached.validated_at_ms) < 300_000)
+                || crate::now_ms().saturating_sub(cached.validated_at_ms) < max_age)
             && let Some(status) = cached.data["status"]
                 .as_u64()
                 .filter(|s| matches!(s, 403 | 404))
         {
+            crate::report::record_validation(&key, cached);
             return Err(Error::GitHub {
                 status: status as u16,
                 message: cached.data["message"]
@@ -99,6 +118,9 @@ impl Client {
                 if let Error::GitHub { status, message } = &error {
                     self.save_derived(&key, json!({"status":status,"message":message}))
                         .await?;
+                    if let Some(cached) = self.peek_derived(&key).await? {
+                        crate::report::record_validation(&key, &cached);
+                    }
                 }
                 Err(error)
             }
@@ -352,6 +374,8 @@ impl Client {
                 }
             }
             let state = if errors.is_empty() { state } else { "unknown" };
+            let validations = crate::report::VALIDATIONS.with(|records| records.borrow().clone());
+            let observed_at_ms = crate::now_ms();
             let mut report = RequiredChecksReport {
                 repository: repository.into(),
                 pull_number: number,
@@ -370,6 +394,10 @@ impl Client {
                 rules,
                 errors,
                 cursor: String::new(),
+                pull_request_state: final_pr.data["state"].as_str().map(str::to_owned),
+                observed_at_ms: Some(observed_at_ms),
+                oldest_validation_at_ms: validations.iter().map(|r| r.validated_at_ms).min(),
+                validations,
             };
             let value = json!({"repository":report.repository,"pull_number":number,"head_sha":report.head_sha,"base_branch":report.base_branch,"base_sha":report.base_sha,"pr_base_sha":report.pr_base_sha,"merge_sha":report.merge_sha,"state":report.state,"strict":strict,"up_to_date":up_to_date,"checks":report.checks,"rules":report.rules,"errors":report.errors});
             if value.to_string().len() > self.collection_limit() {
@@ -515,11 +543,50 @@ fn evaluate(ci: &CiReport, requirements: &BTreeSet<(String, Option<i64>)>) -> Ve
             context: name.clone(),
             app_id: *app,
             state: state.into(),
-            sha: (!latest.is_empty()).then_some(sha),
+            failure_key: failure_key(&ci.head_sha, name, *app, &sha, latest.into_values()),
+            sha: (state != "missing").then_some(sha),
             url,
         });
     }
     result
+}
+
+pub(crate) fn failure_key<'a>(
+    head: &str,
+    context: &str,
+    app: Option<i64>,
+    sha: &str,
+    results: impl Iterator<Item = &'a Value>,
+) -> Option<String> {
+    let failures: Vec<_> = results
+        .filter(|c| {
+            matches!(c["state"].as_str(), Some("failure" | "error"))
+                || (c["status"] == "completed"
+                    && matches!(
+                        c["conclusion"].as_str(),
+                        Some(
+                            "failure"
+                                | "cancelled"
+                                | "timed_out"
+                                | "action_required"
+                                | "stale"
+                                | "startup_failure"
+                        )
+                    ))
+        })
+        .map(|c| {
+            json!([
+                c["id"],
+                c["name"],
+                c["context"],
+                c["conclusion"],
+                c["state"],
+                c["app"]["id"]
+            ])
+        })
+        .collect();
+    (!failures.is_empty())
+        .then(|| crate::digest(&json!([head, context, app, sha, failures]).to_string()))
 }
 fn rank(state: &str) -> u8 {
     match state {
@@ -528,5 +595,30 @@ fn rank(state: &str) -> u8 {
         "pending" => 2,
         "missing" => 1,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_failure_keys_track_reruns_without_job_or_review_reads() {
+        let mut ci: CiReport = serde_json::from_value(json!({
+            "head_sha":"head","merge_sha":null,"check_runs":[{"id":1,"name":"test","head_sha":"head","app":{"id":3},"status":"completed","conclusion":"failure"}],
+            "commit_statuses":[],"workflow_runs":[],"jobs":[],"summary":{"state":"failure","successful":0,"failed":1,"pending":0,"unknown":0,"skipped":0},"failures":[],"errors":[]
+        })).unwrap();
+        let requirements = BTreeSet::from([("test".to_owned(), Some(3))]);
+        let key = |ci: &CiReport| {
+            serde_json::to_value(evaluate(ci, &requirements)).unwrap()[0]["failure_key"].clone()
+        };
+        let first = key(&ci);
+        assert!(first.as_str().is_some_and(|s| !s.is_empty()));
+        ci.check_runs[0]["details_url"] = json!("https://github.com/o/r/actions/runs/1");
+        assert_eq!(key(&ci), first);
+        ci.check_runs[0]["id"] = json!(2);
+        assert_ne!(key(&ci), first);
+        ci.check_runs.push(json!({"id":3,"name":"test","head_sha":"head","app":{"id":3},"status":"in_progress","conclusion":null}));
+        assert!(key(&ci).is_null(), "Superseded failures must disappear");
     }
 }

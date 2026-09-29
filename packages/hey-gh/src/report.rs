@@ -49,7 +49,7 @@ async fn acquire_report_lock(
     }
 }
 
-tokio::task_local! { static VALIDATIONS: std::cell::RefCell<Vec<ResourceValidation>>; }
+tokio::task_local! { pub(crate) static VALIDATIONS: std::cell::RefCell<Vec<ResourceValidation>>; }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResourceValidation {
