@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const HEADER: &str = "# Managed by hey-boss configure-agents.\n";
 const RULE_START: &str = "prefix_rule(pattern = [";
 const RULE_END: &str = "], decision = \"allow\")";
+const GIT_COMMIT_NO_VERIFY_RULE: &str =
+    "prefix_rule(pattern = [\"git\", \"commit\", \"--no-verify\"], decision = \"allow\")";
 const LIMIT: u64 = 4 * 1024 * 1024;
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -97,6 +99,9 @@ fn codex_rules(source: Option<&str>, commands: &[String]) -> io::Result<String> 
             invalid("hey-boss.rules already exists and is not managed by hey-boss; move it aside before retrying")
         })?;
         for line in body.lines() {
+            if line == GIT_COMMIT_NO_VERIFY_RULE {
+                continue;
+            }
             let encoded = line
                 .strip_prefix(RULE_START)
                 .and_then(|s| s.strip_suffix(RULE_END))
@@ -114,6 +119,8 @@ fn codex_rules(source: Option<&str>, commands: &[String]) -> io::Result<String> 
             serde_json::to_string(command)?
         ));
     }
+    result.push_str(GIT_COMMIT_NO_VERIFY_RULE);
+    result.push('\n');
     Ok(result)
 }
 

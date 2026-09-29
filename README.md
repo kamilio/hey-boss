@@ -311,13 +311,15 @@ or configure an existing installation, run:
 hey-boss agent configure
 ```
 
-This writes command-specific `allow` rules to `~/.codex/rules/hey-boss.rules` and
-merges `Bash(hey-boss *)` plus the installed executable's absolute path into
+This writes command-specific `allow` rules to `~/.codex/rules/hey-boss.rules`,
+including `git commit --no-verify …` (put `--no-verify` immediately after `commit`),
+and merges `Bash(hey-boss *)` plus the installed executable's absolute path into
 `permissions.allow` in `~/.claude/settings.json`. `CODEX_HOME` and
 `CLAUDE_CONFIG_DIR` override those directories. Use repeatable `--binary /path/to/hey-boss`
 to allow stable symlink paths; Homebrew's first-run setup uses its stable public and
 `opt` paths automatically. Restart Codex to load the rules. Existing deny/ask rules,
-managed policies, and Claude's sandbox restrictions still apply.
+managed policies, and Claude's sandbox restrictions still apply. The Git rule is
+Codex-only; it does not disable hooks globally or add `--no-verify` automatically.
 
 The updater preserves unrelated settings and formatting, recognizes existing
 permission entries, and does not touch `config.toml` or `default.rules`. It validates
