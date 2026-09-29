@@ -118,7 +118,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
                 WHERE i.deleted_at IS NULL AND i.state='ready'
             ) SELECT 1 FROM dependencies d LEFT JOIN issues i ON i.project_id=NEW.project_id AND i.number=d.number
             WHERE i.number IS NULL OR (i.deleted_at IS NULL AND i.state<>'closed' AND
-                (i.state<>'ready' OR NOT EXISTS(SELECT 1 FROM project_settings WHERE project_id=NEW.project_id AND prs_enabled=1)))
+                i.state<>'ready')
         ) BEGIN SELECT RAISE(IGNORE); END;
         CREATE VIEW IF NOT EXISTS obsolete_dependency_steering AS
         SELECT q.request_id FROM agent_steering q JOIN worker_runs r ON r.id=q.run_id

@@ -2854,6 +2854,8 @@ mod tests {
                         labels: vec![],
                         at_top: false,
                         draft: false,
+                        blockers: vec![],
+                        then_titles: vec![],
                     },
                     request_id: None,
                 })

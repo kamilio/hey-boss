@@ -312,6 +312,12 @@ enum Action {
         body: Body,
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Issues that block this new issue; starts in Blocked state immediately.
+        #[arg(long = "blocked-by", visible_alias = "by", value_delimiter = ',')]
+        blocked_by: Vec<i64>,
+        /// Atomically create follow-up issues in sequence, each blocked by the previous one.
+        #[arg(long = "then")]
+        then_titles: Vec<String>,
     },
     /// Replace supplied fields; omitted fields are preserved.
     #[command(
@@ -494,6 +500,12 @@ enum SubtaskAction {
         labels: Vec<String>,
         #[arg(long)]
         if_version: Option<i64>,
+        /// Issues that block this new subtask; starts in Blocked state immediately.
+        #[arg(long = "blocked-by", visible_alias = "by", value_delimiter = ',')]
+        blocked_by: Vec<i64>,
+        /// Atomically create follow-up subtasks in sequence, each blocked by the previous one.
+        #[arg(long = "then")]
+        then_titles: Vec<String>,
     },
     /// Link an existing issue; unlink its previous parent first.
     #[command(after_help = SUBTASK_SCHEDULING_HELP)]
@@ -623,6 +635,8 @@ impl Options {
                     body,
                     labels,
                     if_version,
+                    blocked_by,
+                    then_titles,
                 } => Operation::CreateSubtask {
                     number: *number,
                     title: title.clone(),
@@ -630,6 +644,8 @@ impl Options {
                     labels: labels.clone(),
                     at_top: false,
                     if_version: *if_version,
+                    blockers: blocked_by.clone(),
+                    then_titles: then_titles.clone(),
                 },
                 SubtaskAction::Add {
                     number,
@@ -827,6 +843,8 @@ impl Options {
                 labels,
                 draft,
                 interactive,
+                blocked_by,
+                then_titles,
             } => {
                 if *interactive && body.file.as_deref() == Some(std::path::Path::new("-")) {
                     return Err(Error::invalid(
@@ -845,6 +863,8 @@ impl Options {
                     body,
                     labels: labels.clone(),
                     at_top: !*at_bottom,
+                    blockers: blocked_by.clone(),
+                    then_titles: then_titles.clone(),
                 }
             }
             Action::Edit {
@@ -1485,6 +1505,11 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(issue) = value.get("issue") {
         print_issue_line(issue);
+        if let Some(chain) = value["created_chain"].as_array() {
+            for item in chain.iter().skip(1) {
+                print_issue_line(item);
+            }
+        }
         if value.get("changed").is_none() {
             println!(
                 "Version: {} · Created by: {}",
@@ -1715,11 +1740,54 @@ fn print_issue_line(issue: &Value) {
     }
     if let Some(blockers) = issue["blocked_by"].as_array() {
         for blocker in blockers {
+            let prs = blocker["pull_requests"]
+                .as_array()
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let urls: Vec<_> = p.iter().filter_map(|x| x["url"].as_str()).collect();
+                    format!(" · PR {}", urls.join(", "))
+                })
+                .unwrap_or_default();
             println!(
-                "  Blocked by: #{} {} [{}]",
+                "  Blocked by: #{} {} [{}]{prs}",
                 blocker["number"],
                 line(&blocker["title"]),
                 line(&blocker["state"])
+            );
+        }
+    }
+    if let Some(links) = issue["blocker_links"].as_array() {
+        for link in links.iter().filter(|l| l["satisfied"] == true) {
+            let prs = link["pull_requests"]
+                .as_array()
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let urls: Vec<_> = p.iter().filter_map(|x| x["url"].as_str()).collect();
+                    format!(" · PR {}", urls.join(", "))
+                })
+                .unwrap_or_default();
+            println!(
+                "  Depends on: #{} {} [{}]{prs}",
+                link["number"],
+                line(&link["title"]),
+                line(&link["state"])
+            );
+        }
+    }
+    if let Some(dependents) = issue["blocking"].as_array() {
+        for dep in dependents {
+            let note = if dep["unblocks_on_release"] == true {
+                " · unblocks on Ready/Close"
+            } else if dep["actively_blocked"] == true {
+                " · waiting on multiple blockers"
+            } else {
+                ""
+            };
+            println!(
+                "  Blocking: #{} {} [{}]{note}",
+                dep["number"],
+                line(&dep["title"]),
+                line(&dep["state"])
             );
         }
     }

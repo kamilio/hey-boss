@@ -26,6 +26,7 @@ impl Fixture {
         let store = Store::open(&root.join("issues.db")).unwrap();
         let db = Connection::open(root.join("issues.db")).unwrap();
         let mut f = Self { root, store, db };
+        f.run(json!({"action":"configure_project","subtask_scheduling":"sequential"}));
         f.run(json!({"action":"create","title":"Connector integration","body":"","labels":[]}));
         for title in ["Contract", "Independent settings", "OAuth"] {
             f.run(

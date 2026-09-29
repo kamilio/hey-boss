@@ -372,6 +372,10 @@ pub enum Operation {
         #[serde(default)]
         at_top: bool,
         if_version: Option<i64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blockers: Vec<i64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        then_titles: Vec<String>,
     },
     AddSubtask {
         number: i64,
@@ -405,6 +409,10 @@ pub enum Operation {
         labels: Vec<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         at_top: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blockers: Vec<i64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        then_titles: Vec<String>,
     },
     Edit {
         #[serde(default, skip_serializing_if = "Option::is_none")]
