@@ -144,17 +144,20 @@ pub(super) fn assign(
             params![project.id, issue.number],
         )?;
     }
-    if target == "github"
-        && status
-            .as_object_mut()
-            .unwrap()
-            .remove("stopped_reason")
-            .is_some()
-    {
-        db.execute(
-            "UPDATE issue_github_watches SET status=?3 WHERE project_id=?1 AND issue_number=?2",
-            params![project.id, issue.number, status.to_string()],
-        )?;
+    if target == "github" {
+        let previous = status.clone();
+        status = lifecycle::linked_status(
+            status,
+            &registry::pull_requests(db, &project.id, issue.number)?,
+            false,
+        );
+        status.as_object_mut().unwrap().remove("stopped_reason");
+        if status != previous {
+            db.execute(
+                "UPDATE issue_github_watches SET status=?3 WHERE project_id=?1 AND issue_number=?2",
+                params![project.id, issue.number, status.to_string()],
+            )?;
+        }
     }
     if let Some(machine) = machine {
         db.execute(
@@ -326,6 +329,7 @@ pub(super) fn enrich_result(
             || status.get("event").is_some()
             || status.get("error").is_some()
             || status.get("stopped_reason").is_some()
+            || status["prs"].as_object().is_some_and(|prs| !prs.is_empty())
         {
             let monitoring = meta.target.as_deref() == Some("github")
                 && issue["state"] != "closed"
@@ -872,6 +876,7 @@ mod tests {
         let mut f = Fixture::new();
         f.call(json!({"action":"add_pull_request","number":1,"url":"https://example.com/not-github","purpose":"supporting-evidence"})).unwrap();
         f.assign("github").unwrap();
+        f.observation(None);
         f.call(json!({"action":"remove_pull_request","number":1,"url":"https://github.com/o/r/pull/1"})).unwrap();
         let view = f.call(json!({"action":"view","number":1})).unwrap();
         assert_eq!(view["issue"]["assignee"], "human:boss");
@@ -894,6 +899,11 @@ mod tests {
         let resumed = f.call(json!({"action":"view","number":1})).unwrap();
         assert_eq!(resumed["issue"]["github_status"]["monitoring"], true);
         assert!(
+            resumed["issue"]["github_status"]["prs"]
+                .get("https://github.com/o/r/pull/1")
+                .is_none()
+        );
+        assert!(
             resumed["issue"]["github_status"]
                 .get("stopped_reason")
                 .is_none()
@@ -901,9 +911,57 @@ mod tests {
     }
 
     #[test]
+    fn removing_one_watched_pr_prunes_its_snapshot_and_signal_history() {
+        let mut f = Fixture::new();
+        let removed = "https://github.com/o/r/pull/1";
+        f.assign("github").unwrap();
+        f.observation(Some("first"));
+        f.call(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/2","purpose":"fix"})).unwrap();
+        f.call(json!({"action":"remove_pull_request","number":1,"url":removed}))
+            .unwrap();
+        let view = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(view["issue"]["assignment"]["kind"], "github");
+        assert!(view["issue"]["github_status"]["prs"].get(removed).is_none());
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM issue_github_signals WHERE url=?1",
+                    [removed],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        f.observation(Some("late-removed"));
+        assert!(
+            saved(&f.store.db, "named:test", 1).unwrap().1["prs"]
+                .get(removed)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn manual_destination_keeps_previously_observed_status_without_a_wake_event() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.observation(None);
+        f.assign("unassigned").unwrap();
+        let claim = f
+            .call(json!({"action":"claim","number":1,"force":false}))
+            .unwrap();
+        assert_eq!(claim["issue"]["github_status"]["monitoring"], false);
+        assert_eq!(
+            claim["issue"]["github_status"]["prs"]["https://github.com/o/r/pull/1"]["head"],
+            "head"
+        );
+    }
+
+    #[test]
     fn terminal_pr_reconciliation_preserves_an_active_claim_and_other_open_prs() {
         let mut f = Fixture::new();
         f.assign("github").unwrap();
+        f.observation(None);
         f.call(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/2","purpose":"fix"})).unwrap();
         f.store
             .record_pr_status("https://github.com/o/r/pull/1", Some("closed"), 100, None)
@@ -911,6 +969,11 @@ mod tests {
         f.store
             .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
             .unwrap();
+        assert_eq!(
+            saved(&f.store.db, "named:test", 1).unwrap().1["prs"]["https://github.com/o/r/pull/1"]
+                ["lifecycle"],
+            "closed"
+        );
         assert_eq!(
             get_issue(&f.store.db, "named:test", 1, false)
                 .unwrap()
