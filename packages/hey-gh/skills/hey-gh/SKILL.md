@@ -90,8 +90,11 @@ it from the open list. Events identify opened, closed, merged, reopened, comment
 CI, commit, and conflict activity. Save the returned `cursor` atomically with
 consumer state. Drain `hasMore` even when `changes` is empty. Keep the same `-R`
 selection. On `cursor_expired`, bootstrap again and replace local state. PR and
-source cursors are separate. The feed records observations; polling can miss
-transitions entirely between reads.
+source cursors are separate. Only current data is retained; updates to each resource are coalesced.
+Activity and changed fields describe its latest observation. Intermediate versions
+are not replayed, so repeated cursor reads may return newer data. Apply full
+replacements and checkpoint state with the cursor. Polling can miss transitions
+entirely between reads.
 
 PR list/change commands can emit valid JSON and exit 1 when the envelope or
 returned rows contain source errors. Parse stdout even on that exit; preserve
