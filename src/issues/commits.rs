@@ -1136,7 +1136,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Barrier;
         let fixture = HookFixture::new();
-        let path = fixture.0.join("post-checkout");
+        let dir = fixture.0.join("git-hooks");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("post-checkout");
+        let repo = fixture.0.join("repo");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
         let versions: Vec<_> = ["old", "new"]
             .iter()
             .map(|version| {
@@ -1165,16 +1176,32 @@ mod tests {
                 let mut observed = String::new();
                 file.read_to_string(&mut observed).unwrap();
                 assert!(versions.contains(&observed), "reader saw a partial script");
-                let output = Command::new(&path).output().unwrap();
+                // Use the production launch path. Exec into Git closes staging
+                // descriptors inherited from sibling threads before running the
+                // hook; directly execing it here can hit Linux ETXTBSY instead.
+                let output = Command::new("git")
+                    .args(["hook", "run", "post-checkout"])
+                    .current_dir(&repo)
+                    .env("GIT_CONFIG_COUNT", "1")
+                    .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+                    .env("GIT_CONFIG_VALUE_0", &dir)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()
+                    .unwrap();
                 assert!(
                     output.status.success(),
                     "{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
-                assert!(output.stdout == b"old\n" || output.stdout == b"new\n");
+                // Git forwards hook stdout to stderr.
+                assert!(
+                    output.stderr == b"old\n" || output.stderr == b"new\n",
+                    "{output:?}"
+                );
             }
         });
-        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
     #[test]
