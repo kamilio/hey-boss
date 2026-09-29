@@ -2610,6 +2610,35 @@ func auditArtifactEditor() {
     precondition(text.string == "3. third\n", "Return exits an empty list item")
     print("PASS Markdown formatting preserves Unicode selections and toggles selected lines")
 
+    text.string = "Meet 🦀 today"; text.setSelectedRange(NSRange(location: 5, length: 2))
+    let link = text.linkSelection()
+    precondition(link.label == "🦀" && link.destination.isEmpty)
+    text.replace(link.range, with: ArtifactMarkdownText.markdownLink(link.label, "https://example.com/a b?q=(x)"), selection: NSRange(location: 5, length: 0))
+    precondition(text.string == "Meet [🦀](<https://example.com/a%20b?q=(x)>) today")
+    text.setSelectedRange(NSRange(location: 7, length: 0))
+    let existingLink = text.linkSelection()
+    precondition(existingLink.label == "🦀" && existingLink.destination == "https://example.com/a%20b?q=(x)")
+    precondition(ArtifactMarkdownText.markdownLink(existingLink.label, existingLink.destination) == "[🦀](<https://example.com/a%20b?q=(x)>)", "Editing a link preserves URL escapes")
+    precondition(ArtifactMarkdownText.markdownLink("[label]", "https://example.com/>").contains("\\[label\\]"))
+    let clipboard = NSPasteboard.withUniqueName()
+    clipboard.setString("plain text", forType: .string)
+    precondition(ArtifactImageInput.read(clipboard).isEmpty, "Plain text paste retains native editing behavior")
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 24, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    bitmap.setColor(NSColor(deviceRed: 0.2, green: 0.4, blue: 0.9, alpha: 1), atX: 0, y: 0)
+    let png = bitmap.representation(using: .png, properties: [:])!
+    clipboard.clearContents(); clipboard.setData(png, forType: .png)
+    let images = ArtifactImageInput.read(clipboard)
+    precondition(images.count == 1 && (try! images[0].contents()).data == png)
+    let imported = try! images[0].copy(beside: root.appendingPathComponent("Picture note.md"))
+    precondition(imported.hasPrefix("Picture%20note.assets/") && !imported.contains("file:"))
+    let copy = root.appendingPathComponent(imported.removingPercentEncoding!)
+    precondition(try! Data(contentsOf: copy) == png, "Local images persist beside the Markdown file")
+    clipboard.clearContents(); clipboard.writeObjects([copy as NSURL])
+    precondition(ArtifactImageInput.containsImages(clipboard) && ArtifactImageInput.read(clipboard).first?.url == copy, "Finder image drops use file URLs")
+    let tiff = ArtifactImageInput(url: nil, bytes: bitmap.tiffRepresentation!, name: "Screenshot.tiff")
+    precondition(try! tiff.contents().name == "Screenshot.png", "Clipboard TIFF images become web-compatible PNG attachments")
+    print("PASS link selection, destination escaping and persistent image paste import")
+
     let file = root.appendingPathComponent("Keyboard.md")
     try! Data("A native note 🦀\n".utf8).write(to: file)
     let editor = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:Editor tests", file: file.path), journalRoot: root, cli: "/usr/bin/false", present: false)
@@ -2619,6 +2648,42 @@ func auditArtifactEditor() {
         precondition(condition(), "Native operation completed")
     }
     wait { editor.session.ready }
+    editor.window.makeFirstResponder(editor.text)
+    editor.text.setSelectedRange(NSRange(location: 2, length: 6))
+    precondition(editor.command("k", shift: false) && editor.linkDialog != nil)
+    precondition(editor.linkDialog?.buttons[0].isEnabled == false, "A link needs a destination")
+    editor.linkURLField!.stringValue = "https://example.com"
+    editor.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: editor.linkURLField))
+    precondition(editor.linkDialog!.buttons[0].isEnabled)
+    editor.window.endSheet(editor.linkDialog!.window, returnCode: .alertFirstButtonReturn)
+    wait { editor.linkDialog == nil }
+    precondition(editor.text.string == "A [native](<https://example.com>) note 🦀\n")
+    editor.text.setSelectedRange(NSRange(location: 5, length: 0)); editor.link()
+    precondition(editor.linkURLField?.stringValue == "https://example.com")
+    editor.window.endSheet(editor.linkDialog!.window, returnCode: .alertSecondButtonReturn)
+    wait { editor.linkDialog == nil }
+    precondition(editor.text.string == "A [native](<https://example.com>) note 🦀\n", "Cancelling the popup leaves the document unchanged")
+    editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note 🦀\n", "Inserting a link is one undo operation")
+
+    editor.text.importImages?(images, 2)
+    editor.text.setSelectedRange(NSRange(location: 0, length: 0)); editor.text.insertText("Before ", replacementRange: editor.text.selectedRange())
+    wait { editor.imageQueue.isEmpty }
+    precondition(editor.text.string.hasPrefix("Before A \n![Pasted image.png]"), "Image insertion follows edits made while the file is being copied")
+    precondition(editor.text.string.contains("Keyboard.assets/"))
+    let imageNode = try! JSONDecoder().decode(NativeMarkdownNode.self, from: JSONSerialization.data(withJSONObject: ["type": "image", "lineStart": 1, "lineEnd": 1, "url": imported, "children": [["type": "text", "value": "Preview", "lineStart": 1, "lineEnd": 1]]]))
+    editor.reader.textStorage!.setAttributedString(NativeMarkdownRenderer.render(imageNode))
+    editor.loadPreviewImages(generation: editor.renderGeneration)
+    wait { !editor.previewImages.isEmpty }
+    let attachment = editor.reader.textStorage!.attribute(.attachment, at: 0, effectiveRange: nil) as! NSTextAttachment
+    precondition(attachment.image!.size.width == 32, "Reading view loads a real local image")
+    editor.text.undoManager?.undo(); editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note 🦀\n", "Image insertion and intervening typing undo independently")
+    editor.text.importImages?([ArtifactImageInput(url: nil, bytes: Data("not an image".utf8), name: "Invalid.png")], 0)
+    wait { editor.imageQueue.isEmpty }
+    precondition(editor.imageFailure != nil && editor.text.string == "A native note 🦀\n", "Invalid images never insert broken Markdown")
+    editor.imageFailure = nil
+    wait { !editor.session.dirty && !editor.session.saving }
     precondition(editor.focusMode && editor.sidebar.superview == nil)
     precondition(editor.window.toolbar?.items.count == 6 && editor.titleField.isDescendant(of: editor.window.contentView!) == false, "Document controls belong to the native window toolbar")
     editor.window.makeFirstResponder(editor.text)

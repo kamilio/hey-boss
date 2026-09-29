@@ -1588,7 +1588,7 @@ final class NativeMarkdownRenderer {
             append("[" + (node.value ?? "") + "] ",attributes,node); children(node,attributes); newline(attributes,node)
         case "image":
             let alt = (node.children ?? []).compactMap(\.value).joined()
-            if let raw = node.url, let url = URL(string:raw), ["https","http"].contains(url.scheme ?? "") {
+            if let raw = node.url, let url = URL(string:raw), ["https","http","file", ""].contains(url.scheme ?? "") {
                 let attachment = NSTextAttachment(); attachment.image = NSImage(systemSymbolName:"photo",accessibilityDescription:alt)
                 attachment.bounds = NSRect(x:0,y:0,width:32,height:32)
                 var imageAttributes = attributes; imageAttributes[.attachment] = attachment
@@ -5376,7 +5376,7 @@ final class ArtifactBackend {
         self.launch = launch
         self.cli = cli ?? ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"] ?? "/opt/homebrew/bin/hey-boss"
     }
-    func request(_ arguments: [String], body: String? = nil, completion: @escaping (Result<Data, Error>) -> Void) {
+    func request(_ arguments: [String], body: String? = nil, command: String = "artifact", completion: @escaping (Result<Data, Error>) -> Void) {
         let executable = cli, context = launch
         DispatchQueue.global(qos: .userInitiated).async {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-artifact-" + UUID().uuidString)
@@ -5389,7 +5389,7 @@ final class ArtifactBackend {
                 let stdin = try FileHandle(forReadingFrom: input), stdout = try FileHandle(forWritingTo: output)
                 defer { try? stdin.close(); try? stdout.close() }
                 let process = Process(); process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = ["artifact", "--json", "--agent", "human:boss", "--project", context.project] + (context.host.map { ["--host", $0] } ?? []) + arguments
+                process.arguments = [command, "--json", "--agent", "human:boss", "--project", context.project] + (context.host.map { ["--host", $0] } ?? []) + arguments
                 process.currentDirectoryURL = root
                 var env = ProcessInfo.processInfo.environment
                 for key in ["HEY_BOSS_ISSUE_HOST", "HEY_BOSS_ISSUE_PROJECT", "HEY_BOSS_AGENT_ID", "CODEX_THREAD_ID"] { env.removeValue(forKey: key) }
@@ -5419,7 +5419,94 @@ final class ArtifactBackend {
     }
 }
 
+struct ArtifactImageInput {
+    let url: URL?
+    let bytes: Data?
+    let name: String
+    static func containsImages(_ pasteboard: NSPasteboard) -> Bool {
+        if pasteboard.availableType(from: [.png, .tiff]) != nil { return true }
+        return (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .contains { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+    }
+    static func read(_ pasteboard: NSPasteboard) -> [ArtifactImageInput] {
+        let files = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+        if !files.isEmpty {
+            return files.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+                .map { ArtifactImageInput(url: $0, bytes: nil, name: $0.lastPathComponent) }
+        }
+        for (type, name) in [(NSPasteboard.PasteboardType.png, "Pasted image.png"), (.tiff, "Pasted image.tiff")] {
+            if let data = pasteboard.data(forType: type) { return [ArtifactImageInput(url: nil, bytes: data, name: name)] }
+        }
+        return []
+    }
+    func contents() throws -> (data: Data, name: String) {
+        if let url {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 10 * 1024 * 1024 else { throw StorageError(description: "Choose an image up to 10 MiB.") }
+        }
+        let data = try bytes ?? Data(contentsOf: url!)
+        guard data.count <= 10 * 1024 * 1024, let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { throw StorageError(description: "Cannot read this image. Choose an image up to 10 MiB.") }
+        if let type = CGImageSourceGetType(source) as String?, ![UTType.png.identifier, UTType.jpeg.identifier, UTType.gif.identifier, UTType.webP.identifier].contains(type) {
+            let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 4096, kCGImageSourceCreateThumbnailWithTransform: true]
+            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { throw StorageError(description: "Cannot decode image") }
+            let output = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { throw StorageError(description: "Cannot convert image") }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination), output.length <= 10 * 1024 * 1024 else { throw StorageError(description: "Choose an image up to 10 MiB.") }
+            return (output as Data, (name as NSString).deletingPathExtension + ".png")
+        }
+        return (data, name)
+    }
+    func copy(beside document: URL) throws -> String {
+        let image = try contents(), directory = document.deletingPathExtension().appendingPathExtension("assets")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let digest = SHA256.hash(data: image.data).map { String(format: "%02x", $0) }.joined()
+        let file = directory.appendingPathComponent(String(digest.prefix(16)) + "-" + image.name)
+        if !FileManager.default.fileExists(atPath: file.path) { try image.data.write(to: file, options: .atomic) }
+        return (directory.lastPathComponent + "/" + file.lastPathComponent).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!
+    }
+}
+
 final class ArtifactMarkdownText: NSTextView {
+    var importImages: (([ArtifactImageInput], Int) -> Void)?
+    static func escapedLabel(_ label: String) -> String {
+        label.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]").replacingOccurrences(of: "\n", with: " ")
+    }
+    static func markdownLink(_ label: String, _ destination: String) -> String {
+        let allowed = CharacterSet.urlFragmentAllowed.union(CharacterSet(charactersIn: "%")).subtracting(CharacterSet(charactersIn: "<>\\\"\n\r\t "))
+        return "[" + escapedLabel(label) + "](<" + (destination.addingPercentEncoding(withAllowedCharacters: allowed) ?? destination) + ">)"
+    }
+    func linkSelection() -> (range: NSRange, label: String, destination: String) {
+        let selection = selectedRange(), source = string as NSString
+        let regex = try! NSRegularExpression(pattern: #"(?<!!)\[((?:\\.|[^\]\\])*)\]\((?:<([^>\n]*)>|([^\s\n]*))\)"#)
+        let line = source.lineRange(for: selection)
+        if let match = regex.matches(in: string, range: line).first(where: { $0.range.location <= selection.location && NSMaxRange($0.range) >= NSMaxRange(selection) }) {
+            let label = source.substring(with: match.range(at: 1)).replacingOccurrences(of: "\\[", with: "[").replacingOccurrences(of: "\\]", with: "]").replacingOccurrences(of: "\\\\", with: "\\")
+            let destination = source.substring(with: match.range(at: match.range(at: 2).location == NSNotFound ? 3 : 2))
+            return (match.range, label, destination)
+        }
+        return (selection, source.substring(with: selection), "")
+    }
+    override func paste(_ sender: Any?) {
+        let images = ArtifactImageInput.read(.general)
+        if isEditable, !images.isEmpty, let importImages { importImages(images, selectedRange().location) }
+        else { pasteAsPlainText(sender) }
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if isEditable, ArtifactImageInput.containsImages(sender.draggingPasteboard) { return .copy }
+        return super.draggingEntered(sender)
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if isEditable, ArtifactImageInput.containsImages(sender.draggingPasteboard) { return .copy }
+        return super.draggingUpdated(sender)
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let images = ArtifactImageInput.read(sender.draggingPasteboard)
+        if isEditable, !images.isEmpty, let importImages {
+            importImages(images, characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil))); return true
+        }
+        return super.performDragOperation(sender)
+    }
     func replace(_ range: NSRange, with replacement: String, selection: NSRange) {
         guard isEditable, shouldChangeText(in: range, replacementString: replacement) else { return }
         textStorage?.replaceCharacters(in: range, with: replacement)
@@ -5503,7 +5590,7 @@ final class ArtifactEditorWindow: NSWindow {
                 switch key {
                 case "a": text.selectAll(nil); return true
                 case "c": text.copy(nil); return true
-                case "v": text.pasteAsPlainText(nil); return true
+                case "v": text.paste(nil); return true
                 case "x": text.cut(nil); return true
                 case "z": if flags.contains(.shift) { text.undoManager?.redo() } else { text.undoManager?.undo() }; return true
                 default: break
@@ -5551,6 +5638,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     var bodyByteCount = 0
     var closed = false
     var originalFile: Data?
+    var linkDialog: NSAlert?
+    var linkURLField: NSTextField?
+    var linkRange: NSRange?
+    var imageQueue: [(input: ArtifactImageInput, offset: Int)] = []
+    var importingImage = false
+    var imageFailure: String?
+    var previewImages: [URL: NSImage] = [:]
     var onClose: () -> Void = {}
     var onOpen: (ArtifactLaunch) -> Void = { _ in }
     var scrollObserver: NSObjectProtocol?
@@ -5625,6 +5719,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         [scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
         configureText(text, scroll: scroll); configureText(reader, scroll: readerScroll)
         text.isRichText = false; text.isEditable = false; text.allowsUndo = true; text.delegate = self
+        text.registerForDraggedTypes([.fileURL, .png, .tiff])
+        text.importImages = { [weak self] images, offset in
+            guard let self else { return }
+            self.imageFailure = nil
+            self.imageQueue += images.map { ($0, offset) }
+            self.updateStatus(); self.importNextImage()
+        }
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.isAutomaticTextReplacementEnabled = false; text.isAutomaticSpellingCorrectionEnabled = false
         text.isAutomaticLinkDetectionEnabled = false; text.isContinuousSpellCheckingEnabled = true
@@ -5776,13 +5877,59 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     func updateStatus() {
         window.title = session.title
         recovery.isHidden = session.failure == nil; reload.isHidden = session.failure == nil
-        if let failure = session.failure { status.stringValue = failure; status.textColor = .systemRed }
+        if let failure = imageFailure ?? session.failure { status.stringValue = failure; status.textColor = .systemRed }
         else {
             status.textColor = .tertiaryLabelColor
-            status.stringValue = loading ? "Loading…" : session.saving || session.dirty ? "Saving…" : "Saved"
+            status.stringValue = !imageQueue.isEmpty ? "Attaching image…" : loading ? "Loading…" : session.saving || session.dirty ? "Saving…" : "Saved"
         }
         status.toolTip = status.stringValue
         if closed, !session.dirty, !session.saving { onClose() }
+        importNextImage()
+    }
+    func importNextImage() {
+        guard !importingImage, let item = imageQueue.first, session.ready else { return }
+        let document = session.launch.file.map { URL(fileURLWithPath: $0) }, id = session.launch.id
+        guard document != nil || !(id ?? "").isEmpty else { return }
+        importingImage = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                if let document {
+                    let destination = try item.input.copy(beside: document)
+                    onMain { self.finishImage(.success(destination)) }; return
+                }
+                let image = try item.input.contents()
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-image-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                let file = directory.appendingPathComponent(image.name)
+                do { try image.data.write(to: file, options: .atomic) }
+                catch { try? FileManager.default.removeItem(at: directory); throw error }
+                self.backend.request(["upload", file.path, "--artifact", id!, "--request-id", UUID().uuidString], command: "attachment") { result in
+                    defer { try? FileManager.default.removeItem(at: directory) }
+                    self.finishImage(result.flatMap { data in Result {
+                        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let attachment = value["attachment"] as? [String: Any], let id = attachment["id"] as? String else { throw StorageError(description: "Attachment reply was incomplete") }
+                        return "/attachments/" + id
+                    } })
+                }
+            } catch { onMain { self.finishImage(.failure(error)) } }
+        }
+    }
+    func finishImage(_ result: Result<String, Error>) {
+        guard !imageQueue.isEmpty else { return }
+        let item = imageQueue.removeFirst(); importingImage = false
+        switch result {
+        case .success(let destination):
+            let insertion = min(item.offset, (text.string as NSString).length), caret = text.selectedRange()
+            let markdown = "\n![" + ArtifactMarkdownText.escapedLabel(item.input.name) + "](<" + destination + ">)\n"
+            let width = (markdown as NSString).length
+            let start = caret.location >= insertion ? caret.location + width : caret.location
+            let end = NSMaxRange(caret) >= insertion ? NSMaxRange(caret) + width : NSMaxRange(caret)
+            let selection = NSRange(location: start, length: end - start)
+            text.replace(NSRange(location: insertion, length: 0), with: markdown, selection: selection)
+            if previewing { renderPreview() }
+        case .failure:
+            imageFailure = "Could not attach \(item.input.name). Drop it again to retry (up to 10 MiB)."
+        }
+        updateStatus()
     }
     func showFailure(_ error: Error) { session.failure = error.localizedDescription; updateStatus() }
     func textDidChange(_ notification: Notification) {
@@ -5797,10 +5944,23 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         let bytes = bodyByteCount - (text.string as NSString).substring(with: affectedCharRange).utf8.count + replacementString.utf8.count
         let limit = session.launch.file == nil ? 1024 * 1024 : 64 * 1024 * 1024
         if bytes > limit { status.stringValue = "This document has reached its size limit."; NSSound.beep(); return false }
+        let delta = (replacementString as NSString).length - affectedCharRange.length
+        func adjusted(_ offset: Int) -> Int {
+            if offset >= NSMaxRange(affectedCharRange) { return offset + delta }
+            return offset > affectedCharRange.location ? affectedCharRange.location + (replacementString as NSString).length : offset
+        }
+        for index in imageQueue.indices {
+            imageQueue[index].offset = adjusted(imageQueue[index].offset)
+        }
+        if let range = linkRange { let start = adjusted(range.location); linkRange = NSRange(location: start, length: max(0, adjusted(NSMaxRange(range)) - start)) }
         bodyByteCount = bytes
         return true
     }
     func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSTextField === linkURLField {
+            linkDialog?.buttons.first?.isEnabled = !(linkURLField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            return
+        }
         if notification.object as? NSSearchField === search {
             searchTimer?.invalidate(); searchTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in self?.refreshLibrary() }
         } else if notification.object as? NSTextField === titleField { session.change(title: titleField.stringValue, body: text.string) }
@@ -5918,8 +6078,57 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 if done.wait(timeout: .now() + 15) != .success { process.terminate(); if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }; throw StorageError(description: "Preview timed out") }
                 guard process.terminationStatus == 0 else { throw StorageError(description: "Preview unavailable") }
                 let node = try JSONDecoder().decode(NativeMarkdownNode.self, from: Data(contentsOf: output))
-                onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.textStorage?.setAttributedString(NativeMarkdownRenderer.render(node)); self.reader.setSelectedRange(NSRange(location: 0, length: 0)); self.reader.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
+                onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.textStorage?.setAttributedString(NativeMarkdownRenderer.render(node)); self.loadPreviewImages(generation: generation); self.reader.setSelectedRange(NSRange(location: 0, length: 0)); self.reader.scrollRangeToVisible(NSRange(location: 0, length: 0)) }
             } catch { onMain { guard let self, generation == self.renderGeneration else { return }; self.reader.string = source; self.status.stringValue = "Preview unavailable · showing source" } }
+        }
+    }
+    func loadPreviewImages(generation: Int) {
+        guard let storage = reader.textStorage else { return }
+        if previewImages.count > 64 { previewImages.removeAll() }
+        storage.enumerateAttribute(.nativeImageURL, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let url = value as? URL, let attachment = storage.attribute(.attachment, at: range.location, effectiveRange: nil) as? NSTextAttachment else { return }
+            if let image = self.previewImages[url] { attachment.image = image; return }
+            let display: (Data?) -> Void = { [weak self, weak attachment] data in
+                guard let data, data.count <= 10 * 1024 * 1024, let image = boundedIconImage(data, maximumPixelSize: 2000) else { return }
+                onMain {
+                    guard let self, let attachment, generation == self.renderGeneration, !self.closed else { return }
+                    self.previewImages[url] = image; attachment.image = image; self.resizePreviewImages()
+                }
+            }
+            if url.relativeString.hasPrefix("/attachments/f-"), self.session.launch.file == nil {
+                let id = url.lastPathComponent
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-preview-image-" + UUID().uuidString)
+                let output = directory.appendingPathComponent("image")
+                do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
+                catch { return }
+                self.backend.request(["download", id, "--output", output.path], command: "attachment") { result in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        defer { try? FileManager.default.removeItem(at: directory) }
+                        if case .success = result { display(try? Data(contentsOf: output)) }
+                    }
+                }
+            } else if let file = self.session.launch.file, url.scheme == nil || url.isFileURL {
+                let resolved = url.isFileURL ? url : URL(string: url.relativeString, relativeTo: URL(fileURLWithPath: file).deletingLastPathComponent().appendingPathComponent(""))!.absoluteURL
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard let size = try? resolved.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 10 * 1024 * 1024 else { return }
+                    display(try? Data(contentsOf: resolved))
+                }
+            } else if ["https", "http"].contains(url.scheme ?? "") {
+                var request = URLRequest(url: url); request.timeoutInterval = 15
+                URLSession.shared.dataTask(with: request) { data, _, _ in display(data) }.resume()
+            }
+        }
+        resizePreviewImages()
+    }
+    func resizePreviewImages() {
+        guard let storage = reader.textStorage else { return }
+        let width = max(80, readerScroll.contentSize.width - 64)
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment, let image = attachment.image, image.size.width > 0 else { return }
+            let scale = min(1, width / image.size.width)
+            attachment.bounds = NSRect(x: 0, y: 0, width: image.size.width * scale, height: image.size.height * scale)
+            reader.layoutManager?.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
+            reader.layoutManager?.invalidateDisplay(forCharacterRange: range)
         }
     }
     func refreshLibrary() {
@@ -5986,8 +6195,33 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     @objc func bold() { writeMode(); text.wrap("**") }
     @objc func italic() { writeMode(); text.wrap("*") }
     @objc func link() {
-        writeMode(); let range = text.selectedRange(), selected = (text.string as NSString).substring(with: range)
-        text.replace(range, with: "[" + selected + "](https://)", selection: NSRange(location: range.location + range.length + 3, length: 8))
+        guard linkDialog == nil, session.ready else { return }
+        writeMode(); let selection = text.linkSelection()
+        let dialog = NSAlert(); dialog.messageText = selection.destination.isEmpty ? "Insert Link" : "Edit Link"
+        let label = NSTextField(string: selection.label), destination = NSTextField(string: selection.destination)
+        label.placeholderString = "Link text"; label.setAccessibilityLabel("Link text")
+        destination.placeholderString = "https://example.com"; destination.setAccessibilityLabel("Link URL")
+        let fields = NSStackView(views: [NSTextField(labelWithString: "Text"), label, NSTextField(labelWithString: "URL"), destination])
+        fields.orientation = .vertical; fields.alignment = .leading; fields.spacing = 8
+        fields.frame = NSRect(x: 0, y: 0, width: 360, height: 116)
+        label.widthAnchor.constraint(equalToConstant: 360).isActive = true; destination.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        dialog.accessoryView = fields; dialog.addButton(withTitle: selection.destination.isEmpty ? "Insert Link" : "Save Link"); dialog.addButton(withTitle: "Cancel")
+        if !selection.destination.isEmpty { dialog.addButton(withTitle: "Remove Link") }
+        linkDialog = dialog; linkURLField = destination; linkRange = selection.range; destination.delegate = self
+        dialog.buttons[0].isEnabled = !selection.destination.isEmpty
+        dialog.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }; let range = self.linkRange ?? selection.range
+            self.linkDialog = nil; self.linkURLField = nil; self.linkRange = nil
+            let url = destination.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if response == .alertFirstButtonReturn, !url.isEmpty {
+                let value = ArtifactMarkdownText.markdownLink(label.stringValue.isEmpty ? url : label.stringValue, url)
+                self.text.replace(range, with: value, selection: NSRange(location: range.location + (value as NSString).length, length: 0))
+            } else if response == .alertThirdButtonReturn {
+                self.text.replace(range, with: selection.label, selection: NSRange(location: range.location, length: (selection.label as NSString).length))
+            }
+            self.window.makeFirstResponder(self.text)
+        }
+        dialog.window.initialFirstResponder = destination; dialog.window.makeFirstResponder(destination); destination.selectText(nil)
     }
     @objc func task() { writeMode(); text.prefixLines("- [ ] ") }
     func writeMode() { if previewing { togglePreview() }; window.makeFirstResponder(text) }
@@ -6061,14 +6295,15 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         case "z": if shift { view.undoManager?.redo() } else { view.undoManager?.undo() }
         case "x": view.cut(nil)
         case "c": view.copy(nil)
-        case "v": view.pasteAsPlainText(nil)
+        case "v": view.paste(nil)
         case "a": view.selectAll(nil)
         default: break
         }
     }
     func windowDidResignKey(_ notification: Notification) { session.flush() }
-    func windowDidResize(_ notification: Notification) { window.saveFrame(usingName: "hey-boss-artifact-editor") }
+    func windowDidResize(_ notification: Notification) { window.saveFrame(usingName: "hey-boss-artifact-editor"); resizePreviewImages() }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if !imageQueue.isEmpty { status.stringValue = "Wait for images to finish attaching."; return false }
         session.flush()
         if session.dirty {
             do { try session.persist() } catch { showFailure(error); return false }
