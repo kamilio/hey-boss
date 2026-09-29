@@ -2952,3 +2952,20 @@ button.avatar.self:hover {
 .dep-unblock-hint { font-size: 10px; font-weight: 600; color: #d97706; padding: 1px 5px; border-radius: 5px; background: #d9770618; }
 .dep-actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .issue-blocking-others { color: var(--muted); }
+
+/* Skill Repository & Agent Sync UI */
+.skills-sync-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.skills-sync-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.skills-audit-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; padding-right: 4px; }
+.skill-audit-row { display: flex; flex-direction: column; gap: 4px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-size: 12px; }
+.skill-select-label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.skill-line-count { margin-left: auto; font-size: 11px; color: var(--muted); }
+.skill-line-count.is-too-long { color: #dc2626; font-weight: 600; }
+.skill-badges { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.skill-agent-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); }
+.skill-agent-badge.is-present { color: #16a34a; border-color: #16a34a44; background: #16a34a12; }
+.skill-agent-badge.is-missing { color: var(--faint); opacity: 0.65; }
+.skill-warning-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 6px; color: #b45309; background: #f59e0b1f; border: 1px solid #f59e0b44; }
+.skill-warning-badge.is-too_long { color: #dc2626; background: #dc262618; border-color: #dc262644; }
+.skill-subhead { font-size: 11px; font-weight: 600; color: var(--muted); margin-top: 6px; }
+.skill-project-tag { font-size: 10px; font-weight: 600; padding: 1px 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); }

@@ -51,6 +51,10 @@ enum GlobalSettingsAction {
         boss_name: Option<String>,
         #[arg(long, action = clap::ArgAction::Set)]
         auto_close_merged_prs: Option<bool>,
+        #[arg(long = "selected-skill")]
+        selected_skills: Option<Vec<String>>,
+        #[arg(long)]
+        sync_skills: bool,
         #[arg(long)]
         if_version: Option<i64>,
     },
@@ -61,10 +65,14 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
         GlobalSettingsAction::Set {
             boss_name,
             auto_close_merged_prs,
+            selected_skills,
+            sync_skills,
             if_version,
         } => Operation::ConfigureGlobal {
             boss_name: boss_name.clone(),
             auto_close_merged_prs: *auto_close_merged_prs,
+            selected_skills: selected_skills.clone(),
+            sync_skills: *sync_skills,
             if_version: *if_version,
         },
     };
