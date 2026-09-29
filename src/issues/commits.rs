@@ -209,9 +209,9 @@ fn parse_url_commit(url: &str) -> Option<(Option<(String, String)>, String)> {
     None
 }
 
-type ResolvedCommit = (String, String, Option<(String, String)>);
+type GitCommitMetadata = (String, String, Option<(String, String)>);
 
-fn git_resolve_in(cwd: &Path, rev: &str) -> Option<ResolvedCommit> {
+fn git_resolve_in(cwd: &Path, rev: &str) -> Option<GitCommitMetadata> {
     let sha_out = Command::new("git")
         .arg("-C")
         .arg(cwd)
