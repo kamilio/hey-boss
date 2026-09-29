@@ -6,14 +6,20 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+static PROCESS_FIXTURE: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     root: PathBuf,
     binary: PathBuf,
+    _process_fixture: MutexGuard<'static, ()>,
 }
 impl Fixture {
     fn new() -> Self {
+        // A concurrent fork can briefly inherit another fixture's writable
+        // executable during copying, causing ETXTBSY when that copy is run.
+        let process_fixture = PROCESS_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!(
             "hb-secret-e2e-{}-{}-{}",
             std::process::id(),
@@ -28,7 +34,11 @@ impl Fixture {
         let binary = root.join("hey-boss");
         fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
         fs::write(root.join("hey-boss.state"), root.to_str().unwrap()).unwrap();
-        Self { root, binary }
+        Self {
+            root,
+            binary,
+            _process_fixture: process_fixture,
+        }
     }
     fn reply(&self, values: Option<Vec<String>>) -> std::thread::JoinHandle<()> {
         let reply = match values {
