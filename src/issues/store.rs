@@ -1916,6 +1916,7 @@ impl Store {
                 draft,
                 labels,
                 then_titles,
+                at_top,
                 ..
             } => {
                 let issue = create_issue(&tx, &project, actor.unwrap(), &r.operation, now)?;
@@ -1935,7 +1936,7 @@ impl Store {
                     prev_number = next_issue.number;
                     created_chain.push(serde_json::to_value(&next_issue)?);
                 }
-                let mut out = json!({"ok":true,"project":project,"issue":issue,"changed":true});
+                let mut out = json!({"ok":true,"project":project,"issue":issue,"changed":true,"placement":if *at_top { "top" } else { "bottom" }});
                 if !then_titles.is_empty() {
                     out["created_chain"] = json!(created_chain);
                 }
@@ -2222,7 +2223,7 @@ fn create_issue(
         &actor.id,
         "created",
         now,
-        &json!({"issue":issue}),
+        &json!({"issue":issue,"placement":if *at_top { "top" } else { "bottom" },"sort_order":sort_order}),
     )?;
     Ok(issue)
 }

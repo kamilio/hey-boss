@@ -1306,6 +1306,15 @@ async function loadHistory() {
   historyOffset = 0;
   await historyPage(true);
 }
+function queueActivity(event) {
+  const data = event.data || {};
+  if (event.action === "created" && ["top", "bottom"].includes(data.placement)) {
+    return `<p class="muted-text">Added to the ${data.placement} of the queue.</p>`;
+  }
+  if (event.action !== "worker_selected") return "";
+  const tags = data.required_tags?.length ? data.required_tags.join(", ") : "None";
+  return `<p>${esc(data.worker_name || "Worker")} reserved this issue as the first eligible task in queue order.</p><p class="muted-text">Required tags: ${esc(tags)}. Drafts, claims, reservations, dependencies and retry holds are excluded.</p><details><summary>Selection details</summary><pre>${esc(JSON.stringify(data, null, 2))}</pre></details>`;
+}
 async function historyPage(reset = false) {
   const project = model.project.id,
     number = model.detail.issue.number;
@@ -1320,6 +1329,7 @@ async function historyPage(reset = false) {
     $(".history-more", target)?.remove();
     const verbs = {
       created: "created this issue",
+      worker_selected: "selected this issue for a worker",
       edited: "edited the description or labels",
       triaged: "updated labels or ownership",
       claimed: "claimed this issue",
@@ -1350,7 +1360,7 @@ async function historyPage(reset = false) {
       result.events
         .map(
           (event) =>
-            `<div class="timeline-item"><strong>${esc(actorName(event.actor))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : ["edited", "triaged"].includes(event.action) ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
+            `<div class="timeline-item"><strong>${esc(event.action === "worker_selected" ? event.data.worker_name || "Worker" : actorName(event.actor))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${queueActivity(event)}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : ["edited", "triaged"].includes(event.action) ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
         )
         .join(""),
     );
@@ -1898,7 +1908,8 @@ window.addEventListener("pagehide", () => {
 });
 window.addEventListener("hashchange", () => {
   saveComment();
-  renderRoute();
+  // Bootstrap renders the latest URL once the project is available.
+  if (model.project) renderRoute();
 });
 $(".skip-link").onclick = (e) => {
   e.preventDefault();
