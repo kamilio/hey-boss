@@ -103,10 +103,20 @@ impl Graph {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })? {
             let (parent, child) = row?;
-            if graph.issues.get(&parent).is_some_and(|i| i["deleted_at"].is_null())
-                && graph.issues.get(&child).is_some_and(|i| i["deleted_at"].is_null())
+            if graph
+                .issues
+                .get(&parent)
+                .is_some_and(|i| i["deleted_at"].is_null())
+                && graph
+                    .issues
+                    .get(&child)
+                    .is_some_and(|i| i["deleted_at"].is_null())
             {
-                graph.dependents.entry(child).or_default().push((parent, "subtask"));
+                graph
+                    .dependents
+                    .entry(child)
+                    .or_default()
+                    .push((parent, "subtask"));
             }
             graph.parents.insert(child, parent);
             graph.children.entry(parent).or_default().push(child);
@@ -271,11 +281,7 @@ impl Graph {
     }
 }
 
-pub(super) fn validate_new_links(
-    db: &Connection,
-    project: &str,
-    links: &[i64],
-) -> Result<bool> {
+pub(super) fn validate_new_links(db: &Connection, project: &str, links: &[i64]) -> Result<bool> {
     if links.is_empty() {
         return Ok(false);
     }
@@ -565,14 +571,20 @@ fn reconcile_projects(db: &Connection, upgrading: bool) -> Result<()> {
     Ok(())
 }
 pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Result<()> {
-    if !["issue", "parent_issue", "child_issue", "issues", "subtasks", "created_chain"]
-        .iter()
-        .any(|key| {
-            result
-                .get(*key)
-                .is_some_and(|v| v.is_object() || v.is_array())
-        })
-    {
+    if ![
+        "issue",
+        "parent_issue",
+        "child_issue",
+        "issues",
+        "subtasks",
+        "created_chain",
+    ]
+    .iter()
+    .any(|key| {
+        result
+            .get(*key)
+            .is_some_and(|v| v.is_object() || v.is_array())
+    }) {
         return Ok(());
     }
     let graph = Graph::load(db, project)?;

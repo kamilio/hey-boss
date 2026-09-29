@@ -1131,7 +1131,11 @@ mod tests {
                     json!({"action":"create","title":"Feature","body":"","labels":[]}),
                 ))
                 .unwrap();
-            store.execute(&request(json!({"action":"configure_project","subtask_scheduling":"sequential"}))).unwrap();
+            store
+                .execute(&request(
+                    json!({"action":"configure_project","subtask_scheduling":"sequential"}),
+                ))
+                .unwrap();
             for _ in 0..2 {
                 store.execute(&request(json!({"action":"create_subtask","number":1,"title":"Step","body":"","labels":[]}))).unwrap();
             }

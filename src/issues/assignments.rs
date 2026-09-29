@@ -1181,7 +1181,7 @@ mod tests {
         f.assign("github").unwrap();
         f.observation(None);
         f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
-        let mut writer = Connection::open(&f.root.join("issues.db")).unwrap();
+        let mut writer = Connection::open(f.root.join("issues.db")).unwrap();
         let _lock = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -1210,7 +1210,7 @@ mod tests {
         observation.completed = None;
         observation.evidence = json!({"head":"head","ci_complete":true,"complete":false,"checks":[],"omitted":{"checks":5},"truncated":true});
         f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
-        let mut writer = Connection::open(&f.root.join("issues.db")).unwrap();
+        let mut writer = Connection::open(f.root.join("issues.db")).unwrap();
         let lock = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -1280,7 +1280,7 @@ mod tests {
             .unwrap();
         let before = saved(&f.store.db, "named:test", 1).unwrap().1;
         f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
-        let mut writer = Connection::open(&f.root.join("issues.db")).unwrap();
+        let mut writer = Connection::open(f.root.join("issues.db")).unwrap();
         let lock = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
