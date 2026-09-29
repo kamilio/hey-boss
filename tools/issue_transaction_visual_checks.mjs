@@ -50,6 +50,7 @@ try {
   assert.equal(created.issue.state, 'blocked');
   assert.deepEqual(run(creation), created);
   assert.equal(run(['request', 'dependent-once']).request.response.issue.number, 2);
+  assert.equal(run(['request', 'dependent-once', '--supervisor']).request.response.issue.number, 2);
   assert.equal(run(['request', 'missing']).request.state, 'not_recorded');
   run(['create', '--title', 'Rejected dependency', '--blocked-by', '999', '--request-id', 'rejected'], false);
   assert.equal(run(['request', 'rejected']).request.state, 'not_recorded');
