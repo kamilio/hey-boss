@@ -1293,6 +1293,12 @@ fn prompt(job: &Job) -> (String, bool, String) {
 }
 fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
     let (mut instructions, goal, objective) = task_prompt(job, config);
+    if let Some(status) = job.issue.get("github_status") {
+        instructions.push_str(&format!(
+            "\n\n{}",
+            serde_json::json!({"github_status": status})
+        ));
+    }
     if let Some(context) = job.issue["subtask_context"].as_object() {
         let parent = &context["parent"];
         let explicit = context.get("scheduling").is_some_and(|v| v == "explicit");

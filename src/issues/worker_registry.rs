@@ -342,6 +342,7 @@ const TAG_FILTER: &str = "AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHER
 // Explicit unanswered/declined input remains under the user's control.
 pub(super) const PICKUP_READY: &str = "
  AND i.draft=0
+ AND (i.assignment_target IS NULL OR i.assignment_target NOT LIKE 'machine:%' OR i.assignment_target='machine:'||(SELECT node FROM fleet_meta WHERE id=1))
  AND NOT EXISTS(SELECT 1 FROM fleet_allocation_deadlines d WHERE d.project_id=i.project_id AND d.issue_number=i.number AND d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000)
  AND NOT EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node<>(SELECT node FROM fleet_meta WHERE id=1))
  AND ((SELECT role FROM fleet_meta WHERE id=1)<>'agent' OR EXISTS(SELECT 1 FROM fleet_allocations f WHERE f.project_id=i.project_id AND f.issue_number=i.number AND f.node=(SELECT node FROM fleet_meta WHERE id=1)))
@@ -973,7 +974,10 @@ pub(super) fn reserve(
                  WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
                   ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
                  AND state!='completed' AND json_extract(job,'$.config.cwd')=?4
-                 AND NOT (state='failed' AND summary LIKE 'Codex turn/start:%ActiveTurnOutputSchemaMismatch%')",
+                 AND NOT (state='failed' AND summary LIKE 'Codex turn/start:%ActiveTurnOutputSchemaMismatch%')
+                 AND NOT EXISTS(SELECT 1 FROM issues i JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number
+                   WHERE i.project_id=?1 AND i.number=?2 AND i.assignment_target='github' AND json_type(w.status,'$.event')='text'
+                   AND NOT EXISTS(SELECT 1 FROM agent_steering s WHERE s.request_id='github:'||worker_runs.id||':'||json_extract(w.status,'$.event') AND s.state='delivered'))",
                 params![project.id, number, machine, config.cwd], |r| r.get::<_, Option<String>>(0),
             ).optional()?.flatten();
             let job = Job {
@@ -1007,6 +1011,10 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE fleet_meta SET node=?1 WHERE id=1 AND role='standalone' AND node=''",
+            [machine],
+        )?;
         let id = id.map(str::to_owned).unwrap_or(random_id()?);
         let prior: Option<(Option<u32>, Option<String>)> = tx
             .query_row(

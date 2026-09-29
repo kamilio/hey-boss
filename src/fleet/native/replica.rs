@@ -13,6 +13,7 @@ pub(super) const TABLES: &[(&str, &[&str])] = &[
     ("agents", &["id"]),
     ("issues", &["project_id", "number"]),
     ("issue_status_updates", &["id"]),
+    ("issue_github_watches", &["project_id", "issue_number"]),
     (
         "issue_agent_launches",
         &["project_id", "issue_number", "run_id"],
@@ -134,6 +135,18 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         let manual = i64::from(m["state"] == "blocked");
         m.entry("manual_blocked").or_insert(json!(manual));
         m.entry("blockers").or_insert(json!("[]"));
+        for column in ["assignment_target", "github_ack_event"] {
+            if !m.contains_key(column) {
+                let target: Option<Option<String>> = db
+                    .query_row(
+                        &format!("SELECT {column} FROM issues WHERE project_id=?1 AND number=?2"),
+                        rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                m.insert(column.into(), json!(target.flatten()));
+            }
+        }
         // Older peers cannot express these fields. Preserve local values when
         // merging their rows; only an explicit modern value may change them.
         // Full modern rows take no extra database read.
@@ -519,6 +532,9 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| invalid("Invalid replicated table"))?;
     keys(table)?;
+    if table == "issue_github_watches" {
+        return Err(invalid("GitHub observations are written by the supervisor"));
+    }
     let mut before = row_json(change, "before_json")?;
     let mut after = row_json(change, "after_json")?;
     let key = if after.is_null() { &before } else { &after };
@@ -746,6 +762,20 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             let mut merged = old.clone();
             for (k, v) in changed {
                 merged[k] = v.clone();
+            }
+            // A companion can finish before its next pull delivers a newer
+            // GitHub event. Keep that event queued instead of parking the task.
+            if merged["assignment_target"] == "github" && merged["assignee"] == "watcher:github" {
+                let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_github_watches WHERE project_id=?1 AND issue_number=?2 AND json_type(status,'$.event')='text' AND json_extract(status,'$.event') IS NOT ?3)",rusqlite::params![merged["project_id"].as_str(),merged["number"].as_i64(),merged["github_ack_event"].as_str()],|r|r.get(0))?;
+                if pending {
+                    merged["assignee"] = Value::Null;
+                } else {
+                    execute(
+                        db,
+                        "DELETE FROM fleet_allocations WHERE project_id=? AND issue_number=?",
+                        &[merged["project_id"].clone(), merged["number"].clone()],
+                    )?;
+                }
             }
             if before["blockers"] != after["blockers"] {
                 let links: Vec<i64> = serde_json::from_str(
@@ -1819,9 +1849,9 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
         let candidates = rows(
             db,
             &format!(
-                "SELECT i.number,i.labels FROM issues i WHERE project_id=? AND state='open' AND deleted_at IS NULL AND assignee IS NULL AND {READY} AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number) AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL) ORDER BY sort_order,number"
+                "SELECT i.number,i.labels FROM issues i WHERE project_id=? AND state='open' AND deleted_at IS NULL AND assignee IS NULL AND (assignment_target IS NULL OR assignment_target NOT LIKE 'machine:%' OR assignment_target='machine:'||?2) AND {READY} AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number) AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL) ORDER BY sort_order,number"
             ),
-            &[json!(project)],
+            &[json!(project), json!(node)],
         )?;
         let mut used = BTreeSet::new();
         for (filter, capacity) in &filters {
@@ -1938,6 +1968,86 @@ mod tests {
     use crate::issues::{Actor, Operation, Project, Request, Store};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn github_watch_status_flows_from_supervisor_and_rejects_companion_edits() {
+        let main = Fixture::new();
+        main.capture();
+        let key = json!({"project_id":"named:Native fleet","issue_number":1});
+        let status = json!({"prs":{},"event":"new-failure"});
+        execute(
+            &main.db,
+            "INSERT INTO issue_github_watches VALUES(?,?,?)",
+            &[
+                key["project_id"].clone(),
+                json!(1),
+                json!(status.to_string()),
+            ],
+        )
+        .unwrap();
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "peer").unwrap();
+        apply_pull(&peer.db, "peer", &snapshot(&main.db, "peer").unwrap(), &[]).unwrap();
+        assert_eq!(
+            current_row(&peer.db, "issue_github_watches", &key).unwrap()["status"],
+            status.to_string()
+        );
+        let before = current_row(&peer.db, "issue_github_watches", &key).unwrap();
+        let mut after = before.clone();
+        after["status"] = json!("{\"prs\":{},\"event\":\"stale\"}");
+        for (seq, before, after) in [
+            (901, Value::Null, after.clone()),
+            (902, before.clone(), after),
+            (903, before, Value::Null),
+        ] {
+            let change = json!({"seq":seq,"table_name":"issue_github_watches","before_json":if before.is_null(){Value::Null}else{json!(before.to_string())},"after_json":if after.is_null(){Value::Null}else{json!(after.to_string())}});
+            let receipt = accept_changes(&main.db, "peer", &[change]).unwrap();
+            assert_eq!(receipt[0]["state"], "conflict");
+            assert_eq!(
+                current_row(&main.db, "issue_github_watches", &key).unwrap()["status"],
+                status.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn github_watcher_remote_handoff_cannot_hide_a_newer_supervisor_event() {
+        for handled in [false, true] {
+            let main = Fixture::new();
+            main.capture();
+            main.db.execute_batch("INSERT INTO agents(id,metadata,last_seen) VALUES('watcher:github','{}',0); UPDATE issues SET assignment_target='github',assignee='human:fixture'; INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'peer');").unwrap();
+            let key = json!({"project_id":"named:Native fleet","number":1});
+            let before = current_row(&main.db, "issues", &key).unwrap();
+            let mut after = before.clone();
+            after["assignee"] = json!("watcher:github");
+            after["github_ack_event"] = json!(if handled { "second" } else { "first" });
+            main.db
+                .execute(
+                    "INSERT INTO issue_github_watches VALUES('named:Native fleet',1,?1)",
+                    [json!({"prs":{},"event":"second"}).to_string()],
+                )
+                .unwrap();
+            let change = json!({"seq":911,"table_name":"issues","before_json":before.to_string(),"after_json":after.to_string()});
+            let receipts = accept_changes(&main.db, "peer", &[change]).unwrap();
+            assert_eq!(receipts[0]["state"], "applied", "{receipts:?}");
+            let issue = current_row(&main.db, "issues", &key).unwrap();
+            assert_eq!(
+                issue["assignee"],
+                if handled {
+                    json!("watcher:github")
+                } else {
+                    Value::Null
+                }
+            );
+            assert_eq!(
+                rows(&main.db, "SELECT * FROM fleet_allocations", &[])
+                    .unwrap()
+                    .is_empty(),
+                handled,
+                "A parked watcher must release its worker allocation"
+            );
+        }
+    }
 
     #[test]
     fn offline_content_edits_preserve_newer_state_and_ownership() {

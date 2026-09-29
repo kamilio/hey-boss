@@ -103,6 +103,9 @@ fn retry_count(db: &Connection, job: &Job) -> Result<i64> {
 // Only the owning agent's deliberate handoff may finish after changing owners.
 // A human takeover must still stop the session and invalidate its completion.
 fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
+    if assignments::own_handoff(db, job, issue)? {
+        return Ok(true);
+    }
     if !job.requires_pr()
         || !matches!(issue.state.as_str(), "open" | "ready")
         || issue.deleted_at.is_some()
@@ -509,6 +512,7 @@ impl Store {
         }
         let issue = get_issue(&tx, &job.project.id, job.number(), true)?;
         let own = issue.assignee.as_deref() == Some(&job.actor.id);
+        let watching = assignments::is_watching(&tx, &job.project.id, job.number())?;
         let own_closed = issue.state == "closed"
             && issue.closed_by.as_deref() == Some(&job.actor.id)
             && issue.deleted_at.is_none();
@@ -535,7 +539,7 @@ impl Store {
             );
         }
         if state == "completed" && !own_closed {
-            let delivered_pr = job.requires_pr() && tx.query_row(
+            let delivered_pr = (job.requires_pr() || watching) && tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))",
                 params![job.project.id,job.number()], |r| r.get::<_,bool>(0),
             )?;
@@ -579,7 +583,7 @@ impl Store {
                     now(),
                 )?;
             }
-            if state == "completed" && job.requires_pr() {
+            if state == "completed" && job.requires_pr() && !watching {
                 mutate(
                     &tx,
                     &job.project,
@@ -600,17 +604,10 @@ impl Store {
                     },
                     now(),
                 )?;
+            } else if own && watching {
+                assignments::release_worker(&tx, job, state)?;
             } else if own {
-                mutate(
-                    &tx,
-                    &job.project,
-                    &job.actor,
-                    &Operation::Unassign {
-                        number: job.number(),
-                        force: false,
-                    },
-                    now(),
-                )?;
+                assignments::release_claim(&tx, job)?;
             }
         }
         if approval_hold
@@ -1582,6 +1579,235 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    fn watch_event(f: &mut HandoffFixture, key: &str) {
+        f.store
+            .record_github_observation(
+                "https://github.com/example/repo/pull/1",
+                &hey_gh::watcher::Observation {
+                    head: "head".into(),
+                    blocking: vec![key.into()],
+                    completed: None,
+                    feedback: vec![],
+                    evidence: json!({"failure":key}),
+                },
+                now(),
+            )
+            .unwrap();
+    }
+
+    fn watching_fixture() -> HandoffFixture {
+        let mut f = HandoffFixture::new(true);
+        f.apply(Operation::Assign {
+            number: 1,
+            target: "github".into(),
+            if_version: f.issue().version,
+        });
+        assert_eq!(
+            f.issue().assignee.as_deref(),
+            Some(f.job.actor.id.as_str()),
+            "Subscribing must retain the live claim until the worker finishes"
+        );
+        watch_event(&mut f, "first");
+        f.apply(Operation::Claim {
+            number: 1,
+            force: false,
+        });
+        f
+    }
+
+    #[test]
+    fn github_watcher_steers_once_and_rearms_after_success() {
+        let mut f = watching_fixture();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+        watch_event(&mut f, "second");
+        assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
+        let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+        assert!(instruction["text"].as_str().unwrap().contains("second"));
+        f.store
+            .worker_steering_result(
+                instruction["request_id"].as_str().unwrap(),
+                "delivered",
+                None,
+            )
+            .unwrap();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+        f.store.worker_finish(&f.job, "completed", "Fixed").unwrap();
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.issue().state, "open");
+        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+    }
+
+    #[test]
+    fn github_watcher_acknowledged_steering_does_not_wait_for_a_writer() {
+        let f = watching_fixture();
+        f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
+        let path: String = f
+            .store
+            .db
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name='main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut writer = Connection::open(path).unwrap();
+        let _lock = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn github_watcher_busy_steering_is_retried_without_failing_the_agent() {
+        let mut f = watching_fixture();
+        watch_event(&mut f, "late");
+        f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
+        let path: String = f
+            .store
+            .db
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name='main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut writer = Connection::open(path).unwrap();
+        let lock = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+        lock.rollback().unwrap();
+        assert!(f.store.worker_steering(&f.job.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn github_watcher_keeps_a_late_or_rejected_update_for_the_next_agent() {
+        for reject in [false, true] {
+            let mut f = watching_fixture();
+            watch_event(&mut f, "late");
+            if reject {
+                let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+                f.store
+                    .worker_steering_result(
+                        instruction["request_id"].as_str().unwrap(),
+                        "rejected",
+                        Some("unsupported"),
+                    )
+                    .unwrap();
+            }
+            f.store
+                .worker_finish(&f.job, "completed", "Fixed first failure")
+                .unwrap();
+            assert_eq!(f.state(), "completed");
+            assert!(f.issue().assignee.is_none());
+            assert!(assignments::is_watching(&f.store.db, &f.job.project.id, 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn github_watcher_retries_failed_work_instead_of_waiting_for_another_ci_event() {
+        let mut f = watching_fixture();
+        f.store
+            .worker_finish(&f.job, "failed", "Agent process failed")
+            .unwrap();
+        assert!(f.issue().assignee.is_none());
+        assert!(assignments::is_watching(&f.store.db, &f.job.project.id, 1).unwrap());
+    }
+
+    #[test]
+    fn github_watcher_handoff_does_not_require_project_wide_pr_mode() {
+        let mut f = watching_fixture();
+        f.job.config.prs_enabled = false;
+        f.store
+            .db
+            .execute("UPDATE project_settings SET prs_enabled=0", [])
+            .unwrap();
+        f.store
+            .worker_finish(&f.job, "completed", "Addressed the check failure")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+    }
+
+    #[test]
+    fn failed_worker_releases_its_claim_but_keeps_the_machine_destination() {
+        let mut f = HandoffFixture::new(false);
+        f.store
+            .db
+            .execute("UPDATE issues SET assignment_target='machine:unit'", [])
+            .unwrap();
+        f.store
+            .db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES(?1,1,'unit')",
+                [&f.job.project.id],
+            )
+            .unwrap();
+        f.store
+            .worker_finish(&f.job, "failed", "Temporary process failure")
+            .unwrap();
+        assert!(f.issue().assignee.is_none());
+        let target: String = f
+            .store
+            .db
+            .query_row("SELECT assignment_target FROM issues", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(target, "machine:unit");
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT count(*) FROM fleet_allocations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn github_watcher_ready_handoff_preserves_monitoring_and_late_events() {
+        for late in [false, true] {
+            let mut f = watching_fixture();
+            if late {
+                watch_event(&mut f, "late");
+            }
+            f.apply(Operation::Ready {
+                number: 1,
+                force: false,
+                guard: None,
+                clear_manual_hold: false,
+                keep_draft: false,
+            });
+            assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
+            assert!(!f.store.worker_cancelled(&f.job).unwrap());
+            f.store
+                .worker_finish(&f.job, "completed", "Ready for checks")
+                .unwrap();
+            assert_eq!(f.state(), "completed");
+            assert_eq!(f.issue().state, if late { "open" } else { "ready" });
+            assert_eq!(
+                f.issue().assignee.as_deref(),
+                if late { None } else { Some("watcher:github") }
+            );
+        }
+    }
+
+    #[test]
+    fn github_watcher_handoff_cannot_discard_a_new_undelivered_event() {
+        let mut f = watching_fixture();
+        watch_event(&mut f, "late");
+        f.apply(Operation::Assign {
+            number: 1,
+            target: "github".into(),
+            if_version: f.issue().version,
+        });
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        f.store
+            .worker_finish(&f.job, "completed", "Returned to watcher")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert!(f.issue().assignee.is_none());
     }
 
     #[test]

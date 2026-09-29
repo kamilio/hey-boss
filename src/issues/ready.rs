@@ -143,7 +143,8 @@ pub(super) fn handoff(
             "Ready blocked by unfinished dependencies; dependency links and ownership preserved",
         ));
     }
-    if registry::project_settings(db, project)?["prs_enabled"] != true {
+    let watching = assignments::is_watching(db, &project.id, issue.number)?;
+    if !watching && registry::project_settings(db, project)?["prs_enabled"] != true {
         return Err(Error::conflict(
             "Ready requires pull requests enabled for this project",
         ));
@@ -171,10 +172,18 @@ pub(super) fn handoff(
     if issue.state == "ready" && issue.assignee.as_deref() == Some("human:boss") {
         return Ok(None);
     }
-    register_boss(db, actor, now)?;
-    let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":"human:boss","previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
+    let assignee = if watching {
+        issue
+            .assignee
+            .clone()
+            .or_else(|| Some("watcher:github".into()))
+    } else {
+        register_boss(db, actor, now)?;
+        Some("human:boss".into())
+    };
+    let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":assignee,"previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
     issue.state = "ready".into();
-    issue.assignee = Some("human:boss".into());
+    issue.assignee = assignee;
     issue.manual_blocked = false;
     Ok(Some(data))
 }

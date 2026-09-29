@@ -60,7 +60,7 @@ pub(super) fn execute(
         || issue
             .assignee
             .as_deref()
-            .is_some_and(|id| id != "human:boss")
+            .is_some_and(|id| id != "human:boss" && id != "watcher:github")
     {
         return Err(Error::conflict(
             "Stop active work and release the agent claim before moving this issue",
@@ -102,6 +102,9 @@ pub(super) fn execute(
         [&target.id],
     )?;
     db.execute("INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,version,labels,sort_order,draft,origin,manual_blocked) SELECT ?3,?4,title,body,state,assignee,created_by,closed_by,created_at,?5,closed_at,version+1,labels,(SELECT coalesce(max(sort_order),0)+1 FROM issues WHERE project_id=?3),draft,origin,manual_blocked FROM issues WHERE project_id=?1 AND number=?2",params![source.id,number,target.id,next,now])?;
+    db.execute("UPDATE issues SET (assignment_target,github_ack_event)=(SELECT assignment_target,github_ack_event FROM issues WHERE project_id=?1 AND number=?2) WHERE project_id=?3 AND number=?4",params![source.id,number,target.id,next])?;
+    db.execute("INSERT INTO issue_github_watches(project_id,issue_number,status) SELECT ?3,?4,status FROM issue_github_watches WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
+    db.execute("INSERT INTO issue_github_signals SELECT ?3,?4,url,head,signal FROM issue_github_signals WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     // Fleet history is append-only. Copy history with fresh IDs rather than
     // relocating existing rows that replicas have already acknowledged.
     db.execute("INSERT INTO issue_status_updates(id,project_id,issue_number,author,level,comment,created_at) SELECT lower(hex(randomblob(16))),?3,?4,author,level,comment,created_at FROM issue_status_updates WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,id",params![source.id,number,target.id,next])?;
@@ -149,7 +152,7 @@ pub(super) fn execute(
     db.execute("UPDATE file_attachments SET project_id=?3,target=CAST(?4 AS TEXT) WHERE project_id=?1 AND kind='issue' AND target=CAST(?2 AS TEXT)",params![source.id,number,target.id,next])?;
     db.execute("UPDATE mindmaps SET version=version+1 WHERE project_id IN (SELECT project_id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=CAST(?2 AS TEXT))",params![source.id,number])?;
     db.execute("UPDATE mindmap_nodes SET reference_project=?3,reference=CAST(?4 AS TEXT),updated_at=?5 WHERE kind='issue' AND reference_project=?1 AND reference=CAST(?2 AS TEXT)",params![source.id,number,target.id,next,now])?;
-    db.execute("UPDATE issues SET deleted_at=?3,assignee=NULL,updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![source.id,number,now])?;
+    db.execute("UPDATE issues SET deleted_at=?3,assignee=NULL,assignment_target=NULL,github_ack_event=NULL,updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![source.id,number,now])?;
     db.execute(
         "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
         params![source.id, number],
