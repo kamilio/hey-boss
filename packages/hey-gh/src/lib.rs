@@ -12,6 +12,7 @@ mod report;
 mod repository;
 mod scheduler;
 mod store;
+pub mod watcher;
 
 pub use api_client::{ApiClient, PrStatusSelection};
 pub use client::{Client, Config, Freshness};
