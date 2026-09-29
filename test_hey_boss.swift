@@ -2610,6 +2610,21 @@ func auditArtifactEditor() {
     precondition(text.string == "3. third\n", "Return exits an empty list item")
     print("PASS Markdown formatting preserves Unicode selections and toggles selected lines")
 
+    text.string = "# Tasks 🦀\n  - [X] nested\n> - [ ] quoted\n7. [ ] numbered\n```md\n- [ ] example\n```\nordinary [ ] text"
+    for word in ["nested", "quoted", "numbered"] {
+        let offset = (text.string as NSString).range(of: word).location
+        text.setSelectedRange(NSRange(location: offset, length: 0))
+        precondition(text.toggleTask(at: offset))
+        precondition(text.selectedRange().location == offset)
+    }
+    precondition(text.string.contains("  - [ ] nested") && text.string.contains("> - [x] quoted") && text.string.contains("7. [x] numbered"))
+    precondition(!text.toggleTask(at: (text.string as NSString).range(of: "example").location), "Fenced examples cannot be checked")
+    precondition(!text.toggleTask(at: (text.string as NSString).range(of: "ordinary").location), "Ordinary brackets are not tasks")
+    text.string = "- [x] done 🦀"; text.setSelectedRange(NSRange(location: (text.string as NSString).length, length: 0)); text.insertNewline(nil)
+    precondition(text.string == "- [x] done 🦀\n- [ ] ", "Return continues a checked task as unchecked")
+    text.insertNewline(nil)
+    precondition(text.string == "- [x] done 🦀\n", "Return exits an empty checklist")
+
     text.string = "Meet 🦀 today"; text.setSelectedRange(NSRange(location: 5, length: 2))
     let link = text.linkSelection()
     precondition(link.label == "🦀" && link.destination.isEmpty)
@@ -2650,6 +2665,116 @@ func auditArtifactEditor() {
     }
     wait { editor.session.ready }
     editor.window.makeFirstResponder(editor.text)
+    editor.text.setSelectedRange(NSRange(location: 14, length: 2))
+    precondition(editor.command("x", shift: true), "Command-Shift-X strikes the selection")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.text.string == "A native note ~~🦀~~\n")
+    precondition(editor.text.layoutManager?.temporaryAttribute(.strikethroughStyle, atCharacterIndex: 16, effectiveRange: nil) as? Int == NSUnderlineStyle.single.rawValue)
+    precondition(!editor.command("x", shift: false), "Command-X remains native Cut")
+    precondition(editor.command("x", shift: true))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.text.string == "A native note 🦀\n")
+    precondition(editor.text.layoutManager?.temporaryAttribute(.strikethroughStyle, atCharacterIndex: 14, effectiveRange: nil) == nil, "Removing syntax clears the visual strike")
+    editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note ~~🦀~~\n")
+    editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note 🦀\n")
+    precondition(editor.command("l", shift: true))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.text.string == "- [ ] A native note 🦀\n")
+    let taskCaret = editor.text.selectedRange()
+    let markerGlyphs = editor.text.layoutManager!.glyphRange(forCharacterRange: NSRange(location: 2, length: 3), actualCharacterRange: nil)
+    let markerRect = editor.text.layoutManager!.boundingRect(forGlyphRange: markerGlyphs, in: editor.text.textContainer!)
+    let clickPoint = editor.text.convert(NSPoint(x: markerRect.midX + editor.text.textContainerOrigin.x, y: markerRect.midY + editor.text.textContainerOrigin.y), to: nil)
+    let checkClick = NSEvent.mouseEvent(with: .leftMouseDown, location: clickPoint, modifierFlags: [], timestamp: 0, windowNumber: editor.window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+    editor.text.mouseDown(with: checkClick)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.text.string == "- [x] A native note 🦀\n" && editor.text.selectedRange() == taskCaret, "Clicking a Markdown checkbox toggles without moving the caret")
+    editor.text.undoManager?.undo()
+    precondition(editor.text.string == "- [ ] A native note 🦀\n")
+    let keyboardCaret = editor.text.selectedRange()
+    let checkKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: editor.window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+    precondition(editor.window.performKeyEquivalent(with: checkKey))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.text.string == "- [x] A native note 🦀\n" && editor.text.selectedRange() == keyboardCaret, "Checking preserves the caret")
+    precondition(editor.window.performKeyEquivalent(with: checkKey))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.text.string == "- [ ] A native note 🦀\n")
+    editor.text.undoManager?.undo()
+    precondition(editor.text.string.hasPrefix("- [x]"), "Checklist toggles undo independently")
+    editor.text.undoManager?.undo(); editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note 🦀\n")
+    precondition(editor.command("l", shift: true))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    let taskNode = NativeMarkdownNode(type: "list", lineStart: 1, lineEnd: 1, children: [
+        NativeMarkdownNode(type: "listItem", lineStart: 1, lineEnd: 1, children: [
+            NativeMarkdownNode(type: "task", lineStart: 1, lineEnd: 1, checked: false),
+            NativeMarkdownNode(type: "text", lineStart: 1, lineEnd: 1, value: "A native note 🦀")
+        ])
+    ])
+    editor.installPreview(taskNode, source: editor.text.string)
+    precondition(editor.reader.string.hasPrefix("☐\t"))
+    precondition(editor.reader.textStorage!.attribute(.nativeTaskLine, at: 0, effectiveRange: nil) as? Int == 1)
+    let previewLink = editor.reader.textStorage!.attribute(.link, at: 0, effectiveRange: nil)!
+    precondition(editor.textView(editor.reader, clickedOnLink: previewLink, at: 0))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.reader.string.hasPrefix("☑\t") && editor.text.string.hasPrefix("- [x]"), "Read-view checkboxes update both source and preview")
+    editor.window.makeFirstResponder(editor.reader); editor.reader.setSelectedRange(NSRange(location: 3, length: 0))
+    precondition(editor.window.performKeyEquivalent(with: checkKey))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    precondition(editor.reader.string.hasPrefix("☐\t") && editor.text.string.hasPrefix("- [ ]"), "Command-Return also toggles from preview text")
+    wait { !editor.session.dirty && !editor.session.saving }
+    precondition(try! String(contentsOf: file, encoding: .utf8) == editor.text.string, "Read-view completion autosaves")
+    editor.previewSource = "stale"
+    precondition(!editor.togglePreviewTask(at: 0), "An outdated preview cannot change another source line")
+    editor.text.undoManager?.undo(); editor.text.undoManager?.undo(); editor.text.undoManager?.undo()
+    precondition(editor.text.string == "A native note 🦀\n")
+    editor.window.makeFirstResponder(editor.text)
+    print("PASS strikethrough, clickable checklists, native shortcuts, preview completion and undo")
+    if let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"] {
+        let checklistFile = root.appendingPathComponent("A calmer workday.md")
+        let checklistSource = "# A calmer workday\n\nKeep the important things in view.\n\n~~Move the meeting to Friday~~\n\n## Today\n\n- [ ] Review the new layout\n- [x] Share the first draft\n  - [ ] Collect feedback 🦀\n\nUse **⌘Return** to check an item, and **⌘⇧L** to start a checklist.\n"
+        try! Data(checklistSource.utf8).write(to: checklistFile)
+        let checklist = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:Editor tests", file: checklistFile.path), journalRoot: root, cli: cli, present: false)
+        wait { checklist.session.ready }
+        func snapshot(_ mode: String) {
+            guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"], let view = checklist.window.contentView else { return }
+            try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+                checklist.window.appearance = NSAppearance(named: appearance)
+                view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+                let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent("checklist-\(mode)-\(name).png"))
+            }
+        }
+        snapshot("edit")
+        checklist.togglePreview()
+        wait { checklist.previewSource != nil }
+        snapshot("read")
+        let previewStorage = checklist.reader.textStorage!
+        var taskIndices: [Int] = []
+        previewStorage.enumerateAttribute(.nativeTaskLine, in: NSRange(location: 0, length: previewStorage.length)) { value, range, _ in
+            if value != nil { taskIndices.append(range.location) }
+        }
+        precondition(taskIndices.count == 3, "The shared parser maps nested checklist markers")
+        let nested = taskIndices[2]
+        let nestedLink = previewStorage.attribute(.link, at: nested, effectiveRange: nil)!
+        precondition(checklist.textView(checklist.reader, clickedOnLink: nestedLink, at: nested))
+        precondition(checklist.text.string.contains("  - [x] Collect feedback 🦀"), "A nested preview checkbox changes its exact source line")
+        wait { !checklist.session.dirty && !checklist.session.saving }
+        precondition(try! String(contentsOf: checklistFile, encoding: .utf8) == checklist.text.string)
+        checklist.window.makeFirstResponder(checklist.reader)
+        precondition(checklist.command("z", shift: false))
+        wait { checklist.previewSource == checklistSource }
+        precondition(checklist.text.string == checklistSource && (checklist.reader.string as NSString).substring(with: NSRange(location: nested, length: 1)) == "☐", "Undo from Read restores source and preview")
+        precondition(checklist.command("z", shift: true))
+        wait { checklist.previewSource == checklist.text.string }
+        precondition(checklist.text.string.contains("  - [x] Collect feedback 🦀"))
+        checklist.session.flush(); wait { !checklist.session.dirty && !checklist.session.saving }
+        checklist.window.close()
+        print("PASS real Markdown parser, nested preview checkboxes, read-mode undo/redo and persisted completion")
+    }
     editor.text.setSelectedRange(NSRange(location: 2, length: 6))
     precondition(editor.command("k", shift: false) && editor.linkDialog != nil)
     precondition(editor.linkDialog?.buttons[0].isEnabled == false, "A link needs a destination")
