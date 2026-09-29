@@ -26,11 +26,11 @@ fn numbers(text: &str) -> String {
 
 // A policy guard, not a second readiness evaluator: declared dependencies and
 // descendant completion remain valid even after their state changes. Only
-// implicit sibling relationships disappear in explicit mode. Each traversal
+// implicit sibling relationships are obsolete. Each traversal
 // starts at one issue and uses indexed parent/child keys, never the whole fleet.
 fn obsolete(project: &str, number: &str, list: &str, entry: &str) -> String {
-    format!("EXISTS(SELECT 1 FROM project_settings s JOIN issues i ON i.project_id=s.project_id
-        WHERE s.project_id={project} AND s.subtask_scheduling='explicit' AND i.number={number}
+    format!("EXISTS(SELECT 1 FROM issues i
+        WHERE i.project_id={project} AND i.number={number}
         AND EXISTS(WITH RECURSIVE descendants(number) AS (
             SELECT r.child_number FROM issue_subtasks r JOIN issues c ON c.project_id=r.project_id AND c.number=r.child_number
             WHERE r.project_id=i.project_id AND r.parent_number=i.number AND c.deleted_at IS NULL
@@ -44,7 +44,7 @@ fn obsolete(project: &str, number: &str, list: &str, entry: &str) -> String {
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=6 FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_mode','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
+    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode') FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
         return Ok(());
     }
     let tx =
@@ -89,6 +89,12 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     // stale last_insert_rowid after an ignored comment. It cannot leave a fake
     // commented event, deduplication signature, or queued instruction behind.
     tx.execute_batch(&format!("
+        DROP TRIGGER IF EXISTS dependency_notice_comment;
+        DROP TRIGGER IF EXISTS dependency_notice_state;
+        DROP TRIGGER IF EXISTS dependency_notice_steering;
+        DROP TRIGGER IF EXISTS dependency_notice_mode;
+        DROP TRIGGER IF EXISTS dependency_notice_delivery;
+        DROP VIEW IF EXISTS obsolete_dependency_steering;
         CREATE TRIGGER IF NOT EXISTS dependency_notice_comment BEFORE INSERT ON comments
         WHEN {comment} BEGIN SELECT RAISE(IGNORE); END;
         DROP TRIGGER IF EXISTS dependency_notice_event;
@@ -101,7 +107,6 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         -- dependencies are satisfied only while their own prerequisites are.
         CREATE TRIGGER IF NOT EXISTS dependency_notice_state BEFORE UPDATE OF state ON issues
         WHEN NEW.state='blocked' AND OLD.state<>'blocked' AND NEW.manual_blocked=0
-        AND EXISTS(SELECT 1 FROM project_settings WHERE project_id=NEW.project_id AND subtask_scheduling='explicit')
         AND NOT EXISTS(
             WITH RECURSIVE dependencies(number,descend) AS (
                 SELECT value,0 FROM json_each(NEW.blockers)
@@ -127,11 +132,6 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         WHEN NEW.state='queued' AND NEW.scope='dependency'
         BEGIN UPDATE agent_steering SET state='rejected',error='{REJECTION}'
         WHERE request_id=NEW.request_id AND request_id IN (SELECT request_id FROM obsolete_dependency_steering); END;
-        CREATE TRIGGER IF NOT EXISTS dependency_notice_mode AFTER UPDATE OF subtask_scheduling ON project_settings
-        WHEN NEW.subtask_scheduling='explicit' AND OLD.subtask_scheduling<>NEW.subtask_scheduling
-        BEGIN UPDATE agent_steering SET state='rejected',error='{REJECTION}'
-        WHERE request_id IN (SELECT q.request_id FROM agent_steering q JOIN worker_runs r ON r.id=q.run_id
-        WHERE r.project_id=NEW.project_id AND q.state='queued' AND q.scope='dependency' AND {queued}); END;
         CREATE TRIGGER IF NOT EXISTS dependency_notice_delivery BEFORE UPDATE OF state ON agent_steering
         WHEN OLD.state='queued' AND NEW.state='sending' AND NEW.scope='dependency'
         AND EXISTS(SELECT 1 FROM worker_runs r WHERE r.id=NEW.run_id AND {incoming})

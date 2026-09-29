@@ -39,12 +39,10 @@ try {
     assert(attempt<600 && owner.exitCode===null && owner.signalCode===null,'Fixture database failed to start');
     await delay(50);
   }
-  assert(run(['issue','settings','set','--help']).includes('--subtask-scheduling'));
+  assert(!run(['issue','settings','set','--help']).includes('--subtask-scheduling'));
   assert(run(['issue','reopen','--help']).includes('--clear-manual-hold'));
   issue(['create','--title','Parent']);
   for(const title of ['Contract','Independent Settings','OAuth']) issue(['subtask','create','1','--title',title]);
-  assert.equal(issue(['view','3']).issue.state,'blocked');
-  issue(['settings','set','--subtask-scheduling','explicit']);
   assert.equal(issue(['settings','show']).subtask_scheduling,'explicit');
   assert.equal(issue(['view','3']).issue.state,'open');
   assert.equal(issue(['view','3']).issue.parent.number,1);
@@ -74,7 +72,7 @@ try {
   issue(['ready','2']);
   assert.equal(issue(['view','4']).issue.state,'open');
   issue(['claim','4']);
-  issue(['settings','set','--subtask-scheduling','sequential'],4);
+  run(['issue','settings','set','--subtask-scheduling','sequential'],2);
   assert.equal(issue(['settings','show']).subtask_scheduling,'explicit');
   assert.equal(issue(['view','4']).issue.assignee,'codex:verification');
   assert.equal(issue(['subtask','create','4','--title','Unsafe child'],4).error.code,'subtask_claim_conflict');
@@ -107,9 +105,9 @@ try {
   const html=await(await fetch(info.url)).text();
   const script=await(await fetch(new URL('/app.js',info.url))).text();
   const settings=await(await fetch(new URL('/project-settings.js',info.url))).text();
-  assert(html.includes('id="project-subtask-scheduling"'));
+  assert(!html.includes('id="project-subtask-scheduling"'));
   assert(script.includes('clear_manual_hold') && script.includes('Waiting for dependencies'));
-  assert(settings.includes('subtask_scheduling'));
+  assert(!settings.includes('subtask_scheduling'));
   result={version,completed:7,expected:7,stages:['CLI discovery','independent siblings and grouping','legacy notice admission and unchanged claims','manual hold and structured blockers','Ready handoff and real rework','legacy state writes and visible worker reservations','embedded UI']};
 } finally {
   await Promise.all(children.map(child=>new Promise(resolve=>{

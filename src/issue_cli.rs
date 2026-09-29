@@ -588,7 +588,7 @@ enum SubtaskAction {
     },
 }
 
-const SUBTASK_SCHEDULING_HELP: &str = "Default: sequential siblings. For independent branches with declared dependencies only:\n  hey-boss issue settings set --subtask-scheduling explicit\nDeclare intentional sequences with `issue blocked-by CHILD PREDECESSOR`.\nReady handoff and parent completion are unchanged.\nSubtasks affect scheduling: unfinished descendants put the parent in Blocked.\nChanges that would release an existing parent or ancestor claim are rejected atomically,\neven for the claim owner. For organization only, prefer ownership-preserving mindmap nesting:\n  hey-boss mm issue PARENT --id parent-work\n  hey-boss mm issue CHILD --under parent-work\nFor a scheduling dependency, have the owner explicitly unassign the affected issue first.";
+const SUBTASK_SCHEDULING_HELP: &str = "Declare intentional sequences with `issue blocked-by CHILD PREDECESSOR`.\nReady handoff and parent completion are unchanged.\nSubtasks affect scheduling: unfinished descendants put the parent in Blocked.\nChanges that would release an existing parent or ancestor claim are rejected atomically,\neven for the claim owner. For organization only, prefer ownership-preserving mindmap nesting:\n  hey-boss mm issue PARENT --id parent-work\n  hey-boss mm issue CHILD --under parent-work\nFor a scheduling dependency, have the owner explicitly unassign the affected issue first.";
 
 #[derive(Subcommand)]
 enum CommitAction {
@@ -643,9 +643,6 @@ enum PrAction {
 enum SettingsAction {
     Show,
     Set {
-        /// Sequential (default) waits for earlier siblings; explicit uses declared links only.
-        #[arg(long, value_parser = ["sequential", "explicit"])]
-        subtask_scheduling: Option<String>,
         /// Legacy spelling; global profile settings own this value.
         #[arg(long, hide = true)]
         boss_name: Option<String>,
@@ -843,7 +840,6 @@ impl Options {
             Action::Settings { command } => match command {
                 SettingsAction::Show => Operation::ProjectSettings,
                 SettingsAction::Set {
-                    subtask_scheduling,
                     boss_name,
                     prompt,
                     chief,
@@ -858,7 +854,6 @@ impl Options {
                     plan_template,
                 } => {
                     if boss_name.is_none()
-                        && subtask_scheduling.is_none()
                         && !chief
                         && !no_chief
                         && chief_prompt.is_none()
@@ -872,11 +867,11 @@ impl Options {
                         && plan_template.is_none()
                     {
                         return Err(Error::invalid(
-                            "Specify --subtask-scheduling, --prompt, --chief, --no-chief, --chief-prompt, --worktree, --no-worktree, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
+                            "Specify --prompt, --chief, --no-chief, --chief-prompt, --worktree, --no-worktree, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
                         ));
                     }
                     Operation::ConfigureProject {
-                        subtask_scheduling: subtask_scheduling.clone(),
+                        subtask_scheduling: None,
                         chief_enabled: if *chief {
                             Some(true)
                         } else if *no_chief {
@@ -1676,9 +1671,6 @@ pub(crate) fn print_text(value: &Value) {
         if !prompt.trim().is_empty() {
             println!("{label}: {prompt}");
         }
-    }
-    if let Some(mode) = value.get("subtask_scheduling") {
-        println!("Subtask scheduling: {}", line(mode));
     }
     if let Some(config) = value.get("config") {
         println!(

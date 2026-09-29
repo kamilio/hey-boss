@@ -869,44 +869,23 @@ CLI-created children append. Dragging or using the
 arrow keys on a child handle updates the shared project queue, which governs
 web, CLI and worker order.
 
-By default, subtasks run sequentially in their displayed queue order. A later sibling and its
-entire subtree stay **Blocked** until every earlier sibling and its descendants
-reach Ready in PR-enabled projects, or Closed otherwise. A closed intermediate issue does not bypass unfinished descendants;
-deleted subtrees are skipped. Reordering, linking, unlinking, reopening, deleting,
-and restoring issues recompute the sequence. Reordering/linking changes that would
-block a claimed or reserved task are rejected. Reopening upstream work preserves
-running claims and sends a rework notice; unstarted dependents become Blocked.
-Independent parent trees can still run concurrently.
-
-For plans with independent branches, select **Explicit dependencies** under
-**Project settings → Subtask scheduling**, or run:
-
-```sh
-hey-boss issue settings set --subtask-scheduling explicit
-hey-boss issue blocked-by 243 240
-```
-
-This keeps the parent/group relationships and parent completion rules, but removes
-all implicit `previous_subtask` dependencies, including those inherited from an
-ancestor's siblings. Queue order remains pickup priority, not a dependency.
-Declare intentional sequences with `blocked-by CHILD PREDECESSOR`; declared links
-still hand off at Ready in PR projects and Closed otherwise. Use
-`--subtask-scheduling sequential` to restore the default. A mode change that
-would introduce a dependency cycle or block claimed/reserved work is rejected
-atomically. Existing claims are preserved; hierarchy mutations retain the same
-parent and ancestor claim protections in either mode.
+Sibling order sets pickup priority only. Declare dependencies with
+`hey-boss issue blocked-by CHILD PREDECESSOR`. Declared links hand off at Ready
+in PR projects and Closed otherwise. Parent completion still follows descendants.
+Reopening upstream work preserves running claims and sends a rework notice;
+unstarted dependents become Blocked. Hierarchy mutations preserve parent and ancestor claims.
 
 `issue reopen NUMBER` reports effective blocker numbers and sources (`linked`,
-`subtask`, or `previous_subtask`). To clear a reconciled manual hold while keeping
+or `subtask`). To clear a reconciled manual hold while keeping
 automatic dependency blocking, use
 `issue reopen NUMBER --clear-manual-hold --if-version VERSION`. The issue stays
 Blocked until its dependencies are satisfied, then resumes automatically. This
 does not remove dependency links, change the hierarchy, or release a live claim.
 
 Claims and issue details include `subtask_context`: parent, one-based position,
-sibling count, scheduling mode, and previous/next sibling summaries (including state and PR links).
+sibling count, and previous/next sibling summaries (including state and PR links).
 Worker prompts include the same context and commands to read the parent and the
-previous task's results. Agents should use those requirements and handoff notes,
+declared prerequisites' results. Agents should use those requirements and handoff notes,
 complete their own subtask, and leave a completion summary for the next agent.
 `dependency_context` includes prerequisite tasks and their attached PRs, even
 after Ready unblocks the task. PR-enabled prompts instruct workers to stack on
@@ -914,7 +893,7 @@ unmerged prerequisite PR branches and use those branches as their PR bases.
 Workers update/rebase the stack when upstream changes or merges.
 
 Ready is worker-controlled: attach the delivery PR, then run `issue ready NUMBER`.
-It assigns Boss and unblocks explicit dependencies and sequential subtasks, without
+It assigns Boss and unblocks explicit dependencies and parent tasks, without
 checking CI independently. Completed PR worker runs mark Ready automatically.
 Use `list --state ready` or the Ready tab to find PRs awaiting review. Reopen a
 Ready task before reworking it; descendants must account for upstream changes

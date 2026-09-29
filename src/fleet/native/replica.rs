@@ -178,10 +178,11 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         let m = row
             .as_object_mut()
             .ok_or_else(|| invalid("Invalid settings row"))?;
+        // Retained only for older peers; sibling scheduling is no longer supported.
+        m.insert("subtask_scheduling".into(), json!("explicit"));
         // Old capture triggers omit additive fields. An omitted value is not
         // an instruction to reset a setting already known by this replica.
         for (column, default) in [
-            ("subtask_scheduling", json!("sequential")),
             ("drafts_enabled", json!(1)),
             ("plan_template", json!("plans/{timestamp}-{number}.md")),
             ("worktree_enabled", json!(0)),
@@ -3768,7 +3769,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduling_capture_upgrade_republishes_and_preserves_legacy_replays() {
+    fn scheduling_capture_upgrade_republishes_and_normalizes_legacy_replays() {
         let main = Fixture::new();
         main.db
             .execute_batch(include_str!(
@@ -3843,7 +3844,7 @@ mod tests {
                 &[]
             )
             .unwrap()[0]["subtask_scheduling"],
-            "sequential"
+            "explicit"
         );
     }
 
@@ -3863,9 +3864,8 @@ mod tests {
         main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name) VALUES('named:Native fleet','Instructions',0,1,'Boss')", []).unwrap();
         let mut expected =
             rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()[0].clone();
-        // Older senders had implicit sequential ordering. New projects default
-        // to explicit dependencies, but legacy replay retains its old behavior.
-        expected["subtask_scheduling"] = json!("sequential");
+        // Older senders cannot restore implicit sequential ordering.
+        expected["subtask_scheduling"] = json!("explicit");
         let mut legacy = expected.clone();
         for column in [
             "subtask_scheduling",
@@ -4410,7 +4410,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_allocates_only_the_first_unfinished_subtask_and_syncs_progress() {
+    fn fleet_allocates_independent_subtasks_and_syncs_progress() {
         let main = Fixture::new();
         main.db.execute("INSERT INTO project_settings(project_id,prompt,version,subtask_scheduling) VALUES('named:Native fleet',?1,1,'sequential')", [crate::issues::worker::DEFAULT_PROMPT]).unwrap();
         main.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
@@ -4430,7 +4430,10 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(allocated, vec![json!({"issue_number":2})]);
+        assert_eq!(
+            allocated,
+            vec![json!({"issue_number":2}), json!({"issue_number":3})]
+        );
         let agent = Fixture::new();
         install_capture(&agent.db, "agent", "agent").unwrap();
         apply_pull(
@@ -4442,7 +4445,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             rows(&agent.db, "SELECT state FROM issues WHERE number=3", &[]).unwrap()[0]["state"],
-            "blocked"
+            "open"
         );
         main.db
             .execute("UPDATE issues SET state='closed' WHERE number=2", [])

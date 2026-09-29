@@ -26,7 +26,7 @@ impl Fixture {
         let store = Store::open(&root.join("issues.db")).unwrap();
         let db = Connection::open(root.join("issues.db")).unwrap();
         let mut f = Self { root, store, db };
-        f.run(json!({"action":"configure_project","subtask_scheduling":"sequential"}));
+        f.run(json!({"action":"configure_project","prs_enabled":false}));
         f.run(json!({"action":"create","title":"Connector integration","body":"","labels":[]}));
         for title in ["Contract", "Independent settings", "OAuth"] {
             f.run(
@@ -129,10 +129,10 @@ fn declared_and_parent_completion_notices_remain_valid() {
 }
 
 #[test]
-fn sequential_notices_and_ordinary_comments_are_unchanged() {
+fn obsolete_notices_are_rejected_and_ordinary_comments_are_unchanged() {
     let mut f = Fixture::new();
     f.legacy_notice(3, &[2]);
-    assert_eq!(f.notices("comments", 3), 1);
+    assert_eq!(f.notices("comments", 3), 0);
     f.explicit();
     for body in [
         "Dependency rework: this is a human discussion",
@@ -142,13 +142,13 @@ fn sequential_notices_and_ordinary_comments_are_unchanged() {
     }
     assert_eq!(
         f.notices("comments", 3),
-        3,
-        "History and authored discussion remain intact"
+        2,
+        "Authored discussion remains intact"
     );
 }
 
 #[test]
-fn mode_change_rejects_only_obsolete_queued_steering_and_preserves_live_reservations() {
+fn obsolete_queued_steering_is_rejected_and_live_reservations_are_preserved() {
     let mut f = Fixture::new();
     f.run(json!({"action":"set_blockers","number":4,"blockers":[2],"force":false}));
     f.reserve(3);
@@ -366,7 +366,7 @@ fn automatic_state_guard_preserves_real_dependencies_and_manual_holds() {
 }
 
 #[test]
-fn state_guard_upgrade_is_idempotent_and_sequential_states_remain_unchanged() {
+fn state_guard_upgrade_is_idempotent_and_rejects_implicit_blocking() {
     let mut f = Fixture::new();
     f.db.execute_batch(
         "UPDATE issues SET state='ready' WHERE number=3;
@@ -377,7 +377,7 @@ fn state_guard_upgrade_is_idempotent_and_sequential_states_remain_unchanged() {
     assert_eq!(
         f.db.execute("UPDATE issues SET state='blocked' WHERE number=3", [])
             .unwrap(),
-        1
+        0
     );
     f.explicit();
     f.store = Store::open(&f.root.join("issues.db")).unwrap();
