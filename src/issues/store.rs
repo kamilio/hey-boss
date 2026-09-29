@@ -1113,7 +1113,7 @@ impl Store {
             .is_none_or(|sql| !sql.contains("ready_dependencies"));
         let needs_readiness_refresh = prior_readiness
             .as_ref()
-            .is_none_or(|sql| !sql.contains("surviving_attempt_protection"));
+            .is_none_or(|sql| !sql.contains("explicit_dependencies_only"));
         let needs_repair = version >= 10
             && (!missing_additive_columns(&db)
                 .map_err(|e| migration_error(e, path))?
@@ -1267,9 +1267,8 @@ impl Store {
         super::dependency_notices::migrate(&db)?;
         if needs_readiness_refresh {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if needs_sequence {
-                super::blockers::reconcile_sequence_upgrade(&tx)?;
-            }
+            tx.execute("UPDATE project_settings SET subtask_scheduling='explicit',version=version+1 WHERE subtask_scheduling<>'explicit'", [])?;
+            super::blockers::reconcile_upgrade(&tx)?;
             tx.execute_batch(include_str!("subtask-readiness.sql"))?;
             tx.commit()?;
         }
@@ -2097,8 +2096,6 @@ impl Store {
                     | Operation::RemoveSubtask { .. }
             ) {
                 super::blockers::reconcile_subtasks
-            } else if matches!(r.operation, Operation::Move { .. }) {
-                super::blockers::reconcile_sequence_change
             } else if matches!(
                 r.operation,
                 Operation::Reopen { .. } | Operation::ConfigureProject { .. }

@@ -62,12 +62,9 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
 
 struct Graph {
     satisfied: RefCell<BTreeMap<i64, bool>>,
-    explicit: bool,
     prs_enabled: bool,
     issues: BTreeMap<i64, Value>,
     children: BTreeMap<i64, Vec<i64>>,
-    parents: BTreeMap<i64, i64>,
-    previous: BTreeMap<i64, Vec<i64>>,
     links: BTreeMap<i64, Vec<i64>>,
     dependents: BTreeMap<i64, Vec<(i64, &'static str)>>,
     active_cache: RefCell<BTreeMap<i64, BTreeMap<i64, &'static str>>>,
@@ -76,12 +73,9 @@ impl Graph {
     fn load(db: &Connection, project: &str) -> Result<Self> {
         let mut graph = Self {
             satisfied: RefCell::new(BTreeMap::new()),
-            explicit: !db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND subtask_scheduling='sequential')", [project], |r| r.get::<_, bool>(0))?,
             prs_enabled: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)", [project], |r| r.get(0))?,
             issues: BTreeMap::new(),
             children: BTreeMap::new(),
-            parents: BTreeMap::new(),
-            previous: BTreeMap::new(),
             links: BTreeMap::new(),
             dependents: BTreeMap::new(),
             active_cache: RefCell::new(BTreeMap::new()),
@@ -118,20 +112,7 @@ impl Graph {
                     .or_default()
                     .push((parent, "subtask"));
             }
-            graph.parents.insert(child, parent);
             graph.children.entry(parent).or_default().push(child);
-        }
-        for (&parent, children) in &graph.children {
-            if graph.explicit || !graph.issues[&parent]["deleted_at"].is_null() {
-                continue;
-            }
-            let mut previous = Vec::new();
-            for &child in children {
-                if graph.issues[&child]["deleted_at"].is_null() {
-                    graph.previous.insert(child, previous.clone());
-                    previous.push(child);
-                }
-            }
         }
         let mut prs = db.prepare("SELECT issue_number,url,purpose,status FROM issue_pull_requests WHERE project_id=?1 ORDER BY created_at,url")?;
         for row in prs.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"url":r.get::<_,String>(1)?,"purpose":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?}))))? {
@@ -143,32 +124,11 @@ impl Graph {
         }
         Ok(graph)
     }
-    // Include preceding branches at every level, so a nested leaf cannot
-    // overtake its parent's previous sibling. Deleted ancestors detach work.
-    fn sequence_roots(&self, mut n: i64) -> Vec<i64> {
-        let mut roots = Vec::new();
-        loop {
-            if self
-                .issues
-                .get(&n)
-                .is_none_or(|i| !i["deleted_at"].is_null())
-            {
-                break;
-            }
-            roots.extend(self.previous.get(&n).into_iter().flatten());
-            let Some(parent) = self.parents.get(&n) else {
-                break;
-            };
-            n = *parent;
-        }
-        roots
-    }
     fn unfinished(&self, n: i64) -> bool {
         if let Some(done) = self.satisfied.borrow().get(&n) {
             return !done;
         }
-        // Legacy links may oppose newly introduced sibling order. Treat cycles
-        // as unfinished so startup can preserve and display the work for repair.
+        // Treat cycles as unfinished so damaged legacy data remains repairable.
         self.satisfied.borrow_mut().insert(n, false);
         let unfinished = self.issues.get(&n).is_none_or(|i| {
             i["deleted_at"].is_null()
@@ -202,13 +162,6 @@ impl Graph {
         for child in self.descendants(n) {
             if self.unfinished(child) {
                 result.insert(child, "subtask");
-            }
-        }
-        for root in self.sequence_roots(n) {
-            for previous in std::iter::once(root).chain(self.descendants(root)) {
-                if self.unfinished(previous) {
-                    result.insert(previous, "previous_subtask");
-                }
             }
         }
         for &blocker in self.links.get(&n).into_iter().flatten() {
@@ -274,7 +227,6 @@ impl Graph {
                 continue;
             }
             todo.extend(self.children.get(&n).into_iter().flatten());
-            todo.extend(self.sequence_roots(n));
             todo.extend(self.links.get(&n).into_iter().flatten());
         }
         Ok(())
@@ -364,27 +316,6 @@ pub(super) fn reopen_blockers(db: &Connection, project: &str, number: i64) -> Re
         .collect())
 }
 
-/// Mode changes may remove dependencies, but cannot add blockers to running work.
-pub(super) fn validate_scheduling_change(db: &Connection, project: &str) -> Result<()> {
-    let graph = Graph::load(db, project)?;
-    graph.validate_edges()?;
-    for (&number, issue) in &graph.issues {
-        if issue["deleted_at"].is_null()
-            && issue["state"] == "open"
-            && (!issue["assignee"].is_null() || issue["reserved"] == true)
-            && graph
-                .active(number)
-                .values()
-                .any(|source| *source == "previous_subtask")
-        {
-            return Err(Error::conflict(format!(
-                "Cannot change subtask scheduling: issue #{number} is claimed or reserved and would gain sibling blockers. Finish or release that work first."
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Validate an incoming fleet relationship inside its savepoint, before the
 /// batch reconciler can release a claim acquired while the replica was offline.
 pub(crate) fn validate_subtask_claims(db: &Connection, project: &str) -> Result<()> {
@@ -400,32 +331,6 @@ pub(super) fn reconcile(
     now: i64,
 ) -> Result<()> {
     reconcile_graph(db, project, actor, now, false, false)
-}
-
-/// Reordering must not retroactively block a claimed or reserved branch.
-pub(super) fn reconcile_sequence_change(
-    db: &Connection,
-    project: &str,
-    actor: Option<&str>,
-    now: i64,
-) -> Result<()> {
-    let graph = Graph::load(db, project)?;
-    graph.validate_edges()?;
-    for (&n, issue) in &graph.issues {
-        if issue["state"] == "open"
-            && issue["deleted_at"].is_null()
-            && (!issue["assignee"].is_null() || issue["reserved"] == true)
-            && graph
-                .active(n)
-                .values()
-                .any(|source| *source == "previous_subtask")
-        {
-            return Err(Error::conflict(format!(
-                "Cannot reorder subtasks: issue #{n} is claimed or reserved. Finish or release that work first."
-            )));
-        }
-    }
-    reconcile(db, project, actor, now)
 }
 
 /// Upstream rework pauses future pickups without taking running work away.
@@ -522,12 +427,7 @@ fn reconcile_graph(
         if issue["state"] != "ready" && (!issue["assignee"].is_null() || issue["reserved"] == true)
         {
             // An upgrade lets existing work drain without stealing ownership.
-            // The readiness view already excludes later branches from new pickup.
-            if upgrading
-                || rework
-                || graph.prs_enabled
-                || blockers.values().any(|s| *s == "previous_subtask")
-            {
+            if upgrading || rework || graph.prs_enabled {
                 continue;
             }
         }
@@ -552,7 +452,7 @@ pub(crate) fn reconcile_all(db: &Connection) -> Result<()> {
     reconcile_projects(db, false)
 }
 
-pub(super) fn reconcile_sequence_upgrade(db: &Connection) -> Result<()> {
+pub(super) fn reconcile_upgrade(db: &Connection) -> Result<()> {
     reconcile_projects(db, true)
 }
 
@@ -592,30 +492,14 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
         let Some(n) = issue["number"].as_i64() else {
             return;
         };
-        issue["subtask_scheduling"] = json!(if graph.explicit {
-            "explicit"
-        } else {
-            "sequential"
-        });
+        issue["subtask_scheduling"] = json!("explicit");
         if let Some(context) = issue
             .get_mut("subtask_context")
             .and_then(Value::as_object_mut)
         {
-            context.insert(
-                "scheduling".into(),
-                json!(if graph.explicit {
-                    "explicit"
-                } else {
-                    "sequential"
-                }),
-            );
+            context.insert("scheduling".into(), json!("explicit"));
         }
         let mut dependencies = BTreeMap::new();
-        for root in graph.sequence_roots(n) {
-            for prior in std::iter::once(root).chain(graph.descendants(root)) {
-                dependencies.insert(prior, "previous_subtask");
-            }
-        }
         for &linked in graph.links.get(&n).into_iter().flatten() {
             dependencies.insert(linked, "linked");
         }

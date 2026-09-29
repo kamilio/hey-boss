@@ -301,3 +301,44 @@ fn clear_manual_hold_keeps_dependencies_and_checks_version_first() {
     assert_eq!(f.view(3)["state"], "open");
     assert_eq!(f.ready(), vec![3]);
 }
+
+#[test]
+fn legacy_sequential_projects_upgrade_to_explicit_dependencies() {
+    let mut f = Fixture::new("removed-scheduling");
+    f.run(json!({"action":"configure_project","prs_enabled":false}));
+    f.create(None);
+    f.create(Some(1));
+    f.create(Some(1));
+    f.create(Some(1));
+    f.run(json!({"action":"set_blockers","number":4,"blockers":[2],"force":false}));
+    f.run(json!({"action":"claim","number":2,"force":false}));
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    db.execute_batch("DROP TRIGGER dependency_notice_state; UPDATE project_settings SET subtask_scheduling='sequential'; UPDATE issues SET state='blocked' WHERE number=3; DROP VIEW issue_pickup_ready; CREATE VIEW issue_pickup_ready AS -- surviving_attempt_protection\n -- ready_dependencies_fast\n SELECT project_id,number FROM issues WHERE state='open';").unwrap();
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    assert_eq!(f.view(2)["assignee"], "codex:test");
+    assert_eq!(f.view(3)["state"], "open");
+    assert_eq!(f.view(3)["blocked_by"], json!([]));
+    assert_eq!(f.view(4)["blocked_by"][0]["number"], 2);
+    assert_eq!(f.ready(), vec![3]);
+    assert_eq!(
+        f.run(json!({"action":"project_settings"}))["subtask_scheduling"],
+        "explicit"
+    );
+    assert!(
+        f.store
+            .execute(&Fixture::request(
+                json!({"action":"configure_project","subtask_scheduling":"sequential"})
+            ))
+            .is_err()
+    );
+    let persisted: String = db
+        .query_row("SELECT subtask_scheduling FROM project_settings", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(persisted, "explicit");
+    let before = f.view(3);
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    assert_eq!(f.view(3), before);
+    assert_eq!(f.ready(), vec![3]);
+}

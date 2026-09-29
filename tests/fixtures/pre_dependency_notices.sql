@@ -3,7 +3,7 @@
 DROP TRIGGER dependency_notice_comment;
 DROP TRIGGER dependency_notice_event;
 DROP TRIGGER dependency_notice_steering;
-DROP TRIGGER dependency_notice_mode;
+DROP TRIGGER IF EXISTS dependency_notice_mode;
 DROP TRIGGER dependency_notice_delivery;
 DROP TRIGGER dependency_notice_state;
 DROP VIEW obsolete_dependency_steering;

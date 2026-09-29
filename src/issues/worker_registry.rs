@@ -86,7 +86,6 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 struct ProjectSettingsRow {
-    subtask_scheduling: String,
     chief_enabled: bool,
     chief_prompt: Option<String>,
     prompt: String,
@@ -99,10 +98,9 @@ struct ProjectSettingsRow {
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt,subtask_scheduling FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
-            subtask_scheduling: r.get(9)?,
             chief_enabled: r.get(7)?, chief_prompt: r.get(8)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
             drafts_enabled: r.get(3)?, plan_template: r.get(4)?,
@@ -110,7 +108,6 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         }),
     ).optional()?;
     let ProjectSettingsRow {
-        subtask_scheduling,
         chief_enabled,
         chief_prompt,
         prompt,
@@ -121,7 +118,6 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
-        subtask_scheduling: "explicit".into(),
         chief_enabled: false,
         chief_prompt: None,
         prompt: worker::DEFAULT_PROMPT.into(),
@@ -136,7 +132,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":subtask_scheduling,"chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"plan":worker::DEFAULT_PLAN_PROMPT,"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":"explicit","chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"plan":worker::DEFAULT_PLAN_PROMPT,"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -697,12 +693,13 @@ pub(super) fn execute(
             if_version,
         } => {
             let defaults = project_settings(db, p)?;
-            let scheduling = subtask_scheduling
+            // Accept explicit from older clients, but never restore implicit scheduling.
+            if subtask_scheduling
                 .as_deref()
-                .unwrap_or(defaults["subtask_scheduling"].as_str().unwrap());
-            if !["sequential", "explicit"].contains(&scheduling) {
+                .is_some_and(|mode| mode != "explicit")
+            {
                 return Err(Error::invalid(
-                    "Subtask scheduling must be sequential or explicit",
+                    "Subtask scheduling has been removed; use explicit blocked-by dependencies",
                 ));
             }
             let prompt = prompt
@@ -748,17 +745,13 @@ pub(super) fn execute(
                 ));
             }
             db.execute(
-                "UPDATE project_settings SET chief_enabled=?2,chief_prompt=?3,subtask_scheduling=?4 WHERE project_id=?1",
+                "UPDATE project_settings SET chief_enabled=?2,chief_prompt=?3,subtask_scheduling='explicit' WHERE project_id=?1",
                 params![
                     p.id,
                     chief_enabled.unwrap_or(defaults["chief_enabled"] == true),
-                    chief_prompt,
-                    scheduling
+                    chief_prompt
                 ],
             )?;
-            if defaults["subtask_scheduling"] != scheduling {
-                super::super::blockers::validate_scheduling_change(db, &p.id)?;
-            }
             project_settings(db, p)
         }
         Operation::Commits { number } => {
@@ -1432,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_subtasks_exclude_siblings_and_keep_context() {
+    fn reserved_subtasks_allow_independent_siblings_and_keep_context() {
         let root =
             std::env::temp_dir().join(format!("hb-sequence-worker-{}", random_id().unwrap()));
         std::fs::create_dir(&root).unwrap();
@@ -1447,11 +1440,6 @@ mod tests {
             store
                 .execute(&request(
                     json!({"action":"create","title":"Feature","body":"","labels":[]}),
-                ))
-                .unwrap();
-            store
-                .execute(&request(
-                    json!({"action":"configure_project","subtask_scheduling":"sequential"}),
                 ))
                 .unwrap();
             for _ in 0..2 {
@@ -1469,12 +1457,7 @@ mod tests {
                 super::super::subtasks::worker_issue(&store.db, &project.id, number).unwrap();
             assert_eq!(issue["subtask_context"]["next"]["number"], 3);
             store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('reserved',?1,2,'{}','reserved','reserved',1,'test','unit',0,0)", [&project.id]).unwrap();
-            assert!(candidates(&store.db, &settings, 3).unwrap().is_empty());
-            assert!(
-                store
-                    .execute(&request(json!({"action":"move","number":3,"before":2})))
-                    .is_err()
-            );
+            assert_eq!(candidates(&store.db, &settings, 3).unwrap()[0].1, 3);
             store
                 .db
                 .execute(
