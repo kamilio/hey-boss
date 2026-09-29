@@ -837,12 +837,6 @@ impl Codex {
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("PI_SESSION_ID")
             .env_remove("CLAUDECODE");
-        if let Ok(hooks_dir) = crate::issues::commits::ensure_git_hooks() {
-            command
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "core.hooksPath")
-                .env("GIT_CONFIG_VALUE_0", hooks_dir);
-        }
         let process = crate::agent_process::Process::spawn(&mut command)?;
         Ok(Self {
             process,
@@ -2810,7 +2804,6 @@ mod tests {
         assert_eq!(
             text,
             with_workflow("hey-boss issue view <number>. Keep issue view 123 literal.")
-                .replace("issue commit add 7", "issue commit add <number>")
                 .replace("issue close 7", "issue close <number>")
         );
     }

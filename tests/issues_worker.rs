@@ -661,7 +661,7 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes. Attach every commit with `hey-boss issue commit add 1 HEAD`. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close 1` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open."
+        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close 1` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open."
     );
     w.stop();
 }
@@ -742,7 +742,7 @@ fn custom_prompt_slash_goal_preserves_all_lines() {
     let objective = goal["params"]["objective"].as_str().unwrap();
     assert_eq!(
         objective,
-        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\nCommit your changes. Attach every commit with `hey-boss issue commit add 1 HEAD`. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close 1` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open."
+        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close 1` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open."
     );
     let turn = t.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(

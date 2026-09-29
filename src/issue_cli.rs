@@ -603,15 +603,6 @@ enum CommitAction {
     Remove { number: i64, commit: String },
     /// List commits attached to an issue.
     List { number: i64 },
-    /// Best-effort Git post-commit hook entrypoint to attach HEAD and agent trace provenance.
-    Hook {
-        #[arg(long)]
-        issue: Option<i64>,
-        #[arg(default_value = "HEAD")]
-        commit: String,
-    },
-    /// Install chained global Git hooks that attach commits without breaking repo hooks.
-    InstallHooks,
 }
 
 #[derive(Subcommand)]
@@ -841,7 +832,6 @@ impl Options {
                     commit: commit.clone(),
                 },
                 CommitAction::List { number } => Operation::Commits { number: *number },
-                CommitAction::Hook { .. } | CommitAction::InstallHooks => Operation::Whoami,
             },
             Action::GlobalSettings { operation } => operation.clone(),
             Action::Settings { command } => match command {
@@ -1202,6 +1192,7 @@ pub fn run(options: &Options) -> Result<()> {
     if let Action::Migrate { installation } = &options.action {
         let path = issues::database_path_for_installation(&installation.canonicalize()?)?;
         Store::migrate(&path)?;
+        issues::commits::retire_git_hooks()?;
         if options.json {
             println!("{}", json!({"ok": true}));
         }
@@ -1288,25 +1279,6 @@ pub fn run(options: &Options) -> Result<()> {
         let request: Request = serde_json::from_str(&raw)?;
         Store::open(&issues::database_path()?)?.execute(&request)?
     } else {
-        if let Action::Commit {
-            command: CommitAction::InstallHooks,
-        } = &options.action
-        {
-            let dir = issues::commits::install_global_git_hooks()?;
-            let out = json!({"ok": true, "hooks_dir": dir});
-            if options.json {
-                println!("{out}");
-            } else {
-                println!("Installed chained Git hooks in {}", dir.display());
-            }
-            return Ok(());
-        }
-        if let Action::Commit {
-            command: CommitAction::Hook { issue, commit },
-        } = &options.action
-        {
-            return run_commit_hook(options, *issue, commit);
-        }
         let interactive = match &options.action {
             Action::Create { interactive, .. } | Action::Edit { interactive, .. } => *interactive,
             _ => false,
@@ -2166,93 +2138,4 @@ fn worker_project() -> Option<String> {
     std::env::var("HEY_BOSS_ISSUE_PROJECT")
         .ok()
         .filter(|v| !v.is_empty())
-}
-
-fn worker_issue_number() -> Option<i64> {
-    std::env::var("HEY_BOSS_ISSUE_NUMBER")
-        .ok()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|&n| n > 0)
-}
-
-fn run_commit_hook(
-    options: &Options,
-    explicit_issue: Option<i64>,
-    commit: &str,
-) -> issues::Result<()> {
-    let Ok(cwd) = std::env::current_dir().and_then(|d| d.canonicalize()) else {
-        return Ok(());
-    };
-    let Ok(machine) = issues::identity::machine() else {
-        return Ok(());
-    };
-    let Ok(project) = issues::identity::project(&cwd, &machine) else {
-        return Ok(());
-    };
-    // Hooks must know the checkout's repository, even when the worker was
-    // launched for another project. Without a remote, there is no safe link.
-    if !project.id.starts_with("github.com/") {
-        return Ok(());
-    }
-    let project_override = options.project.clone().or_else(worker_project);
-    let effective_project = project_override.as_deref().unwrap_or(&project.id);
-    let Ok(resolved) = issues::commits::resolve_commit_input(commit, &project.id, Some(&cwd), None)
-    else {
-        return Ok(());
-    };
-    let message = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&cwd)
-        .args(["log", "-1", "--format=%B", &resolved.sha])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_else(|| resolved.title.clone());
-    let explicit = explicit_issue.or_else(worker_issue_number);
-    let actor = match issues::identity::resolve(options.agent.as_deref(), &machine, &cwd) {
-        Ok(mut actor) => {
-            issues::identity::creation_context(&mut actor);
-            actor
-        }
-        Err(_) if explicit.is_some() => {
-            issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?
-        }
-        Err(_) => return Ok(()),
-    };
-    let path = issues::database_path()?;
-    let mut store = Store::open(&path)?;
-    let targets = issues::commits::target_issues_for_hook_path(
-        &path,
-        effective_project,
-        &actor,
-        explicit,
-        &message,
-    )?;
-    let mut attached = Vec::new();
-    for number in targets {
-        let request = Request {
-            version: 1,
-            project: project.clone(),
-            project_override: project_override.clone(),
-            actor: Some(actor.clone()),
-            operation: Operation::AddCommit {
-                number,
-                commit: resolved.url.clone(),
-                title: (!resolved.title.is_empty()).then(|| resolved.title.clone()),
-            },
-            request_id: None,
-        };
-        if let Ok(res) = store.execute(&request) {
-            attached
-                .push(json!({"number": number, "sha": resolved.sha, "changed": res["changed"]}));
-        }
-    }
-    if options.json {
-        println!(
-            "{}",
-            json!({"ok": true, "sha": resolved.sha, "attached": attached})
-        );
-    }
-    Ok(())
 }

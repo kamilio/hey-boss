@@ -526,6 +526,15 @@ pub(crate) fn add(
     now: i64,
 ) -> Result<(bool, Vec<Value>)> {
     migrate(db)?;
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)",
+        [&project.id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(Error::invalid(
+            "This project uses pull requests. Attach a PR instead of a commit.",
+        ));
+    }
     let resolved = resolve_commit_input(raw_commit, &project.id, Some(&actor.cwd), title_override)?;
     let origin = super::provenance::capture(db, actor, now)?;
     let (changed, final_sha, final_url, final_title, final_created_at, final_origin) = upsert_row(
@@ -730,125 +739,6 @@ pub(crate) fn list(db: &Connection, project_id: &str, number: i64) -> Result<Vec
     Ok(deduped)
 }
 
-/// Extract issue numbers referenced as `#123` from a commit message.
-pub fn extract_issue_numbers(message: &str) -> Vec<i64> {
-    let mut numbers = Vec::new();
-    let bytes = message.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            let valid_prefix = i == 0
-                || (!bytes[i - 1].is_ascii_alphanumeric()
-                    && bytes[i - 1] != b'/'
-                    && bytes[i - 1] != b'&');
-            if valid_prefix {
-                let start = i + 1;
-                let mut end = start;
-                while end < bytes.len() && bytes[end].is_ascii_digit() {
-                    end += 1;
-                }
-                if end > start
-                    && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric())
-                    && let Ok(num) = message[start..end].parse::<i64>()
-                    && num > 0
-                    && !numbers.contains(&num)
-                {
-                    numbers.push(num);
-                }
-                i = end;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    numbers
-}
-
-/// Resolve the issue numbers in `project_id` that should receive an automatic commit hook attachment.
-pub fn target_issues_for_hook_path(
-    path: &std::path::Path,
-    project_id: &str,
-    actor: &Actor,
-    explicit_issue: Option<i64>,
-    commit_message: &str,
-) -> Result<Vec<i64>> {
-    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let _ = db.busy_timeout(std::time::Duration::from_millis(500));
-    target_issues_for_hook(
-        &db,
-        project_id,
-        actor,
-        explicit_issue,
-        commit_message,
-        super::worker::now(),
-    )
-}
-
-pub fn target_issues_for_hook(
-    db: &Connection,
-    project_id: &str,
-    actor: &Actor,
-    explicit_issue: Option<i64>,
-    commit_message: &str,
-    now: i64,
-) -> Result<Vec<i64>> {
-    let mut targets = Vec::new();
-    let mut add_if_exists = |num: i64| -> Result<()> {
-        if num > 0 && !targets.contains(&num) {
-            let exists: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1 AND number=?2 AND deleted_at IS NULL)",
-                params![project_id, num],
-                |r| r.get(0),
-            )?;
-            if exists {
-                targets.push(num);
-            }
-        }
-        Ok(())
-    };
-
-    if let Some(num) = explicit_issue {
-        add_if_exists(num)?;
-    }
-    if let Some(run) = &actor.creation_run
-        && run.project_id == project_id
-    {
-        add_if_exists(run.number)?;
-    }
-    if let Some(run) = super::provenance::source_run(db, actor, now)?
-        && run.project_id == project_id
-    {
-        add_if_exists(run.number)?;
-    }
-
-    // Active claims by this agent session in this project.
-    if !actor.id.is_empty() && !actor.id.starts_with("human:") {
-        let mut stmt = db.prepare(
-            "SELECT number FROM issues WHERE project_id=?1 AND assignee=?2 AND state IN ('open','ready') AND deleted_at IS NULL ORDER BY updated_at DESC",
-        )?;
-        let claimed = stmt
-            .query_map(params![project_id, actor.id], |r| r.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for num in claimed {
-            add_if_exists(num)?;
-        }
-    }
-
-    // Commit message `#123` references when committed by an agent or matching an open issue.
-    for num in extract_issue_numbers(commit_message) {
-        let eligible: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1 AND number=?2 AND deleted_at IS NULL AND (assignee=?3 OR state IN ('open','ready')))",
-            params![project_id, num, actor.id],
-            |r| r.get(0),
-        )?;
-        if eligible {
-            add_if_exists(num)?;
-        }
-    }
-
-    Ok(targets)
-}
-
 const MANAGED_HOOKS: &[&str] = &[
     "pre-commit",
     "prepare-commit-msg",
@@ -866,14 +756,9 @@ pub fn hooks_dir() -> Option<PathBuf> {
 }
 
 fn hook_script(hook: &str) -> String {
-    let post_action = if matches!(hook, "post-commit" | "post-rewrite") {
-        "\nexport PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"\nhey-boss issue commit hook >/dev/null 2>&1 || true\n"
-    } else {
-        ""
-    };
     format!(
         "#!/bin/sh
-# Managed by hey-boss: chains repo-local and previous global hooks before commit provenance capture.
+# Managed by hey-boss: compatibility dispatcher for existing sessions; no commit capture.
 SELF_DIR=$(cd \"$(dirname \"$0\")\" 2>/dev/null && pwd)
 HOOK_NAME=\"{hook}\"
 
@@ -914,15 +799,9 @@ if [ -f \"$SELF_DIR/.previous-global-hooks-path\" ]; then
         run_chained \"$prev_dir/$HOOK_NAME\" \"$@\" || true
     fi
 fi
-{post_action}exit 0
+exit 0
 "
     )
-}
-
-pub fn ensure_git_hooks() -> Result<PathBuf> {
-    let dir = hooks_dir().ok_or_else(|| Error::invalid("HOME is not set"))?;
-    provision_git_hooks(&dir)?;
-    Ok(dir)
 }
 
 fn write_hook_atomically(path: &Path, content: &str) -> std::io::Result<()> {
@@ -1019,38 +898,70 @@ fn provision_git_hooks(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-pub fn install_global_git_hooks() -> Result<PathBuf> {
-    let dir = ensure_git_hooks()?;
+/// Retire automatic capture while preserving dispatchers inherited by running agents.
+pub fn retire_git_hooks() -> Result<()> {
+    let Some(dir) = hooks_dir() else {
+        return Ok(());
+    };
+    if dir.is_dir() {
+        provision_git_hooks(&dir)?;
+    }
     let existing = Command::new("git")
         .args(["config", "--global", "--get", "core.hooksPath"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty());
-    if let Some(prev) = existing {
-        let prev_path = PathBuf::from(&prev);
-        if prev_path != dir && !prev.ends_with("hey-boss/git-hooks") {
-            let _ = std::fs::write(dir.join(".previous-global-hooks-path"), format!("{prev}\n"));
-        }
+        .output()?;
+    if !existing.status.success()
+        || Path::new(String::from_utf8_lossy(&existing.stdout).trim()) != dir
+    {
+        return Ok(());
     }
-    let status = Command::new("git")
-        .args([
-            "config",
-            "--global",
-            "core.hooksPath",
-            dir.to_str().unwrap_or(""),
-        ])
-        .status()?;
-    if !status.success() {
-        return Err(Error::invalid("Failed to set git global core.hooksPath"));
+    let previous =
+        std::fs::read_to_string(dir.join(".previous-global-hooks-path")).unwrap_or_default();
+    let previous = previous.trim();
+    let mut command = Command::new("git");
+    command.args(["config", "--global"]);
+    if !previous.is_empty() && Path::new(previous) != dir {
+        command.args(["core.hooksPath", previous]);
+    } else {
+        command.args(["--unset-all", "core.hooksPath"]);
     }
-    Ok(dir)
+    if !command.status()?.success() {
+        return Err(Error::invalid("Failed to restore Git hooks configuration"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_hooks_never_capture_commits() {
+        for hook in MANAGED_HOOKS {
+            assert!(!hook_script(hook).contains("issue commit hook"));
+        }
+    }
+
+    #[test]
+    fn pr_projects_reject_commit_attachments() {
+        let db = test_db();
+        db.execute_batch("INSERT INTO project_settings VALUES('github.com/kamilio/hey-boss', 1);")
+            .unwrap();
+        let project = Project {
+            id: "github.com/kamilio/hey-boss".into(),
+            name: "hey-boss".into(),
+        };
+        let result = add(
+            &db,
+            &project,
+            704,
+            "abcdef1234567890abcdef1234567890abcdef1234",
+            None,
+            &test_actor(),
+            1000,
+        );
+        assert!(result.unwrap_err().message.contains("Attach a PR"));
+        assert!(list(&db, &project.id, 704).unwrap().is_empty());
+    }
 
     struct HookFixture(PathBuf);
     impl HookFixture {
@@ -1380,7 +1291,8 @@ mod tests {
     fn test_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT, hidden_at INTEGER);
+            "CREATE TABLE project_settings(project_id TEXT PRIMARY KEY, prs_enabled INTEGER);
+             CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT, hidden_at INTEGER);
              INSERT INTO projects VALUES('github.com/kamilio/hey-boss', 'hey-boss', NULL);
              CREATE TABLE issues(project_id TEXT, number INTEGER, title TEXT, state TEXT, assignee TEXT, deleted_at INTEGER, version INTEGER DEFAULT 1, updated_at INTEGER DEFAULT 0, origin TEXT, PRIMARY KEY(project_id, number));
              INSERT INTO issues VALUES('github.com/kamilio/hey-boss', 704, 'Attach commits', 'open', 'codex:01a0ed5c-be46-7eb1-bf98-0cf62f47e3d3', NULL, 1, 0, NULL);
@@ -1516,21 +1428,5 @@ mod tests {
         assert_eq!(commits[0]["sha"], full);
         assert_eq!(commits[0]["title"], "Full commit title");
         assert_eq!(commits[0]["origin"]["invocation"]["offset"], 98765);
-    }
-
-    #[test]
-    fn hook_targets_claimed_and_message_referenced_issues() {
-        let db = test_db();
-        let actor = test_actor();
-        let targets = target_issues_for_hook(
-            &db,
-            "github.com/kamilio/hey-boss",
-            &actor,
-            None,
-            "Implement commit deduplication (#704)",
-            1000,
-        )
-        .unwrap();
-        assert_eq!(targets, vec![704]);
     }
 }
