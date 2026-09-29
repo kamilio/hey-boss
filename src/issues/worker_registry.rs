@@ -763,7 +763,9 @@ pub(super) fn execute(
         }
         Operation::Commits { number } => {
             get_issue(db, &p.id, *number, true)?;
-            Ok(json!({"ok":true,"project":p,"number":number,"commits":crate::issues::commits::list(db,&p.id,*number)?,"changed":false}))
+            Ok(
+                json!({"ok":true,"project":p,"number":number,"commits":crate::issues::commits::list(db,&p.id,*number)?,"changed":false}),
+            )
         }
         Operation::AddCommit {
             number,
@@ -798,7 +800,9 @@ pub(super) fn execute(
             {
                 let (changed, commits) =
                     crate::issues::commits::add(db, p, *number, url, None, actor.unwrap(), now())?;
-                return Ok(json!({"ok":true,"project":p,"number":number,"pull_requests":pull_requests(db,&p.id,*number)?,"commits":commits,"changed":changed}));
+                return Ok(
+                    json!({"ok":true,"project":p,"number":number,"pull_requests":pull_requests(db,&p.id,*number)?,"commits":commits,"changed":changed}),
+                );
             }
             let mut changed = 0;
             if let Operation::AddPullRequest { url, .. }
@@ -825,7 +829,10 @@ pub(super) fn execute(
                             .ok()
                             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
                             .unwrap_or(Value::Null);
-                        ("pr_attached", json!({"url":url,"purpose":purpose,"origin":origin}))
+                        (
+                            "pr_attached",
+                            json!({"url":url,"purpose":purpose,"origin":origin}),
+                        )
                     }
                     Operation::ClassifyPullRequest { purpose, .. } => {
                         let previous: String = db.query_row("SELECT purpose FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND url=?3",params![p.id,number,url],|r|r.get(0)).optional()?.ok_or_else(|| Error::new("not_found", "PR is not attached to this issue"))?;

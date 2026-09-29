@@ -2822,6 +2822,7 @@ mod tests {
         assert_eq!(
             text,
             with_workflow("hey-boss issue view <number>. Keep issue view 123 literal.")
+                .replace("issue commit add 7", "issue commit add <number>")
                 .replace("issue close 7", "issue close <number>")
         );
     }

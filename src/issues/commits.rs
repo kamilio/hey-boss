@@ -135,7 +135,17 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
                         } else {
                             val["origin"].as_str().map(str::to_owned)
                         };
-                        upsert_row(db, &project_id, issue_number, &sha, url, title, &actor, created_at, origin.as_deref())?;
+                        upsert_row(
+                            db,
+                            &project_id,
+                            issue_number,
+                            &sha,
+                            url,
+                            title,
+                            &actor,
+                            created_at,
+                            origin.as_deref(),
+                        )?;
                     }
                 }
             }
@@ -286,7 +296,8 @@ pub fn resolve_commit_input(
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
                     .unwrap_or(git_title);
-                let url = canonical_commit_url(project_id, url_repo, git_repo, &full_sha, Some(trimmed));
+                let url =
+                    canonical_commit_url(project_id, url_repo, git_repo, &full_sha, Some(trimmed));
                 return Ok(ResolvedCommit {
                     sha: full_sha,
                     url,
@@ -395,7 +406,9 @@ fn upsert_row(
         .filter(|(ex_sha, ex_url, _, _, _, _)| {
             sha_matches(ex_sha, &sha)
                 || (!url.is_empty()
-                    && ex_url.trim_end_matches('/').eq_ignore_ascii_case(url.trim_end_matches('/')))
+                    && ex_url
+                        .trim_end_matches('/')
+                        .eq_ignore_ascii_case(url.trim_end_matches('/')))
         })
         .collect();
 
@@ -404,7 +417,14 @@ fn upsert_row(
             "INSERT INTO issue_commits(project_id, issue_number, sha, url, title, added_by, created_at, origin) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![project_id, number, sha, url, title, added_by, created_at, origin],
         )?;
-        return Ok((true, sha, url.to_owned(), title.to_owned(), created_at, origin.map(str::to_owned)));
+        return Ok((
+            true,
+            sha,
+            url.to_owned(),
+            title.to_owned(),
+            created_at,
+            origin.map(str::to_owned),
+        ));
     }
 
     let mut final_sha = sha.clone();
@@ -434,7 +454,9 @@ fn upsert_row(
             final_created_at = *ex_created_at;
             final_added_by = ex_added_by.clone();
         }
-        if origin_score(ex_origin.as_deref()) >= origin_score(final_origin.as_deref()) && ex_origin.is_some() {
+        if origin_score(ex_origin.as_deref()) >= origin_score(final_origin.as_deref())
+            && ex_origin.is_some()
+        {
             final_origin = ex_origin.clone();
         }
     }
@@ -445,7 +467,14 @@ fn upsert_row(
         && matched[0].2 == final_title
         && matched[0].5 == final_origin;
     if identical {
-        return Ok((false, final_sha, final_url, final_title, final_created_at, final_origin));
+        return Ok((
+            false,
+            final_sha,
+            final_url,
+            final_title,
+            final_created_at,
+            final_origin,
+        ));
     }
 
     for (ex_sha, _, _, _, _, _) in &matched {
@@ -474,7 +503,14 @@ fn upsert_row(
             final_origin
         ],
     )?;
-    Ok((true, final_sha, final_url, final_title, final_created_at, final_origin))
+    Ok((
+        true,
+        final_sha,
+        final_url,
+        final_title,
+        final_created_at,
+        final_origin,
+    ))
 }
 
 pub(crate) fn add(
@@ -543,9 +579,8 @@ pub(crate) fn remove(
     if target_sha.is_empty() {
         return Err(Error::invalid("Commit reference cannot be empty"));
     }
-    let mut stmt = db.prepare(
-        "SELECT sha, url FROM issue_commits WHERE project_id=?1 AND issue_number=?2",
-    )?;
+    let mut stmt =
+        db.prepare("SELECT sha, url FROM issue_commits WHERE project_id=?1 AND issue_number=?2")?;
     let rows = stmt
         .query_map(params![project.id, number], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -555,7 +590,9 @@ pub(crate) fn remove(
     let mut removed_shas = Vec::new();
     for (sha, url) in rows {
         if sha_matches(&sha, &target_sha)
-            || url.trim_end_matches('/').eq_ignore_ascii_case(raw_commit.trim().trim_end_matches('/'))
+            || url
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(raw_commit.trim().trim_end_matches('/'))
         {
             db.execute(
                 "DELETE FROM issue_commits WHERE project_id=?1 AND issue_number=?2 AND sha=?3",
@@ -698,7 +735,9 @@ pub fn extract_issue_numbers(message: &str) -> Vec<i64> {
     while i < bytes.len() {
         if bytes[i] == b'#' {
             let valid_prefix = i == 0
-                || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'/' && bytes[i - 1] != b'&');
+                || (!bytes[i - 1].is_ascii_alphanumeric()
+                    && bytes[i - 1] != b'/'
+                    && bytes[i - 1] != b'&');
             if valid_prefix {
                 let start = i + 1;
                 let mut end = start;
@@ -1043,7 +1082,8 @@ mod tests {
         assert_eq!(list1[0]["origin"]["invocation"]["offset"], 123456);
 
         // 2. Re-attaching the exact same short SHA is a no-op (changed = false).
-        let (changed_dup, list_dup) = add(&db, &project, 704, "71CB79C", None, &actor, 1005).unwrap();
+        let (changed_dup, list_dup) =
+            add(&db, &project, 704, "71CB79C", None, &actor, 1005).unwrap();
         assert!(!changed_dup);
         assert_eq!(list_dup.len(), 1);
 
@@ -1071,7 +1111,10 @@ mod tests {
         ] {
             let (changed_again, list_again) =
                 add(&db, &project, 704, input, None, &actor, 1020).unwrap();
-            assert!(!changed_again, "expected {input} to be deduplicated as no-op");
+            assert!(
+                !changed_again,
+                "expected {input} to be deduplicated as no-op"
+            );
             assert_eq!(list_again.len(), 1);
             assert_eq!(list_again[0]["sha"], full_sha);
         }

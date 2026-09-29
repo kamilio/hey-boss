@@ -601,14 +601,9 @@ enum CommitAction {
         title: Option<String>,
     },
     /// Remove an attached commit by SHA, prefix, or URL.
-    Remove {
-        number: i64,
-        commit: String,
-    },
+    Remove { number: i64, commit: String },
     /// List commits attached to an issue.
-    List {
-        number: i64,
-    },
+    List { number: i64 },
     /// Best-effort Git post-commit hook entrypoint to attach HEAD and agent trace provenance.
     Hook {
         #[arg(long)]
@@ -1358,12 +1353,7 @@ pub fn run(options: &Options) -> Result<()> {
         {
             issues::identity::creation_context(actor);
         }
-        if let Operation::AddCommit {
-            commit,
-            title,
-            ..
-        } = &mut operation
-        {
+        if let Operation::AddCommit { commit, title, .. } = &mut operation {
             let target_project = options
                 .project
                 .clone()
@@ -1644,12 +1634,18 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(commits) = value["commits"].as_array() {
         for c in commits {
-            let short = c["short_sha"].as_str().unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
+            let short = c["short_sha"]
+                .as_str()
+                .unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
             let title = c["title"].as_str().unwrap_or("");
             if title.is_empty() {
                 println!("Commit [{short}]: {}", line(&c["url"]));
             } else {
-                println!("Commit [{short}]: {} · {}", line(&c["url"]), line(&c["title"]));
+                println!(
+                    "Commit [{short}]: {} · {}",
+                    line(&c["url"]),
+                    line(&c["title"])
+                );
             }
         }
     }
@@ -2153,12 +2149,18 @@ fn print_issue_line(issue: &Value) {
     }
     if let Some(commits) = issue["commits"].as_array() {
         for c in commits {
-            let short = c["short_sha"].as_str().unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
+            let short = c["short_sha"]
+                .as_str()
+                .unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
             let title = c["title"].as_str().unwrap_or("");
             if title.is_empty() {
                 println!("  Commit [{short}]: {}", line(&c["url"]));
             } else {
-                println!("  Commit [{short}]: {} · {}", line(&c["url"]), line(&c["title"]));
+                println!(
+                    "  Commit [{short}]: {} · {}",
+                    line(&c["url"]),
+                    line(&c["title"])
+                );
             }
         }
     }
@@ -2177,7 +2179,11 @@ fn worker_issue_number() -> Option<i64> {
         .filter(|&n| n > 0)
 }
 
-fn run_commit_hook(options: &Options, explicit_issue: Option<i64>, commit: &str) -> issues::Result<()> {
+fn run_commit_hook(
+    options: &Options,
+    explicit_issue: Option<i64>,
+    commit: &str,
+) -> issues::Result<()> {
     let Ok(cwd) = std::env::current_dir().and_then(|d| d.canonicalize()) else {
         return Ok(());
     };
@@ -2189,7 +2195,9 @@ fn run_commit_hook(options: &Options, explicit_issue: Option<i64>, commit: &str)
     };
     let project_override = options.project.clone().or_else(worker_project);
     let effective_project = project_override.as_deref().unwrap_or(&project.id);
-    let Ok(resolved) = issues::commits::resolve_commit_input(commit, effective_project, Some(&cwd), None) else {
+    let Ok(resolved) =
+        issues::commits::resolve_commit_input(commit, effective_project, Some(&cwd), None)
+    else {
         return Ok(());
     };
     let message = std::process::Command::new("git")
@@ -2207,7 +2215,9 @@ fn run_commit_hook(options: &Options, explicit_issue: Option<i64>, commit: &str)
             issues::identity::creation_context(&mut actor);
             actor
         }
-        Err(_) if explicit.is_some() => issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?,
+        Err(_) if explicit.is_some() => {
+            issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?
+        }
         Err(_) => return Ok(()),
     };
     let path = issues::database_path()?;
@@ -2234,11 +2244,15 @@ fn run_commit_hook(options: &Options, explicit_issue: Option<i64>, commit: &str)
             request_id: None,
         };
         if let Ok(res) = store.execute(&request) {
-            attached.push(json!({"number": number, "sha": resolved.sha, "changed": res["changed"]}));
+            attached
+                .push(json!({"number": number, "sha": resolved.sha, "changed": res["changed"]}));
         }
     }
     if options.json {
-        println!("{}", json!({"ok": true, "sha": resolved.sha, "attached": attached}));
+        println!(
+            "{}",
+            json!({"ok": true, "sha": resolved.sha, "attached": attached})
+        );
     }
     Ok(())
 }
