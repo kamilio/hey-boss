@@ -2,6 +2,8 @@ use super::*;
 use serde_json::{Value, json};
 #[path = "end_to_end.rs"]
 mod end_to_end;
+#[path = "metadata_cadence.rs"]
+mod metadata_cadence;
 #[path = "review_only.rs"]
 mod review_only;
 

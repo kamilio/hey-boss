@@ -2,11 +2,16 @@
 use super::{ApiClient, Context, Duration, Freshness, Result, Store, schedule, selector};
 mod queue;
 
+#[cfg(test)]
 pub(super) fn poll(
     ctx: &Context,
     runtime: &tokio::runtime::Runtime,
     client: &ApiClient,
 ) -> Result<()> {
+    runtime.block_on(poll_once(ctx, client))
+}
+
+pub(super) async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
     let mut store = Store::open(&ctx.path)?;
     let mut actor = ctx.actor()?;
     actor.id = "human:pr-monitor".into();
@@ -27,7 +32,7 @@ pub(super) fn poll(
         ctx.read_json(&path, serde_json::json!({"cooldown_until":0,"entries":{}}))?,
     )?;
     let due = schedule.due(&tracked, crate::issues::worker::now());
-    runtime.block_on(queue::poll(ctx, client, due, &mut schedule, &path))
+    queue::poll(ctx, client, due, &mut schedule, &path).await
 }
 
 fn fresh(validated_at: u64) -> bool {
