@@ -186,7 +186,8 @@ check the issue revision and use stable request IDs across the supervisor tunnel
 **GitHub watcher** requires an attached open GitHub PR and parks the task outside
 worker pickup. The supervisor polls through the shared `hey-gh` daemon. A fresh
 required-check failure wakes work immediately, without waiting for optional jobs
-or reviews. Completed checks and later review findings also wake work. A running
+or reviews. Completed checks and later review findings also wake work. PRs without
+checks can deliver review findings; an empty check list alone does not wake work. A running
 agent receives the latest update through steering; otherwise, the next event
 starts a fresh session. Successful work returns to watching after the current
 event is delivered; undelivered work remains queued. Claims and steering include

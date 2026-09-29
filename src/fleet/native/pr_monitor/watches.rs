@@ -201,7 +201,7 @@ async fn poll_details(
         .map_err(storage)?
         .record_github_observation(url, &observation, timestamp(ci.observed_at_ms)?)
         .map_err(storage)?;
-    if observation.evidence["ci_complete"] != true || ctx.stopped() {
+    if observation.evidence["ci_settled"] != true || ctx.stopped() {
         return Ok(());
     }
 
