@@ -57,16 +57,22 @@ fn wait(label: &str, root: &std::path::Path, mut ready: impl FnMut() -> bool) {
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
 fn github_http_poll_claim_steer_rearm_and_fresh_session() {
-    lifecycle(false);
+    lifecycle(false, 1);
 }
 
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
 fn github_http_poll_rejected_steering_starts_fresh_session_with_pending_findings() {
-    lifecycle(true);
+    lifecycle(true, 1);
 }
 
-fn lifecycle(reject_steering: bool) {
+#[test]
+#[ignore = "long-running isolated worker soak; requires cargo build --bin hey-boss"]
+fn github_watcher_process_soak_retains_exactly_once_wakeups() {
+    lifecycle(true, 600);
+}
+
+fn lifecycle(reject_steering: bool, following_failures: usize) {
     let binary = std::env::current_exe()
         .unwrap()
         .parent()
@@ -168,8 +174,8 @@ fn lifecycle(reject_steering: bool) {
                 };
                 let phase = serving_phase.load(Ordering::Acquire);
                 let (mut ci, mut policy, metadata) = evidence(phase != 2, false);
-                if phase == 3 {
-                    ci["data"]["check_runs"][0]["id"] = json!(2);
+                if phase >= 3 {
+                    ci["data"]["check_runs"][0]["id"] = json!(phase - 1);
                     let observation = hey_gh::watcher::observe_ci(
                         "o/r",
                         1,
@@ -263,25 +269,52 @@ fn lifecycle(reject_steering: bool) {
             1
         );
     }
-    phase.store(3, Ordering::Release);
-    poll_now();
-    wait("fresh second session", &root, || {
-        scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == after_completion + 1
-            && scalar("SELECT count(*) FROM issues WHERE assignee='watcher:github'") == 1
-    });
+    let started = Instant::now();
+    for index in 0..following_failures {
+        phase.store(index + 3, Ordering::Release);
+        poll_now();
+        let expected = after_completion + index as i64 + 1;
+        wait("fresh session", &root, || {
+            scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == expected
+                && scalar("SELECT count(*) FROM issues WHERE assignee='watcher:github'") == 1
+        });
+        poll_now();
+        thread::sleep(Duration::from_millis(1200));
+        assert_eq!(
+            scalar("SELECT count(*) FROM worker_runs"),
+            expected,
+            "Repeated observations cannot launch duplicate work"
+        );
+        if following_failures > 1 && (index + 1) % 20 == 0 {
+            let rss = Command::new("ps")
+                .args(["-o", "rss=", "-p", &worker.0.id().to_string()])
+                .output()
+                .unwrap();
+            eprintln!(
+                "Watcher soak: {}/{following_failures} reruns, elapsed {:?}, worker RSS {} KiB, status {} bytes",
+                index + 1,
+                started.elapsed(),
+                String::from_utf8_lossy(&rss.stdout).trim(),
+                scalar("SELECT sum(length(status)) FROM issue_github_watches")
+            );
+        }
+    }
     let claims: Vec<_> = records()
         .into_iter()
         .filter(|r| r["type"] == "claim")
         .collect();
-    assert_eq!(claims.len(), (after_completion + 1) as usize);
+    assert_eq!(claims.len(), after_completion as usize + following_failures);
     for pair in claims.windows(2) {
         assert_ne!(pair[0]["session"], pair[1]["session"]);
     }
+    // Re-observe the first failure after many newer runs on this same head.
+    // Exact signal history must still suppress it, including across DB opens.
+    phase.store(3, Ordering::Release);
     poll_now();
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(
         scalar("SELECT count(*) FROM worker_runs"),
-        after_completion + 1,
+        after_completion + following_failures as i64,
         "Repeated observations cannot launch duplicate work"
     );
     drop(server);
