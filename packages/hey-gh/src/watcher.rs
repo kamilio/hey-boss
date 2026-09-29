@@ -2,6 +2,7 @@
 use crate::{Report, RequiredChecksReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod evidence;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Observation {
@@ -180,10 +181,12 @@ fn ci_signals(
         blocking,
         completed,
         feedback: Vec::new(),
-        evidence: json!({"repository":repository,"number":number,"head":ci.head_sha,
+        evidence: evidence::bounded(
+            json!({"repository":repository,"number":number,"head":ci.head_sha,
             "complete":false,"ci_complete":complete,"checks":checks,"statuses":statuses,"workflows":workflows,
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
+        ),
     }
 }
 
@@ -207,8 +210,10 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
         blocking,
         completed: None,
         feedback: Vec::new(),
-        evidence: json!({"repository":policy.repository,"number":policy.pull_number,"head":policy.head_sha,
+        evidence: evidence::bounded(
+            json!({"repository":policy.repository,"number":policy.pull_number,"head":policy.head_sha,
             "complete":false,"required":policy.checks,"required_state":policy.state,"policy_errors":policy.errors}),
+        ),
     }
 }
 
@@ -301,26 +306,13 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
     }
     feedback.sort();
     feedback.dedup();
-    // Bound retained/displayed review bodies. Identity above still includes all
-    // findings, so truncation never masks a newly published or edited review.
-    fn excerpt(rows: Vec<Value>) -> Vec<Value> {
-        rows.into_iter()
-            .rev()
-            .take(20)
-            .map(|mut row| {
-                if let Some(body) = row["body"].as_str() {
-                    row["body"] = json!(body.chars().take(1000).collect::<String>());
-                }
-                row
-            })
-            .collect()
-    }
     observation.feedback = feedback;
     observation.evidence.as_object_mut().expect("CI evidence is an object").extend(
-        json!({"complete":complete,"reviews":excerpt(reviews),"review_comments":excerpt(comments),
-            "comments":excerpt(discussion),"unresolved_threads":pr.review_status.unresolved_threads,
+        json!({"complete":complete,"reviews":reviews.into_iter().rev().collect::<Vec<_>>(),"review_comments":comments.into_iter().rev().collect::<Vec<_>>(),
+            "comments":discussion.into_iter().rev().collect::<Vec<_>>(),"unresolved_threads":pr.review_status.unresolved_threads,
             "conflicts":pr.conflicts,"source_errors":pr.errors}).as_object().unwrap().clone()
     );
+    observation.evidence = evidence::bounded(observation.evidence);
     observation
 }
 
@@ -519,5 +511,42 @@ mod tests {
         r.data.ci.check_runs[0]["details_url"] = json!("https://github.com/o/r/actions/runs/1");
         r.data.ci.check_runs[0]["app"]["name"] = json!("Updated app name");
         assert_eq!(observe(&r, &p).completed, before);
+    }
+
+    #[test]
+    fn large_evidence_is_bounded_without_hiding_events_in_omitted_details() {
+        let (mut report, policy) = fixture();
+        report.data.ci.summary.pending = 0;
+        for id in 2..202 {
+            report.data.ci.check_runs.push(json!({"id":id,"name":"Long name ".repeat(500),"app":{"id":id},"head_sha":"head","status":"completed","conclusion":"success"}));
+            report
+                .data
+                .comments
+                .push(json!({"id":id,"body":"界".repeat(5000),"user":{"login":"reviewer"}}));
+        }
+        report.data.ci.failures.push(crate::FailedResult {
+            kind: "job".into(),
+            name: "test".into(),
+            conclusion: "failure".into(),
+            url: None,
+            failed_steps: (0..100)
+                .map(|id| json!({"number":id,"name":"界".repeat(5000),"conclusion":"failure"}))
+                .collect(),
+        });
+        let first = observe(&report, &policy);
+        assert!(first.evidence.to_string().len() <= 64 * 1024);
+        assert!(
+            first.evidence["omitted"]["checks"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        );
+        assert_eq!(first.evidence["required"][0]["state"], "failure");
+        report.data.comments[0]["body"] = json!(format!("{}a later edit", "界".repeat(5000)));
+        let edited = observe(&report, &policy);
+        assert_ne!(
+            first.feedback, edited.feedback,
+            "Identity must use full feedback even when its display is truncated"
+        );
+        assert_eq!(first.blocking, edited.blocking);
     }
 }

@@ -78,3 +78,16 @@ test('stopped watchers explain missing PRs without advertising queued work', () 
   assert.match(html, /No open GitHub pull requests remain/);
   assert.doesNotMatch(html, /Waiting for the first GitHub status/);
 });
+
+test('condensed GitHub evidence identifies omitted results', () => {
+  const html = assignments.status({...base, github_status:{prs:{'https://github.com/o/r/pull/1':{evidence:{truncated:true,omitted:{checks:80,reviews:7},required:[]}}}}},helpers);
+  assert.match(html,/80 checks/);
+  assert.match(html,/7 reviews/);
+  assert.match(html,/GitHub/);
+});
+
+test('required failure count includes results omitted from the summary', () => {
+  const html = assignments.status({...base, github_status:{prs:{'https://github.com/o/r/pull/1':{evidence:{truncated:true,omitted:{required:236},required_counts:{total:300,failure:200,satisfied:100},required:[{context:'one displayed check',state:'failure'}]}}}}},helpers);
+  assert.match(html,/200 required checks failed/);
+  assert.match(html,/236 required checks omitted/);
+});
