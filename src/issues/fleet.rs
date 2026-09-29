@@ -38,6 +38,7 @@ pub(crate) fn check_claim(
     machine: &str,
     force: bool,
 ) -> Result<()> {
+    super::store::attempts::guard(db, project, number)?;
     if force {
         return Ok(());
     }

@@ -26,6 +26,7 @@ pub(super) fn execute(
         return Err(Error::invalid("Issue version must be positive"));
     }
     let issue = get_issue(db, &source.id, number, false)?;
+    attempts::guard(db, &source.id, number)?;
     if issue.version != version {
         return Err(Error::conflict(
             "Issue changed; load its latest revision before moving",

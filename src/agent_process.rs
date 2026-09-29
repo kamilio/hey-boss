@@ -29,7 +29,7 @@ pub(crate) fn exited(pid: u32) -> io::Result<bool> {
 }
 
 pub(crate) struct Process {
-    child: Child,
+    child: Option<Child>,
     input: Option<ChildStdin>,
     inbox: Option<mpsc::Receiver<io::Result<Value>>>,
     stopped: bool,
@@ -100,7 +100,7 @@ impl Process {
             }
         });
         Ok(Self {
-            child,
+            child: Some(child),
             input: Some(input),
             inbox: Some(inbox),
             stopped: false,
@@ -111,7 +111,7 @@ impl Process {
         })
     }
     pub(crate) fn pid(&self) -> u32 {
-        self.child.id()
+        self.child.as_ref().expect("owned process").id()
     }
     pub(crate) fn send(&mut self, value: &Value) -> io::Result<()> {
         if self.stopped {
@@ -162,7 +162,7 @@ impl Process {
                 // A tool can inherit stdout after the agent itself has crashed.
                 // Observe exit without reaping: stop() still owns this exact
                 // process group and must not signal a reused PID.
-                if exited(self.child.id())? {
+                if exited(self.pid())? {
                     return Err(self.failure("Agent exited before reporting completion"));
                 }
                 Ok(None)
@@ -194,7 +194,7 @@ impl Process {
         }
         // The parent has not been reaped, so its PID cannot be reused. Signal the
         // group even when the parent exited: its tools may still be running.
-        let group = -(self.child.id() as i32);
+        let group = -(self.pid() as i32);
         let signal = |signal| -> io::Result<()> {
             if unsafe { libc::kill(group, signal) } == 0 {
                 return Ok(());
@@ -211,13 +211,48 @@ impl Process {
         signal(libc::SIGTERM)?;
         thread::sleep(Duration::from_millis(100));
         signal(libc::SIGKILL)?;
-        self.child.wait()?;
+        self.child.as_mut().expect("owned process").wait()?;
         self.stopped = true;
         self.input.take();
         // A full bounded channel otherwise keeps the reader and stdout alive
         // for as long as the caller retains the stopped process's state.
         self.inbox.take();
         Ok(())
+    }
+
+    /// Keep the owned group and pipes intact while a durable task hold exists.
+    /// The unreaped parent pins its process-group identity until reconciliation.
+    pub(crate) fn preserve_until(&mut self, mut protected: impl FnMut() -> bool + Send + 'static) {
+        if self.stopped {
+            return;
+        }
+        let mut child = self.child.take().expect("owned process");
+        let input = self.input.take();
+        let inbox = self.inbox.take();
+        self.stopped = true;
+        thread::spawn(move || {
+            while protected() {
+                if let Some(inbox) = &inbox {
+                    for _ in 0..100 {
+                        if inbox.try_recv().is_err() {
+                            break;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            let group = -(child.id() as i32);
+            unsafe {
+                libc::kill(group, libc::SIGTERM);
+            }
+            thread::sleep(Duration::from_millis(100));
+            unsafe {
+                libc::kill(group, libc::SIGKILL);
+            }
+            let _ = child.wait();
+            drop(input);
+            drop(inbox);
+        });
     }
 }
 impl Drop for Process {
@@ -243,6 +278,37 @@ fn group_has_no_live_processes(group: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_group_is_not_signalled_when_its_handle_is_dropped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let hold = Arc::new(AtomicBool::new(true));
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "read value"]);
+        let mut process = Process::spawn(&mut command).unwrap();
+        let pid = process.pid();
+        let identity = crate::agents::process_identity(pid).unwrap();
+        let gate = hold.clone();
+        process.preserve_until(move || gate.load(Ordering::SeqCst));
+        drop(process);
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            crate::agents::process_identity(pid).as_deref(),
+            Some(identity.as_str())
+        );
+        assert!(!exited(pid).unwrap());
+        hold.store(false, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while crate::agents::process_identity(pid).as_deref() == Some(identity.as_str())
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert_ne!(
+            crate::agents::process_identity(pid).as_deref(),
+            Some(identity.as_str())
+        );
+    }
 
     #[test]
     fn dead_parent_with_descendant_holding_stdout_is_a_failure() {

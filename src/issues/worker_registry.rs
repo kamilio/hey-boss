@@ -6,6 +6,7 @@ pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS work
 pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
 
 const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
+    ("issues", "project_id", &["attempt_hold"]),
     (
         "issue_pull_requests",
         "project_id",
@@ -1140,6 +1141,99 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attempt_hold_keeps_two_slot_admission_and_other_jobs_intact() {
+        let provider = std::env::current_exe().unwrap();
+        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(provider.as_os_str()) {
+            let output = std::process::Command::new(&provider)
+                .args(["--exact", "issues::store::registry::tests::attempt_hold_keeps_two_slot_admission_and_other_jobs_intact", "--nocapture"])
+                .env("HEY_BOSS_CODEX", &provider).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("hb-attempt-slots-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            for title in ["Retained attempt", "Other active job", "Waiting job"] {
+                let request: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Slots","name":"Slots"},"actor":{"id":"codex:slots","kind":"codex","session_id":"slots","machine":"unit","host":"test","pid":null,"process_start":null,"cwd":root,"source":"test"},"operation":{"action":"create","title":title,"body":"","labels":[]}})).unwrap();
+                store.execute(&request).unwrap();
+            }
+            let settings = Settings {
+                concurrency: 2,
+                enabled: true,
+                directory: root.to_string_lossy().into(),
+                projects: vec!["named:Slots".into()],
+                ..Default::default()
+            };
+            let worker = store.register_worker(None, &settings, "unit").unwrap();
+            let first = reserve(&mut store, "unit", Some(&worker)).unwrap().unwrap();
+            let second = reserve(&mut store, "unit", Some(&worker)).unwrap().unwrap();
+            let other: String = store
+                .db
+                .query_row(
+                    "SELECT job FROM worker_runs WHERE id=?1",
+                    [&second.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "UPDATE issues SET attempt_hold=?1 WHERE number=1",
+                    [json!({"attempt_id":"retained","owner":first.actor.id}).to_string()],
+                )
+                .unwrap();
+            store
+                .worker_finish(&first, "blocked", "The task process survives")
+                .unwrap();
+            for _ in 0..5 {
+                assert!(
+                    reserve(&mut store, "unit", Some(&worker))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT job FROM worker_runs WHERE id=?1",
+                        [&second.id],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                other
+            );
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM worker_runs WHERE finished_at IS NULL",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
+            store
+                .worker_finish(&second, "interrupted", "Ordinary test completion")
+                .unwrap();
+            let next = reserve(&mut store, "unit", Some(&worker)).unwrap().unwrap();
+            assert_ne!(next.number(), first.number());
+            assert!(
+                reserve(&mut store, "unit", Some(&worker))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn recovery_queue_survives_followups_and_pickup_explains_its_choice() {
         // Reservation validates the provider executable but never launches it.

@@ -167,6 +167,11 @@ impl ListFilters {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Protect and reconcile a reported task process on the machine that owns it.
+    Attempt {
+        #[command(subcommand)]
+        command: AttemptAction,
+    },
     /// Atomically update guarded labels and ownership; the entire array is one group.
     #[command(
         after_help = "JSON array (up to 100 issues / 1 MiB):\n  [{\"number\":1,\"if_version\":3,\"expected_assignee\":\"codex:session\",\"add_labels\":[\"rework needed\"],\"remove_labels\":[\"PR ready\"],\"assignment\":\"unassign\"}]\nexpected_assignee is required; use null for unassigned. assignment: keep (default), unassign, boss.\nApplying requires --request-id.\nGuard rejection returns applied:false and per-issue rejected/blocked results; no issue changes.\nThe caller assesses readiness; this command never closes issues or controls workers."
@@ -499,6 +504,31 @@ enum Action {
 }
 
 #[derive(Subcommand)]
+enum AttemptAction {
+    /// Save original owner, attempt ID, PID/start identity, log_path and worktree from JSON.
+    Hold {
+        number: i64,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        if_version: i64,
+    },
+    /// Read current process, log and Git evidence; save JSON for review before reconciliation.
+    Inspect { number: i64 },
+    /// Release only after terminal evidence matches the reviewed inspect JSON.
+    Reconcile {
+        number: i64,
+        #[arg(long)]
+        file: PathBuf,
+        /// Reviewed success/failure and retained Git/log outcome.
+        #[arg(long)]
+        outcome: String,
+        #[arg(long)]
+        if_version: i64,
+    },
+}
+
+#[derive(Subcommand)]
 enum SubtaskAction {
     /// List immediate subtasks in the project queue order.
     List {
@@ -632,6 +662,48 @@ impl Options {
     }
     fn operation(&self) -> Result<Operation> {
         Ok(match &self.action {
+            Action::Attempt { command } => match command {
+                AttemptAction::Hold {
+                    number,
+                    file,
+                    if_version,
+                } => Operation::HoldAttempt {
+                    number: *number,
+                    if_version: *if_version,
+                    report: serde_json::from_str(
+                        &Body {
+                            body: None,
+                            file: Some(file.clone()),
+                        }
+                        .read()?
+                        .unwrap(),
+                    )?,
+                },
+                AttemptAction::Inspect { number } => Operation::InspectAttempt { number: *number },
+                AttemptAction::Reconcile {
+                    number,
+                    file,
+                    if_version,
+                    outcome,
+                } => {
+                    let value: Value = serde_json::from_str(
+                        &Body {
+                            body: None,
+                            file: Some(file.clone()),
+                        }
+                        .read()?
+                        .unwrap(),
+                    )?;
+                    Operation::ReconcileAttempt {
+                        number: *number,
+                        if_version: *if_version,
+                        evidence: serde_json::from_value(
+                            value.get("evidence").cloned().unwrap_or(value),
+                        )?,
+                        outcome: outcome.clone(),
+                    }
+                }
+            },
             Action::Batch { file } => {
                 let raw = Body {
                     body: None,
@@ -1553,6 +1625,41 @@ pub(crate) fn print_text(value: &Value) {
     }
     if let Some(issue) = value.get("issue") {
         print_issue_line(issue);
+        if let Some(hold) = issue.get("attempt_hold").filter(|v| v.is_object()) {
+            println!(
+                "Task attempt protected · pickup paused\nOwner: {} · Attempt: {}\nProcess: {} · {} · {}\nSource: {} · {}\nLog: {}",
+                line(&hold["owner"]),
+                line(&hold["attempt_id"]),
+                hold["pid"],
+                line(&hold["process_start"]),
+                line(&hold["host"]),
+                line(&hold["worktree"]),
+                line(&hold["git_branch"]),
+                line(&hold["log_path"])
+            );
+            println!(
+                "Inspect on the process host: hey-boss issue attempt inspect {} --json{}",
+                issue["number"],
+                command_context(value)
+            );
+        }
+        if let Some(evidence) = value.get("evidence") {
+            println!(
+                "Evidence:\n{}",
+                serde_json::to_string_pretty(evidence).unwrap()
+            );
+        }
+        if let Some(recovery) = issue.get("attempt_recovery") {
+            println!(
+                "Last reconciled attempt: {} · {}\nRetained source: {} · {}\nLog: {}\nOutcome: {}",
+                line(&recovery["hold"]["attempt_id"]),
+                line(&recovery["hold"]["owner"]),
+                line(&recovery["hold"]["worktree"]),
+                line(&recovery["evidence"]["git_branch"]),
+                line(&recovery["hold"]["log_path"]),
+                line(&recovery["outcome"])
+            );
+        }
         if let Some(chain) = value["created_chain"].as_array() {
             for item in chain.iter().skip(1) {
                 print_issue_line(item);

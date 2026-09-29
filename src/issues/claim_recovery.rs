@@ -8,7 +8,7 @@ impl Store {
         let mut stmt = self.db.prepare(
             "SELECT p.id,p.name,i.number,a.metadata,a.last_seen
              FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=i.assignee
-             WHERE i.state='open' AND i.deleted_at IS NULL AND a.last_seen<=?1
+             WHERE i.state='open' AND i.attempt_hold IS NULL AND i.deleted_at IS NULL AND a.last_seen<=?1
              AND json_extract(a.metadata,'$.machine')=?2
              AND (i.assignee LIKE 'codex:%' OR i.assignee LIKE 'claude:%')
              AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL)",
@@ -42,7 +42,7 @@ impl Store {
             // Recheck ownership and activity after obtaining the writer lock.
             let unchanged: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM issues i JOIN agents a ON a.id=i.assignee
-                 WHERE i.project_id=?1 AND i.number=?2 AND i.state='open' AND i.deleted_at IS NULL
+                 WHERE i.project_id=?1 AND i.number=?2 AND i.state='open' AND i.attempt_hold IS NULL AND i.deleted_at IS NULL
                  AND i.assignee=?3 AND a.metadata=?4 AND a.last_seen=?5
                  AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL))",
                 rusqlite::params![project.id, number, actor.id, metadata, last_seen], |r| r.get(0),
