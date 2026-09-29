@@ -66,10 +66,12 @@ pub(super) fn reconcile_issue(
         .assignee
         .as_deref()
         .filter(|id| *id != WATCHER && *id != "human:boss");
-    if active.is_none() {
+    // Blocked tasks cannot have an assignee. Stopping an empty watch must not
+    // lift their dependency/manual hold or abort reconciliation for other PRs.
+    let assignee = active.or_else(|| (issue.state != "blocked").then_some("human:boss"));
+    if assignee == Some("human:boss") {
         ready::register_boss(db, actor, now)?;
     }
-    let assignee = active.unwrap_or("human:boss");
     db.execute("UPDATE issues SET assignment_target=NULL,assignee=?3,version=version+1,updated_at=max(updated_at,?4) WHERE project_id=?1 AND number=?2",params![project,number,assignee,now])?;
     if active.is_none() {
         db.execute(
@@ -86,7 +88,7 @@ pub(super) fn reconcile_issue(
         WATCHER,
         "assigned",
         now,
-        &json!({"target":if active.is_some() {"agent"} else {"boss"},"assignee":assignee,"previous_assignee":issue.assignee,"reason":"no_open_pull_requests"}),
+        &json!({"target":if active.is_some() {"agent"} else if assignee.is_some() {"boss"} else {"unassigned"},"assignee":assignee,"previous_assignee":issue.assignee,"reason":"no_open_pull_requests"}),
     )?;
     Ok(())
 }
