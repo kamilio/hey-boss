@@ -34,8 +34,17 @@ Title, body and label edits use the explicit `--supervisor` route described in
 drafting with an explicit request ID and version. Ordinary reads remain local
 replica snapshots, which can lag behind the authoritative store.
 
+`issue blocked-by NUMBER [BLOCKERS...] --supervisor --if-version VERSION
+--request-id ID` replaces dependency links; omit blockers to clear them. It
+requires `issue_dependencies` support and unassigned, unreserved work with no
+unfinished worker attempt, even when the caller owns the claim. `--force` is
+not supported on this route. The original actor, dependency validation and
+version checks still apply. Successful retries return the original response;
+reuse of an ID with different content fails. No claim or reservation is created
+or released. Dependency state follows the existing Ready/Closed scheduling rules.
+
 `fleet capabilities` reports the negotiated `authority_rpc`, `issue_metadata`
-and `issue_draft`/`issue_reopen` flags, route and supervisor build without fetching fleet
+and `issue_draft`/`issue_reopen`/`issue_dependencies` flags, route and supervisor build without fetching fleet
 history. It also works when the supervisor predates metadata or draft support.
 Missing support produces `fleet_capability_unsupported`, with the missing flag,
 known build and `sent: false`. Run `hey-boss upgrade` on the supervisor to update
@@ -46,3 +55,5 @@ Verification: `cargo test --locked -p hey-boss --test fleet_tunnel`, the authori
 unit tests and existing fleet integration tests. Installed binaries can run the
 18-stage `tools/chief_metadata_checks.mjs` private-fleet qualification; `--serve`
 supports the desktop/phone visual checks in `tools/fleet_tunnel_browser_checks.js`.
+Use `--dependencies --serve` for dependency routing and replication qualification,
+then run `tools/dependency_tunnel_browser_checks.js` for desktop/phone checks.

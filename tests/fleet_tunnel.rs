@@ -452,6 +452,184 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         f.cli("peer", &["fleet", "capabilities"], 0)["capabilities"]["issue_reopen"],
         true
     );
+    // Dependency edits use the same authority and never acquire ownership.
+    assert_eq!(caps["capabilities"]["issue_dependencies"], true);
+    assert!(caps["usage"].as_str().unwrap().contains("blocked-by"));
+    let help = f
+        .command("peer", &["issue", "blocked-by", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("issue_dependencies") && help.contains("--request-id"));
+    let version =
+        f.issue("peer", &["view", "4", "--supervisor"], 0)["issue"]["version"].to_string();
+    let add = [
+        "blocked-by",
+        "4",
+        "7",
+        "--supervisor",
+        "--if-version",
+        &version,
+        "--request-id",
+        "dependency-add",
+    ];
+    let added = f.issue("peer", &add, 0);
+    assert_eq!(added["store"]["host"], "supervisor");
+    assert_eq!(added["issue"]["blocker_numbers"], json!([7]));
+    assert_eq!(added["issue"]["state"], "blocked");
+    assert_eq!(added["issue"]["assignee"], Value::Null);
+    assert_eq!(f.issue("peer", &add, 0), added);
+    let upstream = f.issue("peer", &["view", "7", "--supervisor"], 0);
+    let upstream_version = upstream["issue"]["version"].to_string();
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "blocked-by",
+                "7",
+                "4",
+                "--supervisor",
+                "--if-version",
+                &upstream_version,
+                "--request-id",
+                "dependency-cycle"
+            ],
+            2
+        )["error"]["code"],
+        "invalid_input"
+    );
+    assert_eq!(
+        f.issue("main", &["view", "7"], 0)["issue"],
+        upstream["issue"]
+    );
+    let stale = [
+        "blocked-by",
+        "4",
+        "--supervisor",
+        "--if-version",
+        &version,
+        "--request-id",
+        "dependency-stale",
+    ];
+    assert_eq!(f.issue("peer", &stale, 4)["error"]["code"], "conflict");
+    let changed = [
+        "blocked-by",
+        "4",
+        "--supervisor",
+        "--if-version",
+        &version,
+        "--request-id",
+        "dependency-add",
+    ];
+    assert_eq!(f.issue("peer", &changed, 4)["error"]["code"], "conflict");
+    let current = added["issue"]["version"].to_string();
+    let remove = [
+        "blocked-by",
+        "4",
+        "--supervisor",
+        "--if-version",
+        &current,
+        "--request-id",
+        "dependency-remove",
+    ];
+    let removed = f.issue("peer", &remove, 0);
+    assert_eq!(removed["issue"]["blocker_numbers"], json!([]));
+    assert_eq!(removed["issue"]["state"], "open");
+    assert_eq!(f.issue("peer", &remove, 0), removed);
+    for number in ["2", "3", "10", "11"] {
+        let before = f.issue("main", &["view", number], 0);
+        let version = before["issue"]["version"].to_string();
+        let key = format!("dependency-protected-{number}");
+        assert_eq!(
+            f.issue(
+                "peer",
+                &[
+                    "blocked-by",
+                    number,
+                    "7",
+                    "--supervisor",
+                    "--if-version",
+                    &version,
+                    "--request-id",
+                    &key
+                ],
+                4
+            )["error"]["code"],
+            "conflict"
+        );
+        assert_eq!(
+            f.issue("main", &["view", number], 0)["issue"],
+            before["issue"]
+        );
+    }
+    for args in [
+        vec!["blocked-by", "4", "--if-version", "1"],
+        vec!["blocked-by", "4", "--request-id", "dependency-no-version"],
+        vec![
+            "blocked-by",
+            "4",
+            "--if-version",
+            "0",
+            "--request-id",
+            "dependency-zero",
+        ],
+        vec![
+            "blocked-by",
+            "4",
+            "--if-version",
+            "1",
+            "--request-id",
+            "dependency-force",
+            "--force",
+        ],
+    ] {
+        let mut args = args;
+        args.push("--supervisor");
+        assert_eq!(f.issue("peer", &args, 2)["error"]["code"], "invalid_input");
+    }
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT DISTINCT actor FROM requests WHERE request_id LIKE 'dependency-%'"
+        ),
+        json!([["codex:tunnel-test"]])
+    );
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id LIKE 'dependency-%'"
+        ),
+        json!([[0]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT count(*) FROM fleet_allocations WHERE issue_number=4"
+        ),
+        json!([[0]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT node FROM fleet_allocations WHERE issue_number=10"
+        ),
+        json!([["offline-device"]])
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT finished_at FROM worker_runs WHERE id IN ('reserved','uncertain')"
+        ),
+        json!([[null], [null]])
+    );
+    // A successful retry must not rerun guards or overwrite a newer live owner.
+    f.issue("main", &["claim", "4"], 0);
+    let claimed = f.issue("main", &["view", "4"], 0);
+    assert_eq!(f.issue("peer", &remove, 0), removed);
+    assert_eq!(
+        f.issue("main", &["view", "4"], 0)["issue"],
+        claimed["issue"]
+    );
     let supervisor = f.services.last_mut().unwrap();
     unsafe {
         libc::kill(supervisor.id() as i32, libc::SIGTERM);
@@ -480,6 +658,32 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         1,
     );
     assert_eq!(offline["error"]["code"], "fleet_unavailable");
+    let before = f.issue("peer", &["view", "4"], 0);
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "blocked-by",
+                "4",
+                "7",
+                "--supervisor",
+                "--if-version",
+                "1",
+                "--request-id",
+                "dependency-offline"
+            ],
+            1
+        )["error"]["code"],
+        "fleet_unavailable"
+    );
+    assert_eq!(f.issue("peer", &["view", "4"], 0)["issue"], before["issue"]);
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id='dependency-offline'"
+        ),
+        json!([[0]])
+    );
     assert_eq!(
         f.issue(
             "peer",
