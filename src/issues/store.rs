@@ -15,6 +15,8 @@ mod agent_launches;
 pub(super) mod chief;
 #[path = "claim_recovery.rs"]
 mod claim_recovery;
+#[path = "coordination.rs"]
+pub(crate) mod coordination;
 #[path = "../mindmap/store.rs"]
 mod mindmap;
 #[path = "origin_reader.rs"]
@@ -23,8 +25,6 @@ mod origin_reader;
 mod registry;
 #[path = "steering.rs"]
 mod steering;
-#[path = "coordination.rs"]
-pub(crate) mod coordination;
 #[path = "subtasks.rs"]
 mod subtasks;
 #[path = "worker_store.rs"]
