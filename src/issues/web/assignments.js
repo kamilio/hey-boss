@@ -92,7 +92,99 @@
     }).join("");
     return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries || (!error && !paused ? '<p class="assignment-detail">Waiting for the first GitHub status.</p>' : "")}${omittedPrs}</section>`;
   }
-  const api = {current, describe, render, status, fetchOverview};
+  function initWatcher({list, context, read, refresh, actorName, bossName, icon}) {
+    if (document.querySelector(".github-watcher-dialog")) return;
+    const dialog = document.createElement("dialog");
+    dialog.className = "github-watcher-dialog";
+    dialog.setAttribute("aria-labelledby", "github-watcher-title");
+    dialog.innerHTML = `<header class="dialog-heading"><h2 id="github-watcher-title">GitHub watcher</h2><button type="button" class="button" data-close aria-label="Close watcher">Close</button></header><div class="dialog-content"><a data-issue-link></a><div data-watcher-content></div><p class="github-status-error" data-error role="status" hidden></p></div>`;
+    document.body.append(dialog);
+    const content = dialog.querySelector("[data-watcher-content]"), error = dialog.querySelector("[data-error]");
+    let active = null;
+    const valid = ctx => active === ctx && dialog.open;
+    function renderWatcher(ctx, issue) {
+      const description = describe(issue, {actorName, bossName:bossName()});
+      const actor = current(issue).actor;
+      const trace = actor ? '/agents/session#' + new URLSearchParams({project:ctx.project, issue:ctx.number, agent:actor}) : null;
+      const html = `<p class="assignment-detail">${esc(description.detail)}</p>${trace ? `<p><a href="${esc(trace)}">Open agent conversation</a></p>` : ""}${fetchOverview(issue)}${status(issue, {icon})}`;
+      if (html === ctx.html) return;
+      const detailKey = el => `${el.closest("article")?.querySelector("h4 a")?.href}:${el.querySelector("summary")?.textContent}`;
+      const expanded = new Set([...content.querySelectorAll("details[open]")].map(detailKey));
+      const fetchFocused = content.querySelector(".github-fetch-now") === document.activeElement;
+      content.innerHTML = html;
+      ctx.html = html;
+      content.querySelectorAll("details").forEach(el => { el.open = expanded.has(detailKey(el)); });
+      if (fetchFocused) content.querySelector(".github-fetch-now:not(:disabled)")?.focus();
+    }
+    async function update(ctx, force = false) {
+      if (ctx.pending) {
+        if (!force) return;
+        await ctx.pending;
+      }
+      if (!valid(ctx)) return;
+      clearTimeout(ctx.timer);
+      if (!force && document.hidden) {
+        ctx.timer = setTimeout(() => update(ctx), 5000);
+        return;
+      }
+      error.hidden = true;
+      if (force) content.querySelector(".github-fetch-now")?.setAttribute("disabled", "");
+      ctx.pending = (async () => {
+        try {
+          const result = await (force ? refresh(ctx) : read(ctx));
+          if (valid(ctx)) {
+            // Force a render after a manually disabled button, even on an unchanged response.
+            if (force) ctx.html = null;
+            renderWatcher(ctx, result.issue);
+          }
+        } catch (failure) {
+          if (valid(ctx)) {
+            error.textContent = failure.message || "Unable to load GitHub watcher status.";
+            error.hidden = false;
+            if (force) content.querySelector(".github-fetch-now")?.removeAttribute("disabled");
+          }
+        }
+      })();
+      await ctx.pending;
+      ctx.pending = null;
+      if (valid(ctx)) ctx.timer = setTimeout(() => update(ctx), 5000);
+    }
+    function close() {
+      if (!active) return;
+      const ctx = active;
+      active = null;
+      clearTimeout(ctx.timer);
+      if (dialog.open) dialog.close();
+      const trigger = ctx.trigger.isConnected ? ctx.trigger : list.querySelector(`[data-open-watcher="${ctx.number}"]`);
+      trigger?.focus();
+    }
+    dialog.querySelector("[data-close]").onclick = close;
+    dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+    dialog.addEventListener("close", () => { if (!dialog.open) close(); });
+    window.addEventListener("hashchange", close);
+    content.addEventListener("click", event => {
+      const button = event.target.closest('[data-action="refresh_github"]');
+      if (!button || button.disabled || !active) return;
+      button.disabled = true;
+      update(active, true);
+    });
+    list.addEventListener("click", event => {
+      const trigger = event.target.closest("[data-open-watcher]");
+      if (!trigger) return;
+      const number = Number(trigger.dataset.openWatcher);
+      close();
+      const ctx = {...context(number), number, trigger};
+      active = ctx;
+      const link = dialog.querySelector("[data-issue-link]");
+      link.href = ctx.issueUrl;
+      link.textContent = `Issue #${number}`;
+      content.innerHTML = '<p class="assignment-detail" role="status">Loading watcher activity…</p>';
+      error.hidden = true;
+      dialog.showModal();
+      update(ctx);
+    });
+  }
+  const api = {current, describe, render, status, fetchOverview, initWatcher};
   if (typeof module !== "undefined") module.exports = api;
   else root.IssueAssignments = api;
 })(globalThis);
