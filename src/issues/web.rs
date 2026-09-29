@@ -619,6 +619,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 include_bytes!("web/status.js"),
             )),
             "/app.css" => Some(("text/css; charset=utf-8", include_bytes!("web/app.css"))),
+            "/project-settings.css" => Some((
+                "text/css; charset=utf-8",
+                include_bytes!("web/project-settings.css"),
+            )),
             "/components.css" => Some((
                 "text/css; charset=utf-8",
                 include_bytes!("web/components.css"),

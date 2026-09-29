@@ -1,0 +1,110 @@
+#project-settings-dialog {
+  width: min(880px, calc(100vw - 32px));
+  overflow: hidden;
+}
+#project-settings-form {
+  display: flex;
+  flex-direction: column;
+  height: min(760px, calc(100dvh - 48px));
+}
+#project-settings-form .dialog-heading,
+#project-settings-form .dialog-footer,
+.project-settings-tabs {
+  flex-shrink: 0;
+}
+#project-settings-form .dialog-heading {
+  border-bottom: 0;
+  padding-bottom: 12px;
+}
+#project-settings-state {
+  display: block;
+}
+#project-settings-name {
+  margin: 0;
+  padding: 0 24px 16px;
+  overflow-wrap: anywhere;
+}
+.project-settings-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 24px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+}
+.project-settings-tabs [role="tab"] {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.project-settings-tabs [role="tab"]:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.project-settings-tabs [aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.project-settings-tabs [role="tab"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -4px;
+  border-radius: 4px;
+}
+#project-settings-form .project-settings-body {
+  display: block;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+#project-settings-form [role="tabpanel"][hidden] {
+  display: none;
+}
+#project-settings-form .settings-section:last-child {
+  margin-bottom: 0;
+}
+#project-settings-form .settings-preview {
+  position: static;
+}
+#project-settings-form .planning-settings h3 {
+  margin-bottom: 14px;
+}
+#project-prompt {
+  min-height: 180px;
+}
+#project-settings-error {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 12px 24px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+@media (max-width: 600px) {
+  #project-settings-name {
+    padding: 0 16px 12px;
+  }
+  .project-settings-tabs {
+    padding: 0 12px;
+    gap: 0;
+  }
+  .project-settings-tabs [role="tab"] {
+    padding: 10px 12px;
+  }
+  #project-settings-form .workflow-prompt,
+  #project-settings-form .text-input {
+    font-size: 16px;
+  }
+  #project-settings-error {
+    padding: 10px 16px;
+  }
+  #project-settings-state {
+    font-size: 11px;
+  }
+}
