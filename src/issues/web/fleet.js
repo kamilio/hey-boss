@@ -62,6 +62,7 @@ function retryLabel(run, now = Date.now()) {
   return seconds ? 'Retry in ' + (seconds < 60 ? seconds + 's' : Math.ceil(seconds / 60) + 'm') : 'Waiting to retry';
 }
 function agentState(entry) {
+  if (entry.run.state === 'attempt_held') return 'Task attempt protected';
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
   if (entry.run.kind === 'chief') return entry.run.state === 'running' ? 'Running' : entry.run.state === 'idle' ? 'Completed' : ['failed','blocked'].includes(entry.run.state) ? 'Failed' : 'Stopped';
   if (entry.run.retry_at != null) return retryLabel(entry.run);

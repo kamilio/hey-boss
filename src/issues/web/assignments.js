@@ -14,7 +14,7 @@
   function current(issue) {
     return issue.assignment || (issue.assignee === "watcher:github" ? {kind:"github", waiting:true} : issue.assignee === "human:boss" ? {kind:"boss"} : issue.assignee ? {kind:"agent", actor:issue.assignee} : {kind:"unassigned"});
   }
-  function describe(issue, {actorName, bossName}) {
+  function describeAssignment(issue, {actorName, bossName}) {
     const a = current(issue), machine = a.machine_name || a.machine;
     if (a.kind === "github") return {label:"GitHub watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for required failures or all checks to finish." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
     if (a.kind === "machine") return {label:machine || "Machine", detail:"Waiting for an agent.", icon:"monitor"};
@@ -22,9 +22,14 @@
     if (a.kind === "boss") return {label:bossName, detail:"Assigned to you.", icon:"user"};
     return {label:"Unassigned", detail:"An available machine can pick this up.", icon:"user"};
   }
+  function describe(issue, helpers) {
+    const description = describeAssignment(issue, helpers);
+    if (issue.attempt_hold) description.detail = "Pickup is paused until the retained attempt is reconciled.";
+    return description;
+  }
   function render(value, helpers) {
     const issue = value.issue, a = current(issue), description = describe(issue, helpers);
-    const editable = ["open", "ready"].includes(issue.state) && !issue.deleted_at && !issue.draft;
+    const editable = ["open", "ready"].includes(issue.state) && !issue.deleted_at && !issue.draft && !issue.attempt_hold;
     const hasPr = issue.pull_requests?.some(watchablePr);
     const selected = a.kind === "github" ? "github" : a.kind === "boss" ? "boss" : a.kind === "machine" ? `machine:${a.machine}` : a.kind === "agent" ? "active" : "unassigned";
     const targets = [{id:"unassigned", name:"Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub watcher", disabled:!hasPr}];

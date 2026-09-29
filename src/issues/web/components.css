@@ -1064,3 +1064,11 @@ textarea::placeholder {
 #blocker-picker-dialog { width:min(560px, calc(100vw - 32px)); max-height:calc(100dvh - 32px); }
 #blocker-picker-results { max-height:50dvh; overflow:auto; margin-top:12px; }
 #blocker-picker-results .subtask-option { width:100%; overflow-wrap:anywhere; }
+:root .attempt-notice { align-items: flex-start; }
+.attempt-notice > div:last-child { min-width: 0; }
+.attempt-notice details { margin-top: 12px; }
+.attempt-notice summary { cursor: pointer; font-weight: 600; }
+.attempt-notice dl { margin: 12px 0 0; }
+.attempt-notice dl > div { margin-top: 8px; }
+.attempt-notice dt { font-size: 12px; font-weight: 600; }
+.attempt-notice dd { margin: 2px 0 0; overflow-wrap: anywhere; }

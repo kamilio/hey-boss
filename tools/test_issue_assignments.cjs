@@ -119,3 +119,11 @@ test('a bounded multi-PR status discloses omitted PRs and source errors', () => 
   assert.match(html,/Status incomplete/);
   assert.match(html,/2 source errors/);
 });
+
+test('a surviving attempt disables reassignment and never promises pickup', () => {
+  const issue={...base,attempt_hold:{attempt_id:'retained'},assignment:{kind:'unassigned'}};
+  const html=assignments.render({issue},helpers);
+  assert.match(html,/data-assignment-select[^>]*disabled/);
+  assert.match(html,/Pickup is paused until the retained attempt is reconciled/);
+  assert.doesNotMatch(html,/An available machine can pick this up/);
+});

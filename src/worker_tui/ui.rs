@@ -147,7 +147,9 @@ fn run_label(run: &Value) -> String {
 }
 
 fn run_state(run: &Value) -> String {
-    if run["retry_at"].is_i64() {
+    if run["state"] == "attempt_held" {
+        "Task attempt protected".into()
+    } else if run["retry_at"].is_i64() {
         "Retry scheduled".into()
     } else if run["state"] == "infrastructure_blocked" {
         let summary = run["summary"].as_str().unwrap_or("");
