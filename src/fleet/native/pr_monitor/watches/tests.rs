@@ -53,6 +53,11 @@ fn queue_scenario(hold_details: bool) {
         .execute(&request(json!({"action":"view","number":1})))
         .unwrap();
     store.execute(&request(json!({"action":"assign","number":1,"target":"github","if_version":view["issue"]["version"]}))).unwrap();
+    if hold_details {
+        store
+            .execute(&request(json!({"action":"refresh_github","number":1})))
+            .unwrap();
+    }
     drop(store);
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let client =
@@ -77,6 +82,11 @@ fn queue_scenario(hold_details: bool) {
                 .unwrap()
                 .expect("Other PRs must progress while one detail read waits");
             let path = incoming.url().split('?').next().unwrap();
+            assert!(incoming.url().ends_with(if hold_details {
+                "?refresh=true"
+            } else {
+                "?max_age_seconds=30"
+            }));
             let number: u64 = path.split('/').nth(5).unwrap().parse().unwrap();
             if path.ends_with("required-checks") {
                 required.insert(number);
@@ -133,6 +143,14 @@ fn queue_scenario(hold_details: bool) {
         count
     );
     assert!(view["issue"]["assignee"].is_null());
+    let fetches = view["issue"]["github_status"]["fetches"]
+        .as_object()
+        .unwrap();
+    assert_eq!(fetches.len(), count);
+    for fetch in fetches.values() {
+        assert!(fetch["finished_at"].as_i64().unwrap() >= fetch["started_at"].as_i64().unwrap());
+        assert!(fetch["requested_at"].is_null());
+    }
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }

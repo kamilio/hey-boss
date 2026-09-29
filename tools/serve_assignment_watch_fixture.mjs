@@ -3,12 +3,13 @@ import {mkdirSync, copyFileSync, readFileSync, rmSync} from 'node:fs';
 import {spawn, spawnSync} from 'node:child_process';
 import {createServer, request} from 'node:http';
 import {resolve} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
 
 const root = resolve('output/playwright/assignment-watch');
 mkdirSync(root, {recursive: true});
 const binary = root + '/hey-boss-visual', database = root + '/issues.db';
 for (const suffix of ['', '-wal', '-shm']) rmSync(database + suffix, {force: true});
-copyFileSync(resolve('target/debug/hey-boss'), binary);
+copyFileSync(resolve(process.env.HEY_BOSS_TEST_BINARY || 'target/debug/hey-boss'), binary);
 const env = {...process.env, HEY_BOSS_ISSUE_DB: database, HEY_BOSS_FLEET_STATE: root,
   HEY_BOSS_FLEET_DESIRED: root + '/absent-fleet.json',
   HEY_BOSS_INBOX_SOCKET: root + '/absent.sock'};
@@ -18,21 +19,22 @@ const project = 'named:Assignment QA';
 // database companion when the setup CLI runs.
 const web = spawn(binary, ['issue', '--project', project, 'web', '--port', '48697', '--no-discovery', '--json'], {env, stdio:['ignore','inherit','inherit']});
 process.on('exit', () => web.kill('SIGTERM'));
-let started = false;
+let started = false, startupError = "";
 for (let attempt = 0; attempt < 100; attempt++) {
-  try { const response = await fetch('http://127.0.0.1:48697/'); if (response.ok) { started = true; break; } } catch {}
+  try { const response = await fetch('http://127.0.0.1:48697/'); if (response.ok) { started = true; break; } startupError = `HTTP ${response.status}`; } catch (error) { startupError = error.message; }
   if (web.exitCode !== null) break;
   await new Promise(resolve => setTimeout(resolve, 100));
 }
-if (!started) { web.kill('SIGTERM'); throw Error('Fixture web server did not start'); }
+if (!started) { web.kill('SIGTERM'); throw Error('Fixture web server did not start: ' + startupError); }
 const cli = args => {
   const result = spawnSync(binary, ['issue', '--project', project, '--agent', 'human:boss', '--json', ...args], {env, encoding: 'utf8'});
   if (result.status) throw Error(result.stderr + result.stdout);
   return JSON.parse(result.stdout);
 };
 const sql = text => {
-  const result = spawnSync('sqlite3', [database], {input: text, encoding: 'utf8'});
-  if (result.status) throw Error(result.stderr);
+  const db = new DatabaseSync(database);
+  try { db.exec('PRAGMA busy_timeout=5000;'); db.exec(text); }
+  finally { db.close(); }
 };
 const quote = value => "'" + String(value).replaceAll("'", "''") + "'";
 for (const [index, title] of [
@@ -48,7 +50,7 @@ for (const [index, title] of [
   cli(['create', '--title', title, '--body', 'Check the assignment and current GitHub status.']);
   if (![4, 5].includes(index + 1)) {
     cli(['pr', 'add', number, 'https://github.com/example/project/pull/' + number, '--purpose', 'fix']);
-    cli(['assign', number, 'github', '--if-version', String(cli(['view', number]).issue.version)]);
+    cli(['assign', number, 'github']);
   }
 }
 sql(`CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -57,7 +59,7 @@ sql(`CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT 
     {node:'laptop', hostname:'MacBook Pro', host:'local', state:'connected', workers:[]},
     {node:'offline', hostname:'Offline device with a long but readable name', host:'remote', state:'disconnected', workers:[]}
   ]))});`);
-cli(['assign', '4', 'machine:devbox', '--if-version', String(cli(['view', '4']).issue.version)]);
+cli(['assign', '4', 'machine:devbox']);
 const timestamp = Date.now();
 for (const number of [1, 2, 3, 6, 7]) {
   const failed = [2, 3].includes(number);
@@ -68,6 +70,7 @@ for (const number of [1, 2, 3, 6, 7]) {
     source_errors:[],ci_errors:[],policy_errors:[]};
   const url = 'https://github.com/example/project/pull/' + number;
   const status = {prs:{[url]:{head:evidence.head,checked_at:timestamp,evidence,...(number===7?{error:'GitHub rate limit reached. Monitoring will retry after the cooldown.'}:{})}}};
+  sql(`INSERT INTO github_fetch_status(url,requested_at,started_at,finished_at,next_at,error) VALUES(${quote(url)},${number === 6 ? timestamp : 'NULL'},${timestamp - (number === 2 ? 1000 : 65000)},${timestamp - 60000},${timestamp + (number === 7 ? 300000 : 30000)},${number === 7 ? quote('GitHub rate limit reached') : 'NULL'});`);
   if (failed || number === 6) status.event = 'fixture-event-' + number;
   sql(`INSERT INTO issue_github_watches VALUES(${quote(project)},${number},${quote(JSON.stringify(status))});`);
 }

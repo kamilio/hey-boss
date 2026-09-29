@@ -133,7 +133,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -231,6 +231,7 @@ impl Relay {
                             "issue_ready": message["capabilities"]["issue_ready"] == true,
                             "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
                             "issue_assignment": message["capabilities"]["issue_assignment"] == true,
+                            "issue_github_refresh": message["capabilities"]["issue_github_refresh"] == true,
                         });
                         return Ok(capability_report(
                             "supervisor_tunnel",
@@ -276,6 +277,7 @@ impl Relay {
                                     .then_some("issue_ready_keep_draft"),
                             )
                             .chain(matches!(metadata.operation,crate::issues::Operation::Assign{..}).then_some("issue_assignment"))
+                            .chain(matches!(metadata.operation,crate::issues::Operation::RefreshGithub{..}).then_some("issue_github_refresh"))
                         {
                             if message["capabilities"][capability] != true {
                                 return Err(unsupported(capability, &message["build"]).into());
@@ -474,6 +476,14 @@ mod tests {
         assert_eq!(capabilities["route"], "supervisor_tunnel");
         assert_eq!(capabilities["capabilities"]["issue_metadata"], false);
         relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
+        let refresh = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"refresh-old","operation":{"action":"refresh_github","number":1}}});
+        let error = call(&ctx.state, &ctx.path, refresh).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_github_refresh"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
         let receipt = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"request_status","id":"original"}}});
         let error = call(&ctx.state, &ctx.path, receipt).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");

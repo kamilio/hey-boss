@@ -20,6 +20,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             force: false,
             ..
         } if *version > 0 => {}
+        Operation::RefreshGithub { .. } => {}
         Operation::Ready { guard: Some(_), .. } => {}
         Operation::Assign { if_version, .. } if *if_version > 0 => {}
         Operation::Batch { edits }

@@ -834,7 +834,7 @@ async function refresh(quiet = true) {
     ]);
     if (sequence !== model.sequence || model.orderDragging || model.orderSaving)
       return;
-    $$("time[datetime]").forEach((time) => {
+    $$("time[datetime]:not([data-absolute])").forEach((time) => {
       const text = relative(Date.parse(time.dateTime));
       if (time.textContent !== text) time.textContent = text;
     });
@@ -863,6 +863,24 @@ async function refresh(quiet = true) {
         if (changed) {
           if (updateIssueProgress?.(result.issue) === "remount") mountIssueProgress(result.issue);
           model.detail.issue.status = result.issue.status;
+          detailCache.delete(detailKey(project, result.issue.number));
+        }
+      }
+      // Watcher telemetry changes independently of issue versions. Refresh only
+      // its sidebar so background polls never replace a comment draft.
+      if (model.detail && result.issue.version === model.detail.issue.version &&
+          JSON.stringify(result.issue.assignment) === JSON.stringify(model.detail.issue.assignment)) {
+        const overview = $(".github-fetch-overview");
+        const html = IssueAssignments.fetchOverview(result.issue);
+        if (overview && !overview.contains(document.activeElement)) {
+          const template = document.createElement("template");
+          template.innerHTML = html;
+          if (!overview.isEqualNode(template.content.firstElementChild)) overview.replaceWith(template.content);
+        }
+        if (JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status)) {
+          const status = $(".github-watch-status");
+          if (status) status.outerHTML = IssueAssignments.status(result.issue, {icon});
+          model.detail.issue.github_status = result.issue.github_status;
           detailCache.delete(detailKey(project, result.issue.number));
         }
       }
@@ -1304,6 +1322,7 @@ async function performAction(action, button) {
     }
     toast(
       {
+        refresh_github: "GitHub fetch queued",
         claim: "Assigned to you",
         assign_boss: `Assigned to ${model.boss.name}`,
         unassign: "Claim released",
