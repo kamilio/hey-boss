@@ -77,7 +77,7 @@ pub fn run(options: &Options) -> Result<()> {
                         .filter(|v| {
                             matches!(
                                 v.as_str(),
-                                "open" | "blocked" | "closed" | "deleted" | "all"
+                                "open" | "blocked" | "ready" | "closed" | "deleted" | "all"
                             )
                         })
                         .cloned()
