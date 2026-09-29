@@ -18,7 +18,6 @@ pub struct Details {
 struct Policy {
     min_age: u64,
     manual: bool,
-    discard_ignored: bool,
 }
 
 const AGGRESSIVE_WORKTREE_IDLE_SECONDS: u64 = 4 * 3600;
@@ -105,6 +104,8 @@ fn git(path: &Path, args: &[&str]) -> Command {
             "core.hooksPath=/dev/null",
             "-c",
             "maintenance.auto=false",
+            "-c",
+            "advice.sparseIndexExpanded=false",
             "-C",
         ])
         .arg(path)
@@ -286,6 +287,80 @@ fn remote_base(path: &Path) -> Option<String> {
         })
 }
 
+// Remote-tracking refs make scanning cheap, but can outlive a deleted branch.
+// Before deletion, match a locally proven descendant against live remote heads.
+fn verify_published(path: &Path, head: &str) -> io::Result<()> {
+    let known_tips = || -> io::Result<BTreeSet<String>> {
+        let mut tips: BTreeSet<_> = git_text(
+            path,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "--contains",
+                head,
+                "refs/heads/",
+                "refs/remotes/",
+            ],
+        )?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+        tips.insert(head.to_owned());
+        Ok(tips)
+    };
+    let mut known = known_tips()?;
+    for remote in git_text(path, &["remote"])?.lines() {
+        let advertised =
+            match text_with_remote_timeout(&mut git(path, &["ls-remote", "--heads", "--", remote]))
+            {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+        let tips: BTreeSet<_> = advertised
+            .lines()
+            .filter_map(|line| {
+                let (hash, name) = line.split_once('\t')?;
+                (name.starts_with("refs/heads/")
+                    && matches!(hash.len(), 40 | 64)
+                    && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| hash.to_owned())
+            })
+            .collect();
+        if !known.is_disjoint(&tips) {
+            return Ok(());
+        }
+        // A branch may have advanced since the last local fetch. Refresh once
+        // for this remote; compare against the advertised immutable commits.
+        if !tips.is_empty()
+            && text_with_remote_timeout(&mut git(
+                path,
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--recurse-submodules=no",
+                    "--",
+                    remote,
+                ],
+            ))
+            .is_ok()
+        {
+            known = known_tips()?;
+            if !known.is_disjoint(&tips) {
+                return Ok(());
+            }
+        }
+    }
+    Err(super::preserved(
+        "Cannot verify HEAD on a live remote branch; preserved",
+    ))
+}
+
+fn text_with_remote_timeout(command: &mut Command) -> io::Result<String> {
+    super::text_within(command, Duration::from_secs(30))
+}
+
 fn check_submodules(path: &Path) -> io::Result<()> {
     // Gitlinks may exist without .gitmodules. Large monorepo indexes can exceed
     // the ordinary command-output limit; still fail closed on incomplete output.
@@ -398,7 +473,6 @@ fn eligible(
         .parse::<u64>()
         .map_err(io::Error::other)?;
     for path in [
-        w.path.clone(),
         w.path.join(".git"),
         admin.join("HEAD"),
         admin.join("index"),
@@ -421,12 +495,8 @@ fn eligible(
                 "status",
                 "--porcelain=v1",
                 "-z",
-                "--untracked-files=all",
-                if policy.discard_ignored {
-                    "--ignored=no"
-                } else {
-                    "--ignored=matching"
-                },
+                "--untracked-files=no",
+                "--ignored=no",
             ],
         ),
         Duration::from_secs(15),
@@ -434,7 +504,7 @@ fn eligible(
     )?;
     if !clean {
         return Err(super::preserved(
-            "Modified, untracked, or ignored files; preserved",
+            "Tracked files modified or staged; preserved",
         ));
     }
     let head = git_text(&w.path, &["rev-parse", "HEAD"])?;
@@ -443,12 +513,17 @@ fn eligible(
             "Checkout changed during inspection; preserved",
         ));
     }
-    let retained_branch = git_text(&w.path, &["symbolic-ref", "--quiet", "HEAD"])
-        .ok()
-        .filter(|s| s.starts_with("refs/heads/"))
-        .is_some_and(|branch| {
-            git_text(&w.path, &["rev-parse", "--verify", &branch]).is_ok_and(|value| value == head)
-        });
+    let published = !git_text(
+        &w.path,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "--contains",
+            &head,
+            "refs/remotes/",
+        ],
+    )?
+    .is_empty();
     let merged = remote_base(&w.path).is_some_and(|base| {
         output(
             &mut git(&w.path, &["merge-base", "--is-ancestor", &head, &base]),
@@ -456,9 +531,9 @@ fn eligible(
         )
         .is_ok_and(|o| o.status.success())
     });
-    if !merged && !retained_branch {
+    if !published {
         return Err(super::preserved(
-            "Commits not merged into the remote default branch; preserved",
+            "Commits not verified on a remote branch; preserved",
         ));
     }
     let files = super::output_with_limit(
@@ -470,9 +545,22 @@ fn eligible(
         return Err(io::Error::other("Cannot inspect tracked files; preserved"));
     }
     for file in files.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+        if let Some(sparse) = file.strip_prefix(b"S ") {
+            // Sparse checkout omits tracked files intentionally. Existing files
+            // can hide edits behind skip-worktree, so only absence is safe.
+            match std::fs::symlink_metadata(w.path.join(std::ffi::OsStr::from_bytes(sparse))) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+                Ok(_) => {
+                    return Err(super::preserved(
+                        "Present skip-worktree file may hide edits; index flags preserved",
+                    ));
+                }
+            }
+        }
         let Some(file) = file.strip_prefix(b"H ") else {
             return Err(super::preserved(
-                "Assume-unchanged, sparse, or unusual index flags; preserved",
+                "Assume-unchanged or unusual index flags; preserved",
             ));
         };
         let path = w.path.join(std::ffi::OsStr::from_bytes(file));
@@ -510,12 +598,8 @@ fn activity() -> io::Result<(Table, Vec<PathBuf>)> {
     Ok((table, paths))
 }
 
-/// Explicit checkout removal bypasses age only. A named branch retains unmerged commits.
+/// Explicit checkout removal bypasses age only; commits must be published.
 pub fn remove_one(path: &Path) -> io::Result<()> {
-    remove_one_with_policy(path, false)
-}
-
-fn remove_one_with_policy(path: &Path, discard_ignored: bool) -> io::Result<()> {
     if !path.is_absolute() || path.canonicalize()? != path {
         return Err(io::Error::other(
             "Select an absolute, non-symlinked worktree path",
@@ -541,7 +625,6 @@ fn remove_one_with_policy(path: &Path, discard_ignored: bool) -> io::Result<()> 
     let policy = Policy {
         min_age: 0,
         manual: true,
-        discard_ignored,
     };
     let (table, paths) = activity()?;
     let head = eligible(selected, &main, &[], &paths, &table, policy, now())?;
@@ -556,7 +639,7 @@ fn remove_one_with_policy(path: &Path, discard_ignored: bool) -> io::Result<()> 
     if head != checked {
         return Err(io::Error::other("Worktree HEAD changed; preserved"));
     }
-    remove_checkout_with_policy(path, discard_ignored)?;
+    remove_checkout(path)?;
     Ok(())
 }
 
@@ -621,7 +704,6 @@ pub fn clean(
                 Policy {
                     min_age: config.worktree_min_age_days * 86400,
                     manual: false,
-                    discard_ignored: false,
                 },
                 at,
             );
@@ -649,9 +731,9 @@ pub fn clean(
             retained.insert(key.clone());
             let ready = at.saturating_sub(first) >= config.observation_seconds;
             let mut detail = if ready {
-                "Clean and unused; merged or old with a retained branch"
+                "Tracked files clean and commits published; unused"
             } else {
-                "Merged or old with a retained branch; observing before cleanup"
+                "Tracked files clean and commits published; observing before cleanup"
             }
             .to_owned();
             if ready && apply {
@@ -684,7 +766,6 @@ pub fn clean(
                         Policy {
                             min_age: config.worktree_min_age_days * 86400,
                             manual: false,
-                            discard_ignored: false,
                         },
                         now(),
                     ) {
@@ -698,7 +779,7 @@ pub fn clean(
                         match remove_checkout(&w.path) {
                             Ok(()) if !w.path.exists() => {
                                 removed += 1;
-                                detail = "Removed clean merged checkout; branch retained".into();
+                                detail = "Removed published checkout; branch retained".into();
                                 observations.remove(&key);
                             }
                             Ok(()) => detail = "Checkout reappeared; preserved".into(),
@@ -725,6 +806,22 @@ pub fn clean(
     }
     observations.retain(|k, _| retained.contains(k));
     Ok((items, removed))
+}
+
+#[cfg(test)]
+fn publish_fixture(repo: &Path) {
+    let common = common_directory(repo).unwrap();
+    let remote = common
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("remote.git");
+    if !remote.exists() {
+        git_text(repo, &["init", "--bare", remote.to_str().unwrap()]).unwrap();
+        git_text(repo, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+    }
+    git_text(repo, &["push", "origin", "HEAD:refs/heads/published"]).unwrap();
 }
 
 #[cfg(test)]
@@ -774,7 +871,6 @@ mod tests {
                         Policy {
                             min_age: 0,
                             manual: false,
-                            discard_ignored: false,
                         },
                         now(),
                     )
@@ -814,6 +910,210 @@ mod tests {
                 "inspection failure missing from error count (aggressive={aggressive})"
             );
         }
+    }
+
+    #[test]
+    fn clean_sparse_worktrees_are_removable_but_hidden_files_are_preserved() {
+        for sparse_index in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "harvester-sparse-{}-{sparse_index}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(root.join("main/included")).unwrap();
+            let root = root.canonicalize().unwrap();
+            let main = root.join("main");
+            let work = root.join("work");
+            std::fs::create_dir(main.join("excluded")).unwrap();
+            std::fs::write(main.join("included/file"), "included").unwrap();
+            std::fs::write(main.join("excluded/file"), "excluded").unwrap();
+            git_text(&main, &["init", "-b", "main"]).unwrap();
+            git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+            git_text(&main, &["config", "user.name", "Test"]).unwrap();
+            git_text(&main, &["add", "."]).unwrap();
+            git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+            git_text(
+                &main,
+                &["worktree", "add", "-b", "sparse", work.to_str().unwrap()],
+            )
+            .unwrap();
+            git_text(
+                &work,
+                &[
+                    "sparse-checkout",
+                    "set",
+                    "--cone",
+                    if sparse_index {
+                        "--sparse-index"
+                    } else {
+                        "--no-sparse-index"
+                    },
+                    "included",
+                ],
+            )
+            .unwrap();
+            let w = list(&main).unwrap().remove(1);
+            git_text(&main, &["update-ref", "refs/remotes/origin/main", &w.head]).unwrap();
+            let check = || {
+                aggressive_eligible(
+                    &w,
+                    &main,
+                    std::slice::from_ref(&root),
+                    &[],
+                    &Table::new(),
+                    now() + 172800,
+                )
+            };
+            assert!(!work.join("excluded/file").exists());
+            assert!(
+                check().is_ok(),
+                "absent sparse files are safe: {:?}",
+                check()
+            );
+            // A file materialized outside the cone can hide local edits.
+            std::fs::create_dir(work.join("excluded")).unwrap();
+            std::fs::write(work.join("excluded/file"), "unpublished edits").unwrap();
+            assert!(check().is_err());
+            assert_eq!(
+                std::fs::read_to_string(work.join("excluded/file")).unwrap(),
+                "unpublished edits"
+            );
+            std::fs::remove_file(work.join("excluded/file")).unwrap();
+            git_text(&work, &["sparse-checkout", "reapply"]).unwrap();
+            git_text(
+                &work,
+                &["update-index", "--assume-unchanged", "included/file"],
+            )
+            .unwrap();
+            std::fs::write(work.join("included/file"), "hidden edits").unwrap();
+            assert!(check().is_err());
+            std::fs::write(work.join("included/file"), "included").unwrap();
+            git_text(
+                &work,
+                &["update-index", "--no-assume-unchanged", "included/file"],
+            )
+            .unwrap();
+            publish_fixture(&work);
+            remove_checkout(&work).unwrap();
+            assert!(!work.exists());
+            assert_eq!(git_text(&main, &["rev-parse", "sparse"]).unwrap(), w.head);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_pushed_commits_and_ignores_untracked_logs() {
+        let root = std::env::temp_dir().join(format!("harvester-pushed-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("main")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main = root.join("main");
+        let work = root.join("work");
+        git_text(&main, &["init", "-b", "main"]).unwrap();
+        git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+        git_text(&main, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(main.join("source"), "published").unwrap();
+        git_text(&main, &["add", "."]).unwrap();
+        git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+        publish_fixture(&main);
+        git_text(
+            &main,
+            &["worktree", "add", "-b", "feature", work.to_str().unwrap()],
+        )
+        .unwrap();
+        std::fs::write(work.join("source"), "local commit").unwrap();
+        git_text(&work, &["commit", "-am", "feature"]).unwrap();
+        let check = || {
+            let w = list(&main).unwrap().remove(1);
+            aggressive_eligible(
+                &w,
+                &main,
+                std::slice::from_ref(&root),
+                &[],
+                &Table::new(),
+                now() + 172800,
+            )
+        };
+        assert!(
+            check().is_err(),
+            "a local branch alone does not mean pushed"
+        );
+        publish_fixture(&work);
+        git_text(&work, &["checkout", "--detach"]).unwrap();
+        assert!(
+            check().is_ok(),
+            "a remote feature branch protects detached commits too"
+        );
+        std::fs::write(work.join("debug.log"), "disposable untracked output").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(work.join("debug.log"))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(now() + 172800))
+            .unwrap();
+        assert!(
+            check().is_ok(),
+            "untracked logs must not block eligibility or reset idle time"
+        );
+        std::fs::write(work.join("source"), "uncommitted edits").unwrap();
+        assert!(remove_checkout(&work).is_err());
+        std::fs::write(work.join("source"), "local commit").unwrap();
+        // A stale remote-tracking ref cannot authorize deletion.
+        let remote = root.join("remote.git");
+        git_text(&remote, &["update-ref", "-d", "refs/heads/published"]).unwrap();
+        assert!(remove_checkout(&work).is_err());
+        assert!(work.join("source").exists());
+        git_text(&work, &["push", "origin", "HEAD:refs/heads/published"]).unwrap();
+        // Remote advancement must work even when its tip is absent from local refs.
+        let head = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
+        let tree = git_text(&work, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        let next = git_text(
+            &work,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &head,
+                "-m",
+                "remote advancement",
+            ],
+        )
+        .unwrap();
+        git_text(
+            &work,
+            &["push", "origin", &format!("{next}:refs/heads/published")],
+        )
+        .unwrap();
+        git_text(
+            &work,
+            &["update-ref", "refs/remotes/origin/published", &head],
+        )
+        .unwrap();
+        verify_published(&work, &head).unwrap();
+        assert_eq!(
+            git_text(&work, &["rev-parse", "refs/remotes/origin/published"]).unwrap(),
+            next
+        );
+        git_text(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                root.join("unavailable.git").to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            remove_checkout(&work).is_err(),
+            "unreachable remotes preserve the checkout"
+        );
+        git_text(
+            &work,
+            &["remote", "set-url", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        remove_checkout(&work).unwrap();
+        assert!(!work.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -899,6 +1199,7 @@ mod tests {
         );
         std::fs::remove_file(work.join("module")).unwrap();
         std::fs::create_dir(work.join("module")).unwrap();
+        publish_fixture(&work);
         remove_one(&work).unwrap();
         assert!(!work.exists());
         assert!(git_text(&main, &["rev-parse", "refs/heads/keep"]).is_ok());
@@ -966,7 +1267,6 @@ mod tests {
                 Policy {
                     min_age: 0,
                     manual: false,
-                    discard_ignored: false,
                 },
                 now() + 86400,
             )
@@ -1001,6 +1301,7 @@ mod tests {
         let completed = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
         std::fs::write(&receipt, "completed fixture work").unwrap();
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
+        publish_fixture(&work);
         remove_one(&work).unwrap();
         assert!(!work.exists() && !admin.exists());
         assert_eq!(
@@ -1056,7 +1357,6 @@ mod tests {
                 Policy {
                     min_age: 86400,
                     manual: false,
-                    discard_ignored: false,
                 },
                 at,
             )
@@ -1107,21 +1407,11 @@ mod tests {
         );
         git_text(&work, &["update-index", "--no-skip-worktree", "file"]).unwrap();
         std::fs::write(work.join("private.env"), "important").unwrap();
-        assert!(
-            check(&w, &[], future)
-                .unwrap_err()
-                .to_string()
-                .contains("untracked")
-        );
+        assert!(check(&w, &[], future).is_ok());
         std::fs::remove_file(work.join("private.env")).unwrap();
         std::fs::write(main.join(".git/info/exclude"), "secret.env\n").unwrap();
         std::fs::write(work.join("secret.env"), "must survive").unwrap();
-        assert!(
-            check(&w, &[], future)
-                .unwrap_err()
-                .to_string()
-                .contains("ignored")
-        );
+        assert!(check(&w, &[], future).is_ok());
         std::fs::remove_file(work.join("secret.env")).unwrap();
         git_text(&main, &["worktree", "lock", work.to_str().unwrap()]).unwrap();
         assert!(
@@ -1135,21 +1425,20 @@ mod tests {
         assert!(check(&w, &[], future).is_err());
         git_text(&work, &["commit", "-am", "unmerged"]).unwrap();
         let unmerged = list(&main).unwrap()[1].clone();
-        // Old named-branch work can be removed without losing its commits.
-        assert!(check(&unmerged, &[], future).is_ok());
+        // A retained local branch does not prove these commits were pushed.
+        assert!(check(&unmerged, &[], future).is_err());
         assert!(check(&unmerged, &[], now() + 3601).is_err());
         let manual = Policy {
             min_age: 0,
             manual: true,
-            discard_ignored: false,
         };
-        assert!(eligible(&unmerged, &main, &[], &[], &table, manual, now()).is_ok());
+        assert!(eligible(&unmerged, &main, &[], &[], &table, manual, now()).is_err());
         git_text(&work, &["checkout", "--detach"]).unwrap();
         assert!(
             check(&list(&main).unwrap()[1], &[], future)
                 .unwrap_err()
                 .to_string()
-                .contains("not merged")
+                .contains("not verified")
         );
         assert!(
             eligible(
@@ -1163,10 +1452,11 @@ mod tests {
             )
             .unwrap_err()
             .to_string()
-            .contains("not merged")
+            .contains("not verified")
         );
         git_text(&work, &["checkout", "done"]).unwrap();
-        // Manual removal of a young unmerged checkout keeps its named branch.
+        // Manual removal of a young published checkout keeps its named branch.
+        publish_fixture(&work);
         remove_one(&work).unwrap();
         assert!(!work.exists());
         assert_eq!(
@@ -1192,12 +1482,8 @@ mod tests {
 }
 
 /// Recheck Git state and inspect databases before any deletion. Git itself enforces
-/// ownership locks and refuses newly dirty work at the final removal boundary.
+/// ownership locks; tracked state is rechecked at the final removal boundary.
 fn remove_checkout(path: &Path) -> io::Result<()> {
-    remove_checkout_with_policy(path, false)
-}
-
-fn remove_checkout_with_policy(path: &Path, discard_ignored: bool) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
     if path.canonicalize()? != path {
@@ -1211,7 +1497,7 @@ fn remove_checkout_with_policy(path: &Path, discard_ignored: bool) -> io::Result
         .iter()
         .find(|w| w.path == path)
         .ok_or_else(|| io::Error::other("Worktree registration changed; preserved"))?;
-    eligible(
+    let checked_head = eligible(
         selected,
         &main.path,
         &[],
@@ -1220,10 +1506,10 @@ fn remove_checkout_with_policy(path: &Path, discard_ignored: bool) -> io::Result
         Policy {
             min_age: 0,
             manual: true,
-            discard_ignored,
         },
         now(),
     )?;
+    verify_published(path, &checked_head)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let device = std::fs::symlink_metadata(path)?.dev();
     let mut pending = vec![path.to_path_buf()];
@@ -1256,11 +1542,27 @@ fn remove_checkout_with_policy(path: &Path, discard_ignored: bool) -> io::Result
             }
         }
     }
+    let (table, paths) = activity()?;
+    eligible(
+        selected,
+        &main.path,
+        &[],
+        &paths,
+        &table,
+        Policy {
+            min_age: 0,
+            manual: true,
+        },
+        now(),
+    )?;
     git_text(
         &main.path,
         &[
             "worktree",
             "remove",
+            // One force permits disposable untracked output. It still refuses
+            // locked worktrees; never use a second force to override ownership.
+            "--force",
             "--",
             path.to_str()
                 .ok_or_else(|| io::Error::other("Non-UTF-8 checkout preserved"))?,
@@ -1283,16 +1585,7 @@ fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
         }
     }
     super::visit_nul_output(
-        &mut git(
-            &w.path,
-            &[
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-        ),
+        &mut git(&w.path, &["ls-files", "-z", "--cached"]),
         Duration::from_secs(30),
         |name| {
             let relative = Path::new(std::ffi::OsStr::from_bytes(name));
@@ -1337,7 +1630,6 @@ fn aggressive_eligible(
         Policy {
             min_age: AGGRESSIVE_WORKTREE_IDLE_SECONDS,
             manual: false,
-            discard_ignored: true,
         },
         at,
     )?;
@@ -1437,8 +1729,8 @@ fn aggressive_clean(
         let result = (|| -> io::Result<bool> {
             if apply {
                 // Recheck all activity, registration and Git state, then use
-                // ordinary Git removal. Missing checkout indexes stay in place.
-                remove_one_with_policy(&w.path, true)?;
+                // tracked-only removal. Missing checkout indexes stay in place.
+                remove_one(&w.path)?;
                 removed += 1;
             }
             Ok(true)
@@ -1550,10 +1842,7 @@ mod aggressive_tests {
             );
             file.set_modified(original).unwrap();
         }
-        assert!(
-            remove_checkout(&work).is_err(),
-            "ordinary removal stays conservative"
-        );
+        publish_fixture(&work);
         assert!(
             aggressive_eligible(
                 &checkout,
@@ -1571,7 +1860,7 @@ mod aggressive_tests {
         let database = work.join("node_modules/History");
         std::fs::write(&database, b"SQLite format 3\0fixture").unwrap();
         assert!(
-            remove_checkout_with_policy(&work, true)
+            remove_checkout(&work)
                 .unwrap_err()
                 .to_string()
                 .contains("SQLite")
@@ -1579,11 +1868,21 @@ mod aggressive_tests {
         assert!(database.exists() && work.join(".claude/settings.local.json").exists());
         std::fs::remove_file(database).unwrap();
         std::fs::write(work.join("receipt"), "untracked recovery evidence").unwrap();
-        assert!(remove_checkout_with_policy(&work, true).is_err());
+        assert!(
+            aggressive_eligible(
+                &checkout,
+                &main,
+                std::slice::from_ref(&root),
+                &[],
+                &Table::new(),
+                now() + 172800
+            )
+            .is_ok()
+        );
         assert!(work.join("receipt").exists());
         std::fs::remove_file(work.join("receipt")).unwrap();
         std::fs::write(work.join("file"), "new source edits").unwrap();
-        assert!(remove_checkout_with_policy(&work, true).is_err());
+        assert!(remove_checkout(&work).is_err());
         assert_eq!(
             std::fs::read_to_string(work.join("file")).unwrap(),
             "new source edits"
@@ -1607,7 +1906,7 @@ mod aggressive_tests {
             );
             let flags = RestoreFlags(protected.clone());
             assert!(
-                remove_checkout_with_policy(&work, true)
+                remove_checkout(&work)
                     .unwrap_err()
                     .to_string()
                     .contains("Filesystem")
@@ -1618,13 +1917,13 @@ mod aggressive_tests {
         }
         git_text(&main, &["worktree", "lock", work.to_str().unwrap()]).unwrap();
         assert!(
-            remove_checkout_with_policy(&work, true)
+            remove_checkout(&work)
                 .unwrap_err()
                 .to_string()
                 .contains("Locked")
         );
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
-        remove_checkout_with_policy(&work, true).unwrap();
+        remove_checkout(&work).unwrap();
         assert!(!work.exists());
         assert!(git_text(&main, &["rev-parse", "completed"]).is_ok());
         std::fs::remove_dir_all(root).unwrap();
@@ -1680,9 +1979,7 @@ mod aggressive_tests {
         )
         .unwrap_err();
         assert!(
-            refusal
-                .to_string()
-                .contains("Modified, untracked, or ignored"),
+            refusal.to_string().contains("Tracked files modified"),
             "{refusal}"
         );
         assert!(expired(&w, now() + 172800).unwrap());
@@ -1693,7 +1990,10 @@ mod aggressive_tests {
             .unwrap()
             .set_modified(UNIX_EPOCH + Duration::from_secs(now() + 172800))
             .unwrap();
-        assert!(!expired(&w, now() + 172800).unwrap());
+        assert!(
+            expired(&w, now() + 172800).unwrap(),
+            "untracked output is not source activity"
+        );
         let admin = PathBuf::from(git_text(&work, &["rev-parse", "--absolute-git-dir"]).unwrap());
         let index = std::fs::read(admin.join("index")).unwrap();
         // Move only this fixture's checkout aside to simulate loss; keep its data.
@@ -1801,7 +2101,7 @@ mod aggressive_tests {
             )
             .unwrap_err()
             .to_string()
-            .contains("Modified")
+            .contains("Tracked files modified")
         );
         assert_eq!(std::fs::read(admin.join("index")).unwrap(), index);
         assert_eq!(
@@ -1825,6 +2125,7 @@ mod aggressive_tests {
         std::fs::remove_dir(work.join("node_modules")).unwrap();
         git_text(&work, &["commit", "-m", "completed fixture"]).unwrap();
         let completed = list(&main).unwrap().remove(1);
+        publish_fixture(&work);
         assert!(
             aggressive_eligible(
                 &completed,
@@ -1853,6 +2154,7 @@ mod aggressive_tests {
         std::fs::write(work.join("History"), b"SQLite format 3\0fixture").unwrap();
         git_text(&work, &["add", "History"]).unwrap();
         git_text(&work, &["commit", "-m", "database fixture"]).unwrap();
+        publish_fixture(&work);
         assert!(
             remove_checkout(&work)
                 .unwrap_err()
@@ -1862,6 +2164,7 @@ mod aggressive_tests {
         assert!(work.join("file").exists());
         git_text(&work, &["rm", "History"]).unwrap();
         git_text(&work, &["commit", "-m", "owner completed"]).unwrap();
+        publish_fixture(&work);
         let head = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
         remove_checkout(&work).unwrap();
         assert_eq!(git_text(&main, &["rev-parse", "owned"]).unwrap(), head);

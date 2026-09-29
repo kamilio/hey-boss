@@ -846,8 +846,8 @@ The menu-bar **Harvester (Terminal)…** entry launches the same CLI.
 **s** scans, **c** cleans eligible candidates after confirmation, **a** toggles
 automatic maintenance, and **p/w/b/l** toggle process/worktree/cache/log cleanup.
 In Worktrees, select a row and press **x** to request removal; **y** confirms.
-This bypasses age only: local files, live processes, locks, primary checkouts and
-detached unmerged commits remain protected, and named branches are retained.
+This bypasses age only: tracked edits, unpushed commits, live processes, locks and
+primary checkouts remain protected. Untracked/ignored output is disposable; branches are retained.
 The Processes page shows current-user PIDs, CPU usage, resident memory and executable
 names; appearing in this inventory never authorizes termination. Activity shows
 scan phases, cleanup decisions, preservation reasons and errors.
@@ -910,12 +910,11 @@ that began the last scan (`scan_build`); old snapshots retain an unknown scan bu
 until a new check runs. Compare both IDs after deployment before trusting telemetry.
 
 With `configure --aggressive true`, clean linked worktrees become eligible after
-4 hours without source or Git activity. Locks, active processes, source changes,
-and untracked files remain protected. Ignored artifacts alone do not retain a
-checkout; SQLite databases and filesystem protections still prevent removal.
-Primary checkouts stay intact, and missing-checkout metadata is retained for
-recovery. Removal uses ordinary Git
-checks and retains the branch. Discovery includes nested Codex
+4 hours without tracked-source or Git activity. Tracked edits, unpushed commits,
+locks and active processes prevent removal. Untracked/ignored output neither blocks
+cleanup nor resets idle time; SQLite and filesystem protections still apply.
+Clean sparse checkouts are supported. Primary checkouts and missing-checkout metadata
+stay intact. Removal retains branches and never overrides ownership locks. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
 See [ownership and recovery](docs/worktree-ownership.md).
 
@@ -986,13 +985,13 @@ personal browsers are never automatic targets.** A disconnected or idle agent is
 
 The conservative worktree cleaner discovers repositories directly inside `~/Workspace` and
 `~/.codex/worktrees` (or `$CODEX_HOME/worktrees`), plus configured roots. It only
-removes linked checkouts that are merged or at least 7 days old with a verified
-named branch retaining their commits. A merged checkout must have been inactive
-for at least an hour. All removals require no active process, agent or
-open file, no modified/untracked/ignored files, no locks, in-progress Git
-operations or populated submodules. Merge status uses the locally recorded remote
-default branch; detached unmerged commits are preserved. It rechecks eligibility before file-by-file removal and keeps branches. Missing registrations and primary checkouts are preserved.
-Ignored files such as `.env` or build directories also prevent automatic removal.
+removes published linked checkouts: merged work after one idle hour, other branches
+after the configured minimum age. Tracked edits, active processes/agents, open files,
+locks, in-progress Git operations and populated submodules prevent removal.
+Scans use remote-tracking refs; deletion verifies HEAD against live remote branches
+and refreshes refs when needed. Unverifiable or unpushed commits stay intact.
+Untracked/ignored output is disposable. Eligibility is rechecked before removal;
+branches, missing registrations and primary checkouts are retained.
 Empty, uninitialized submodule directories do not block cleanup; submodule
 contents and symlinked submodule paths remain protected.
 
