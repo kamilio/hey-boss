@@ -403,9 +403,10 @@ impl Store {
         // Assignment or link edits during the read must win before publishing.
         let mut reopened = BTreeSet::new();
         let signals = serde_json::to_string(&signal_keys(observation))?;
+        let signal_url = url.trim_end_matches('/');
         for update in observation_updates(&tx, url, observation, checked_at)? {
-            tx.execute("DELETE FROM issue_github_signals WHERE project_id=?1 AND issue_number=?2 AND url=?3 AND head<>?4",params![update.project,update.number,url,observation.head])?;
-            tx.execute("INSERT OR IGNORE INTO issue_github_signals SELECT ?1,?2,?3,?4,value FROM json_each(?5)",params![update.project,update.number,url,observation.head,signals])?;
+            tx.execute("DELETE FROM issue_github_signals WHERE project_id=?1 AND issue_number=?2 AND url IN (?3,?3||'/') AND head<>?4",params![update.project,update.number,signal_url,observation.head])?;
+            tx.execute("INSERT OR IGNORE INTO issue_github_signals SELECT ?1,?2,?3,?4,value FROM json_each(?5)",params![update.project,update.number,signal_url,observation.head,signals])?;
             tx.execute("INSERT INTO issue_github_watches(project_id,issue_number,status) VALUES(?1,?2,?3) ON CONFLICT(project_id,issue_number) DO UPDATE SET status=excluded.status",params![update.project,update.number,update.status.to_string()])?;
             if update.wake {
                 let was_ready: bool = tx.query_row(
@@ -524,7 +525,9 @@ fn observation_updates(
         {
             continue;
         }
-        let wake: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url=?3 AND seen.head=?4 AND seen.signal=s.value))",params![project,number,url,observation.head,signals],|r|r.get(0))?;
+        // A trailing slash changes the attached link, not the GitHub event.
+        // Read both spellings so existing durable histories remain effective.
+        let wake: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal=s.value))",params![project,number,url.trim_end_matches('/'),observation.head,signals],|r|r.get(0))?;
         let mut errors = source_errors(previous);
         errors.remove("required_checks");
         let evidence = &observation.evidence;
@@ -834,6 +837,68 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+    #[test]
+    fn trailing_slash_aliases_share_event_history_after_either_link_is_removed() {
+        let url = "https://github.com/o/r/pull/1";
+        let alias = "https://github.com/o/r/pull/1/";
+        for (removed, remaining) in [(url, alias), (alias, url)] {
+            for legacy in [false, true] {
+                let mut f = Fixture::new();
+                f.call(json!({"action":"add_pull_request","number":1,"url":alias,"purpose":"fix"}))
+                    .unwrap();
+                f.assign("github").unwrap();
+                let observation = hey_gh::watcher::Observation {
+                    head: "head".into(),
+                    blocking: vec!["failure".into()],
+                    completed: None,
+                    feedback: Vec::new(),
+                    evidence: json!({"head":"head","complete":false}),
+                };
+                f.store
+                    .record_github_observation(alias, &observation, 100)
+                    .unwrap();
+                if legacy {
+                    f.store
+                        .db
+                        .execute("UPDATE issue_github_signals SET url=?1", [alias])
+                        .unwrap();
+                }
+                let event = saved(&f.store.db, "named:test", 1).unwrap().1["event"].clone();
+                f.assign("github").unwrap();
+                f.store
+                    .record_github_observation(url, &observation, 101)
+                    .unwrap();
+                assert_eq!(
+                    saved(&f.store.db, "named:test", 1).unwrap().1["event"],
+                    event
+                );
+                assert_eq!(
+                    get_issue(&f.store.db, "named:test", 1, false)
+                        .unwrap()
+                        .assignee
+                        .as_deref(),
+                    Some(WATCHER)
+                );
+                f.call(json!({"action":"remove_pull_request","number":1,"url":removed}))
+                    .unwrap();
+                f.store
+                    .record_github_observation(remaining, &observation, 102)
+                    .unwrap();
+                assert_eq!(
+                    saved(&f.store.db, "named:test", 1).unwrap().1["event"],
+                    event
+                );
+                assert_eq!(
+                    get_issue(&f.store.db, "named:test", 1, false)
+                        .unwrap()
+                        .assignee
+                        .as_deref(),
+                    Some(WATCHER)
+                );
+            }
+        }
+    }
+
     #[test]
     fn assignment_waits_then_a_new_failure_releases_exactly_once() {
         let mut f = Fixture::new();
