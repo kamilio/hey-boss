@@ -978,3 +978,36 @@ async fn startup_repairs_only_proven_old_completion_cancellations_and_keeps_audi
         1
     );
 }
+
+#[test]
+fn startup_interrupt_sweep_uses_state_index_instead_of_scanning_requests() {
+    let (_dir, store) = fixture();
+    let connection = Connection::open(&store.database.as_ref().unwrap().path).unwrap();
+    for statement in [
+        format!(
+            "SELECT request_id FROM requests WHERE {}",
+            database::OPEN_REQUESTS
+        ),
+        format!(
+            "UPDATE requests SET state='interrupted' WHERE {}",
+            database::OPEN_REQUESTS
+        ),
+    ] {
+        let mut plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {statement}"))
+            .unwrap();
+        let details: Vec<String> = plan
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            details.iter().any(|d| d.contains("requests_state_time")),
+            "{statement}: {details:?}"
+        );
+        assert!(
+            !details.iter().any(|d| d.starts_with("SCAN requests")),
+            "{statement}: {details:?}"
+        );
+    }
+}

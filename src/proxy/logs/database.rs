@@ -51,6 +51,10 @@ pub struct Database {
     batch_size: usize,
 }
 
+// Only pending and streaming requests lack ended_ms. Naming the states lets
+// SQLite use requests_state_time instead of scanning every logged request.
+pub(super) const OPEN_REQUESTS: &str = "state IN ('pending','streaming') AND ended_ms IS NULL";
+
 impl Database {
     pub fn open(path: PathBuf, config: &Logging, session_id: &str) -> Result<Self> {
         let parent = path.parent().context("Database path must have a parent")?;
@@ -94,13 +98,13 @@ impl Database {
         repair_completed_disconnects(&mut connection)?;
         let transaction = connection.transaction()?;
         let timestamp = integer(now_ms());
-        transaction.execute("INSERT INTO request_events(request_id,timestamp_ms,kind,details)
-            SELECT request_id,?1,'interrupted','{\"source\":\"process_restart\",\"error_code\":\"proxy_process_ended\"}' FROM requests WHERE ended_ms IS NULL",[timestamp])?;
-        transaction.execute("UPDATE requests SET state='interrupted', ended_ms=?1, updated_ms=?1,
+        transaction.execute(&format!("INSERT INTO request_events(request_id,timestamp_ms,kind,details)
+            SELECT request_id,?1,'interrupted','{{\"source\":\"process_restart\",\"error_code\":\"proxy_process_ended\"}}' FROM requests WHERE {OPEN_REQUESTS}"),[timestamp])?;
+        transaction.execute(&format!("UPDATE requests SET state='interrupted', ended_ms=?1, updated_ms=?1,
             total_duration_ms=NULL, error_code='proxy_process_ended',
             record=json_set(record,'$.state','interrupted','$.ended_ms',?1,'$.updated_ms',?1,
                 '$.total_duration_ms',NULL,'$.error_code','proxy_process_ended','$.outcome_source','process_restart')
-            WHERE ended_ms IS NULL", [timestamp])?;
+            WHERE {OPEN_REQUESTS}"), [timestamp])?;
         transaction.execute(
             "INSERT INTO sessions(session_id,started_ms) VALUES(?1,?2)",
             params![session_id, timestamp],
