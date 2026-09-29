@@ -1997,7 +1997,12 @@ impl Store {
             if let Some(chain) = result["created_chain"].as_array_mut() {
                 for item in chain {
                     if let Some(number) = item["number"].as_i64() {
-                        *item = serde_json::to_value(get_issue(&tx, &response_project.id, number, true)?)?;
+                        *item = serde_json::to_value(get_issue(
+                            &tx,
+                            &response_project.id,
+                            number,
+                            true,
+                        )?)?;
                     }
                 }
             }
@@ -2189,7 +2194,11 @@ fn create_issue(
         super::planning::drafts_allowed(db, project)?;
     }
     let any_unfinished = super::blockers::validate_new_links(db, &project.id, blockers)?;
-    let initial_state = if !draft && any_unfinished { "blocked" } else { "open" };
+    let initial_state = if !draft && any_unfinished {
+        "blocked"
+    } else {
+        "open"
+    };
     let number: i64 = db.query_row(
         "SELECT next_number FROM projects WHERE id=?1",
         [&project.id],

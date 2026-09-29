@@ -70,7 +70,12 @@ pub(super) fn execute(
             let actor = actor.unwrap();
             let child = create_issue(db, project, actor, operation, now)?;
             change(db, project, actor, operation, child.number, true, now)?;
-            let mut created_chain = vec![serde_json::to_value(get_issue(db, &project.id, child.number, false)?)?];
+            let mut created_chain = vec![serde_json::to_value(get_issue(
+                db,
+                &project.id,
+                child.number,
+                false,
+            )?)?];
             let mut prev_number = child.number;
             for next_title in then_titles {
                 let next_op = Operation::CreateSubtask {
@@ -86,7 +91,12 @@ pub(super) fn execute(
                 let next_child = create_issue(db, project, actor, &next_op, now)?;
                 change(db, project, actor, &next_op, next_child.number, true, now)?;
                 prev_number = next_child.number;
-                created_chain.push(serde_json::to_value(get_issue(db, &project.id, next_child.number, false)?)?);
+                created_chain.push(serde_json::to_value(get_issue(
+                    db,
+                    &project.id,
+                    next_child.number,
+                    false,
+                )?)?);
             }
             let mut out = json!({"ok":true,"project":project,"issue":get_issue(db,&project.id,child.number,false)?,"parent_issue":get_issue(db,&project.id,number,false)?,"changed":true});
             if !then_titles.is_empty() {
