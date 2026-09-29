@@ -716,21 +716,22 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     );
     for args in [
         vec!["--supervisor", "claim", "2", "--force"],
-        vec!["--supervisor", "reopen", "1", "--if-version", "3"],
+        vec!["--supervisor", "close", "1"],
         vec![
             "--supervisor",
             "edit",
             "2",
             "--label",
-            "unguarded",
+            "invalid-version",
+            "--if-version",
+            "0",
             "--request-id",
             "unsupported",
         ],
         vec![
             "--supervisor",
-            "edit",
+            "undraft",
             "2",
-            "--draft",
             "--request-id",
             "unsupported",
         ],
