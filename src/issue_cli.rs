@@ -213,6 +213,11 @@ enum Action {
         #[command(subcommand)]
         command: PrAction,
     },
+    /// Attach, list, or remove deduplicated Git commits and agent trace links.
+    Commit {
+        #[command(subcommand)]
+        command: CommitAction,
+    },
     /// Create, link, list, or unlink full issues as subtasks.
     #[command(visible_alias = "subtasks", after_help = SUBTASK_SCHEDULING_HELP)]
     Subtask {
@@ -581,6 +586,36 @@ enum SubtaskAction {
 const SUBTASK_SCHEDULING_HELP: &str = "Default: sequential siblings. For independent branches with declared dependencies only:\n  hey-boss issue settings set --subtask-scheduling explicit\nDeclare intentional sequences with `issue blocked-by CHILD PREDECESSOR`.\nReady handoff and parent completion are unchanged.\nSubtasks affect scheduling: unfinished descendants put the parent in Blocked.\nChanges that would release an existing parent or ancestor claim are rejected atomically,\neven for the claim owner. For organization only, prefer ownership-preserving mindmap nesting:\n  hey-boss mm issue PARENT --id parent-work\n  hey-boss mm issue CHILD --under parent-work\nFor a scheduling dependency, have the owner explicitly unassign the affected issue first.";
 
 #[derive(Subcommand)]
+enum CommitAction {
+    /// Attach a commit (defaults to HEAD); duplicate SHAs and prefixes are deduplicated.
+    Add {
+        number: i64,
+        #[arg(default_value = "HEAD")]
+        commit: String,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Remove an attached commit by SHA, prefix, or URL.
+    Remove {
+        number: i64,
+        commit: String,
+    },
+    /// List commits attached to an issue.
+    List {
+        number: i64,
+    },
+    /// Best-effort Git post-commit hook entrypoint to attach HEAD and agent trace provenance.
+    Hook {
+        #[arg(long)]
+        issue: Option<i64>,
+        #[arg(default_value = "HEAD")]
+        commit: String,
+    },
+    /// Install chained global Git hooks that attach commits without breaking repo hooks.
+    InstallHooks,
+}
+
+#[derive(Subcommand)]
 enum PrAction {
     /// Attach a PR; existing links keep their recorded purpose.
     Add {
@@ -785,6 +820,23 @@ impl Options {
                     url: url.clone(),
                 },
                 PrAction::List { number } => Operation::PullRequests { number: *number },
+            },
+            Action::Commit { command } => match command {
+                CommitAction::Add {
+                    number,
+                    commit,
+                    title,
+                } => Operation::AddCommit {
+                    number: *number,
+                    commit: commit.clone(),
+                    title: title.clone(),
+                },
+                CommitAction::Remove { number, commit } => Operation::RemoveCommit {
+                    number: *number,
+                    commit: commit.clone(),
+                },
+                CommitAction::List { number } => Operation::Commits { number: *number },
+                CommitAction::Hook { .. } | CommitAction::InstallHooks => Operation::Whoami,
             },
             Action::GlobalSettings { operation } => operation.clone(),
             Action::Settings { command } => match command {
@@ -1229,6 +1281,25 @@ pub fn run(options: &Options) -> Result<()> {
         let request: Request = serde_json::from_str(&raw)?;
         Store::open(&issues::database_path()?)?.execute(&request)?
     } else {
+        if let Action::Commit {
+            command: CommitAction::InstallHooks,
+        } = &options.action
+        {
+            let dir = issues::commits::install_global_git_hooks()?;
+            let out = json!({"ok": true, "hooks_dir": dir});
+            if options.json {
+                println!("{out}");
+            } else {
+                println!("Installed chained Git hooks in {}", dir.display());
+            }
+            return Ok(());
+        }
+        if let Action::Commit {
+            command: CommitAction::Hook { issue, commit },
+        } = &options.action
+        {
+            return run_commit_hook(&options, *issue, commit);
+        }
         let interactive = match &options.action {
             Action::Create { interactive, .. } | Action::Edit { interactive, .. } => *interactive,
             _ => false,
@@ -1272,10 +1343,37 @@ pub fn run(options: &Options) -> Result<()> {
         }
         if matches!(
             operation,
-            Operation::Create { .. } | Operation::CreateSubtask { .. }
+            Operation::Create { .. }
+                | Operation::CreateSubtask { .. }
+                | Operation::AddCommit { .. }
+                | Operation::AddPullRequest { .. }
+                | Operation::Close { .. }
         ) && let Some(actor) = actor.as_mut()
         {
             issues::identity::creation_context(actor);
+        }
+        if let Operation::AddCommit {
+            commit,
+            title,
+            ..
+        } = &mut operation
+        {
+            let target_project = options
+                .project
+                .clone()
+                .or_else(worker_project)
+                .unwrap_or_else(|| project.id.clone());
+            if let Ok(resolved) = issues::commits::resolve_commit_input(
+                commit,
+                &target_project,
+                Some(&cwd),
+                title.as_deref(),
+            ) {
+                *commit = resolved.url;
+                if title.is_none() && !resolved.title.is_empty() {
+                    *title = Some(resolved.title);
+                }
+            }
         }
         let request = Request {
             version: 1,
@@ -1505,6 +1603,17 @@ pub(crate) fn print_text(value: &Value) {
                 pr["purpose"].as_str().unwrap_or("unspecified"),
                 line(&pr["url"])
             );
+        }
+    }
+    if let Some(commits) = value["commits"].as_array() {
+        for c in commits {
+            let short = c["short_sha"].as_str().unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
+            let title = c["title"].as_str().unwrap_or("");
+            if title.is_empty() {
+                println!("Commit [{short}]: {}", line(&c["url"]));
+            } else {
+                println!("Commit [{short}]: {} · {}", line(&c["url"]), line(&c["title"]));
+            }
         }
     }
     if value["scope"] == "global" {
@@ -2005,10 +2114,94 @@ fn print_issue_line(issue: &Value) {
             );
         }
     }
+    if let Some(commits) = issue["commits"].as_array() {
+        for c in commits {
+            let short = c["short_sha"].as_str().unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
+            let title = c["title"].as_str().unwrap_or("");
+            if title.is_empty() {
+                println!("  Commit [{short}]: {}", line(&c["url"]));
+            } else {
+                println!("  Commit [{short}]: {} · {}", line(&c["url"]), line(&c["title"]));
+            }
+        }
+    }
 }
 
 fn worker_project() -> Option<String> {
     std::env::var("HEY_BOSS_ISSUE_PROJECT")
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+fn worker_issue_number() -> Option<i64> {
+    std::env::var("HEY_BOSS_ISSUE_NUMBER")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0)
+}
+
+fn run_commit_hook(options: &Options, explicit_issue: Option<i64>, commit: &str) -> issues::Result<()> {
+    let Ok(cwd) = std::env::current_dir().and_then(|d| d.canonicalize()) else {
+        return Ok(());
+    };
+    let Ok(machine) = issues::identity::machine() else {
+        return Ok(());
+    };
+    let Ok(project) = issues::identity::project(&cwd, &machine) else {
+        return Ok(());
+    };
+    let project_override = options.project.clone().or_else(worker_project);
+    let effective_project = project_override.as_deref().unwrap_or(&project.id);
+    let Ok(resolved) = issues::commits::resolve_commit_input(commit, effective_project, Some(&cwd), None) else {
+        return Ok(());
+    };
+    let message = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&cwd)
+        .args(["log", "-1", "--format=%B", &resolved.sha])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_else(|| resolved.title.clone());
+    let explicit = explicit_issue.or_else(worker_issue_number);
+    let actor = match issues::identity::resolve(options.agent.as_deref(), &machine, &cwd) {
+        Ok(mut actor) => {
+            issues::identity::creation_context(&mut actor);
+            actor
+        }
+        Err(_) if explicit.is_some() => issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?,
+        Err(_) => return Ok(()),
+    };
+    let path = issues::database_path()?;
+    let mut store = Store::open(&path)?;
+    let targets = issues::commits::target_issues_for_hook_path(
+        &path,
+        effective_project,
+        &actor,
+        explicit,
+        &message,
+    )?;
+    let mut attached = Vec::new();
+    for number in targets {
+        let request = Request {
+            version: 1,
+            project: project.clone(),
+            project_override: project_override.clone(),
+            actor: Some(actor.clone()),
+            operation: Operation::AddCommit {
+                number,
+                commit: resolved.url.clone(),
+                title: (!resolved.title.is_empty()).then(|| resolved.title.clone()),
+            },
+            request_id: None,
+        };
+        if let Ok(res) = store.execute(&request) {
+            attached.push(json!({"number": number, "sha": resolved.sha, "changed": res["changed"]}));
+        }
+    }
+    if options.json {
+        println!("{}", json!({"ok": true, "sha": resolved.sha, "attached": attached}));
+    }
+    Ok(())
 }

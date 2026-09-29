@@ -3,6 +3,7 @@ pub(crate) mod authority;
 mod discovery;
 use store::chief;
 pub(crate) mod blockers;
+pub mod commits;
 mod dependency_notices;
 mod fleet;
 pub(crate) use fleet::INDEXES as FLEET_INDEXES;
@@ -308,6 +309,19 @@ pub enum Operation {
         number: i64,
         url: String,
     },
+    Commits {
+        number: i64,
+    },
+    AddCommit {
+        number: i64,
+        commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    RemoveCommit {
+        number: i64,
+        commit: String,
+    },
     WorkerStatus,
     WorkerPreview {
         config: worker::ProjectConfig,
@@ -564,6 +578,7 @@ impl Operation {
                 | Self::GlobalSettings
                 | Self::ProjectSettings
                 | Self::PullRequests { .. }
+                | Self::Commits { .. }
                 | Self::WorkerStatus
                 | Self::WorkerPreview { .. }
                 | Self::WorkerRun { .. }
@@ -614,6 +629,9 @@ impl Operation {
             | Self::AddPullRequest { number, .. }
             | Self::ClassifyPullRequest { number, .. }
             | Self::RemovePullRequest { number, .. }
+            | Self::Commits { number }
+            | Self::AddCommit { number, .. }
+            | Self::RemoveCommit { number, .. }
             | Self::Move { number, .. }
             | Self::Transfer { number, .. }
             | Self::View { number }
