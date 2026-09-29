@@ -157,7 +157,35 @@ fn owned_path_inner(path: &Path, active: &BTreeSet<PathBuf>) -> io::Result<bool>
     Ok(false)
 }
 
-type Paths = BTreeMap<u32, Result<Vec<PathBuf>, String>>;
+#[derive(Default)]
+struct WorkloadPaths {
+    cwd: Option<PathBuf>,
+    // Includes open directories and mapped files, even when equal to cwd.
+    files: Vec<PathBuf>,
+}
+
+type Paths = BTreeMap<u32, Result<WorkloadPaths, String>>;
+
+fn workload_owned(
+    paths: Result<WorkloadPaths, String>,
+    executable: Option<&Path>,
+    inherited_cwd_exempt: bool,
+    mut owned: impl FnMut(&Path) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let paths = paths?;
+    if let Some(cwd) = &paths.cwd {
+        // Inspect even exempt cwd: only a successful ownership match is ignored.
+        if owned(cwd)? && !inherited_cwd_exempt {
+            return Ok(true);
+        }
+    }
+    for path in paths.files.iter().map(PathBuf::as_path).chain(executable) {
+        if owned(path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 #[cfg(target_os = "macos")]
 fn paths(ids: &BTreeSet<u32>) -> Paths {
@@ -165,7 +193,7 @@ fn paths(ids: &BTreeSet<u32>) -> Paths {
     use std::process::Command;
     use std::time::Duration;
     let list = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let read = || -> io::Result<BTreeMap<u32, Vec<PathBuf>>> {
+    let read = || -> io::Result<BTreeMap<u32, WorkloadPaths>> {
         let output = super::output_with_limit(
             Command::new("/usr/sbin/lsof").args([
                 "-nP",
@@ -182,8 +210,7 @@ fn paths(ids: &BTreeSet<u32>) -> Paths {
         if !output.status.success() || !output.stderr.is_empty() {
             return Err(io::Error::other("Cannot inspect workload files"));
         }
-        let mut result = BTreeMap::<u32, Vec<PathBuf>>::new();
-        let mut cwd = BTreeSet::new();
+        let mut result = BTreeMap::<u32, WorkloadPaths>::new();
         let mut pid = 0;
         let mut descriptor = Vec::new();
         for field in output.stdout.split(|b| *b == 0) {
@@ -198,18 +225,18 @@ fn paths(ids: &BTreeSet<u32>) -> Paths {
                 }
                 Some((b'f', value)) => descriptor = value.to_vec(),
                 Some((b'n', value)) if value.starts_with(b"/") && ids.contains(&pid) => {
+                    let path = PathBuf::from(std::ffi::OsString::from_vec(value.to_vec()));
+                    let paths = result.entry(pid).or_default();
                     if descriptor == b"cwd" {
-                        cwd.insert(pid);
+                        paths.cwd = Some(path);
+                    } else {
+                        paths.files.push(path);
                     }
-                    result
-                        .entry(pid)
-                        .or_default()
-                        .push(PathBuf::from(std::ffi::OsString::from_vec(value.to_vec())));
                 }
                 _ => {}
             }
         }
-        result.retain(|pid, _| cwd.contains(pid));
+        result.retain(|_, paths| paths.cwd.is_some());
         Ok(result)
     };
     match read() {
@@ -231,22 +258,36 @@ fn paths(ids: &BTreeSet<u32>) -> Paths {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn mapped_paths(contents: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    contents.lines().filter_map(|line| {
+        let mut rest = line;
+        for _ in 0..5 {
+            rest = rest.trim_start();
+            rest = rest.find(char::is_whitespace).map_or("", |at| &rest[at..]);
+        }
+        let path = rest.trim_start();
+        path.starts_with('/')
+            .then(|| PathBuf::from(path.replace("\\012", "\n")))
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn paths(ids: &BTreeSet<u32>) -> Paths {
     ids.iter()
         .map(|pid| {
-            let read = || -> io::Result<Vec<PathBuf>> {
+            let read = || -> io::Result<WorkloadPaths> {
                 let directory = PathBuf::from(format!("/proc/{pid}"));
                 if super::linux::authentication_service(&directory) {
-                    return Ok(Vec::new());
+                    return Ok(WorkloadPaths::default());
                 }
-                let mut result = vec![fs::read_link(directory.join("cwd"))?];
-                result.extend(
-                    super::linux::descriptors(*pid)?
-                        .into_iter()
-                        .map(|(_, path)| path),
-                );
-                Ok(result)
+                let cwd = Some(fs::read_link(directory.join("cwd"))?);
+                let mut files: Vec<_> = super::linux::descriptors(*pid)?
+                    .into_iter()
+                    .map(|(_, path)| path)
+                    .collect();
+                files.extend(mapped_paths(&fs::read_to_string(directory.join("maps"))?));
+                Ok(WorkloadPaths { cwd, files })
             };
             (*pid, read().map_err(|e| e.to_string()))
         })
@@ -281,7 +322,11 @@ fn extend_family(table: &Table, protected: &mut BTreeMap<u32, Protection>) {
     }
 }
 
-pub(super) fn protected(table: &Table, candidates: &BTreeSet<u32>) -> BTreeMap<u32, Protection> {
+pub(super) fn protected(
+    table: &Table,
+    candidates: &BTreeSet<u32>,
+    inherited_cwd_exemptions: &BTreeSet<u32>,
+) -> BTreeMap<u32, Protection> {
     if candidates.is_empty() {
         return BTreeMap::new();
     }
@@ -341,22 +386,18 @@ pub(super) fn protected(table: &Table, candidates: &BTreeSet<u32>) -> BTreeMap<u
         if identity(pid).is_none() {
             continue;
         }
-        let check = || -> Result<bool, String> {
-            let mut paths = paths?;
-            if let Some(p) = table.get(&pid) {
-                paths.push(PathBuf::from(&p.executable));
-            }
-            for path in paths {
-                let owned = known
-                    .entry(path.clone())
-                    .or_insert_with(|| owned_path(&path, &active).map_err(|e| e.to_string()));
-                if *owned.as_ref().map_err(Clone::clone)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        };
-        match check() {
+        let check = workload_owned(
+            paths,
+            table.get(&pid).map(|p| Path::new(&p.executable)),
+            inherited_cwd_exemptions.contains(&pid),
+            |path| {
+                known
+                    .entry(path.to_owned())
+                    .or_insert_with(|| owned_path(path, &active).map_err(|e| e.to_string()))
+                    .clone()
+            },
+        );
+        match check {
             Ok(false) => {}
             Ok(true) => {
                 protected.insert(
@@ -387,6 +428,151 @@ pub(super) fn protected(table: &Table, candidates: &BTreeSet<u32>) -> BTreeMap<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherited_cwd_strictly_protects_without_an_exemption() {
+        let paths = WorkloadPaths {
+            cwd: Some("/owned".into()),
+            files: Vec::new(),
+        };
+        assert_eq!(
+            workload_owned(Ok(paths), None, false, |_| Ok(true)),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn inherited_cwd_exemption_ignores_only_a_successfully_inspected_cwd() {
+        let paths = WorkloadPaths {
+            cwd: Some("/owned".into()),
+            files: Vec::new(),
+        };
+        let mut inspected = Vec::new();
+        assert_eq!(
+            workload_owned(Ok(paths), None, true, |path| {
+                inspected.push(path.to_owned());
+                Ok(true)
+            }),
+            Ok(false)
+        );
+        assert_eq!(inspected, vec![PathBuf::from("/owned")]);
+    }
+
+    #[test]
+    fn inherited_cwd_exemption_never_ignores_executable_file_or_directory_ownership() {
+        for (executable, files, owned) in [
+            (Some("/owned/browser"), vec![], "/owned/browser"),
+            (None, vec!["/owned/open.log"], "/owned/open.log"),
+            (None, vec!["/owned/mapped.so"], "/owned/mapped.so"),
+            (None, vec!["/owned/open-directory"], "/owned/open-directory"),
+            // An open directory or executable may have exactly the cwd pathname.
+            (None, vec!["/owned"], "/owned"),
+            (Some("/owned"), vec![], "/owned"),
+        ] {
+            let paths = WorkloadPaths {
+                cwd: Some("/owned".into()),
+                files: files.into_iter().map(PathBuf::from).collect(),
+            };
+            assert_eq!(
+                workload_owned(Ok(paths), executable.map(Path::new), true, |path| {
+                    Ok(path == Path::new("/owned") || path == Path::new(owned))
+                }),
+                Ok(true),
+                "ownership evidence: {owned}"
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_cwd_exemption_preserves_inspection_failures() {
+        assert_eq!(
+            workload_owned(Err("unreadable workload paths".into()), None, true, |_| {
+                panic!("failed path inspection must stop evaluation")
+            }),
+            Err("unreadable workload paths".into())
+        );
+        for failed_path in ["/owned", "/owned/open.log", "/owned/browser"] {
+            let paths = WorkloadPaths {
+                cwd: Some("/owned".into()),
+                files: vec!["/owned/open.log".into()],
+            };
+            assert_eq!(
+                workload_owned(Ok(paths), Some(Path::new("/owned/browser")), true, |path| {
+                    if path == Path::new(failed_path) {
+                        Err("ownership inspection failed".into())
+                    } else {
+                        Ok(path == Path::new("/owned"))
+                    }
+                }),
+                Err("ownership inspection failed".into()),
+                "failed evidence: {failed_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_cwd_exemption_does_not_change_cached_ownership() {
+        let cwd = PathBuf::from("/owned");
+        let mut known = BTreeMap::new();
+        let mut inspections = 0;
+        let mut owned = |path: &Path| {
+            known
+                .entry(path.to_owned())
+                .or_insert_with(|| {
+                    inspections += 1;
+                    Ok(true)
+                })
+                .clone()
+        };
+        for (exempt, files, expected) in [
+            (true, vec![], false),
+            (true, vec![cwd.clone()], true),
+            (false, vec![], true),
+        ] {
+            assert_eq!(
+                workload_owned(
+                    Ok(WorkloadPaths {
+                        cwd: Some(cwd.clone()),
+                        files,
+                    }),
+                    None,
+                    exempt,
+                    &mut owned,
+                ),
+                Ok(expected)
+            );
+        }
+        assert_eq!(inspections, 1);
+    }
+
+    #[test]
+    fn inherited_cwd_linux_mapped_files_remain_file_evidence() {
+        let files: Vec<_> = mapped_paths(
+            "1000-2000 r-xp 00000000 08:01 42 /owned/mapped library.so\n\
+             2000-3000 rw-p 00000000 00:00 0 [heap]\n\
+             3000-4000 r--p 00000000 08:01 43 /owned/line\\012break.so\n",
+        )
+        .collect();
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("/owned/mapped library.so"),
+                PathBuf::from("/owned/line\nbreak.so")
+            ]
+        );
+        assert_eq!(
+            workload_owned(
+                Ok(WorkloadPaths {
+                    cwd: Some("/owned".into()),
+                    files,
+                }),
+                None,
+                true,
+                |_| Ok(true)
+            ),
+            Ok(true)
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
