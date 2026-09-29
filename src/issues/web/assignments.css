@@ -32,3 +32,13 @@
 .github-fetch-now { margin-top: 10px; min-height: 36px; padding: 6px 12px; font: inherit; font-size: 13px; color: var(--text); background: var(--input); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
 .github-fetch-now:disabled { opacity: .55; cursor: default; }
 .github-fetch-now:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.list-watcher-open { border: 0; padding: 0; background: transparent; cursor: pointer; flex-shrink: 0; }
+.github-watcher-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; }
+.github-watcher-dialog[open] { display: flex; flex-direction: column; }
+.github-watcher-dialog .dialog-heading { flex-shrink: 0; gap: 16px; }
+.github-watcher-dialog .dialog-content { min-height: 0; overflow: auto; padding: 20px 24px; }
+.github-watcher-dialog .github-watch-status { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 20px; }
+.github-watcher-dialog .github-fetch-now, .github-watcher-dialog [data-close] { min-height: 44px; }
+@media (max-width: 640px) {
+  .github-watcher-dialog .dialog-content { padding: 16px; }
+}

@@ -413,6 +413,7 @@ function listAssignment(issue) {
   const owner=a.kind==='github'?'watcher:github':a.kind==='machine'?'machine:'+a.machine:a.actor||issue.assignee||'human:boss';
   const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
   const actor=a.actor||issue.assignee;
+  if(a.kind==='github') return `<span class="list-assignee">${filter}<button type="button" class="list-agent-trace list-watcher-open" data-open-watcher="${issue.number}" title="Open GitHub watcher" aria-label="Open GitHub watcher for issue #${issue.number}">${icon('arrow-right')}</button></span>`;
   if(!actor || actor.startsWith('human:') || actor==='watcher:github') return filter;
   const trace='/agents/session#'+new URLSearchParams({project:model.project.id,issue:issue.number,agent:actor});
   return `<span class="list-assignee">${filter}<a class="list-agent-trace" href="${esc(trace)}" aria-label="Open agent conversation for issue #${issue.number}">${icon('arrow-right')}</a></span>`;
@@ -2028,6 +2029,12 @@ async function boot() {
     initGlobalSettings();
     IssueSubtasks.init();
     IssueBlockers.init();
+    IssueAssignments.initWatcher({
+      list:$("#issue-list"), actorName, bossName:() => model.boss.name, icon,
+      context:number => ({project:model.project.id, host:model.route.host || null, issueUrl:routeHash({...model.route, issue:number})}),
+      read:ctx => api({action:"view", number:ctx.number}, ctx.project, null, ctx.host),
+      refresh:ctx => mutate({action:"refresh_github", number:ctx.number}, ctx.project, ctx.host),
+    });
     updateProfile();
     initInbox();
     await renderRoute();
