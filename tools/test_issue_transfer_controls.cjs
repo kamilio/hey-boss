@@ -26,7 +26,7 @@ for (const state of ['open', 'blocked', 'ready', 'closed', 'draft', 'deleted']) 
       $:node, $$:() => [], document:{querySelector:node},
       esc:String, icon:empty, date:empty, avatar:empty, actorName:empty,
       renderDraftNotice:empty, renderIssueWork:empty, renderIssueContext:empty,
-      renderPullRequests:empty, issueStateActions:empty, renderIssueComment:empty,
+      renderPullRequests:empty, renderCommits:empty, issueStateActions:empty, renderIssueComment:empty,
       mountIssueProgress:fail('progress'), placeIssueWork(){}, secureLinks(){}, loadRelatedNotices(){},
       HeyBossStatus:{card:empty}, HeyBossOrigin:{creator:empty},
       IssueSubtasks:{parent:empty,card:empty,rendered:fail('subtasks')},
