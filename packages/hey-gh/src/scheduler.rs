@@ -19,6 +19,14 @@ use tokio::{
 
 pub(crate) const MAX_ACTIVE_BUCKETS: usize = 3;
 
+pub(crate) fn max_active_buckets(config: &Config) -> usize {
+    if config.rest_url.host_str() == Some("api.github.com") {
+        8
+    } else {
+        MAX_ACTIVE_BUCKETS
+    }
+}
+
 pub(crate) type SharedResult = Option<Result<Arc<Response>>>;
 pub(crate) type Inflight =
     Arc<Mutex<HashMap<String, (watch::Receiver<SharedResult>, Arc<AtomicBool>, Arc<Mutex<Instant>>)>>>;
@@ -105,14 +113,33 @@ struct Active {
     future: Pin<Box<dyn Future<Output = (Job, Attempt)> + Send>>,
 }
 
-fn lane_busy(active: &[Active], job: &Job) -> bool {
+fn lane_busy(active: &[Active], job: &Job, prod: bool) -> bool {
+    if !prod {
+        return if job.detail_lane {
+            active.iter().any(|attempt| attempt.detail_lane)
+        } else {
+            active.iter().filter(|attempt| !attempt.detail_lane).count() >= 2
+                || active
+                    .iter()
+                    .any(|attempt| !attempt.detail_lane && attempt.resource == job.resource)
+        };
+    }
     if job.detail_lane {
-        active.iter().any(|attempt| attempt.detail_lane)
-    } else {
-        active.iter().filter(|attempt| !attempt.detail_lane).count() >= 2
+        active.iter().filter(|attempt| attempt.detail_lane).count() >= 2
+    } else if job.resource == "core" {
+        active.iter().filter(|attempt| !attempt.detail_lane).count() >= 6
             || active
                 .iter()
-                .any(|attempt| !attempt.detail_lane && attempt.resource == job.resource)
+                .filter(|attempt| !attempt.detail_lane && attempt.resource == "core")
+                .count()
+                >= 5
+    } else {
+        active.iter().filter(|attempt| !attempt.detail_lane).count() >= 6
+            || active
+                .iter()
+                .filter(|attempt| !attempt.detail_lane && attempt.resource == job.resource)
+                .count()
+                >= 2
     }
 }
 
@@ -161,7 +188,8 @@ impl Scheduler {
         let mut global_next = Instant::now();
         let mut secondary_until = Instant::now();
         let mut active = Vec::<Active>::new();
-        let max_active = self.config.queue_capacity.min(MAX_ACTIVE_BUCKETS);
+        let prod = self.config.rest_url.host_str() == Some("api.github.com");
+        let max_active = self.config.queue_capacity.min(max_active_buckets(&self.config));
         loop {
             self.metrics
                 .active
@@ -210,7 +238,7 @@ impl Scheduler {
             let global = global_next.max(secondary_until);
             let next = {
                 let eligible =
-                    |job: &Job| ready(job, &budgets, global) <= now && !lane_busy(&active, job);
+                    |job: &Job| ready(job, &budgets, global) <= now && !lane_busy(&active, job, prod);
                 // Prefer interactive policy, but admit an eligible background job
                 // after at most three foreground dispatches in the same quota lane.
                 // A GraphQL/detail completion cannot reset core's fairness counter.
@@ -288,7 +316,7 @@ impl Scheduler {
             let wake = pending
                 .iter()
                 .map(|job| {
-                    if active.len() >= max_active || lane_busy(&active, job) {
+                    if active.len() >= max_active || lane_busy(&active, job, prod) {
                         // Busy lanes wake on completion; never spin on their old
                         // ready time. Their queued deadlines still expire on time.
                         job.deadline()

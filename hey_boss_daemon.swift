@@ -4138,7 +4138,8 @@ final class IssuesLauncher {
     }
     var probe: (@escaping (Bool) -> Void) -> Void = { done in
         var request = URLRequest(url: URL(string: "http://hey-boss.test/api/bootstrap")!)
-        request.timeoutInterval = 1
+        request.timeoutInterval = 3
+        request.setValue("close", forHTTPHeaderField: "Connection")
         URLSession.shared.dataTask(with: request) { data, response, _ in
             let value = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             let valid = (response as? HTTPURLResponse)?.statusCode == 200 && value?["ok"] as? Bool == true && value?["projects"] is [[String: Any]] && value?["csrf"] is String
