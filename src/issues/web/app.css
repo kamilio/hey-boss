@@ -2098,6 +2098,12 @@ dialog::backdrop {
 .issue-pr-link:hover {
   text-decoration: underline;
 }
+.issue-commits-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
 .issue-commit-chip {
   position: relative;
   z-index: 1;
