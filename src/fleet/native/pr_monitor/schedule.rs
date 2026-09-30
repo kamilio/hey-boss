@@ -57,6 +57,17 @@ impl Schedule {
             },
         );
     }
+
+    pub fn defer_details(&mut self, url: &str, now: i64) {
+        self.entries.insert(
+            url.into(),
+            Entry {
+                attempted_at: 1,
+                next_at: now,
+                failures: 0,
+            },
+        );
+    }
     pub fn due(&mut self, prs: &[crate::issues::TrackedPullRequest], now: i64) -> Vec<String> {
         let active = prs
             .iter()

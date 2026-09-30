@@ -665,64 +665,41 @@ impl Client {
                 .filter(|s| valid_sha(s))
                 .map(str::to_owned);
             let base_sha = pr.data["base"]["sha"].clone();
-            let ci_observation = self.ci_for_pr(repository, number, freshness).await?;
+            let prefix = format!("repos/{repository}");
+            let comments_path = format!("{prefix}/issues/{number}/comments?per_page=100");
+            let review_comments_path = format!("{prefix}/pulls/{number}/comments?per_page=100");
+            let reviews_path = format!("{prefix}/pulls/{number}/reviews?per_page=100");
+            let timeline_path = format!("{prefix}/issues/{number}/timeline?per_page=100");
+            let (
+                ci_res,
+                comments_res,
+                review_comments_res,
+                reviews_res,
+                timeline_res,
+                review_events_res,
+                review_threads_res,
+            ) = tokio::join!(
+                self.ci_for_pr(repository, number, freshness),
+                self.pages(&comments_path, None, freshness),
+                self.pages(&review_comments_path, None, freshness),
+                self.pages(&reviews_path, None, freshness),
+                self.pages(&timeline_path, None, freshness),
+                self.review_events(repository, number, freshness),
+                self.review_threads(repository, number, freshness),
+            );
+            let ci_observation = ci_res?;
             VALIDATIONS.with(|records| records.borrow_mut().extend(ci_observation.validations));
             let ci = ci_observation.data;
             if ci.head_sha != head || ci.merge_sha != merge {
                 continue;
             }
             let mut errors = Vec::new();
-            let prefix = format!("repos/{repository}");
-            let comments = collect(
-                self.pages(
-                    &format!("{prefix}/issues/{number}/comments?per_page=100"),
-                    None,
-                    freshness,
-                )
-                .await,
-                "comments",
-                &mut errors,
-            );
-            let review_comments = collect(
-                self.pages(
-                    &format!("{prefix}/pulls/{number}/comments?per_page=100"),
-                    None,
-                    freshness,
-                )
-                .await,
-                "review_comments",
-                &mut errors,
-            );
-            let reviews = collect(
-                self.pages(
-                    &format!("{prefix}/pulls/{number}/reviews?per_page=100"),
-                    None,
-                    freshness,
-                )
-                .await,
-                "reviews",
-                &mut errors,
-            );
-            let timeline = collect(
-                self.pages(
-                    &format!("{prefix}/issues/{number}/timeline?per_page=100"),
-                    None,
-                    freshness,
-                )
-                .await,
-                "timeline",
-                &mut errors,
-            );
-            let review_events = collect(
-                self.review_events(repository, number, freshness).await,
-                "review_events",
-                &mut errors,
-            );
-            let review_threads = collect(
-                self.review_threads(repository, number, freshness).await,
-                "review_threads",
-                &mut errors,
-            );
+            let comments = collect(comments_res, "comments", &mut errors);
+            let review_comments = collect(review_comments_res, "review_comments", &mut errors);
+            let reviews = collect(reviews_res, "reviews", &mut errors);
+            let timeline = collect(timeline_res, "timeline", &mut errors);
+            let review_events = collect(review_events_res, "review_events", &mut errors);
+            let review_threads = collect(review_threads_res, "review_threads", &mut errors);
             let final_pr = self
                 .pull_request(
                     repository,
