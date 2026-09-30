@@ -1034,7 +1034,7 @@ impl Client {
                 .0
                 .config
                 .queue_capacity
-                .min(crate::scheduler::MAX_ACTIVE_BUCKETS),
+                .min(crate::scheduler::max_active_buckets(&self.0.config)),
             queue_capacity: self.0.config.queue_capacity,
             interactive_reserved_slots: self.interactive_reserved_slots(),
             queue_full_rejections: self.0.metrics.queue_full.load(Ordering::Relaxed),

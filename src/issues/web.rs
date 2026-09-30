@@ -321,7 +321,7 @@ fn add_local_http(
 fn serve_requests(servers: &[Server], app: &Arc<App>, stop: &Arc<AtomicBool>) {
     std::thread::scope(|scope| {
         for server in servers {
-            for _ in 0..4 {
+            for _ in 0..16 {
                 scope.spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match server.recv_timeout(Duration::from_millis(250)) {
@@ -488,6 +488,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
     let mut response = Response::from_data(bytes).with_status_code(StatusCode(status));
     for (name, value) in [
         ("Content-Type", kind),
+        ("Connection", "close"),
         ("Cache-Control", "no-store"),
         ("X-Content-Type-Options", "nosniff"),
         ("Referrer-Policy", "no-referrer"),

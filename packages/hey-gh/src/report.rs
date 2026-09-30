@@ -479,9 +479,8 @@ impl Client {
                     let merge = pr.data["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
                     let data = self.ci_report(repository, &head, merge, policy).await?;
                     let final_policy = if matches!(policy, Freshness::CachedOnly)
-                        || (!crate::client::interactive_read()
-                            && matches!(policy, Freshness::MaxAge(_))
-                            && now_ms().saturating_sub(pr.validated_at_ms) < 10_000)
+                        || (matches!(policy, Freshness::MaxAge(_))
+                            && now_ms().saturating_sub(pr.validated_at_ms) < 15_000)
                     {
                         policy
                     } else {
@@ -712,7 +711,10 @@ impl Client {
                 .pull_request(
                     repository,
                     number,
-                    if matches!(freshness, Freshness::CachedOnly) {
+                    if matches!(freshness, Freshness::CachedOnly)
+                        || (matches!(freshness, Freshness::MaxAge(_))
+                            && now_ms().saturating_sub(pr.validated_at_ms) < 15_000)
+                    {
                         freshness
                     } else {
                         Freshness::Revalidate

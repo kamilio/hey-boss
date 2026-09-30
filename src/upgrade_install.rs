@@ -38,6 +38,9 @@ fn restart_hey_gh_daemon() {
     let _ = Command::new("/usr/bin/pkill")
         .args(["-TERM", "-f", "hey-boss fleet companion"])
         .status();
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-TERM", "-f", "hey-boss issue web"])
+        .status();
     std::thread::sleep(std::time::Duration::from_millis(200));
     let _ = Command::new("/usr/bin/pkill")
         .args(["-KILL", "-f", "hey-gh serve"])
@@ -45,10 +48,15 @@ fn restart_hey_gh_daemon() {
 }
 fn restart_desktop() -> io::Result<()> {
     restart_hey_gh_daemon();
+    let uid = unsafe { libc::getuid() };
+    let _ = Command::new("/bin/launchctl")
+        .args(["kickstart", "-k"])
+        .arg(format!("gui/{uid}/local.hey-boss-fleet-controller"))
+        .status();
     output(
         Command::new("/bin/launchctl")
             .args(["kickstart", "-k"])
-            .arg(format!("gui/{}/local.hey-boss", unsafe { libc::getuid() })),
+            .arg(format!("gui/{uid}/local.hey-boss")),
     )?;
     Ok(())
 }

@@ -351,12 +351,34 @@ impl Client {
             } else {
                 "satisfied"
             };
-            let (final_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
+            let (final_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly)
+                || (matches!(freshness, Freshness::MaxAge(_))
+                    && crate::now_ms().saturating_sub(pr.validated_at_ms) < 15_000
+                    && branch
+                        .as_ref()
+                        .is_ok_and(|b| crate::now_ms().saturating_sub(b.validated_at_ms) < 30_000))
+            {
                 (pr.clone(), None)
             } else {
+                let pr_policy = if matches!(freshness, Freshness::MaxAge(_))
+                    && crate::now_ms().saturating_sub(pr.validated_at_ms) < 15_000
+                {
+                    freshness
+                } else {
+                    Freshness::Revalidate
+                };
+                let branch_policy = if matches!(freshness, Freshness::MaxAge(_))
+                    && branch
+                        .as_ref()
+                        .is_ok_and(|b| crate::now_ms().saturating_sub(b.validated_at_ms) < 30_000)
+                {
+                    freshness
+                } else {
+                    Freshness::Revalidate
+                };
                 let (pr_res, branch_res) = tokio::join!(
-                    self.pull_request(repository, number, Freshness::Revalidate),
-                    self.get(&branch_path, Freshness::Revalidate),
+                    self.pull_request(repository, number, pr_policy),
+                    self.get(&branch_path, branch_policy),
                 );
                 (pr_res?, Some(branch_res))
             };
