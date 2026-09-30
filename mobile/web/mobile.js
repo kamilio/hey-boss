@@ -1,6 +1,6 @@
 "use strict";
 const resources=document.createElement('div');resources.className='project-resources';resources.setAttribute('aria-label','Project resources');
-for(const id of ['nav-artifacts','nav-mindmaps']){
+for(const id of ['nav-artifacts','nav-mindmaps','nav-merged-prs']){
  const link=document.getElementById(id);if(link)resources.append(link);
 }
 document.querySelector('main')?.prepend(resources);

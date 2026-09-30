@@ -16,6 +16,7 @@ jobs:
       - run: python3 tools/test_skill_manager_api.py
       - run: node tools/test_skill_manager.cjs && node --check src/issues/web/skills.js
       - run: node tools/test_quick_issue.js && node --check src/issues/web/quick-issue.js
+      - run: node --test tools/test_merged_prs.cjs
       - run: node tools/test_issue_blocked_types.cjs
       - run: node --test tools/test_issue_assignments.cjs
       - run: node tools/test_issue_transfer_controls.cjs
