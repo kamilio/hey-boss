@@ -752,15 +752,9 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
 /// Reads and validates an existing config without creating one.
 pub fn load(path: &Path) -> Result<Config> {
     let content = fs::read(path).context("Cannot read config")?;
-    // Rollout checks a plaintext candidate through a pipe, without putting its
-    // credentials in a staging file. Linux /dev/stdin resolves to a procfs pipe
-    // descriptor, which canonicalize cannot follow to a filesystem path.
-    if path == Path::new("/dev/stdin") {
-        return parse(&content, path);
-    }
-    // Resolve symlinks so the key belongs to the actual config file.
-    let path = fs::canonicalize(path).context("Cannot locate config")?;
-    parse(&content, &path)
+    // Plaintext configs may arrive through a pipe (/dev/stdin during rollout),
+    // which has no canonical filesystem path on Linux.
+    parse(&content, path)
 }
 
 pub fn protect(path: &Path) -> Result<Config> {
@@ -853,50 +847,169 @@ mod tests {
             reloaded.gemini.as_ref().unwrap().api_key,
             protected.gemini.as_ref().unwrap().api_key
         );
+        protect(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), on_disk);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for file in [&path, &path.with_extension("credentials.key")] {
+                assert_eq!(
+                    fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
     }
+
     #[test]
-    fn encrypted_credentials_are_stable_and_reject_missing_keys_or_tampering() {
+    fn encryption_preserves_legacy_and_client_configs_and_accepts_new_plaintext_keys() {
+        for raw in [
+            serde_json::json!({"listen":"127.0.0.1:8080", "api_keys":{"default":"synthetic-openai"},
+                "gemini":{"auth":"api_key","api_key":"synthetic-gemini"}}),
+            serde_json::json!({"listen":"127.0.0.1:8080", "mode":"client",
+                "connection":{"url":"http://127.0.0.1:9090","api_key":"synthetic-host"}}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+            let expected = serde_json::to_value(load(&path).unwrap()).unwrap();
+            protect(&path).unwrap();
+            assert!(!fs::read_to_string(&path).unwrap().contains("synthetic-"));
+            assert_eq!(
+                serde_json::to_value(load(&path).unwrap()).unwrap(),
+                expected
+            );
+
+            // Editing a single key leaves all other encrypted fields intact.
+            let mut stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let pointer = if raw.get("connection").is_some() {
+                "/connection/api_key"
+            } else {
+                "/api_keys/default"
+            };
+            *stored.pointer_mut(pointer).unwrap() = serde_json::json!("synthetic-replacement");
+            fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+            let updated = protect(&path).unwrap();
+            assert_eq!(
+                updated
+                    .connection
+                    .as_ref()
+                    .map(|c| c.api_key.as_str())
+                    .unwrap_or_else(|| &updated.api_keys["default"]),
+                "synthetic-replacement"
+            );
+            assert!(!fs::read_to_string(&path).unwrap().contains("synthetic-"));
+        }
+    }
+
+    #[test]
+    fn damaged_encryption_fails_closed_without_rewriting_or_disclosing_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let raw = serde_json::json!({
-            "listen": "127.0.0.1:8080",
-            "mode": "client",
-            "connection": {"url": "http://localhost:8081", "api_key": "synthetic-host-key"}
-        });
-        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"synthetic-private-key"}}"#,
+        )
+        .unwrap();
         protect(&path).unwrap();
         let encrypted = fs::read(&path).unwrap();
-        protect(&path).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), encrypted);
-        assert_eq!(
-            load(&path).unwrap().connection.unwrap().api_key,
-            "synthetic-host-key"
+        let key_path = path.with_extension("credentials.key");
+        let key = fs::read(&key_path).unwrap();
+        fs::remove_file(&key_path).unwrap();
+        assert!(
+            load(&path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("restore the matching")
         );
+        assert!(!key_path.exists());
+        fs::write(&key_path, &key).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut wrong_key = key.clone();
+        wrong_key[0] ^= 1;
+        fs::write(&key_path, wrong_key).unwrap();
+        let error = protect(&path).err().unwrap().to_string();
+        assert!(error.contains("key mismatch"));
+        assert!(!error.contains("synthetic-private-key"));
+        assert_eq!(fs::read(&path).unwrap(), encrypted);
+        fs::write(&key_path, key).unwrap();
 
-        let mut damaged: serde_json::Value = serde_json::from_slice(&encrypted).unwrap();
-        let ciphertext = damaged["connection"]["api_key"]["encrypted"]
+        let mut stored: serde_json::Value = serde_json::from_slice(&encrypted).unwrap();
+        let ciphertext = stored["api_keys"]["default"]["encrypted"]
             .as_str()
-            .unwrap();
-        let mut ciphertext = ciphertext.as_bytes().to_vec();
-        // Alter the nonce while preserving a valid version and base64 encoding.
-        ciphertext[3] = if ciphertext[3] == b'A' { b'B' } else { b'A' };
-        damaged["connection"]["api_key"]["encrypted"] =
-            String::from_utf8(ciphertext).unwrap().into();
-        fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
-        assert!(load(&path).is_err());
-        assert!(protect(&path).is_err());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
-            damaged
-        );
-
-        fs::write(&path, &encrypted).unwrap();
-        fs::remove_file(path.with_extension("credentials.key")).unwrap();
-        assert!(protect(&path).is_err());
-        assert_eq!(fs::read(&path).unwrap(), encrypted);
-        assert!(!path.with_extension("credentials.key").exists());
+            .unwrap()
+            .to_owned();
+        let mut tampered = ciphertext.clone().into_bytes();
+        tampered[19] = if tampered[19] == b'A' { b'B' } else { b'A' };
+        for field in [
+            serde_json::json!({"encrypted":"v2:unsupported"}),
+            serde_json::json!({"encrypted":"v1:not base64"}),
+            serde_json::json!({"encrypted":ciphertext,"extra":"synthetic-private-key"}),
+            // Valid base64 with altered ciphertext.
+            serde_json::json!({"encrypted":String::from_utf8(tampered).unwrap()}),
+        ] {
+            stored["api_keys"]["default"] = field;
+            let bytes = serde_json::to_vec(&stored).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let error = protect(&path).err().unwrap().to_string();
+            assert!(!error.contains("synthetic-private-key"));
+            assert!(!error.contains(&ciphertext));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_config_symlinks_use_the_target_key_and_reject_public_key_permissions() {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"synthetic-private-key"}}"#,
+        )
+        .unwrap();
+        let link = dir.path().join("linked.json");
+        symlink(&path, &link).unwrap();
+        protect(&link).unwrap();
+        assert!(link.is_symlink());
+        assert!(!link.with_extension("credentials.key").exists());
+        assert_eq!(
+            load(&link).unwrap().api_keys["default"],
+            "synthetic-private-key"
+        );
+        fs::set_permissions(
+            path.with_extension("credentials.key"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(load(&link).err().unwrap().to_string().contains("chmod 600"));
+    }
+
+    #[test]
+    fn reference_only_and_invalid_configs_are_not_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let references = br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"op://Vault/Item/key","shell":"sh://printf synthetic"}}"#;
+        fs::write(&path, references).unwrap();
+        protect(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), references);
+        let invalid = br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"synthetic-private-key"},"unknown":"synthetic-private-key"}"#;
+        fs::write(&path, invalid).unwrap();
+        assert_eq!(
+            protect(&path).err().unwrap().to_string(),
+            "Invalid config fields"
+        );
+        assert_eq!(fs::read(&path).unwrap(), invalid);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
     #[test]
     fn creates_private_config_and_preserves_edits() {
         let dir = tempfile::tempdir().unwrap();

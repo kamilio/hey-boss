@@ -58,6 +58,17 @@ pub(super) const OPEN_REQUESTS: &str = "state IN ('pending','streaming') AND end
 
 impl Database {
     pub fn open(path: PathBuf, config: &Logging, session_id: &str) -> Result<Self> {
+        Self::open_with_initializer(path, config, session_id, initialize)
+    }
+
+    fn open_with_initializer(
+        path: PathBuf,
+        config: &Logging,
+        session_id: &str,
+        initialize: impl FnOnce(&std::path::Path, &str, &Health) -> Result<(Connection, File)>
+        + Send
+        + 'static,
+    ) -> Result<Self> {
         let health = Arc::new(Health::default());
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
         let worker_health = health.clone();
@@ -522,4 +533,77 @@ price_version=excluded.price_version,price_model=excluded.price_model,record=exc
 
 fn integer(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delayed_initialization_keeps_startup_and_enqueue_nonblocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (release, gate) = mpsc::channel();
+        let config = Logging {
+            queue_capacity: 128,
+            batch_size: 32,
+            ..Logging::default()
+        };
+        let database = Database::open_with_initializer(
+            dir.path().join("requests.sqlite3"),
+            &config,
+            "startup-test",
+            move |path, session, health| {
+                // A slow filesystem or recovery must not hold up the caller.
+                gate.recv_timeout(Duration::from_secs(10))?;
+                initialize(path, session, health)
+            },
+        )
+        .unwrap();
+        assert_eq!(database.health()["status"], "initializing");
+        assert!(
+            database
+                .read::<()>(|_| panic!("read ran before initialization"))
+                .await
+                .is_err()
+        );
+        for id in 0..129 {
+            database.enqueue(Event {
+                entry: Entry {
+                    request_id: format!("startup-test-{id}"),
+                    session_id: "startup-test".into(),
+                    state: "succeeded".into(),
+                    ended_ms: Some(now_ms()),
+                    ..Entry::default()
+                },
+                kind: "completed".into(),
+                details: json!({}),
+                timestamp_ms: now_ms(),
+            });
+        }
+        assert_eq!(database.health()["pending_events"], 128);
+        assert_eq!(database.health()["dropped_events"], 1);
+        assert!(!database.path.exists());
+        release.send(()).unwrap();
+        database.flush().await.unwrap();
+        assert_eq!(database.health()["status"], "gaps");
+        assert_eq!(database.health()["committed_events"], 128);
+        assert_eq!(database.health()["pending_events"], 0);
+        let (requests, events, drops) = database
+            .read(|c| {
+                Ok((
+                    c.query_row("SELECT count(*) FROM requests", [], |r| r.get::<_, i64>(0))?,
+                    c.query_row("SELECT count(*) FROM request_events", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                    c.query_row(
+                        "SELECT value FROM metadata WHERE key='dropped_events'",
+                        [],
+                        |r| r.get::<_, String>(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!((requests, events, drops.as_str()), (128, 128, "1"));
+    }
 }

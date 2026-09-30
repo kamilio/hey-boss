@@ -107,7 +107,10 @@ pub(super) fn decrypt(value: &mut Value, path: &Path) -> Result<()> {
             .filter(|b| b.len() >= 28)
             .context("Invalid encrypted credential encoding")?;
         if cipher.is_none() {
-            cipher = Some(Aes256GcmSiv::new((&key(path, false)?).into()));
+            // Only encrypted credentials need a file-backed key. Resolve links
+            // here so a config symlink uses the actual config's sibling key.
+            let path = fs::canonicalize(path).context("Cannot locate encrypted config")?;
+            cipher = Some(Aes256GcmSiv::new((&key(&path, false)?).into()));
         }
         let plaintext = cipher
             .as_ref()

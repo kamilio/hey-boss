@@ -16,28 +16,30 @@ fn cli(home: &Path) -> Command {
 fn credential_preflight_accepts_piped_config_without_creating_files_or_printing_secrets() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
-    let mut child = cli(dir.path())
-        .args(["--config", "/dev/stdin", "check-credentials"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(
+    for input_path in ["/dev/stdin", "/dev/fd/0"] {
+        let mut child = cli(dir.path())
+            .args(["--config", input_path, "check-credentials"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(
         br#"{"listen":"127.0.0.1:8080","providers":{"openai":{"api_keys":{"default":"synthetic-piped-secret"}}}}"#,
     ).unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "Credential sources ready"
-    );
-    assert!(output.stderr.is_empty());
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "Credential sources ready"
+        );
+        assert!(output.stderr.is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }
 
 #[test]

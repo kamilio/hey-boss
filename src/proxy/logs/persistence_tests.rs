@@ -312,6 +312,73 @@ async fn database_initialization_failure_keeps_proxy_available_and_counts_lost_e
 }
 
 #[tokio::test]
+async fn failed_database_initialization_keeps_forwarding_and_live_logs_available() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("requests.sqlite3"),
+        b"not a SQLite database",
+    )
+    .unwrap();
+    let (upstream_url, upstream_task) =
+        serve(axum::Router::new().fallback(|| async { "ok" })).await;
+    let config = Config {
+        upstream_url,
+        ..Config::test_fixture()
+    };
+    let store = Arc::new(Store::open(&config, &dir.path().join("config.json")).unwrap());
+    let (url, proxy_task) = serve(
+        router_with(
+            config,
+            Options {
+                logs: Some(store.clone()),
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let response = client.get(format!("{url}/v1/test")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), "ok");
+    // A failed writer drains the bounded queue but never acknowledges durability.
+    assert!(store.flush().await.is_err());
+    let live: Value = client
+        .get(format!("{url}/logs/api?local=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(live["logging"]["status"], "error");
+    assert_eq!(live["logging"]["committed_events"], 0);
+    assert_eq!(live["logging"]["pending_events"], 0);
+    assert!(live["logging"]["dropped_events"].as_u64().unwrap() > 0);
+    assert!(
+        live["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"] == "/v1/test" && e["status"] == 200)
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}/logs/api?local=true&minutes=60"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn writer_lock_and_queue_saturation_never_block_forwarding_and_gaps_are_visible() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::test_fixture();

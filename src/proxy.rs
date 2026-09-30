@@ -2191,6 +2191,13 @@ mod tests {
         config.api_keys.insert("default".into(), "second".into());
         std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
         assert_eq!(get().await.unwrap().text().await.unwrap(), "Bearer second");
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(!stored.contains("\"second\""));
+        assert!(stored.contains("\"encrypted\""));
+        assert_eq!(
+            crate::config::load(&path).unwrap().api_keys["default"],
+            "second"
+        );
 
         // A broken edit is ignored and the last good config stays in force.
         tokio::time::sleep(Duration::from_millis(20)).await;

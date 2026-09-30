@@ -1,6 +1,6 @@
 # Configuration
 
-The default file is `~/.hey-proxy/config.json`. Use `--config PATH` for another file. First run and `--init` create a missing minimal file with private permissions on Unix. `--init` validates an existing config without changing it; normal startup encrypts literal credentials as described below.
+The default file is `~/.hey-proxy/config.json`. Use `--config PATH` for another file. First run and `--init` create a missing minimal file with private permissions on Unix. `--init` validates an existing config without changing it; starting the proxy also encrypts literal credentials as described below.
 
 OpenAI is the default provider for unprefixed model names on `/v1/responses`. Prefix a model with `gemini/` to use Gemini conversion. `openai/` is an optional explicit prefix. Gemini's native endpoints use the configured Gemini provider directly.
 
@@ -32,15 +32,15 @@ An alias's `api_key` is the project name, never the key itself. A reasoning rout
 
 ## Encrypted credentials
 
-Normal startup, credential hot reload, and remote installation automatically replace literal OpenAI, Gemini, and client connection keys with opaque fields:
+Starting the proxy, applying a valid hot reload, or installing remotely replaces literal OpenAI and Gemini API keys, bearer tokens, and client `connection.api_key` values with objects of the form `{"encrypted":"v1:..."}`. Both the current `providers` layout and legacy top-level `api_keys` / `gemini` fields are supported. `sh://` and `op://` references stay unchanged and resolve at runtime. To encrypt without starting the service, run:
 
-```json
-"api_keys": {"default": {"encrypted": "v1:..."}}
+```sh
+hey-proxy --config /path/to/config.json encrypt-config
 ```
 
-To encrypt an existing config without starting the service, run `hey-proxy encrypt-config` (or add `--config PATH`). `sh://` and `op://` references stay as references. To change a key, replace its encrypted object with the new literal string; the proxy encrypts it when the config reloads.
+Encryption uses AES-256-GCM-SIV with a random nonce and a local 32-byte key. For `config.json`, that key is `config.credentials.key` beside the config. On Unix, the migrated config and key have mode `600`; encryption rejects a key readable by other users. Migration validates first and replaces the config atomically without making a plaintext backup. Existing encrypted fields are preserved when another key is edited.
 
-Each config uses a separate private key file, such as `config.credentials.key`, with owner-only permissions. Keep that file with the config when moving or backing it up. This keeps API keys out of ordinary config inspection; a process running as the same user can still decrypt them. Migration replaces the config atomically without creating a plaintext backup.
+Keep the config and its matching key together when backing up or moving them. A symlink uses the target config's key. Missing keys, damaged ciphertext, and unsupported encryption versions fail validation; an invalid hot reload leaves the last valid config active. To rotate an API key, replace its encrypted object with the new string and reload or run `encrypt-config`. The key file protects against disclosure of the config alone; anyone who can read both files can decrypt the credentials.
 
 ## API-specific overwrites
 
@@ -73,7 +73,7 @@ Persistent request metadata is enabled by default. To disable it:
 
 The default database is `requests.sqlite3` beside the proxy config. Use `logging.database` to change its path. Prompts, payloads, credentials, and raw error messages are excluded from this history. Retention does not automatically delete old records.
 
-Database initialization, recovery, and writes run on a dedicated background thread. Startup and forwarded requests do not wait for SQLite; request events enter a bounded, nonblocking queue and are written in batches. Historical queries read the database only when requested. While the database initializes or is unavailable, the proxy keeps serving and the dashboard can show recent requests from memory. `/logs/api/health` reports initialization, errors, and dropped events if persistence cannot keep up.
+Database creation, schema setup, recovery, and persistence run on a background writer. Requests enter a bounded queue without waiting for SQLite or disk. `/logs/api?local=true` reports `logging.status` as `initializing` until setup completes. If initialization fails, forwarding and live in-memory logs remain available, the service prints an initialization error, and logging reports `error`. Historical queries return HTTP 503 until the database is ready. Queue overflow increments `dropped_events` and reports gaps; a successful flush confirms queued events were committed. Fix an initialization error and restart to restore persistent logging.
 
 ## Remote setup
 
