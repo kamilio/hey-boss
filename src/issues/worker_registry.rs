@@ -10,7 +10,14 @@ const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
     (
         "issue_pull_requests",
         "project_id",
-        &["purpose", "status", "checked_at", "error"],
+        &[
+            "purpose",
+            "status",
+            "checked_at",
+            "error",
+            "merged_at",
+            "pr_title",
+        ],
     ),
     ("global_settings", "id", &["auto_close_merged_prs"]),
 ];

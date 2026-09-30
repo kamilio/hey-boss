@@ -22,6 +22,6 @@ test('renders safe PR and issue links with counts and fallback dates', () => {
  assert.match(html,/o\/r#7/);
  assert.match(html,/issue=3/);
  assert.match(html,/host=box/);
- assert.match(html,/First observed/);
+ assert.match(html,/Observed/);
  assert.doesNotMatch(render([{url:'javascript:alert(1)',issues:[]}],{project:'test'}),/href="javascript:/);
 });

@@ -169,6 +169,8 @@ function date(at) {
   }
   function projectNavigation(project) {
     const hash = new URLSearchParams({project});
+    const host = new URLSearchParams(location.hash.slice(1)).get('host');
+    if (host && !Object.keys(document.documentElement.dataset).some(key => key.endsWith('Mobile'))) hash.set('host', host);
     if ($("#nav-merged-prs")) $("#nav-merged-prs").href = `/merged-prs#${hash}`;
     if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
     if ($("#nav-mindmaps")) $("#nav-mindmaps").href = `/mm#${hash}`;
@@ -177,7 +179,7 @@ function date(at) {
     if ($("#nav-admin")) $("#nav-admin").href = `/admin#${hash}`;
     if (location.pathname !== "/") {
       if ($("#nav-issues")) $("#nav-issues").href = `/#${hash}`;
-      if ($("#nav-inbox")) $("#nav-inbox").href = `/#${new URLSearchParams({project, view:"inbox"})}`;
+      if ($("#nav-inbox")) $("#nav-inbox").href = `/#${hash}&view=inbox`;
     }
     if ($(".brand")) $(".brand").href = `/#${hash}`;
     try { localStorage.setItem("hey-boss-issues-project", JSON.stringify(project)); } catch {}

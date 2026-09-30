@@ -139,6 +139,53 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn merged_history_backfills_closed_tasks_and_repairs_fleet_capture() {
+        let (mut store, _, root) = fixture();
+        let url = "https://github.com/o/r/pull/1";
+        store
+            .record_pr_status(url, Some("merged"), 2000, None)
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE issues SET state='closed'", [])
+            .unwrap();
+        assert!(
+            store
+                .tracked_pull_requests()
+                .unwrap()
+                .iter()
+                .any(|pr| pr.url == url)
+        );
+        store.db.execute_batch("CREATE TABLE capture_log(value TEXT); CREATE TRIGGER fleet_capture_issue_pull_requests_UPDATE AFTER UPDATE ON issue_pull_requests WHEN 1 AND NOT (OLD.project_id IS NEW.project_id AND OLD.url IS NEW.url) BEGIN INSERT INTO capture_log VALUES(json_object('project_id',NEW.project_id,'url',NEW.url)); END;").unwrap();
+        registry::repair_pr_capture(&store.db).unwrap();
+        store
+            .record_pr_merge_details(url, "Historical merge", Some("2026-09-29T23:30:00Z"), 3000)
+            .unwrap();
+        let captured: String = store
+            .db
+            .query_row("SELECT value FROM capture_log LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let captured: Value = serde_json::from_str(&captured).unwrap();
+        assert_eq!(captured["pr_title"], "Historical merge");
+        assert_eq!(captured["merged_at"], 1790724600000_i64);
+        assert!(
+            !store
+                .tracked_pull_requests()
+                .unwrap()
+                .iter()
+                .any(|pr| pr.url == url)
+        );
+        assert_eq!(
+            merged_history(&store.db, "named:test", 10, 0).unwrap()["pull_requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn merged_history_deduplicates_and_preserves_github_dates() {
         let (mut store, _, root) = fixture();
         let url = "https://github.com/o/r/pull/1";
