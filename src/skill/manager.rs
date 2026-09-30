@@ -323,7 +323,7 @@ fn transport(home: &Path, host: &str, input: &Value) -> Result<Value> {
             && let control = control_socket(home, host)
             && control.exists()
         {
-            c.args(["-o", "ControlMaster=no", "-o"])
+            c.args(["-F", "/dev/null", "-o", "ControlMaster=no", "-o"])
                 .arg(format!("ControlPath={}", control.display()));
         }
         c.args([
