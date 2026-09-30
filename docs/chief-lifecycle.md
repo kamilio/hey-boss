@@ -18,7 +18,7 @@ the old exit-only check fails it. A companion test preserves detection of a dead
 parent whose descendant retains stdout.
 
 Run `cargo test --locked --lib chief` and `cargo test --locked --test issues_chief`.
-The integration test covers initial launch, resume, missing-thread replacement,
+The integration test covers initial launch, fresh conversations, manual queue coalescing,
 failed/malformed completion, inherited stdout, ownership, and disabling Chief.
 Its 15-second waits identify the stage, persisted Chief state, worker exit, and
 bounded log tails. Shutdown has a five-second graceful limit and cleans up the

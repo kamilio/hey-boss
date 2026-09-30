@@ -40,16 +40,18 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  function requestFleet(req,res,action){
   if(!snapshot||now()-seen>15000)throw new HubError(503,'Connect your supervisor to edit worker configuration.');
   const input=req.method==='GET'?{}:req.body;
+  if(action==='chief_run'&&(typeof input.project!=='string'||!visible().has(input.project)||typeof input.id!=='string'||!/^[a-zA-Z0-9_-]{1,128}$/.test(input.id)))throw new HubError(400,'Choose a visible project and a request ID.');
   if(action==='configuration'&&req.method==='POST'&&((typeof input.text!=='string'&&!input.worker_update)||Buffer.byteLength(JSON.stringify(input))>1048576||typeof input.revision!=='string'||typeof input.save!=='boolean'))throw new HubError(400,'Provide YAML text, its revision, and whether to save.');
   if(action==='signal'&&(!['pause','resume','stop','restart'].includes(input.signal)||typeof input.host!=='string'||typeof input.worker!=='string'||typeof input.id!=='string'))throw new HubError(400,'Invalid worker action');
   if(pending.size>=32||[...pending.values()].filter(p=>p.device===req.device.id).length>=2)throw new HubError(429,'Wait for your current request to finish.');
   const id=randomUUID(),timer=setTimeout(()=>{pending.delete(id);if(!res.destroyed)res.status(504).json({error:'No confirmation from your supervisor. Reload to check whether the change was saved.'});},20000);timer.unref();
-  pending.set(id,{id,action,text:input.text,worker_update:input.worker_update,revision:input.revision,save:input.save,host:input.host,worker:input.worker,signal:input.signal,signal_id:input.id,device:req.device.id,res,timer});
+  pending.set(id,{id,action,project:input.project,text:input.text,worker_update:input.worker_update,revision:input.revision,save:input.save,host:input.host,worker:input.worker,signal:input.signal,signal_id:input.id,device:req.device.id,res,timer});
   res.on('close',()=>{clearTimeout(timer);pending.delete(id);});
  }
  app.get('/api/fleet/configuration',auth,(req,res)=>requestFleet(req,res,'configuration'));
  app.post('/api/fleet/configuration',auth,(req,res)=>requestFleet(req,res,'configuration'));
  app.post('/api/fleet',auth,(req,res)=>requestFleet(req,res,'signal'));
+ app.post('/api/fleet/chief',auth,(req,res)=>requestFleet(req,res,'chief_run'));
  app.get('/api/fleet/conversation',auth,(req,res)=>requestAgent(req,res,'conversation'));
  app.get('/api/fleet/assignment',auth,(req,res)=>requestAgent(req,res,'assignment'));
  app.post('/api/fleet/takeover',auth,(req,res)=>requestAgent(req,res,'takeover'));

@@ -77,6 +77,8 @@ const chief = {id:'chief:local:named:Atlas',kind:'chief',project_id:'named:Atlas
 const chiefEntry = {run:chief,online:true,worker:{pid:12,config:{enabled:true}}};
 assert.equal(chiefState(chiefEntry,now),'Waiting · 15 minutes left');
 assert.equal(chiefState({...chiefEntry,run:{...chief,state:'running',finished_at:null}},now),'Running');
+assert.equal(chiefState({...chiefEntry,run:{...chief,state:'running',queued:true}},now),'Running · 1 queued');
+assert.equal(chiefState({...chiefEntry,run:{...chief,state:'running',next_at:now-1}},now),'Running · 1 queued');
 assert.equal(chiefState({...chiefEntry,online:false},now),'Device disconnected');
 assert.equal(chiefState({...chiefEntry,worker:{pid:12,config:{enabled:false}}},now),'Paused');
 assert.equal(chiefState({...chiefEntry,run:{...chief,next_at:now-1}},now),'Waiting · Due now');

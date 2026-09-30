@@ -42,7 +42,7 @@ function projectView(data, now = Date.now()) {
 }
 function chiefState(entry, now = Date.now()) {
   if (!entry.online) return entry.worker.pid > 0 ? 'Device disconnected' : 'Worker stopped';
-  if (entry.run.state === 'running') return 'Running';
+  if (entry.run.state === 'running') return entry.run.queued || entry.run.next_at <= now ? 'Running · 1 queued' : 'Running';
   if (entry.run.enabled === false) return 'Disabled';
   if (entry.worker.config?.enabled === false) return 'Paused';
   const minutes = Math.max(0, Math.ceil((entry.run.next_at - now) / 60000));

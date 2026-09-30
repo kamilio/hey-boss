@@ -2,6 +2,7 @@
 const workflowPromptKeys = ["plan", "worktree", "checkout", "prs", "main"];
 let projectPromptDefaults = {};
 let chiefDefaultPrompt = "", chiefPreviewTemplate = "", projectSettingsTab = "instructions";
+let chiefRunPending = false, chiefRunRequest = null;
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
   projectSettingsFocus = null,
@@ -72,6 +73,7 @@ function projectSettingsChanged() {
   updateWorkflowBranches();
   $("#project-chief-state").textContent = $("#project-chief").checked ? "Enabled" : "Disabled";
   $(".chief-settings").classList.toggle("chief-enabled", $("#project-chief").checked);
+  $("#project-chief-run").disabled = chiefRunPending || projectSettingsSaving || !projectSettingsOriginal?.chief_enabled || changed;
   $("#project-settings-state").textContent = changed ? "Unsaved changes" : "";
   $("#project-settings-form button[type=submit]").disabled =
     projectSettingsSaving || !projectSettingsOriginal || !changed;
@@ -89,6 +91,9 @@ $("#project-settings-trigger").onclick = async () => {
   projectSettingsProject = model.project.id;
   projectSettingsFocus = $("#project-settings-trigger");
   projectSettingsOriginal = null;
+  chiefRunRequest = null;
+  $("#project-chief-actions").open = false;
+  $("#project-chief-run-status").textContent = "";
   $("#project-settings-name").textContent = model.project.name;
   $("#project-settings-error").hidden = true;
   projectPreviewFailed = false;
@@ -135,6 +140,25 @@ $("#project-settings-trigger").onclick = async () => {
   }
 };
 $("#project-settings-close").onclick = closeProjectSettings;
+$("#project-chief-run").onclick = async () => {
+  if (chiefRunPending || $("#project-chief-run").disabled) return;
+  const project = projectSettingsProject, sequence = projectSettingsSequence;
+  chiefRunPending = true;
+  chiefRunRequest ||= {project, id: HeyBossUI.requestId()};
+  projectSettingsChanged();
+  $("#project-chief-run-status").textContent = "Queuing Chief…";
+  try {
+    await post("/api/fleet/chief", chiefRunRequest);
+    if (sequence !== projectSettingsSequence) return;
+    chiefRunRequest = null;
+    $("#project-chief-run-status").textContent = "Chief queued. If a pass is running, one fresh pass will follow it.";
+  } catch (error) {
+    if (sequence === projectSettingsSequence) $("#project-chief-run-status").textContent = error.message;
+  } finally {
+    chiefRunPending = false;
+    projectSettingsChanged();
+  }
+};
 $("#project-settings-cancel").onclick = closeProjectSettings;
 $("#project-settings-dialog").addEventListener("cancel", (event) => {
   event.preventDefault();
@@ -252,6 +276,7 @@ $("#project-chief-reset").onclick = () => {
 };
 
 function setProjectSettingsDisabled(disabled) {
+  $("#project-chief-run").disabled = disabled || chiefRunPending || !projectSettingsOriginal?.chief_enabled;
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;
   for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt], #project-chief-reset")) input.disabled = disabled;
