@@ -142,7 +142,7 @@ class TagInput {
 let issueTagPicker = null;
 function renderTagSidebar(issue) {
   const deleted = !!issue.deleted_at;
-  return `<div class="side-section tag-section"><h2 class="side-heading">Tags${deleted ? "" : `<button class="icon-button" type="button" data-tag-picker aria-label="Assign tags" aria-haspopup="dialog">${icon("plus")}</button>`}</h2><div class="side-labels">${renderIssueTagChips(issue)}</div>${deleted ? "" : '<button class="button small link-button" type="button" data-tag-picker>Add tags</button>'}</div>`;
+  return `<div class="side-section tag-section"><h2 class="side-heading">Tags${deleted ? "" : `<button class="tag-add" type="button" data-tag-picker aria-label="Assign tags" aria-haspopup="dialog">${icon("plus")}Add</button>`}</h2><div class="side-labels">${renderIssueTagChips(issue)}</div></div>`;
 }
 function renderIssueTagChips(issue) {
   return issue.labels.length
@@ -152,7 +152,7 @@ function renderIssueTagChips(issue) {
             `<span class="tag-chip">${label(tag)}${issue.deleted_at || (specialIssueTags.has(tag) && model.actor.id !== "human:boss") ? "" : `<button type="button" data-remove-issue-tag="${esc(tag)}" aria-label="Remove ${esc(tag)} tag">${icon("x")}</button>`}</span>`,
         )
         .join("")
-    : '<span class="muted-text">No tags yet</span>';
+    : '<span class="muted-text">None</span>';
 }
 function closeIssueTagPicker() {
   $("#issue-tag-picker")?.remove();

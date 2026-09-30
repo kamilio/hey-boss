@@ -20,6 +20,7 @@ vm.runInContext(app.slice(app.indexOf('const specialIssueTags ='), app.indexOf('
 vm.runInContext(tags, context);
 (async () => {
   const sidebar = context.renderTagSidebar(context.model.detail.issue);
+  assert.equal((sidebar.match(/data-tag-picker/g) || []).length, 1, 'One add-tags control');
   assert.ok(!sidebar.includes('agent-permissions'), 'Permissions live in tags, without a separate panel');
   assert.ok(context.label('yolo').includes('data-icon="bolt"'), 'YOLO has its distinctive icon');
   context.openIssueTagPicker({focus(){}});

@@ -1,5 +1,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const vm = require('node:vm');
+const context = vm.createContext({});
+vm.runInContext(require('node:fs').readFileSync('src/issues/web/components.js', 'utf8') + '\nthis.ui = HeyBossUI;', context);
+global.HeyBossUI = context.ui;
 const assignments = require('../src/issues/web/assignments.js');
 const helpers = {actorName: id => id === 'human:boss' ? 'Boss' : 'Codex', icon: () => '', bossName: 'Boss'};
 const base = {number: 1, state: 'open', version: 1, pull_requests: [{url: 'https://github.com/o/r/pull/1'}]};
@@ -164,4 +168,15 @@ test('multiple PRs show their own last fetch and retry time', () => {
   assert.equal((html.match(/Last fetch/g)||[]).length,2);
   assert.match(html,/Retry after/);
   assert.match(html,/Rate limited/);
+});
+
+test('waiting watcher keeps help in a popover and avoids duplicate empty status', () => {
+  const issue = {...base, assignment:{kind:'github', waiting:true}};
+  const html = assignments.render({issue}, helpers);
+  assert.match(html, /popovertarget="assignment-help"/);
+  assert.match(html, /id="assignment-help"[^>]*popover/);
+  assert.doesNotMatch(html, /<p[^>]*>Waiting for required/);
+  assert.doesNotMatch(html, /Not recorded yet|Last fetch/);
+  assert.match(html, /Awaiting first fetch/);
+  assert.equal(assignments.status(issue, helpers), '');
 });

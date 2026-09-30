@@ -30,7 +30,7 @@ async page => {
   await fixture.keyboard.press('Escape');
   await second.click();
   await fixture.evaluate(() => { responses[1].resolve({issue:issue(2)}); currentHost='changed-host'; });
-  await dialog.getByText('Waiting for first fetch').waitFor();
+  await dialog.getByText('Awaiting first fetch').waitFor();
   await fixture.evaluate(() => responses[0].resolve({issue:{...issue(1),github_status:{error:'STALE RESPONSE'}}}));
   check(await dialog.getByText('STALE RESPONSE').count() === 0, 'Late response cannot overwrite another watcher');
   await dialog.getByRole('button',{name:'Fetch now'}).click();
@@ -38,7 +38,7 @@ async page => {
   await fixture.waitForFunction(() => calls.length === 4);
   await fixture.evaluate(() => responses.at(-1).reject(Error('Temporary network failure')));
   await dialog.getByText('Temporary network failure').waitFor();
-  check(await dialog.getByText('Waiting for first fetch').isVisible(), 'Read failure preserves last known activity');
+  check(await dialog.getByText('Awaiting first fetch').isVisible(), 'Read failure preserves last known activity');
   await fixture.waitForFunction(() => calls.length === 5);
   await fixture.evaluate(() => responses.at(-1).resolve({issue:issue(2)}));
   await dialog.getByText('Temporary network failure').waitFor({state:'hidden'});
