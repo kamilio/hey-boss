@@ -11,10 +11,14 @@ test('shared issue UI relays to the supervisor without retaining content on Fly'
  const base='http://127.0.0.1:'+server.address().port;
  const call=(path,body,headers={})=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});
  assert.equal((await call('/issues')).status,401);
+ assert.equal((await call('/merged-prs')).status,401);
  assert.equal((await call('/api/bootstrap')).status,401);
  assert.equal((await call('/api/bridge/web')).status,401);
  const paired=await call('/api/pair',{code:store.pairing()});
  const phone={Cookie:paired.headers.get('set-cookie').split(';')[0]},bridge={Authorization:'Bearer '+key};
+ const mergedPage=await call('/merged-prs',undefined,phone);
+ assert.equal(mergedPage.status,200);
+ assert.match(await mergedPage.text(),/id="merged-main"/);
  assert.equal((await call('/api/action',{project:'named:Atlas',operation:{action:'list'}},{...phone,Origin:'https://evil.invalid'})).status,403);
  assert.equal((await call('/api/action',{project:'named:Atlas',host:'other',operation:{action:'view',number:1}},phone)).status,400);
  const reading=call('/api/bootstrap',undefined,phone);
@@ -22,6 +26,12 @@ test('shared issue UI relays to the supervisor without retaining content on Fly'
  assert.equal(queue[0].kind,'bootstrap');
  await call('/api/bridge/web/'+queue[0].id+'/result',{ok:true,projects:[],actor:{id:'human:boss'}},bridge);
  assert.equal((await(await reading).json()).actor.id,'human:boss');
+ const history={project:'named:Atlas',operation:{action:'merged_pull_requests',limit:100,offset:0}};
+ const historyRead=call('/api/action',history,phone);
+ for(let i=0;i<30;i++){queue=(await(await call('/api/bridge/web',undefined,bridge)).json()).requests;if(queue.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.deepEqual(queue[0].payload,history);
+ await call('/api/bridge/web/'+queue[0].id+'/result',{ok:true,pull_requests:[],next_offset:null},bridge);
+ assert.deepEqual(await(await historyRead).json(),{ok:true,pull_requests:[],next_offset:null});
  const mutation={project:'named:Atlas',operation:{action:'edit',number:1,title:'Private title'},request_id:'stable-retry'};
  const writing=call('/api/action',mutation,phone);
  for(let i=0;i<30;i++){queue=(await(await call('/api/bridge/web',undefined,bridge)).json()).requests;if(queue.length)break;await new Promise(r=>setTimeout(r,10));}

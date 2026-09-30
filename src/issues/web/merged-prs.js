@@ -19,12 +19,12 @@ const HeyBossMergedPRs = (() => {
       const label = match ? `${match[1]}/${match[2]}#${match[3]}` : 'Pull request';
       const time = pr.merged_at || pr.observed_at;
       const title = pr.title || label;
-      return `<article class="merge-row"><span class="merge-mark" aria-label="Merged">↗</span><div class="merge-main">${match?`<a class="merge-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`:`<span class="merge-title">${esc(title)}</span>`}<div class="merge-meta"><span>${esc(label)}</span>${(pr.issues||[]).map(issue=>`<a href="/#${esc(new URLSearchParams({project:context.project,issue:issue.number,...(context.host?{host:context.host}:{})}))}" title="${esc(issue.title)}">#${issue.number} ${esc(issue.title)}</a>`).join('')}</div></div><span class="merge-time">${time?`${pr.merged_at?'':'First observed '}<time datetime="${new Date(time).toISOString()}" title="${esc(new Date(time).toLocaleString())}">${esc(new Date(time).toLocaleString(undefined,pr.merged_at?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric',year:'numeric'}))}</time>`:'Date unavailable'}</span></article>`;
+      return `<article class="merge-row"><span class="merge-mark" data-icon="pr-merged" role="img" aria-label="Merged"></span><div class="merge-main">${match?`<a class="merge-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`:`<span class="merge-title">${esc(title)}</span>`}<div class="merge-meta"><span>${esc(label)}</span>${(pr.issues||[]).map(issue=>`<a href="/#${esc(new URLSearchParams({project:context.project,issue:issue.number,...(context.host?{host:context.host}:{})}))}" title="${esc(issue.title)}">#${issue.number} ${esc(issue.title)}</a>`).join('')}</div></div><span class="merge-time">${time?`${pr.merged_at?'':'Observed '}<time datetime="${new Date(time).toISOString()}" title="${esc(new Date(time).toLocaleString())}">${esc(new Date(time).toLocaleString(undefined,pr.merged_at?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric',year:'numeric'}))}</time>`:'Date unavailable'}</span></article>`;
     }).join('')}</div></section>`).join('');
   }
   async function start() {
-    HeyBossUI.icons();
     const $ = selector => document.querySelector(selector);
+    HeyBossUI.icons();
     const mobile = document.documentElement.dataset.issueMobile === 'true';
     let boot, context, generation=0, rows=[], next=null, busy=false;
     const picker = new HeyBossUI.ProjectPicker({onSelect:project=>{location.hash=new URLSearchParams({project,...(context.host?{host:context.host}:{})});}});
@@ -45,6 +45,7 @@ const HeyBossMergedPRs = (() => {
         if(seq!==generation)return;
         rows=reset?value.pull_requests:[...new Map([...rows,...value.pull_requests].map(pr=>[pr.url,pr])).values()];next=value.next_offset;
         $('#merged-list').innerHTML=render(rows,current);
+        HeyBossUI.icons($('#merged-list'));
         $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:'No merged PRs yet. Tracked PRs will appear here after GitHub confirms the merge.';
         $('#merged-more').hidden=next===null;
       } catch(e) {if(seq===generation){error(e.message);$('#merged-status').textContent='';}}
