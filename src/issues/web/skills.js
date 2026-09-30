@@ -333,11 +333,27 @@ if(typeof document!=='undefined') (()=>{
       ${renderMachineTags(skill,true)}
       <span class="agent-target ${hasAgent('codex')?'present':''}">${icon('code')}Codex <small>${hasAgent('codex')?'found':'not found'}</small></span>
       <span class="agent-target ${hasAgent('claude')?'present':''}">${icon('spark')}Claude <small>${hasAgent('claude')?'found':'not found'}</small></span>
-      <span class="skill-pill ${chosen?'green':'amber'}">${chosen?'Unified / chosen':'Pick version to keep'}</span>
+      ${(() => {
+        const cov = machineCoverage(skill, data.machines);
+        return cov.allGreen
+          ? '<span class="skill-pill green">Synced on all machines</span>'
+          : !cov.inSync
+            ? `<span class="skill-pill amber">${skill.versions.length} versions · Pick one to unify</span>`
+            : cov.missing.length
+              ? `<span class="skill-pill amber">On ${cov.present.length} of ${cov.known.length} machines</span>`
+              : '<span class="skill-pill green">Unified</span>';
+      })()}
       <span class="skill-size">${preview.word_count||0} words · ${(currentFileObj.text||'').split('\n').length} lines</span>
     </div>
     <section class="skill-section">
-      <div class="skill-section-title"><h3>Versions across machines <span>${skill.versions.length}</span></h3><span>${skill.versions.length>1?'Pick one to unify everywhere':'In sync across scanned copies'}</span></div>
+      <div class="skill-section-title"><h3>Versions across machines <span>${skill.versions.length}</span></h3><span>${(() => {
+        const cov = machineCoverage(skill, data.machines);
+        return !cov.inSync
+          ? 'Pick one version to unify across all machines'
+          : cov.missing.length
+            ? `Missing on ${cov.missing.map(shortHost).join(', ')} · Distribute to install everywhere`
+            : `In sync across all ${cov.known.length || 1} machines`;
+      })()}</span></div>
       ${skill.versions.length>1?'<p class="skill-conflict-note">This skill differs across machines. Review the GitHub diff below and pick the version you want to keep everywhere.</p>':''}
       <div class="skill-versions">${skill.versions.map((v,i)=>{
         const locations=skill.copies.filter(c=>c.digest===v.digest);
@@ -348,10 +364,17 @@ if(typeof document!=='undefined') (()=>{
             <span class="version-symbol">V${i+1}</span>
             <span><strong>${esc(hostsLabel)}</strong><small>${esc(agentsLabel)} · ${v.word_count||0} words${locations.every(c=>c.stale)?' · Last seen':''}</small></span>
           </button>
-          ${skill.scope==='global'?`<div class="version-buttons">
-            <button class="version-choose ${chosen?.digest===v.digest?'chosen':''}" data-choose="${esc(v.digest)}" ${pending||data.busy?'disabled':''} aria-label="Choose version ${i+1} of ${esc(skill.name)}">${chosen?.digest===v.digest?`${icon('check')}Selected`:'Select'}</button>
-            <button class="button small primary version-unify" data-unify="${esc(v.digest)}" ${pending||data.busy?'disabled':''} title="Pick this version and sync to all machines">Keep &amp; unify</button>
-          </div>`:''}
+          ${skill.scope==='global'?(() => {
+            const cov = machineCoverage(skill, data.machines);
+            if (cov.allGreen && skill.versions.length === 1) {
+              return `<div class="version-buttons"><span class="version-choose chosen">${icon('check')}Synced everywhere</span></div>`;
+            }
+            const btnLabel = skill.versions.length > 1 ? 'Keep &amp; unify' : 'Distribute to all machines';
+            return `<div class="version-buttons">
+              ${skill.versions.length > 1 ? `<button class="version-choose ${chosen?.digest===v.digest?'chosen':''}" data-choose="${esc(v.digest)}" ${pending||data.busy?'disabled':''} aria-label="Choose version ${i+1} of ${esc(skill.name)}">${chosen?.digest===v.digest?`${icon('check')}Selected`:'Select'}</button>` : ''}
+              <button class="button small primary version-unify" data-unify="${esc(v.digest)}" ${pending||data.busy?'disabled':''} title="Sync this version to all machines">${btnLabel}</button>
+            </div>`;
+          })():''}
         </div>`;
       }).join('')}</div>
     </section>
@@ -361,9 +384,9 @@ if(typeof document!=='undefined') (()=>{
         <h3>Markdown files <span>${mdFiles.length}</span></h3>
         <span>Open or edit with the Markdown editor</span>
       </div>
-      <div class="skill-md-tabs" role="tablist" aria-label="Skill Markdown files">
+      ${mdFiles.length > 1 ? `<div class="skill-md-tabs" role="tablist" aria-label="Skill Markdown files">
         ${mdFiles.map(f=>`<button type="button" role="tab" class="skill-md-tab ${f.path===currentFileObj.path?'is-active':''}" aria-selected="${f.path===currentFileObj.path}" data-md-file="${esc(f.path)}">${icon('docs')||icon('code')}<span>${esc(f.path)}</span></button>`).join('')}
-      </div>
+      </div>` : ''}
       ${editingMarkdown ? `<div class="skill-markdown-editor-card">
         <div class="skill-markdown-editor-toolbar">
           <strong>Editing <code>${esc(currentFileObj.path)}</code></strong>
@@ -378,10 +401,7 @@ if(typeof document!=='undefined') (()=>{
       </div>` : `<div class="skill-source-viewer">
         <div class="skill-source-header">
           <span>${icon('code')}<code>${esc(currentFileObj.path)}</code> <span class="source-version">Version ${skill.versions.findIndex(v=>v.digest===preview.digest)+1}</span></span>
-          <div class="skill-source-actions">
-            <button type="button" class="button small" data-toggle-editor="${esc(currentFileObj.path)}">Edit in Markdown editor</button>
-            <button type="button" class="button small" data-open-dir="${esc(skill.name)}">Open directory</button>
-          </div>
+          <span class="skill-source-path-inline">${esc(shortHost(preview.host))} · <code>${esc(preview.path)}</code></span>
         </div>
         <pre tabindex="0" aria-label="Skill source">${(currentFileObj.text||'').split('\n').map((line,i)=>`<span id="skill-line-${i+1}" data-number="${i+1}">${esc(line)||' '}</span>`).join('')}</pre>
         <p class="skill-source-path">${esc(preview.host)} · ${esc(preview.path)}</p>
@@ -410,7 +430,7 @@ if(typeof document!=='undefined') (()=>{
       return;
     }
     const b=e.target.closest('[data-open]');
-    if(b){active=b.dataset.open;previewDigest='';compareDigest='';activeFile='';editingMarkdown=false;deletePromptSkill='';history.replaceState(null,'',`#skill=${encodeURIComponent(active)}`);renderList();renderDetail();if(innerWidth<850)$('#skills-detail').scrollIntoView({behavior:'smooth',block:'start'});}
+    if(b){active=b.dataset.open;previewDigest='';compareDigest='';activeFile='';editingMarkdown=false;deletePromptSkill='';const params=new URLSearchParams(location.hash.slice(1));params.set('skill',active);history.replaceState(null,'',`#${params}`);renderList();renderDetail();if(innerWidth<850)$('#skills-detail').scrollIntoView({behavior:'smooth',block:'start'});}
   };
   $('#skills-list').onchange=e=>{const name=e.target.dataset.select;if(name){e.target.checked?selected.add(name):selected.delete(name);changes();}};
   $('#skills-detail').onclick=async e=>{
@@ -516,10 +536,27 @@ if(typeof document!=='undefined') (()=>{
     HeyBossUI.icons();$('#nav-skills')?.setAttribute('aria-current','page');
     const bootResponse=await fetch('/api/bootstrap'),boot=await bootResponse.json();
     if(!bootResponse.ok)throw Error(boot.error?.message||'Could not connect');csrf=boot.csrf;
-    const picker=new HeyBossUI.ProjectPicker({onSelect:id=>location.href='/#'+new URLSearchParams({project:id})});picker.update(boot.projects||[],null);
-    $('#project-name').textContent='All projects';
+    const projects=boot.projects||[];
+    const initialProjId=HeyBossUI.projectId(boot.project?.id||projects[0]?.id);
+    let currentProj=projects.find(p=>p.id===initialProjId||p.name===initialProjId)||boot.project||projects[0]||null;
+    const picker=new HeyBossUI.ProjectPicker({onSelect(id){
+      currentProj=projects.find(p=>p.id===id||p.name===id)||currentProj;
+      if(currentProj){
+        picker.update(projects,currentProj);
+        const params=new URLSearchParams(location.hash.slice(1));
+        params.set('project',currentProj.id);
+        history.replaceState(null,'','#'+params);
+      }
+    }});
+    if(currentProj){
+      picker.update(projects,currentProj);
+      const params=new URLSearchParams(location.hash.slice(1));
+      if(!params.get('project')||params.get('project')!==currentProj.id){params.set('project',currentProj.id);history.replaceState(null,'','#'+params);}
+    } else {
+      picker.update(projects,null);
+    }
     active=new URLSearchParams(location.hash.slice(1)).get('skill')||'';
-    use(await request(),true);if(!data.busy)await action('scan');
+    use(await request(),true);if(!data.busy&&!(data.machines||[]).some(m=>m.scanned_at))await action('scan');
   }
   start().catch(fail);
 })();

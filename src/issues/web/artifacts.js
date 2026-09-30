@@ -545,7 +545,7 @@ const HeyBossArtifacts = (() => {
     async function navigate() {
       $("#artifact-delete-dialog")?.close();
       clearInterval(nativeSyncTimer);clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
-      const params=route(),id=HeyBossUI.projectId(boot.projects[0]?.id);project=boot.projects.find(p=>p.id===id)||boot.projects[0];
+      const params=route(),id=HeyBossUI.projectId(boot.projects[0]?.id);project=boot.projects.find(p=>p.id===id||p.name===id)||boot.projects[0];
       if(!project){error(Error("No registered projects. Reconnect the supervisor to load project data."),()=>location.reload());return;}
       context={project:project.id,csrf:boot.csrf,host:params.get("host")};for(const input of [$("#artifact-new"),$("#artifact-search"),$("#artifact-archived")])input.disabled=false;picker.update(boot.projects,project);doc=null;commentsOpen=null;
       $("#nav-artifacts").setAttribute("aria-current","page");

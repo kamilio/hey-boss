@@ -223,10 +223,8 @@
  .worker-editor {padding:20px}.worker-editor .takeover-dialog-actions {bottom:-20px;flex-direction:row}.worker-editor .takeover-dialog-actions button {width:auto;flex:1;font-size:12px}.worker-form-grid {grid-template-columns:minmax(0,1fr) 100px}.worker-form-grid input,.worker-form-grid textarea,.worker-form-grid select {font-size:16px}
 }
 /* Activity uses a machine / worker / task outline, with details on demand. */
-.workers-page #main {max-width:1600px;padding-top:16px}
-.workers-page .page-heading {margin-bottom:8px}
-.workers-page .page-heading .eyebrow,.workers-page #overview-note {display:none}
-.workers-page .page-heading h1 {font-size:26px}
+.workers-page #main {max-width:1120px}
+.workers-page .worker-views {margin-top:4px}
 .workers-page .worker-views {margin-bottom:8px;gap:24px}
 .workers-page .worker-views a {padding:10px 0;font-size:13px}
 .workers-page .worker-toolbar {margin-bottom:8px;align-items:center;gap:12px}

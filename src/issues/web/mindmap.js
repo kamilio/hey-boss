@@ -255,7 +255,7 @@
         const value = await response.json(); if (!response.ok || !value.ok) throw new Error(value.error?.message || "Cannot connect");
         if (ticket !== generation) return; boot = value; csrf = value.csrf; projects = value.projects;
       }
-      const project = HeyBossUI.projectId(boot.project.id);
+      const rawProject = HeyBossUI.projectId(boot.project.id); const project = (projects.find(p => p.id === rawProject || p.name === rawProject) || boot.project).id;
       if (graph && project !== graph.project.id) $("#search").value = "";
       const response = await fetch("/api/mm", { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json", "X-Hey-Boss-CSRF": csrf }, body: JSON.stringify({ project, operation: { action: "mindmap", operation: { command: "show", body_mode: "preview" } }, request_id: null }) });
       const value = await response.json();

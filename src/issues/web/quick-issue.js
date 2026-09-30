@@ -177,7 +177,7 @@ const HeyBossQuickIssue = (() => {
         if (host && host !== value.backend_host) value = await post({action:"projects", include_hidden:true}, projectId);
         if (generation !== sequence) return;
         projects = value.projects;
-        current = projects.find(p => p.id === projectId) || (projectId ? null : value.project);
+        current = projects.find(p => p.id === projectId || p.name === projectId) || (projectId ? null : value.project);
         ready = true; preview(); dismissed = false; updatePicker();
       } catch (e) { if (generation === sequence) { context.textContent = "Unable to load projects · close and retry"; fail(e.message); } }
     }

@@ -710,10 +710,13 @@ async function renderRoute() {
   const sequence = ++model.sequence;
   const previous = model.project?.id;
   model.route = parseRoute();
+  model.project = currentProject();
+  if (model.project?.id) model.route.project = model.project.id;
   updateAppNavigation();
+  projectOptions();
   $("#inbox-view").hidden = model.route.view !== "inbox";
   $("#project-settings-trigger").hidden = model.route.view === "inbox";
-  $(".project-control").hidden = model.route.view === "inbox";
+  $(".project-control").hidden = false;
   if (model.route.view === "inbox") {
     closeProjectMenu();
     model.detail = null;

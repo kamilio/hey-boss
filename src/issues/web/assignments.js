@@ -37,7 +37,8 @@
     if (a.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
     if (a.kind === "agent") targets.unshift({id:"active", name:description.label, disabled:true});
     const options = targets.map(t => `<option value="${esc(t.id)}"${t.id === selected ? " selected" : ""}${t.disabled ? " disabled" : ""}>${esc(t.name)}</option>`).join("");
-    return `<div class="side-section issue-assignment"><label class="side-heading" for="issue-assignment">Assignment${helpers.icon(description.icon)}</label><select id="issue-assignment" data-assignment-select aria-describedby="assignment-detail"${editable ? "" : " disabled"}>${options}</select><p id="assignment-detail" class="assignment-detail">${esc(issue.draft ? "Mark ready before assigning this issue." : description.detail)}</p>${fetchOverview(issue)}${editable && !hasPr ? '<p class="assignment-hint">Attach a PR to enable the GitHub watcher.</p>' : ""}</div>`;
+    const trace = a.actor && value.project?.id && issue.number ? '/agents/session#' + new URLSearchParams({project: value.project.id, issue: issue.number, agent: a.actor}) : null;
+    return `<div class="side-section issue-assignment"><label class="side-heading" for="issue-assignment">Assignment${helpers.icon(description.icon)}</label><select id="issue-assignment" data-assignment-select aria-describedby="assignment-detail"${editable ? "" : " disabled"}>${options}</select><p id="assignment-detail" class="assignment-detail">${esc(issue.draft ? "Mark ready before assigning this issue." : description.detail)}</p>${trace ? `<p class="assignment-trace"><a href="${esc(trace)}">Open agent conversation →</a></p>` : ""}${fetchOverview(issue)}${editable && !hasPr ? '<p class="assignment-hint">Attach a PR to enable the GitHub watcher.</p>' : ""}</div>`;
   }
   function fetchTime(value) {
     const date = typeof value === "number" && value > 0 ? new Date(value) : null;
