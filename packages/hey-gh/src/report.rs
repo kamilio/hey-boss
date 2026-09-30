@@ -986,27 +986,50 @@ impl Client {
         }
         let mut workflows: Vec<Value> = latest.into_values().collect();
         workflows.sort_by_key(|r| r["id"].as_u64().unwrap_or(0));
-        for run in &workflows {
-            if let (Some(id), Some(attempt)) = (run["id"].as_u64(), run["run_attempt"].as_u64()) {
-                jobs.extend(collect(
-                    self.workflow_jobs(repository, id, attempt, run, freshness)
-                        .await,
-                    &format!("jobs:{id}:{attempt}"),
-                    &mut errors,
-                ));
-                check_size(
-                    checks
-                        .iter()
-                        .chain(&statuses)
-                        .chain(&workflows)
-                        .chain(&jobs),
-                    self.collection_limit(),
-                )?;
-            } else {
-                errors.push(SourceError {
-                    source: "workflow_runs".into(),
-                    message: "workflow run lacks id or attempt".into(),
-                });
+        let job_width = if self.status().queue_capacity >= 32 {
+            3
+        } else {
+            1
+        };
+        for group in workflows.chunks(job_width) {
+            let fetch = |index: usize| async move {
+                let Some(run) = group.get(index) else {
+                    return None;
+                };
+                if let (Some(id), Some(attempt)) = (run["id"].as_u64(), run["run_attempt"].as_u64())
+                {
+                    Some((
+                        format!("jobs:{id}:{attempt}"),
+                        self.workflow_jobs(repository, id, attempt, run, freshness)
+                            .await,
+                    ))
+                } else {
+                    Some((
+                        "workflow_runs".to_owned(),
+                        Err(Error::Invalid("workflow run lacks id or attempt".into())),
+                    ))
+                }
+            };
+            let (a, b, c) = tokio::join!(fetch(0), fetch(1), fetch(2));
+            for item in [a, b, c].into_iter().flatten() {
+                if item.0 == "workflow_runs" {
+                    if let Err(Error::Invalid(message)) = item.1 {
+                        errors.push(SourceError {
+                            source: "workflow_runs".into(),
+                            message,
+                        });
+                    }
+                } else {
+                    jobs.extend(collect(item.1, &item.0, &mut errors));
+                    check_size(
+                        checks
+                            .iter()
+                            .chain(&statuses)
+                            .chain(&workflows)
+                            .chain(&jobs),
+                        self.collection_limit(),
+                    )?;
+                }
             }
         }
         check_size(
@@ -1084,7 +1107,7 @@ impl Client {
         );
         if finished
             && matches!(freshness, Freshness::MaxAge(_))
-            && let Some(cached) = self.derived(&key).await?
+            && let Some(cached) = self.peek_derived(&key).await?
             && now_ms().saturating_sub(cached.validated_at_ms) < 86400 * 1000
         {
             return cached.decode();

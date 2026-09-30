@@ -359,8 +359,10 @@ impl Scheduler {
                         let seconds = reset.saturating_sub(now_ms() / 1000);
                         let wait = if remaining == 0 {
                             Duration::from_secs(seconds.saturating_add(1))
-                        } else {
+                        } else if remaining <= 1000 {
                             Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
+                        } else {
+                            Duration::ZERO
                         };
                         // Authenticated REST 304 validations do not consume primary
                         // quota. Preserve pacing debt from the last charged result.

@@ -467,7 +467,20 @@ async fn poll_watch(
         ));
     }
     if watch.pull_number != 0 {
-        return refresh_pr(client, &watch.repository, watch.pull_number, ci_only).await;
+        if terminal_pr_watch_settled(client, &watch.repository, watch.pull_number, ci_only).await? {
+            return Ok(());
+        }
+        let deadline =
+            tokio::time::Instant::now() + client.report_timeout().min(Duration::from_secs(30));
+        return crate::client::BACKGROUND_READ
+            .scope(
+                (),
+                crate::client::REQUEST_DEADLINE.scope(
+                    Some(deadline),
+                    refresh_pr(client, &watch.repository, watch.pull_number, ci_only),
+                ),
+            )
+            .await;
     }
     let resource = format!("prs://{}/{}/mine", client.hostname(), watch.repository);
     let kind = if ci_only { "ci" } else { "full" };
@@ -506,6 +519,31 @@ async fn poll_watch(
     } else {
         Err(Error::Invalid(failed.join("; ")))
     }
+}
+
+async fn terminal_pr_watch_settled(
+    client: &Client,
+    repository: &str,
+    number: u64,
+    ci_only: bool,
+) -> Result<bool> {
+    let spelling = client.pr_repository_spelling(repository, number).await?;
+    let suffix = format!("{}/{spelling}/{number}", client.hostname());
+    let Some(metadata) = client
+        .stored_snapshot(&format!("metadata://{suffix}"))
+        .await?
+    else {
+        return Ok(false);
+    };
+    if metadata["pull_request"]["state"].as_str() != Some("closed") {
+        return Ok(false);
+    }
+    let target = if ci_only {
+        format!("ci://{suffix}")
+    } else {
+        format!("pr://{suffix}")
+    };
+    Ok(client.stored_snapshot(&target).await?.is_some())
 }
 
 async fn refresh_pr(client: &Client, repository: &str, number: u64, ci_only: bool) -> Result<()> {
@@ -1240,6 +1278,59 @@ mod tests {
         // Read-only diagnostics must not create evidence or move feed cursors.
         assert_eq!(client.bootstrap().await.unwrap().cursor, before);
         assert_eq!(client.status().network_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn closed_pull_request_watches_stop_polling_once_terminal_snapshot_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::with_token(
+            crate::Config {
+                cache_path: dir.path().join("cache.sqlite"),
+                ..crate::Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        assert!(
+            !terminal_pr_watch_settled(&client, "acme/demo", 7, true)
+                .await
+                .unwrap()
+        );
+        client
+            .observe(
+                "metadata://github.com/acme/demo/7",
+                &json!({"pull_request":{"state":"closed"},"conflicts":"clean"}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !terminal_pr_watch_settled(&client, "acme/demo", 7, true)
+                .await
+                .unwrap()
+        );
+        client
+            .observe("ci://github.com/acme/demo/7", &json!({"head_sha":"abc"}))
+            .await
+            .unwrap();
+        assert!(
+            terminal_pr_watch_settled(&client, "acme/demo", 7, true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !terminal_pr_watch_settled(&client, "acme/demo", 7, false)
+                .await
+                .unwrap()
+        );
+        client
+            .observe("pr://github.com/acme/demo/7", &json!({"number":7}))
+            .await
+            .unwrap();
+        assert!(
+            terminal_pr_watch_settled(&client, "acme/demo", 7, false)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

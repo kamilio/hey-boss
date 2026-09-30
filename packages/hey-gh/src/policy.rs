@@ -83,8 +83,8 @@ impl Client {
         let key = format!("policy-error://{}/{path}", self.hostname());
         let previous = self.peek_derived(&key).await?;
         let max_age = match freshness {
-            Freshness::MaxAge(age) => age.as_millis().min(300_000) as u64,
-            _ => 300_000,
+            Freshness::MaxAge(age) => age.as_millis().min(90_000) as u64,
+            _ => 90_000,
         };
         if !matches!(freshness, Freshness::Revalidate)
             && let Some(cached) = &previous
@@ -242,6 +242,9 @@ impl Client {
             }
             let rules_path = format!("repos/{repository}/rules/branches/{}", segment(&base));
             let rules_result = match self.policy_get(&rules_path, freshness).await {
+                Ok(first) if first.link.is_none() && first.data.is_array() => {
+                    Ok(first.data.as_array().cloned().unwrap_or_default())
+                }
                 Ok(_) => {
                     self.pages(
                         &rules_path,

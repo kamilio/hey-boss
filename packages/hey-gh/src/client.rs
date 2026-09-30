@@ -69,7 +69,7 @@ impl Default for Config {
             queue_timeout: Duration::from_secs(300),
             request_timeout: Duration::from_secs(30),
             report_timeout: Duration::from_secs(120),
-            min_spacing: Duration::from_millis(100),
+            min_spacing: Duration::from_millis(20),
             max_attempts: 3,
             max_body_bytes: 16 * 1024 * 1024,
             max_collection_bytes: 64 * 1024 * 1024,

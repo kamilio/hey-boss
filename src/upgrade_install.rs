@@ -31,7 +31,13 @@ fn desktop_app() -> io::Result<Option<PathBuf>> {
     }
     Ok(Some(app.to_owned()))
 }
+fn restart_hey_gh_daemon() {
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-TERM", "-f", "hey-gh serve"])
+        .status();
+}
 fn restart_desktop() -> io::Result<()> {
+    restart_hey_gh_daemon();
     output(
         Command::new("/bin/launchctl")
             .args(["kickstart", "-k"])
@@ -40,6 +46,7 @@ fn restart_desktop() -> io::Result<()> {
     Ok(())
 }
 fn restart_companion() -> io::Result<()> {
+    restart_hey_gh_daemon();
     if cfg!(target_os = "macos") {
         output(
             Command::new("/bin/launchctl")
