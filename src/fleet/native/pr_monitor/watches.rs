@@ -83,7 +83,7 @@ async fn poll_required(
     force: bool,
 ) -> hey_gh::Result<Option<RequiredEvidence>> {
     let freshness = fetch_freshness(force);
-    let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20));
+    let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(30));
     let policy = tokio::time::timeout_at(
         deadline,
         client.required_checks_for_pr(repository, number, freshness),
@@ -172,7 +172,7 @@ async fn poll_details(
     } = required;
     let freshness = fetch_freshness(force);
     let result = tokio::time::timeout_at(
-        batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20)),
+        batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(30)),
         async {
             let (ci, metadata) = tokio::join!(
                 client.ci_for_pr(repository, number, freshness),
@@ -238,7 +238,7 @@ async fn poll_details(
     // Review failures cannot undo an already published required failure or slow
     // the next CI attempt. The daemon still owns source-specific quota backoff.
     let result = tokio::time::timeout_at(
-        batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20)),
+        batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(30)),
         client.pr_report(repository, number, freshness),
     )
     .await
