@@ -18,9 +18,9 @@ fn decode_declared_worktrees(bytes: &[u8]) -> io::Result<Vec<PathBuf>> {
         worktrees: Vec<PathBuf>,
     }
     let inventory: Inventory = serde_json::from_slice(bytes)?;
-    if inventory.version != 1 || inventory.worktrees.iter().any(|p| !p.is_absolute()) {
+    if inventory.version != 2 || inventory.worktrees.iter().any(|p| !p.is_absolute()) {
         return Err(io::Error::other(
-            "Invalid declared issue worktree inventory",
+            "Cleanup requires ownership inventory v2 (claims, reservations, retained attempts); upgrade the issue service",
         ));
     }
     Ok(inventory.worktrees)
@@ -40,6 +40,9 @@ fn query_declared_roots(binary: &Path) -> io::Result<BTreeSet<PathBuf>> {
     }
     let mut roots = BTreeSet::new();
     for path in decode_declared_worktrees(&output.stdout)? {
+        // Retained source need not have an intact Git marker. Never discard
+        // declared ownership merely because metadata is missing or inaccessible.
+        roots.insert(path.canonicalize().unwrap_or_else(|_| path.clone()));
         if let Some((root, _)) = checkouts(&path)?.first() {
             roots.insert(root.clone());
         }
@@ -593,13 +596,13 @@ mod tests {
     #[test]
     fn declared_ownership_protocol_keeps_paths_and_rejects_incomplete_inventory() {
         assert_eq!(
-            decode_declared_worktrees(br#"{"version":1,"worktrees":["/declared/topic"]}"#).unwrap(),
+            decode_declared_worktrees(br#"{"version":2,"worktrees":["/declared/topic"]}"#).unwrap(),
             vec![PathBuf::from("/declared/topic")]
         );
         for invalid in [
-            br#"{"version":2,"worktrees":[]}"#.as_slice(),
-            br#"{"version":1}"#,
-            br#"{"version":1,"worktrees":["relative"]}"#,
+            br#"{"version":1,"worktrees":[]}"#.as_slice(),
+            br#"{"version":2}"#,
+            br#"{"version":2,"worktrees":["relative"]}"#,
             b"unavailable",
         ] {
             assert!(decode_declared_worktrees(invalid).is_err());
@@ -614,7 +617,7 @@ mod tests {
         fs::create_dir_all(checkout.join(".git")).unwrap();
         fs::write(checkout.join("browser.log"), "fixture").unwrap();
         let binary = root.join("owner-provider");
-        let body = serde_json::json!({"version":1,"worktrees":[checkout]});
+        let body = serde_json::json!({"version":2,"worktrees":[checkout]});
         fs::write(
             &binary,
             format!(
@@ -643,7 +646,7 @@ mod tests {
         let checkout = root.join("work");
         fs::create_dir_all(checkout.join(".git")).unwrap();
         let provider = brew.join("hey-boss");
-        let body = serde_json::json!({"version":1,"worktrees":[checkout]});
+        let body = serde_json::json!({"version":2,"worktrees":[checkout]});
         fs::write(
             &provider,
             format!(
