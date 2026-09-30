@@ -440,6 +440,141 @@ pub fn report() -> Result<Value> {
     Ok(public_report(&current, super::selected_skills(&home)))
 }
 
+fn wait_until_idle() -> Result<Value> {
+    loop {
+        let rep = report()?;
+        if rep["busy"] != true {
+            return Ok(rep);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+pub fn scan_blocking() -> Result<Value> {
+    let _ = act(Action {
+        action: "scan".into(),
+        revision: 0,
+        selected: vec![],
+        choices: BTreeMap::new(),
+        max_words: DEFAULT_WORDS,
+        skill: String::new(),
+        file_path: String::new(),
+        content: String::new(),
+        base_digest: String::new(),
+        distribute: false,
+    })?;
+    wait_until_idle()
+}
+
+pub fn delete_blocking(skill: &str) -> Result<Value> {
+    let _ = act(Action {
+        action: "delete".into(),
+        revision: 0,
+        selected: vec![],
+        choices: BTreeMap::new(),
+        max_words: DEFAULT_WORDS,
+        skill: skill.to_owned(),
+        file_path: String::new(),
+        content: String::new(),
+        base_digest: String::new(),
+        distribute: false,
+    })?;
+    wait_until_idle()
+}
+
+pub fn distribute_blocking(skills: &[String], from: Option<&str>) -> Result<Value> {
+    let mut rep = report()?;
+    if rep["machines"].as_array().is_none_or(Vec::is_empty) {
+        rep = scan_blocking()?;
+    }
+    let rev = rep["revision"].as_u64().unwrap_or(0);
+    let mut selected_set: BTreeSet<String> = rep["selected"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    for s in skills {
+        selected_set.insert(s.clone());
+    }
+    let target_skills: Vec<String> = if skills.is_empty() {
+        selected_set.iter().cloned().collect()
+    } else {
+        skills.to_vec()
+    };
+    let mut choices: BTreeMap<String, String> = rep["choices"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+        .collect();
+    for name in &target_skills {
+        let mut copies = Vec::new();
+        for m in rep["machines"].as_array().into_iter().flatten() {
+            let host = m["host"].as_str().unwrap_or("");
+            let hostname = m["hostname"].as_str().unwrap_or(host);
+            for c in m["copies"].as_array().into_iter().flatten() {
+                if c["name"].as_str() == Some(name.as_str()) && c["scope"].as_str() == Some("global") {
+                    copies.push((host.to_owned(), hostname.to_owned(), c.clone()));
+                }
+            }
+        }
+        if let Some(sel) = from {
+            let sel_short = sel.trim_end_matches(".local");
+            let matched = copies.iter().find(|(host, hostname, c)| {
+                host == sel
+                    || hostname == sel
+                    || host.trim_end_matches(".local") == sel_short
+                    || hostname.trim_end_matches(".local") == sel_short
+                    || c["digest"].as_str().is_some_and(|d| d.starts_with(sel))
+            });
+            if let Some((_, _, c)) = matched
+                && let Some(d) = c["digest"].as_str()
+            {
+                choices.insert(name.clone(), d.to_owned());
+            } else {
+                return Err(Error::invalid(format!(
+                    "No copy of {name} found matching '{sel}'"
+                )));
+            }
+        } else if !choices.contains_key(name)
+            || !copies.iter().any(|(_, _, c)| c["digest"].as_str() == choices.get(name).map(String::as_str))
+        {
+            let unique: BTreeSet<&str> = copies
+                .iter()
+                .filter_map(|(_, _, c)| c["digest"].as_str())
+                .collect();
+            if unique.len() == 1 {
+                if let Some(d) = unique.into_iter().next() {
+                    choices.insert(name.clone(), d.to_owned());
+                }
+            } else if let Some((_, _, local_copy)) = copies.iter().find(|(h, _, _)| h == "local")
+                && let Some(d) = local_copy["digest"].as_str()
+            {
+                choices.insert(name.clone(), d.to_owned());
+            }
+        }
+    }
+    let single_skill = if skills.len() == 1 {
+        skills[0].clone()
+    } else {
+        String::new()
+    };
+    let _ = act(Action {
+        action: "distribute".into(),
+        revision: rev,
+        selected: selected_set.into_iter().collect(),
+        choices,
+        max_words: rep["max_words"].as_u64().unwrap_or(DEFAULT_WORDS as u64) as usize,
+        skill: single_skill,
+        file_path: String::new(),
+        content: String::new(),
+        base_digest: String::new(),
+        distribute: true,
+    })?;
+    wait_until_idle()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
