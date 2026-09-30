@@ -170,13 +170,15 @@ function date(at) {
   function projectNavigation(project) {
     const hash = new URLSearchParams({project});
     if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
-    $("#nav-mindmaps").href = `/mm#${hash}`;
-    $("#nav-workers").href = `/agents#${hash}`;
+    if ($("#nav-mindmaps")) $("#nav-mindmaps").href = `/mm#${hash}`;
+    if ($("#nav-workers")) $("#nav-workers").href = `/agents#${hash}`;
+    if ($("#nav-skills")) $("#nav-skills").href = `/skills#${hash}`;
+    if ($("#nav-admin")) $("#nav-admin").href = `/admin#${hash}`;
     if (location.pathname !== "/") {
-      $("#nav-issues").href = `/#${hash}`;
-      $("#nav-inbox").href = `/#${new URLSearchParams({project, view:"inbox"})}`;
+      if ($("#nav-issues")) $("#nav-issues").href = `/#${hash}`;
+      if ($("#nav-inbox")) $("#nav-inbox").href = `/#${new URLSearchParams({project, view:"inbox"})}`;
     }
-    $(".brand").href = `/#${hash}`;
+    if ($(".brand")) $(".brand").href = `/#${hash}`;
     try { localStorage.setItem("hey-boss-issues-project", JSON.stringify(project)); } catch {}
   }
 

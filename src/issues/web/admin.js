@@ -114,17 +114,39 @@
     const value=document.getElementById(copy.dataset.copy)?.textContent||"";
     try{if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(value);else{const area=document.createElement("textarea");area.value=value;document.body.append(area);area.select();if(!document.execCommand("copy"))throw new Error("Copy unavailable");area.remove();}$("#toast").textContent="Copied";$("#toast").hidden=false;setTimeout(()=>$("#toast").hidden=true,1800)}catch(e){fail(e)}
   });
+  const picker = typeof HeyBossUI !== "undefined" ? new HeyBossUI.ProjectPicker({
+    onSelect(id) {
+      if ($("#project").value !== id) {
+        $("#project").value = id;
+        const current = projects.find(p => p.id === id || p.name === id) || projects[0];
+        if (current) picker.update(projects, current);
+        loadProject().catch(fail);
+      }
+    }
+  }) : null;
+  function syncHeaderProject() {
+    if (!picker) return;
+    const current = projects.find(p => p.id === $("#project").value || p.name === $("#project").value) || projects[0] || null;
+    if (current && $("#project").value !== current.id) $("#project").value = current.id;
+    picker.update(projects, current);
+  }
   $("#search").addEventListener("input",()=>data&&nav());
-  $("#project").addEventListener("change",()=>loadProject().catch(fail));
+  $("#project").addEventListener("change",()=>{syncHeaderProject();loadProject().catch(fail);});
   $("#issue").addEventListener("change",()=>loadIssue().catch(fail));
   async function start() {
+    if (typeof HeyBossUI !== "undefined") {
+      HeyBossUI.icons();
+      $("#nav-admin")?.setAttribute("aria-current", "page");
+    }
     const [catalog,boot]=await Promise.all([request("/api/admin/catalog"),request("/api/bootstrap")]);
     data=catalog;csrf=boot.csrf;projects=boot.projects||[];
     $("#build").textContent=`BUILD ${data.build} · ${data.commands.filter(c=>c.preview==="sample").length} output previews`;
     const route=new URLSearchParams(location.hash.slice(1));selection=route.get("item")||selection;
     $("#project").innerHTML=projects.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
-    const preferred=route.get("project")||boot.project?.id;
-    if(projects.some(p=>p.id===preferred))$("#project").value=preferred;
+    const preferred = (typeof HeyBossUI !== "undefined" ? HeyBossUI.projectId(boot.project?.id) : route.get("project")) || boot.project?.id;
+    const matched = projects.find(p => p.id === preferred || p.name === preferred) || projects[0];
+    if(matched)$("#project").value=matched.id;
+    syncHeaderProject();
     nav();
     if(projects.length)await loadProject(route.get("issue"));else{$("#context-status").textContent="No projects · sample command data";await show(selection);}
   }

@@ -42,3 +42,7 @@
 @media (max-width: 640px) {
   .github-watcher-dialog .dialog-content { padding: 16px; }
 }
+
+.assignment-trace { margin: 8px 0 0; font-size: 12px; font-weight: 500; }
+.assignment-trace a { color: var(--accent); text-decoration: none; }
+.assignment-trace a:hover { text-decoration: underline; }

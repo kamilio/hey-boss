@@ -708,6 +708,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/agents/session"
                     | "/artifacts"
                     | "/skills"
+                    | "/admin"
             ) {
                 let issues = matches!(path.as_str(), "/" | "/issues");
                 let shell = include_str!("web/app-shell.html")
@@ -746,6 +747,30 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     .replace(
                         "<!--workers-current-->",
                         if matches!(path.as_str(), "/workers" | "/agents" | "/agents/session") {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--artifacts-current-->",
+                        if path == "/artifacts" {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--skills-current-->",
+                        if path == "/skills" {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--admin-current-->",
+                        if path == "/admin" {
                             " aria-current=\"page\""
                         } else {
                             ""

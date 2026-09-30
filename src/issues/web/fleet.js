@@ -174,10 +174,12 @@ if (typeof document !== 'undefined') (() => {
   }});
   function context() {
     if(!defaultProject){if(last)render(last);return;}
-    const id=HeyBossUI.projectId(defaultProject.id);
+    const rawId=HeyBossUI.projectId(defaultProject.id);
+    const matched=projects.find(p=>p.id===rawId||p.name===rawId)||defaultProject||{id:rawId,name:rawId};
+    const id=matched.id;
     const query=new URLSearchParams(location.hash.slice(1));
-    if(!query.get('project')){query.set('project',id);history.replaceState(null,'','#'+query);}
-    picker.update(projects, projects.find(p=>p.id===id)||{id,name:id});
+    if(!query.get('project')||query.get('project')!==id){query.set('project',id);history.replaceState(null,'','#'+query);}
+    picker.update(projects, matched);
     if(last)render(last);
   }
   const link = (entry) => base+'/session#'+new URLSearchParams({project:entry.run.project_id,host:entry.machine.host,run:entry.run.id});
@@ -219,7 +221,7 @@ if (typeof document !== 'undefined') (() => {
     const focus=document.activeElement?.dataset.focus;
     const open=new Set([...$('projects').querySelectorAll('details[open]')].map(d=>d.dataset.section));
     const filter=route().get('scope')==='all'?null:route().get('project');
-    const groups=projectView(data).filter(p=>!filter||p.id===filter);
+    const groups=projectView(data).filter(p=>!filter||p.id===filter||p.name===filter);
     $('show-all').hidden=!filter;
     $('overview-note').textContent=groups.some(p=>p.active.length)?'A little closer to done. See what’s moving.':'Your projects, and the work behind them.';
     const sections=groups.map(group=>{
@@ -248,9 +250,9 @@ if (typeof document !== 'undefined') (() => {
       }
       if(holds.length){section.append(element('h3','agents-section-label','Scheduled retries'));const held=element('div','agent-grid');for(const entry of holds)held.append(card(entry,true));section.append(held);}
       if(group.active.length||group.chiefs.length)section.append(element('h3','agents-section-label','Active agents'));
-      const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);
+      if(group.active.length){const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);}
       if(!group.active.length&&group.chiefs.length)section.append(element('p','chief-owner','No active issue agents.'));
-      if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id);section.append(history);}
+      if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id)||(!group.active.length&&!group.chiefs.length&&!holds.length);section.append(history);}
       return section;
     });
     if(!sections.length){const empty=element('section','agents-empty');empty.append(element('div','empty-orbit','✧'),element('h2','','Room for your next idea'),element('p','','When an agent picks up a task, its conversation will appear here.'));sections.push(empty);}
@@ -515,7 +517,7 @@ if (typeof document !== 'undefined') (() => {
       selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
     }
     $('back').href=base+'#'+new URLSearchParams({project:route().get('project'),view:'conversations'});
-    if(!selected){$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
+    if(!selected){const issueNum=Number(route().get('issue')),proj=route().get('project');if(issueNum>0&&proj){$('session-issue').hidden=false;$('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:proj,issue:issueNum});$('session-issue').textContent='Issue #'+issueNum+' ↗';}$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('conversation-empty').textContent='The saved session could not be loaded.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
     $('session-title').textContent=run.kind==='chief'?'Chief · '+(run.project_name||'Organizing project'):run.title||'Preparing your task';
