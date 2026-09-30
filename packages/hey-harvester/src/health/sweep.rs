@@ -292,7 +292,9 @@ fn protected_dependency(path: &std::path::Path) -> bool {
     // Installed runtimes and extracted dependencies must remain complete. Their
     // node_modules/build/dist folders are not project caches, even under HOME or
     // .cache. Check ancestors so persisted cursors inside an installation stop too.
-    software_bundle(path)
+    path.ancestors()
+        .any(|p| p.file_name().is_some_and(|n| n == "node_modules"))
+        || software_bundle(path)
         || path.ancestors().any(|dir| {
             let name = dir.file_name().and_then(|name| name.to_str());
             let parent = dir
@@ -1098,6 +1100,36 @@ mod tests {
             discover_projects_until(&mut p, Instant::now() + Duration::from_secs(5));
             assert_eq!(p.roots, VecDeque::from([root.join("normal/out")]));
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resumed_sweep_cannot_remove_unregistered_dependencies() {
+        let root = std::env::temp_dir().join(format!(
+            "harvester-unregistered-deps-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::create_dir_all(root.join("cache")).unwrap();
+        let root = root.canonicalize().unwrap();
+        fs::write(root.join("node_modules/.bin/tsc"), "retained validator").unwrap();
+        fs::write(root.join("cache/expired"), "disposable").unwrap();
+        let mut progress = Progress::default();
+        progress
+            .stack
+            .push(Frame::new(root.join("node_modules/.bin")));
+        progress.roots.push_back(root.join("cache"));
+        let (removed, _, errors) = advance_with_owners(
+            &mut progress,
+            now() + 172800,
+            true,
+            Instant::now() + Duration::from_secs(5),
+            100,
+            &BTreeSet::new(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(removed, 1);
+        assert!(root.join("node_modules/.bin/tsc").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -5,6 +5,7 @@ mod sweep;
 pub use sweep::Statistics as CacheProgress;
 
 mod caches;
+pub mod cleanup;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]

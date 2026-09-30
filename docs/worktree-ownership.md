@@ -1,6 +1,8 @@
 # Worktree ownership and recovery
 
-Current cleanup policy (September 28): tracked edits and unpublished commits block
+Current cleanup policy: an explicit exact-target release and fresh ownership
+checks are required by every supported worktree/dependency remover. See
+[cleanup releases](cleanup-protection.md). Tracked edits and unpublished commits block
 removal; untracked/ignored output is disposable and does not reset idle time.
 Live remote verification, ownership locks, activity and database protections still
 apply. The dated investigations below describe the policies at those times.
@@ -95,7 +97,8 @@ modify either reported worktree, branch, claim, validator, or receipt.
 Only the task owner releases its lock after checking normal validation completion,
 publication requirements, and absence of live or queued descendants. Keep receipts
 outside the checkout. Recheck branch/HEAD and staged, unstaged, untracked and
-ignored files. Then explicitly unlock only that worktree and use ordinary
+ignored files. Then explicitly unlock only that worktree, record
+`health release-cleanup PATH --owner SESSION`, and use ordinary
 `git worktree remove` or `hey-boss health remove-worktree ABSOLUTE_PATH`.
 Health cleanup still refuses unsafe state and retains the named branch. Do not
 use a double force, broad glob, recursive temporary-root cleanup, or prune to

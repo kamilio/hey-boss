@@ -954,7 +954,7 @@ JSON status distinguish the responding binary (`reporting_build`) from the worke
 that began the last scan (`scan_build`); old snapshots retain an unknown scan build
 until a new check runs. Compare both IDs after deployment before trusting telemetry.
 
-With `configure --aggressive true`, clean linked worktrees become eligible after
+With `configure --aggressive true`, explicitly released clean linked worktrees become eligible after
 4 hours without tracked-source or Git activity. Tracked edits, unpushed commits,
 locks and active processes prevent removal. Untracked/ignored output neither blocks
 cleanup nor resets idle time. Unpublished SQLite files and filesystem protections
@@ -963,11 +963,17 @@ Clean sparse checkouts are supported. Primary checkouts and missing-checkout met
 stay intact. Removal retains branches and never overrides ownership locks. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
 See [ownership and recovery](docs/worktree-ownership.md).
+Every worktree removal requires an exact-target cleanup release and fresh ownership
+checks. Use `health release-cleanup PATH --owner SESSION` only after the owner
+confirms completion; `health retain-cleanup PATH` withdraws it before reuse.
+For dependencies, use `health remove-dependencies /absolute/path/node_modules`.
+See [cleanup releases and receipts](docs/cleanup-protection.md).
 
 Aggressive cache cleanup expires individual files after 24 hours across OS temp,
 npm/Bun/Yarn/Python caches and `~/.cache`. New siblings do not protect old
 files. Git checkouts retain all contents, including tracked build assets,
 dependency links and untracked output; age alone does not prove these disposable.
+All `node_modules` directories are excluded, even outside registered checkouts.
 The worktree cleaner reclaims unused checkouts after its ownership and safety checks.
 Installed runtimes, application bundles, Sparkle update staging, and macOS
 application data are excluded, including when resuming old traversal cursors.
