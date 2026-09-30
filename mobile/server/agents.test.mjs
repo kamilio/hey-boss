@@ -62,6 +62,15 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal(pending[0].run,'old');assert.equal(pending[0].at,123);assert.equal(pending[0].project,'named:Atlas');
  await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:false,error:'This origin is not recorded'},bridge);
  assert.equal((await historical).status,503,'The supervisor must confirm the saved origin before serving history');
+ const chiefInput={project:'named:Atlas',id:'manual-chief'};
+ assert.equal((await call('/api/fleet/chief',chiefInput)).status,401);
+ assert.equal((await call('/api/fleet/chief',{...chiefInput,project:'named:Hidden'},headers)).status,400);
+ assert.equal((await call('/api/fleet/chief',chiefInput,{...headers,Origin:'https://evil.example'})).status,403);
+ const chief=call('/api/fleet/chief',chiefInput,headers);
+ for(let i=0;i<20;i++){pending=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(pending.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(pending[0].action,'chief_run');assert.equal(pending[0].project,'named:Atlas');assert.equal(pending[0].signal_id,'manual-chief');
+ await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,queued:true},bridge);
+ assert.equal((await(await chief).json()).queued,true);
  store.setIssueProjects([]);assert.equal((await call('/api/fleet/conversation?host=local&run=run',null,headers)).status,404);
 });
 
