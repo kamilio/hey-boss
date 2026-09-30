@@ -478,7 +478,15 @@ impl Client {
                     let head = sha(&pr.data, "head")?;
                     let merge = pr.data["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
                     let data = self.ci_report(repository, &head, merge, policy).await?;
-                    let final_policy = if matches!(policy, Freshness::CachedOnly) { policy } else { Freshness::Revalidate };
+                    let final_policy = if matches!(policy, Freshness::CachedOnly)
+                        || (!crate::client::interactive_read()
+                            && matches!(policy, Freshness::MaxAge(_))
+                            && now_ms().saturating_sub(pr.validated_at_ms) < 10_000)
+                    {
+                        policy
+                    } else {
+                        Freshness::Revalidate
+                    };
                     let final_pr = self.pull_request(repository, number, final_policy).await?;
                     if pr.data["node_id"] != final_pr.data["node_id"]
                         || pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
