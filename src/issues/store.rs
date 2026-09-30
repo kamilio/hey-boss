@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[path = "agent_launches.rs"]
 mod agent_launches;
 #[path = "chief.rs"]
-pub(super) mod chief;
+pub(crate) mod chief;
 #[path = "claim_recovery.rs"]
 mod claim_recovery;
 #[path = "coordination.rs"]

@@ -505,8 +505,12 @@ impl Worker {
                     }
                 }
                 handles = active;
+                let mut chief_finished = false;
                 chiefs.retain_mut(|task| match task.poll(&store) {
-                    Ok(finished) => !finished,
+                    Ok(finished) => {
+                        chief_finished |= finished;
+                        !finished
+                    }
                     Err(error) => {
                         reconnect_store(&mut store, &path, &error);
                         crate::worker_tui::diagnostics::report(format_args!(
@@ -584,19 +588,24 @@ impl Worker {
                     }
                     last_recovery = Instant::now();
                 }
-                if last_chief.elapsed() >= Duration::from_secs(5) {
-                    match store.reserve_chief(&machine, worker_id.as_deref()) {
-                        Ok(Some(job)) => {
-                            chiefs.push(super::chief::Task::start(
-                                path.clone(),
-                                job,
-                                stopped.clone(),
-                            ));
+                if chief_finished || last_chief.elapsed() >= Duration::from_secs(5) {
+                    loop {
+                        match store.reserve_chief(&machine, worker_id.as_deref()) {
+                            Ok(Some(job)) => {
+                                chiefs.push(super::chief::Task::start(
+                                    path.clone(),
+                                    job,
+                                    stopped.clone(),
+                                ));
+                            }
+                            Ok(None) => break,
+                            Err(error) => {
+                                crate::worker_tui::diagnostics::report(format_args!(
+                                    "Chief scheduler: {error}"
+                                ));
+                                break;
+                            }
                         }
-                        Ok(None) => {}
-                        Err(error) => crate::worker_tui::diagnostics::report(format_args!(
-                            "Chief scheduler: {error}"
-                        )),
                     }
                     last_chief = Instant::now();
                 }
@@ -618,12 +627,7 @@ impl Worker {
                         ));
                     }
                 }
-                for _ in 0..5 {
-                    if stopped.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(200));
-                }
+                thread::park_timeout(Duration::from_secs(1));
             }
             for (id, handle) in handles {
                 let _ = handle.join();

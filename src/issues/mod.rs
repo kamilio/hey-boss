@@ -1,7 +1,7 @@
 //! Durable project issues. SQLite transactions arbitrate ownership; Markdown is text.
 pub(crate) mod authority;
 mod discovery;
-use store::chief;
+pub(crate) use store::chief;
 pub(crate) mod blockers;
 pub mod commits;
 mod dependency_notices;

@@ -1084,8 +1084,8 @@ mod tests {
     fn chief_conversation_reads_the_saved_thread_and_filters_hidden_projects() {
         let f = Fixture::new();
         f.db.execute_batch("CREATE TABLE project_settings(project_id TEXT,chief_enabled INTEGER); INSERT INTO project_settings VALUES('Atlas',1);
-            CREATE TABLE project_chiefs(project_id TEXT,machine TEXT,state TEXT,pid INTEGER,session_id TEXT,started_at INTEGER,finished_at INTEGER,next_at INTEGER,summary TEXT,last_event TEXT,worker_id TEXT);
-            INSERT INTO project_chiefs VALUES('Atlas','local','idle',NULL,'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',1,2,3600002,'Organized','Done','owner');").unwrap();
+            CREATE TABLE project_chiefs(project_id TEXT,machine TEXT,state TEXT,pid INTEGER,session_id TEXT,started_at INTEGER,finished_at INTEGER,next_at INTEGER,summary TEXT,last_event TEXT,worker_id TEXT,queued INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO project_chiefs VALUES('Atlas','local','idle',NULL,'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',1,2,3600002,'Organized','Done','owner',0);").unwrap();
         std::fs::write(
             &f.path,
             Fixture::line("assistant", "Chief finished its pass."),

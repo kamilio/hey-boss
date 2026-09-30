@@ -409,6 +409,81 @@ impl Supervisor {
         }
         Ok(result)
     }
+    fn chief_run(&self, request: &Value) -> Result<Value> {
+        let project = request["project"]
+            .as_str()
+            .ok_or_else(|| invalid("Missing project"))?;
+        let _configuration = self.configuration.lock().unwrap();
+        let db = self.ctx.db()?;
+        let enabled: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE p.id=?1 AND p.hidden_at IS NULL AND s.chief_enabled=1)", [project], |r| r.get(0))?;
+        if !enabled {
+            return Err(invalid(
+                "Enable Chief in project settings before running it",
+            ));
+        }
+        let assignment = crate::chief_ownership::read(&db)?
+            .into_iter()
+            .find(|a| a.project_id == project && !a.revoking)
+            .ok_or_else(|| {
+                invalid("Chief is waiting for a worker; start a worker monitoring this project")
+            })?;
+        let host = if assignment.node == self.ctx.node {
+            "local".to_owned()
+        } else {
+            self.state
+                .lock()
+                .unwrap()
+                .machines
+                .iter()
+                .find(|(_, m)| m["node"] == assignment.node)
+                .map(|(host, _)| host.clone())
+                .ok_or_else(|| invalid("Chief's device is unavailable"))?
+        };
+        let identifier = request["id"].as_str().map(str::to_owned).unwrap_or(id()?);
+        let tx = db.unchecked_transaction()?;
+        let old = replica::rows(
+            &db,
+            "SELECT id,host,worker,signal FROM fleet_signals WHERE id=?",
+            &[json!(identifier)],
+        )?;
+        if let Some(old) = old.first() {
+            if old["worker"] != project || old["signal"] != "chief" {
+                return Err(invalid("Signal ID already has a different payload"));
+            }
+            return Ok(json!({"ok":true,"id":identifier,"queued":true,"changed":false}));
+        }
+        // One undelivered request per project. The owner also coalesces requests
+        // received during a pass into its single pending slot.
+        let pending = replica::rows(
+            &db,
+            "SELECT id FROM fleet_signals WHERE worker=? AND signal='chief' AND state='pending'",
+            &[json!(project)],
+        )?;
+        if let Some(pending) = pending.first() {
+            let receipt = json!({"id":identifier,"state":"superseded","signal":"chief","worker":project,"superseded_by":pending["id"]});
+            replica::execute(
+                &db,
+                "INSERT INTO fleet_signals VALUES(?,?,?,'chief','superseded',?,?)",
+                &[
+                    json!(identifier),
+                    json!(host),
+                    json!(project),
+                    json!(receipt.to_string()),
+                    json!(now()),
+                ],
+            )?;
+            tx.commit()?;
+            return Ok(json!({"ok":true,"id":identifier,"queued":true,"changed":false}));
+        }
+        replica::execute(
+            &db,
+            "INSERT INTO fleet_signals VALUES(?,?,?,'chief','pending',NULL,?)",
+            &[json!(identifier), json!(host), json!(project), json!(now())],
+        )?;
+        tx.commit()?;
+        Ok(json!({"ok":true,"id":identifier,"queued":true,"changed":true}))
+    }
+
     fn signal(&self, request: &Value) -> Result<Value> {
         let host = request["host"]
             .as_str()
@@ -976,7 +1051,7 @@ impl Supervisor {
                     for pending in signals {
                         send(
                             &mut input,
-                            json!({"kind":"signal","id":pending["id"],"worker":pending["worker"],"signal":pending["signal"]}),
+                            json!({"kind":"signal","id":pending["id"],"worker":pending["worker"],"signal":pending["signal"],"created_at":pending["created_at"]}),
                         )?;
                     }
                     let current = self.configured(host, &workers)?;
@@ -1452,6 +1527,9 @@ impl Supervisor {
             Some("configuration") => self
                 .configuration_request(value)
                 .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
+            Some("chief_run") => self
+                .chief_run(value)
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
             Some("worker_signal") => self
                 .signal(value)
                 .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
@@ -1500,6 +1578,7 @@ impl Supervisor {
             Some("overview") => self.overview(),
             Some("conversation" | "takeover" | "steer") => self.conversation(&request),
             Some("signal") => self.signal(&request),
+            Some("chief_run") => self.chief_run(&request),
             Some("configuration") => self.configuration_request(&request),
             _ => Err(invalid("Unknown supervisor request")),
         };
@@ -1823,6 +1902,81 @@ mod tests {
             }),
         };
         (directory, app)
+    }
+
+    #[test]
+    fn chief_manual_signal_routes_coalesces_and_receipts_do_not_requeue() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Project',1);
+            INSERT INTO project_settings(project_id,prompt,version,chief_enabled) VALUES('project','Work',1,1);
+            INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('owner','cli','{}',1,0);
+            UPDATE fleet_meta SET role='controller',node='test-supervisor';").unwrap();
+        let assignment = crate::chief_ownership::Assignment {
+            project_id: "project".into(),
+            node: app.ctx.node.clone(),
+            worker_id: "owner".into(),
+            generation: 1,
+            revoking: false,
+        };
+        crate::chief_ownership::apply(&db, std::slice::from_ref(&assignment)).unwrap();
+        let request = json!({"kind":"chief_run","project":"project","id":"manual-one"});
+        assert_eq!(app.chief_run(&request).unwrap()["changed"], true);
+        assert_eq!(app.chief_run(&request).unwrap()["changed"], false);
+        let duplicate = json!({"kind":"chief_run","project":"project","id":"manual-two"});
+        assert_eq!(app.chief_run(&duplicate).unwrap()["changed"], false);
+        let signals = replica::rows(
+            &db,
+            "SELECT * FROM fleet_signals WHERE state='pending'",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0]["host"], "local");
+        assert_eq!(
+            control::apply_signal(&app.ctx, &signals[0]).unwrap()["state"],
+            "acknowledged"
+        );
+        assert!(
+            db.query_row("SELECT queued FROM project_chiefs", [], |r| r
+                .get::<_, bool>(0))
+                .unwrap()
+        );
+        db.execute("UPDATE project_chiefs SET queued=0", [])
+            .unwrap();
+        control::apply_signal(&app.ctx, &signals[0]).unwrap();
+        app.chief_run(&duplicate).unwrap();
+        assert!(
+            !db.query_row("SELECT queued FROM project_chiefs", [], |r| r
+                .get::<_, bool>(0))
+                .unwrap()
+        );
+        app.state.lock().unwrap().machines.insert(
+            "peer-host".into(),
+            json!({"node":"peer","state":"connected"}),
+        );
+        crate::chief_ownership::apply(
+            &db,
+            &[crate::chief_ownership::Assignment {
+                node: "peer".into(),
+                generation: 2,
+                ..assignment
+            }],
+        )
+        .unwrap();
+        app.chief_run(&json!({"project":"project","id":"remote"}))
+            .unwrap();
+        assert_eq!(
+            replica::rows(&db, "SELECT host FROM fleet_signals WHERE id='remote'", &[]).unwrap()[0]
+                ["host"],
+            "peer-host"
+        );
+        db.execute("UPDATE project_settings SET chief_enabled=0", [])
+            .unwrap();
+        assert!(
+            app.chief_run(&json!({"project":"project","id":"disabled"}))
+                .is_err()
+        );
     }
 
     #[test]
