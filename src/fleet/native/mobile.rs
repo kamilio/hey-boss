@@ -435,10 +435,18 @@ impl Mobile {
         for request in queue["requests"].as_array().into_iter().flatten() {
             let identifier = transport_id(&request["id"])?;
             let result = (|| -> Result<Value> {
-                if matches!(request["action"].as_str(), Some("configuration" | "signal")) {
+                if matches!(
+                    request["action"].as_str(),
+                    Some("configuration" | "signal" | "chief_run")
+                ) {
+                    if request["action"] == "chief_run"
+                        && !visible.contains(request["project"].as_str().unwrap_or(""))
+                    {
+                        return Err(invalid("This project is no longer available"));
+                    }
                     let mut action = request.clone();
                     action["kind"] = request["action"].clone();
-                    if request["action"] == "signal" {
+                    if matches!(request["action"].as_str(), Some("signal" | "chief_run")) {
                         action["id"] = request["signal_id"].clone();
                     }
                     if action["text"].is_null() {

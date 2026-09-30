@@ -24,7 +24,7 @@ pub(in crate::issues) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS project_c
  session_id TEXT,next_at INTEGER NOT NULL DEFAULT 0,owner_pid INTEGER,owner_start TEXT,
  pid INTEGER,process_start TEXT,state TEXT NOT NULL DEFAULT 'idle',summary TEXT NOT NULL DEFAULT '',
  worker_id TEXT REFERENCES issue_workers(id),started_at INTEGER,finished_at INTEGER,
- last_event TEXT NOT NULL DEFAULT '',
+ last_event TEXT NOT NULL DEFAULT '',queued INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(project_id,machine));";
 pub(in crate::issues) const ACTIVITY_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS project_chiefs_worker ON project_chiefs(worker_id);";
@@ -49,6 +49,7 @@ pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()>
         ("finished_at", "INTEGER"),
         ("last_event", "TEXT NOT NULL DEFAULT ''"),
         ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("queued", "INTEGER NOT NULL DEFAULT 0"),
     ];
     let complete = additions
         .iter()
@@ -92,13 +93,42 @@ pub(in crate::issues) struct Job {
     machine: String,
     cwd: String,
     prompt: String,
-    session: Option<String>,
     started_at: i64,
     owner_start: String,
     worker_id: String,
 }
 
 impl Store {
+    /// Queue one pass on a standalone installation, or route to the fleet owner.
+    pub fn request_chief(&self, project: &str) -> Result<Value> {
+        let standalone: bool = self.db.query_row(
+            "SELECT role='standalone' FROM fleet_meta WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        if !standalone {
+            return crate::fleet::call(&serde_json::json!({"kind":"chief_run","project":project}));
+        }
+        let machine = crate::issues::identity::machine()?;
+        let worker: Option<String> = self
+            .db
+            .query_row(
+                "SELECT worker_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
+                params![project, machine],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let worker = worker.ok_or_else(|| {
+            Error::invalid("Start a worker monitoring this project before running Chief")
+        })?;
+        let tx =
+            crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let result = queue(&tx, project, &machine, &worker, worker::now())?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     pub(in crate::issues) fn reserve_chief(
         &mut self,
         machine: &str,
@@ -166,19 +196,13 @@ impl Store {
                 continue;
             }
             let started = worker::now();
-            tx.execute("INSERT INTO project_chiefs(project_id,machine,cwd,owner_pid,owner_start,next_at,state,worker_id,started_at,last_event) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,?8,'Launching Chief') ON CONFLICT(project_id,machine) DO UPDATE SET session_id=CASE WHEN cwd=excluded.cwd THEN session_id ELSE NULL END,cwd=excluded.cwd,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,pid=NULL,process_start=NULL,next_at=excluded.next_at,state='running',summary='',worker_id=excluded.worker_id,started_at=excluded.started_at,finished_at=NULL,last_event=excluded.last_event",params![project,machine,cwd,owner,start,started+INTERVAL_MS,worker_id,started])?;
-            let session = tx.query_row(
-                "SELECT session_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
-                params![project, machine],
-                |r| r.get(0),
-            )?;
+            tx.execute("INSERT INTO project_chiefs(project_id,machine,cwd,owner_pid,owner_start,next_at,state,worker_id,started_at,last_event) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,?8,'Launching Chief') ON CONFLICT(project_id,machine) DO UPDATE SET session_id=NULL,queued=0,cwd=excluded.cwd,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,pid=NULL,process_start=NULL,next_at=excluded.next_at,state='running',summary='',worker_id=excluded.worker_id,started_at=excluded.started_at,finished_at=NULL,last_event=excluded.last_event",params![project,machine,cwd,owner,start,started+INTERVAL_MS,worker_id,started])?;
             tx.commit()?;
             return Ok(Some(Job {
                 project,
                 machine: machine.into(),
                 cwd,
                 prompt,
-                session,
                 started_at: started,
                 owner_start: start,
                 worker_id,
@@ -212,7 +236,7 @@ impl Store {
             }
         }
         let finished = worker::now();
-        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=?6+CASE WHEN ?4 IN ('idle','cancelled') THEN ?3 ELSE min(300000,30000*(1<<min(4,retry_count))) END,retry_count=CASE WHEN ?4 IN ('idle','cancelled') THEN 0 ELSE min(5,retry_count+1) END,state=?4,summary=?5,finished_at=?6,last_event=?5 WHERE project_id=?1 AND machine=?2 AND started_at=?7 AND owner_pid=?8 AND owner_start=?9 AND state='running'",params![job.project,job.machine,INTERVAL_MS,state,summary,finished,job.started_at,std::process::id(),job.owner_start])?;
+        self.db.execute("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=CASE WHEN ?4='cancelled' THEN ?6+?3 WHEN queued=1 OR next_at<=?6 THEN ?6 WHEN ?4='idle' THEN next_at ELSE ?6+min(300000,30000*(1<<min(4,retry_count))) END,queued=CASE WHEN ?4='cancelled' THEN 0 ELSE queued END,retry_count=CASE WHEN ?4 IN ('idle','cancelled') THEN 0 ELSE min(5,retry_count+1) END,state=?4,summary=?5,finished_at=?6,last_event=?5 WHERE project_id=?1 AND machine=?2 AND started_at=?7 AND owner_pid=?8 AND owner_start=?9 AND state='running'",params![job.project,job.machine,INTERVAL_MS,state,summary,finished,job.started_at,std::process::id(),job.owner_start])?;
         Ok(())
     }
 
@@ -234,7 +258,6 @@ impl Store {
                         project: r.get(0)?,
                         machine: machine.into(),
                         cwd: r.get(1)?,
-                        session: r.get(2)?,
                         started_at: r.get(3)?,
                         owner_start: owner_start.clone(),
                         prompt: String::new(),
@@ -244,13 +267,44 @@ impl Store {
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for job in jobs {
-            self.chief_update(&job, "blocked", "Chief worker reloaded before saving its result; the saved conversation will resume on the next pass")?;
+            self.chief_update(&job, "blocked", "Chief worker reloaded before saving its result; the next pass will start a fresh conversation")?;
         }
         Ok(())
     }
 }
 
-const STATUS_QUERY: &str = "SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0) FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine";
+/// Caller holds a write transaction, including any transport receipt.
+pub(crate) fn queue(
+    db: &crate::database::Connection,
+    project: &str,
+    machine: &str,
+    worker: &str,
+    requested_at: i64,
+) -> Result<Value> {
+    let enabled: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE p.id=?1 AND p.hidden_at IS NULL AND s.chief_enabled=1)", [project], |r| r.get(0))?;
+    if !enabled {
+        return Err(Error::invalid(
+            "Enable Chief in project settings before running it",
+        ));
+    }
+    if !crate::chief_ownership::allowed(db, project, worker)? {
+        return Err(Error::invalid(
+            "Chief ownership changed; retry on the current owner",
+        ));
+    }
+    // A pass that started after the click already satisfies a delayed request.
+    // This prevents transport latency from creating an extra pass after handoff.
+    let satisfied: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM project_chiefs WHERE project_id=?1 AND machine=?2 AND started_at>?3)", params![project,machine,requested_at], |r|r.get(0))?;
+    if satisfied {
+        return Ok(
+            serde_json::json!({"ok":true,"queued":false,"changed":false,"project_id":project}),
+        );
+    }
+    let changed = db.execute("INSERT INTO project_chiefs(project_id,machine,cwd,worker_id,queued,next_at) VALUES(?1,?2,'',?3,1,0) ON CONFLICT(project_id,machine) DO UPDATE SET queued=1,next_at=CASE WHEN state='running' THEN next_at ELSE 0 END WHERE queued=0", params![project,machine,worker])?;
+    Ok(serde_json::json!({"ok":true,"queued":true,"changed":changed>0,"project_id":project}))
+}
+
+const STATUS_QUERY: &str = "SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0),c.queued FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine";
 
 pub(in crate::issues) fn status(
     db: &crate::database::Connection,
@@ -271,6 +325,7 @@ pub(in crate::issues) fn status(
             "enabled":r.get::<_,bool>(12)?,"title":"Organizing project","state":state,"pid":r.get::<_,Option<u32>>(4)?,
             "session_id":r.get::<_,Option<String>>(5)?,"started_at":r.get::<_,Option<i64>>(6)?,
             "finished_at":if running { None } else { Some(finished.unwrap_or(next-INTERVAL_MS)) },
+            "queued":r.get::<_,bool>(13)? || running && next<=worker::now(),
             "next_at":next,"summary":r.get::<_,String>(9)?,"last_event":r.get::<_,String>(10)?
         }))
     })?.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -310,21 +365,38 @@ pub(in crate::issues) struct Task {
     job: Job,
     handle: Option<thread::JoinHandle<Result<String>>>,
     outcome: Option<Result<String>>,
+    ready: Arc<AtomicBool>,
 }
 
 impl Task {
     pub(in crate::issues) fn start(path: PathBuf, job: Job, stop: Arc<AtomicBool>) -> Self {
         let launched = job.clone();
-        match thread::Builder::new().spawn(move || execute(path, launched, stop)) {
+        let scheduler = thread::current();
+        let ready = Arc::new(AtomicBool::new(false));
+        let completed = ready.clone();
+        match thread::Builder::new().spawn(move || {
+            // Also wake the scheduler when the launch thread unwinds.
+            struct Wake(thread::Thread, Arc<AtomicBool>);
+            impl Drop for Wake {
+                fn drop(&mut self) {
+                    self.1.store(true, Ordering::Release);
+                    self.0.unpark();
+                }
+            }
+            let _wake = Wake(scheduler, completed);
+            execute(path, launched, stop)
+        }) {
             Ok(handle) => Self {
                 job,
                 handle: Some(handle),
                 outcome: None,
+                ready,
             },
             Err(error) => Self {
                 job,
                 handle: None,
                 outcome: Some(Err(error.into())),
+                ready,
             },
         }
     }
@@ -346,10 +418,11 @@ impl Task {
     }
 
     pub(in crate::issues) fn poll(&mut self, store: &Store) -> Result<bool> {
-        if self
-            .handle
-            .as_ref()
-            .is_some_and(|handle| handle.is_finished())
+        if self.ready.load(Ordering::Acquire)
+            || self
+                .handle
+                .as_ref()
+                .is_some_and(|handle| handle.is_finished())
         {
             self.join();
         }
@@ -401,199 +474,166 @@ fn exited_with_open_stream(pid: u32, output: &OwnedFd) -> std::io::Result<bool> 
 }
 
 fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<String> {
-    let mut session = job.session.clone();
-    // A deleted conversation may be replaced once; ordinary failures keep its ID.
-    for _ in 0..2 {
-        let binary = worker::codex_binary()?;
-        let mut paths = vec![
-            std::env::current_exe()?.parent().unwrap().to_owned(),
-            binary.parent().unwrap().to_owned(),
-        ];
-        paths.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ));
-        let mut command = Command::new(binary);
-        command.arg("exec");
-        if let Some(id) = &session {
-            command.args(["resume", id]);
-        }
-        crate::codex_permissions::apply(&mut command);
-        command
-            .args(["--json", "--skip-git-repo-check"])
-            .arg(worker::chief_instructions(&job.project, &job.prompt))
-            .current_dir(&job.cwd)
-            .process_group(0)
-            .env("HEY_BOSS_ISSUE_DB", path)
-            .env("HEY_BOSS_ISSUE_PROJECT", &job.project)
-            .env(
-                "PATH",
-                std::env::join_paths(paths).map_err(|e| Error::invalid(e.to_string()))?,
-            )
-            .env_remove("HEY_BOSS_ISSUE_HOST")
-            .env_remove("HEY_BOSS_AGENT_ID")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("CODEX_SESSION_ID")
-            .env_remove("CLAUDE_SESSION_ID")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = command.spawn()?;
-        let pid = child.id();
-        let start = crate::agents::process_identity(pid)
-            .ok_or_else(|| Error::new("worker_error", "Chief exited during launch"));
-        let outcome = (|| -> Result<String> {
-            let start = start.as_ref().map_err(Clone::clone)?;
-            store.db.execute("UPDATE project_chiefs SET pid=?3,process_start=?4 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,pid,start])?;
-            let stdout = child.stdout.take().unwrap();
-            let output = stdout.as_fd().try_clone_to_owned()?;
-            let (send, receive) = mpsc::sync_channel(128);
-            let reader = thread::spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let mut line = Vec::new();
-                    match Read::take(&mut reader, 1024 * 1024 + 1).read_until(b'\n', &mut line) {
-                        Ok(0) => break,
-                        Err(error) => {
-                            let _ = send.send(Err(error.to_string()));
-                            break;
-                        }
-                        Ok(_) => {
-                            let value = if line.len() > 1024 * 1024 || line.last() != Some(&b'\n') {
-                                Err("Chief returned an oversized or incomplete event".into())
-                            } else {
-                                serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())
-                            };
-                            let failed = value.is_err();
-                            if send.send(value).is_err() || failed {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-            let mut thread_started = false;
-            let mut completed = false;
-            let mut failed = false;
-            let mut summary = String::new();
-            let mut missing = false;
-            let mut last_control = Instant::now() - Duration::from_secs(1);
+    let binary = worker::codex_binary()?;
+    let mut paths = vec![
+        std::env::current_exe()?.parent().unwrap().to_owned(),
+        binary.parent().unwrap().to_owned(),
+    ];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut command = Command::new(binary);
+    command.arg("exec");
+    crate::codex_permissions::apply(&mut command);
+    command
+        .args(["--json", "--skip-git-repo-check"])
+        .arg(worker::chief_instructions(&job.project, &job.prompt))
+        .current_dir(&job.cwd)
+        .process_group(0)
+        .env("HEY_BOSS_ISSUE_DB", path)
+        .env("HEY_BOSS_ISSUE_PROJECT", &job.project)
+        .env(
+            "PATH",
+            std::env::join_paths(paths).map_err(|e| Error::invalid(e.to_string()))?,
+        )
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_AGENT_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_SESSION_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let start = crate::agents::process_identity(pid)
+        .ok_or_else(|| Error::new("worker_error", "Chief exited during launch"));
+    let outcome = (|| -> Result<String> {
+        let start = start.as_ref().map_err(Clone::clone)?;
+        store.db.execute(
+            "UPDATE project_chiefs SET pid=?3,process_start=?4 WHERE project_id=?1 AND machine=?2",
+            params![job.project, job.machine, pid, start],
+        )?;
+        let stdout = child.stdout.take().unwrap();
+        let output = stdout.as_fd().try_clone_to_owned()?;
+        let (send, receive) = mpsc::sync_channel(128);
+        let reader = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
             loop {
-                let disabled = if last_control.elapsed() >= Duration::from_secs(1) {
-                    last_control = Instant::now();
-                    store.db.query_row(
-                        "SELECT NOT chief_enabled FROM project_settings WHERE project_id=?1",
-                        [&job.project],
-                        |r| r.get::<_, bool>(0),
-                    )? || !crate::chief_ownership::allowed(&store.db, &job.project, &job.worker_id)?
-                } else {
-                    false
-                };
-                if stop.load(Ordering::Relaxed) || disabled {
-                    return Err(Error::new(
-                        "cancelled",
-                        "Chief stopped; the saved thread will be resumed on its next scheduled pass",
-                    ));
-                }
-                match receive.recv_timeout(Duration::from_millis(200)) {
-                    Ok(Err(error)) => return Err(Error::new("worker_error", error)),
-                    Ok(Ok(event)) => {
-                        if let Some(activity) = event_activity(&event) {
-                            store.db.execute("UPDATE project_chiefs SET last_event=?3 WHERE project_id=?1 AND machine=?2", params![job.project,job.machine,activity])?;
-                        }
-                        match event["type"].as_str().unwrap_or("") {
-                            "thread.started" => {
-                                let id = event["thread_id"].as_str().ok_or_else(|| {
-                                    Error::new("worker_error", "Chief returned no thread ID")
-                                })?;
-                                if session.as_deref().is_some_and(|saved| saved != id) {
-                                    return Err(Error::new(
-                                        "worker_error",
-                                        "Chief resumed a different thread",
-                                    ));
-                                }
-                                thread_started = true;
-                                store.db.execute("UPDATE project_chiefs SET session_id=?3 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,id])?;
-                            }
-                            "item.completed" if event["item"]["type"] == "agent_message" => {
-                                summary = event["item"]["text"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .chars()
-                                    .take(4000)
-                                    .collect();
-                            }
-                            "turn.completed" => completed = true,
-                            "error" | "turn.failed" => {
-                                failed = true;
-                                let message = event["message"]
-                                    .as_str()
-                                    .or(event["error"]["message"].as_str())
-                                    .unwrap_or("Chief turn failed");
-                                missing |=
-                                    message.to_lowercase().contains("no saved session found")
-                                        || message.to_lowercase().contains("thread not found");
-                                summary = message.chars().take(4000).collect();
-                            }
-                            _ => {}
-                        }
+                let mut line = Vec::new();
+                match Read::take(&mut reader, 1024 * 1024 + 1).read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Err(error) => {
+                        let _ = send.send(Err(error.to_string()));
+                        break;
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if exited_with_open_stream(pid, &output)? {
-                            return Err(Error::new(
-                                "worker_error",
-                                "Chief exited before closing its event stream",
-                            ));
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        if child.try_wait()?.is_some() {
+                    Ok(_) => {
+                        let value = if line.len() > 1024 * 1024 || line.last() != Some(&b'\n') {
+                            Err("Chief returned an oversized or incomplete event".into())
+                        } else {
+                            serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())
+                        };
+                        let failed = value.is_err();
+                        if send.send(value).is_err() || failed {
                             break;
                         }
-                        thread::sleep(Duration::from_millis(200));
                     }
                 }
             }
-            let _ = reader.join();
-            let status = child.wait()?;
-            if !thread_started && missing && session.is_some() {
-                return Err(Error::new("missing_thread", summary));
-            }
-            if !status.success()
-                || !completed
-                || failed
-                || !thread_started
-                || summary.trim().is_empty()
-            {
+        });
+        let mut thread_started = false;
+        let mut completed = false;
+        let mut failed = false;
+        let mut summary = String::new();
+        let mut last_control = Instant::now() - Duration::from_secs(1);
+        loop {
+            let disabled = if last_control.elapsed() >= Duration::from_secs(1) {
+                last_control = Instant::now();
+                store.db.query_row(
+                    "SELECT NOT chief_enabled FROM project_settings WHERE project_id=?1",
+                    [&job.project],
+                    |r| r.get::<_, bool>(0),
+                )? || !crate::chief_ownership::allowed(&store.db, &job.project, &job.worker_id)?
+            } else {
+                false
+            };
+            if stop.load(Ordering::Relaxed) || disabled {
                 return Err(Error::new(
-                    "worker_error",
-                    if summary.is_empty() {
-                        "Chief ended without a completed turn".into()
-                    } else {
-                        summary
-                    },
+                    "cancelled",
+                    "Chief stopped; the next scheduled pass will start a fresh conversation",
                 ));
             }
-            Ok(summary)
-        })();
-        if let Ok(start) = &start {
-            let _ = worker::stop_group(pid, start);
+            match receive.recv_timeout(Duration::from_millis(200)) {
+                Ok(Err(error)) => return Err(Error::new("worker_error", error)),
+                Ok(Ok(event)) => {
+                    if let Some(activity) = event_activity(&event) {
+                        store.db.execute("UPDATE project_chiefs SET last_event=?3 WHERE project_id=?1 AND machine=?2", params![job.project,job.machine,activity])?;
+                    }
+                    match event["type"].as_str().unwrap_or("") {
+                        "thread.started" => {
+                            let id = event["thread_id"].as_str().ok_or_else(|| {
+                                Error::new("worker_error", "Chief returned no thread ID")
+                            })?;
+                            thread_started = true;
+                            store.db.execute("UPDATE project_chiefs SET session_id=?3 WHERE project_id=?1 AND machine=?2",params![job.project,job.machine,id])?;
+                        }
+                        "item.completed" if event["item"]["type"] == "agent_message" => {
+                            summary = event["item"]["text"]
+                                .as_str()
+                                .unwrap_or("")
+                                .chars()
+                                .take(4000)
+                                .collect();
+                        }
+                        "turn.completed" => completed = true,
+                        "error" | "turn.failed" => {
+                            failed = true;
+                            let message = event["message"]
+                                .as_str()
+                                .or(event["error"]["message"].as_str())
+                                .unwrap_or("Chief turn failed");
+                            summary = message.chars().take(4000).collect();
+                        }
+                        _ => {}
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if exited_with_open_stream(pid, &output)? {
+                        return Err(Error::new(
+                            "worker_error",
+                            "Chief exited before closing its event stream",
+                        ));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
         }
-        let _ = child.kill();
-        let _ = child.wait();
-        if outcome.as_ref().is_err_and(|e| e.code == "missing_thread") {
-            session = None;
-            store.db.execute(
-                "UPDATE project_chiefs SET session_id=NULL WHERE project_id=?1 AND machine=?2",
-                params![job.project, job.machine],
-            )?;
-            continue;
+        let _ = reader.join();
+        let status = child.wait()?;
+        if !status.success() || !completed || failed || !thread_started || summary.trim().is_empty()
+        {
+            return Err(Error::new(
+                "worker_error",
+                if summary.is_empty() {
+                    "Chief ended without a completed turn".into()
+                } else {
+                    summary
+                },
+            ));
         }
-        return outcome;
+        Ok(summary)
+    })();
+    if let Ok(start) = &start {
+        let _ = worker::stop_group(pid, start);
     }
-    Err(Error::new(
-        "worker_error",
-        "Chief could not start a replacement thread",
-    ))
+    let _ = child.kill();
+    let _ = child.wait();
+    outcome
 }
 
 #[cfg(test)]
@@ -687,6 +727,111 @@ mod tests {
             .execute("UPDATE project_chiefs SET session_id='saved-thread'", [])
             .unwrap();
         (root, store, job)
+    }
+
+    #[test]
+    fn chief_hourly_deadline_survives_completion_and_overruns_collapse() {
+        let (root, mut store, job) = launch_fixture();
+        store
+            .db
+            .execute(
+                "UPDATE project_chiefs SET next_at=?1",
+                [worker::now() + 60_000],
+            )
+            .unwrap();
+        let deadline: i64 = store
+            .db
+            .query_row("SELECT next_at FROM project_chiefs", [], |r| r.get(0))
+            .unwrap();
+        store.chief_update(&job, "idle", "Done").unwrap();
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["next_at"],
+            deadline
+        );
+        store
+            .db
+            .execute("UPDATE project_chiefs SET next_at=0", [])
+            .unwrap();
+        let next = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        assert!(status(&store.db, Some("owner")).unwrap()[0]["session_id"].is_null());
+        store
+            .db
+            .execute(
+                "UPDATE project_chiefs SET next_at=?1",
+                [worker::now() - 3 * INTERVAL_MS],
+            )
+            .unwrap();
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none()
+        );
+        store.chief_update(&next, "idle", "Long pass done").unwrap();
+        let queued = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        store.chief_update(&queued, "idle", "Caught up").unwrap();
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chief_manual_requests_coalesce_and_survive_reopening() {
+        let (root, mut store, job) = launch_fixture();
+        let deadline = status(&store.db, Some("owner")).unwrap()[0]["next_at"].clone();
+        for expected in [true, false, false] {
+            assert_eq!(
+                queue(&store.db, "named:Chief", "unit", "owner", worker::now()).unwrap()["changed"],
+                expected
+            );
+        }
+        let active = &status(&store.db, Some("owner")).unwrap()[0];
+        assert_eq!(active["queued"], true);
+        assert_eq!(active["next_at"], deadline);
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none()
+        );
+        store.chief_update(&job, "idle", "Done").unwrap();
+        drop(store);
+        let mut store = Store::open(&root.join("issues.db")).unwrap();
+        let queued = store.reserve_chief("unit", Some("owner")).unwrap().unwrap();
+        assert_eq!(
+            status(&store.db, Some("owner")).unwrap()[0]["queued"],
+            false
+        );
+        store.chief_update(&queued, "idle", "Done").unwrap();
+        assert_eq!(
+            queue(
+                &store.db,
+                "named:Chief",
+                "unit",
+                "owner",
+                queued.started_at - 1
+            )
+            .unwrap()["changed"],
+            false
+        );
+        assert!(
+            store
+                .reserve_chief("unit", Some("owner"))
+                .unwrap()
+                .is_none()
+        );
+        store
+            .db
+            .execute("UPDATE project_settings SET chief_enabled=0", [])
+            .unwrap();
+        assert!(queue(&store.db, "named:Chief", "unit", "owner", worker::now()).is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -891,7 +1036,7 @@ mod tests {
         store.chief_update(&job, "idle", "Verified pass").unwrap();
         let wait: i64 = store
             .db
-            .query_row("SELECT next_at-finished_at FROM project_chiefs", [], |r| {
+            .query_row("SELECT next_at-started_at FROM project_chiefs", [], |r| {
                 r.get(0)
             })
             .unwrap();
@@ -908,6 +1053,7 @@ mod tests {
             job,
             handle: Some(handle),
             outcome: None,
+            ready: Arc::new(AtomicBool::new(false)),
         };
         task.join();
         store.db.execute_batch("CREATE TRIGGER fail_chief_result BEFORE UPDATE OF state ON project_chiefs BEGIN SELECT RAISE(ABORT,'result write unavailable'); END;").unwrap();
@@ -1015,6 +1161,7 @@ mod tests {
             job,
             handle: Some(handle),
             outcome: None,
+            ready: Arc::new(AtomicBool::new(false)),
         };
         task.join();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1123,18 +1270,15 @@ mod tests {
                     .is_none()
             );
             let resumed = store.reserve_chief("unit", Some("first")).unwrap().unwrap();
-            assert_eq!(resumed.session.as_deref(), Some("saved"));
+            assert!(status(&store.db, Some("first")).unwrap()[0]["session_id"].is_null());
             store.chief_update(&resumed, "idle", "Done").unwrap();
             store.db.execute_batch("UPDATE issue_workers SET stop_requested=1 WHERE id='first'; UPDATE project_chiefs SET next_at=0;").unwrap();
             let transferred = store
                 .reserve_chief("unit", Some("second"))
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                transferred.session.as_deref(),
-                Some("saved"),
-                "A stopped owner hands off the same conversation"
-            );
+            assert!(status(&store.db, Some("second")).unwrap()[0]["session_id"].is_null());
+            store.chief_update(&transferred, "idle", "Done").unwrap();
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1238,11 +1382,8 @@ mod tests {
             store.db.execute("UPDATE issue_workers SET config=json_set(config,'$.projects',json('[\"named:Chief\"]')) WHERE id=?1",[&id]).unwrap();
             store.db.execute("UPDATE project_chiefs SET owner_pid=4294967295,owner_start='dead',session_id='saved-thread'",[]).unwrap();
             let recovered = store.reserve_chief("unit", Some(&id)).unwrap().unwrap();
-            assert_eq!(
-                recovered.session.as_deref(),
-                Some("saved-thread"),
-                "Dead owner recovery keeps the conversation"
-            );
+            assert!(status(&store.db, Some(&id)).unwrap()[0]["session_id"].is_null());
+            store.chief_update(&recovered, "idle", "Done").unwrap();
         }
         std::fs::remove_dir_all(root).unwrap();
     }

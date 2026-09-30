@@ -62,6 +62,8 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Run Chief now, or queue one pass after the current pass finishes.
+    RunChief,
     /// Start an independent worker; wait idle through temporary connection outages.
     Run,
     /// Print one status snapshot without starting workers or opening a dashboard.
@@ -160,6 +162,23 @@ fn run_inner(o: &Options) -> Result<()> {
         .canonicalize()?;
     let machine = issues::identity::machine()?;
     let base = issues::identity::project(&cwd, &machine)?;
+    if matches!(o.action, Some(Action::RunChief)) {
+        if o.all_projects || o.project.len() > 1 {
+            return Err(Error::invalid("Run Chief for one project at a time"));
+        }
+        let mut store = Store::open(&issues::database_path()?)?;
+        let project = store.notification_project(&base, o.project.first().map(String::as_str))?;
+        let value = store.request_chief(&project.id)?;
+        if o.json {
+            println!("{value}");
+        } else {
+            println!(
+                "Chief queued for {}. If a pass is running, one fresh pass will follow it.",
+                project.name
+            );
+        }
+        return Ok(());
+    }
     let actor_id = format!("worker-control:{machine}:{}", std::process::id());
     let actor = issues::identity::resolve(Some(&actor_id), &machine, &cwd)?;
     let path = issues::database_path()?;
@@ -230,7 +249,7 @@ fn run_inner(o: &Options) -> Result<()> {
     }
     if let Some(action) = o.action.as_ref().filter(|a| !matches!(a, Action::Run)) {
         let operation = match action {
-            Action::Run => unreachable!("Run starts a worker below"),
+            Action::Run | Action::RunChief => unreachable!("Run is handled separately"),
             Action::Restart { .. } => {
                 unreachable!("Restart is routed through the fleet supervisor")
             }
@@ -257,7 +276,11 @@ fn run_inner(o: &Options) -> Result<()> {
             Action::Pause { id } => {
                 hey_boss::fleet::record_local_worker(id, None, "pause")?;
             }
-            Action::Run | Action::Status | Action::Restart { .. } | Action::Watch { .. } => {}
+            Action::Run
+            | Action::RunChief
+            | Action::Status
+            | Action::Restart { .. }
+            | Action::Watch { .. } => {}
         }
         value["store"] = serde_json::json!({"host":issues::identity::host(),"database":issues::database_path()?});
         if matches!(action, Action::Status) {
@@ -600,6 +623,7 @@ fn remote_arguments(o: &Options) -> Vec<String> {
     }
     match &o.action {
         Some(Action::Run) => args.push("run".into()),
+        Some(Action::RunChief) => args.push("run-chief".into()),
         Some(Action::Status) => args.push("status".into()),
         Some(Action::Watch { count }) => {
             args.push("watch".into());

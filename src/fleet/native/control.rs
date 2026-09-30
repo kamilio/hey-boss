@@ -413,7 +413,9 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
         Err(e) => {
             let invalid = e
                 .downcast_ref::<std::io::Error>()
-                .is_some_and(|e| e.kind() == std::io::ErrorKind::InvalidInput);
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::InvalidInput)
+                || e.downcast_ref::<crate::issues::Error>()
+                    .is_some_and(|e| e.code == "invalid_input");
             let receipt = json!({"id":message["id"],"state":if invalid{"failed"}else{"pending"},"signal":message["signal"],"worker":message["worker"],"error":e.to_string()});
             if invalid {
                 replica::execute(
@@ -481,6 +483,37 @@ fn apply_signal_locked(
     let action = message["signal"]
         .as_str()
         .ok_or_else(|| invalid("Unknown signal"))?;
+    if action == "chief" {
+        // Chief signals address a project; they never change worker intent.
+        let project = message["worker"]
+            .as_str()
+            .ok_or_else(|| invalid("Missing project"))?;
+        let tx = db.unchecked_transaction()?;
+        let assignment = crate::chief_ownership::read(db)?
+            .into_iter()
+            .find(|a| a.project_id == project && a.node == ctx.node && !a.revoking)
+            .ok_or_else(|| invalid("Chief ownership changed; retry on the current owner"))?;
+        let result = crate::issues::chief::queue(
+            db,
+            project,
+            &ctx.node,
+            &assignment.worker_id,
+            (message["created_at"].as_f64().unwrap_or_else(now) * 1000.0) as i64,
+        )?;
+        let receipt = json!({"id":message["id"],"state":"acknowledged","signal":"chief","worker":project,"queued":true,"changed":result["changed"]});
+        replica::execute(
+            db,
+            "INSERT INTO fleet_signals VALUES(?,'local',?,'chief','acknowledged',?,?) ON CONFLICT(id) DO UPDATE SET state='acknowledged',result=excluded.result",
+            &[
+                message["id"].clone(),
+                json!(project),
+                json!(receipt.to_string()),
+                json!(now()),
+            ],
+        )?;
+        tx.commit()?;
+        return Ok(receipt);
+    }
     if !matches!(action, "pause" | "resume" | "stop" | "restart") {
         return Err(invalid("Unknown signal"));
     }

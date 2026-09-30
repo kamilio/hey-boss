@@ -164,7 +164,7 @@ fn chief_wait_reports_worker_exit_with_stage_and_output() {
 }
 
 #[test]
-fn chief_runs_without_issues_resumes_and_cleans_up() {
+fn chief_runs_without_issues_starts_fresh_and_cleans_up() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let fake = f.0.join("codex");
@@ -253,11 +253,14 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
     let mut worker = start(false);
-    wait_for(&f, &mut worker, "saved thread resume", || {
+    wait_for(&f, &mut worker, "fresh conversation after restart", || {
         finished()
             && fs::read_to_string(f.0.join("launches.txt"))
                 .unwrap_or_default()
-                .contains("exec resume chief-saved-thread")
+                .lines()
+                .filter(|line| line.starts_with("exec "))
+                .count()
+                >= 2
     });
     drop(worker);
     db.execute(
@@ -266,11 +269,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     )
     .unwrap();
     let mut worker = start(false);
-    wait_for(&f, &mut worker, "missing thread replacement", finished);
+    wait_for(&f, &mut worker, "old thread ignored", finished);
     assert!(
-        fs::read_to_string(f.0.join("launches.txt"))
+        !fs::read_to_string(f.0.join("launches.txt"))
             .unwrap()
-            .contains("exec resume missing-thread")
+            .contains("exec resume")
     );
     drop(worker);
     fs::write(f.0.join("fail"), "").unwrap();
@@ -403,6 +406,109 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn chief_manual_cli_queues_one_fresh_pass_without_overlap() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let fake = f.0.join("codex");
+    fs::write(&fake, r#"#!/bin/sh
+printf '%s\n' "$$" >> passes.txt
+printf '{"type":"thread.started","thread_id":"chief-%s"}\n' "$$"
+if [ ! -f first-started ]; then
+  touch first-started
+  while [ ! -f release ]; do sleep 0.05; done
+fi
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Done"}}' '{"type":"turn.completed"}'
+"#).unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+    f.cli(&["settings", "set", "--chief"]);
+    let log = fs::File::create(f.0.join("worker.log")).unwrap();
+    let mut worker = Worker(
+        f.command()
+            .env("HEY_BOSS_CODEX", &fake)
+            .args([
+                "worker",
+                "run",
+                "--project",
+                "Chief QA",
+                "--directory",
+                f.0.to_str().unwrap(),
+                "--json",
+            ])
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+        Some(f.0.clone()),
+    );
+    wait_for(&f, &mut worker, "first manual-test pass", || {
+        f.0.join("first-started").exists()
+    });
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    // Simulate several missed hours while the first process remains alive.
+    db.execute("UPDATE project_chiefs SET next_at=0", [])
+        .unwrap();
+    for _ in 0..3 {
+        let out = f
+            .command()
+            .args(["worker", "run-chief", "--project", "Chief QA", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()["queued"],
+            true
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(f.0.join("passes.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let first: String = db
+        .query_row("SELECT session_id FROM project_chiefs", [], |r| r.get(0))
+        .unwrap();
+    let released = std::time::Instant::now();
+    fs::write(f.0.join("release"), "").unwrap();
+    wait_for(&f, &mut worker, "queued pass completion", || {
+        fs::read_to_string(f.0.join("passes.txt"))
+            .unwrap()
+            .lines()
+            .count()
+            == 2
+            && db
+                .query_row(
+                    "SELECT state='idle' AND queued=0 FROM project_chiefs",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap()
+    });
+    assert!(
+        released.elapsed() < std::time::Duration::from_secs(3),
+        "Queued pass waited for the periodic scheduler"
+    );
+    let second: String = db
+        .query_row("SELECT session_id FROM project_chiefs", [], |r| r.get(0))
+        .unwrap();
+    assert_ne!(first, second);
+    assert!(
+        db.query_row(
+            "SELECT next_at-started_at=3600000 FROM project_chiefs",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
 }
 
 #[test]
