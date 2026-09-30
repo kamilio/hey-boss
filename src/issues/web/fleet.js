@@ -714,9 +714,33 @@ if (typeof document !== 'undefined') (() => {
     const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not load configuration.');return data;
   }
   function configButtons(){const loaded=configRevision!==undefined;$('config-text').disabled=configBusy||!loaded;$('config-reload').disabled=configBusy;$('config-validate').disabled=configBusy||!loaded;$('config-save').disabled=configBusy||configPreview!==$('config-text').value||configOriginal===$('config-text').value;}
+  function confirmFleet(title,message,submitLabel='Continue',danger=false){
+    return new Promise(resolve=>{
+      let dialog=$('fleet-confirm-dialog');
+      if(!dialog){
+        dialog=document.createElement('dialog');
+        dialog.id='fleet-confirm-dialog';
+        dialog.className='takeover-dialog';
+        dialog.innerHTML='<h2 id="fleet-confirm-title"></h2><p id="fleet-confirm-message"></p><div class="takeover-dialog-actions"><button id="fleet-confirm-cancel" class="button" type="button">Cancel</button><button id="fleet-confirm-submit" class="button primary" type="button">Continue</button></div>';
+        document.body.append(dialog);
+      }
+      $('fleet-confirm-title').textContent=title;
+      $('fleet-confirm-message').textContent=message;
+      const cancelBtn=$('fleet-confirm-cancel'),submitBtn=$('fleet-confirm-submit');
+      submitBtn.textContent=submitLabel;
+      submitBtn.className='button '+(danger?'danger':'primary');
+      const finish=ok=>{if(dialog.open)dialog.close();resolve(ok);};
+      cancelBtn.onclick=()=>finish(false);
+      submitBtn.onclick=()=>finish(true);
+      dialog.onclick=e=>{if(e.target===dialog)finish(false);};
+      dialog.oncancel=e=>{e.preventDefault();finish(false);};
+      dialog.showModal();
+      cancelBtn.focus();
+    });
+  }
   async function loadConfig(){
     if(configBusy)return;
-    if(configRevision&&$('config-text').value!==configOriginal&&!confirm('Discard your unsaved YAML edits and reload the file?'))return;
+    if(configRevision&&$('config-text').value!==configOriginal&&!(await confirmFleet('Discard unsaved YAML edits?','Reloading will replace your unsaved YAML edits with the saved file from the supervisor.','Discard and reload',true)))return;
     configBusy=true;configButtons();$('config-status').textContent='Loading configuration…';
     try{const data=await configRequest();configRevision=data.revision;configOriginal=data.text;$('config-text').value=data.text;configPreview=undefined;$('config-source').textContent=data.source;$('config-changes').replaceChildren();$('config-status').textContent=data.error?'File error: '+data.error:'Loaded from the supervisor. Changes are applied after saving.';}catch(error){$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
   }
@@ -743,7 +767,7 @@ if (typeof document !== 'undefined') (() => {
       workerEditOriginal=editFingerprint();$('worker-editor-status').textContent='Other settings are preserved. Structured edits may reformat the YAML file.';$('worker-editor-changes').replaceChildren();$('worker-editor').showModal();
     }catch(error){fail(error);}finally{workerEditBusy=false;workerEditButtons();}
   }
-  function closeWorkerEditor(event){if(workerEditBusy||editFingerprint()!==workerEditOriginal&&!confirm('Discard your unsaved worker changes?')){event?.preventDefault();return;}workerEdit=null;$('worker-editor').close();}
+  async function closeWorkerEditor(event){if(workerEditBusy){event?.preventDefault();return;}if(editFingerprint()!==workerEditOriginal){event?.preventDefault();if(!(await confirmFleet('Discard unsaved worker changes?','Your unsaved changes to this worker will be lost.','Discard changes',true)))return;}workerEdit=null;$('worker-editor').close();}
   $('worker-editor-cancel').onclick=closeWorkerEditor;$('worker-editor').addEventListener('cancel',closeWorkerEditor);
   $('worker-form').oninput=()=>{workerEditPreview=undefined;$('worker-editor-status').textContent='Unsaved changes. Review before saving.';$('worker-editor-changes').replaceChildren();workerEditButtons();};
   function workerUpdate(){
@@ -768,7 +792,7 @@ if (typeof document !== 'undefined') (() => {
   $('worker-board').onclick=async event=>{
     const edit=event.target.closest('[data-edit-worker]');if(edit){event.preventDefault();await openWorkerEditor(edit.dataset.host,edit.dataset.editWorker);return;}
     const b=event.target.closest('button[data-signal]');if(!b)return;
-    if(['stop','restart'].includes(b.dataset.signal)&&!confirm((b.dataset.signal==='stop'?'Stop':'Restart')+' this worker and its current agents?'))return;
+    if(['stop','restart'].includes(b.dataset.signal)&&!(await confirmFleet((b.dataset.signal==='stop'?'Stop':'Restart')+' this worker?','This will '+(b.dataset.signal==='stop'?'stop':'restart')+' the worker and its currently running agents.',b.dataset.signal==='stop'?'Stop worker':'Restart worker',b.dataset.signal==='stop')))return;
     b.disabled=true;try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(error){fail(error);}finally{b.disabled=false;}
   };
 
@@ -787,7 +811,7 @@ if (typeof document !== 'undefined') (() => {
   addEventListener('beforeunload',event=>{if(configRevision&&$('config-text').value!==configOriginal||workerEdit&&editFingerprint()!==workerEditOriginal){event.preventDefault();event.returnValue='';}});
   $('device-list').onclick=async event=>{
     const b=event.target.closest('button[data-signal]');if(!b)return;
-    if(b.dataset.signal==='stop'&&!confirm('Stop agents on this device? Their saved conversations will remain available.'))return;
+    if(b.dataset.signal==='stop'&&!(await confirmFleet('Stop agents on this device?','Currently running agents on this device will stop. Their saved conversations will remain available.','Stop agents',true)))return;
     b.disabled=true;
     try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
   };
