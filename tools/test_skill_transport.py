@@ -106,5 +106,40 @@ class SkillTransportTests(unittest.TestCase):
         transport.install(self.home, copies, copies)
         self.assertEqual(len(transport.scan(self.home)['copies']), 3)
 
+    def test_agents_md_scan_and_install_unifies_across_agents(self):
+        codex_agents = self.home / '.codex/AGENTS.md'
+        codex_agents.parent.mkdir(parents=True, exist_ok=True)
+        codex_agents.write_text('# Grand instructions\nAlways push to main.\n')
+        report = transport.scan(self.home)
+        copies = [c for c in report['copies'] if c['name'] == 'AGENTS.md']
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0]['agent'], 'codex')
+        transport.install(self.home, copies, report['copies'])
+        self.assertEqual((self.home / '.codex/AGENTS.md').read_text(), '# Grand instructions\nAlways push to main.\n')
+        self.assertEqual((self.home / '.agents/AGENTS.md').read_text(), '# Grand instructions\nAlways push to main.\n')
+        self.assertEqual((self.home / '.claude/CLAUDE.md').read_text(), '# Grand instructions\nAlways push to main.\n')
+
+    def test_delete_removes_skill_and_backs_up_copies_while_protecting_hey_boss(self):
+        self.skill('.codex', 'junk-skill', 'Bad junk')
+        self.skill('.claude', 'junk-skill', 'Bad junk')
+        with self.assertRaises(ValueError):
+            transport.delete(self.home, ['hey-boss'])
+        after = transport.delete(self.home, ['junk-skill'])
+        self.assertEqual([c for c in after['copies'] if c['name'] == 'junk-skill'], [])
+        self.assertFalse((self.home / '.codex/skills/junk-skill').exists())
+        self.assertFalse((self.home / '.claude/skills/junk-skill').exists())
+        self.assertTrue(list((self.home / '.hey-boss/skill-backups').glob('*/.codex/skills/junk-skill/SKILL.md')))
+
+    def test_save_updates_accompanying_markdown_and_skill_bundle(self):
+        root = self.skill('.codex', 'stacked-prs', 'Read [guide](references/guide.md).')
+        ref = root / 'references/guide.md'
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text('# Old Guide\n')
+        base_files = transport.scan(self.home)['copies'][0]['files']
+        saved = transport.save(self.home, 'stacked-prs', base_files, 'references/guide.md', '# Updated Guide\nNew steps.\n')
+        for agent in ('.codex', '.agents', '.claude'):
+            self.assertEqual((self.home / agent / 'skills/stacked-prs/references/guide.md').read_text(), '# Updated Guide\nNew steps.\n')
+        self.assertEqual(saved['source']['name'], 'stacked-prs')
+
 if __name__ == '__main__':
     unittest.main()

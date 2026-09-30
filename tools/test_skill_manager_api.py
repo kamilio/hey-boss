@@ -134,4 +134,63 @@ class SkillManagerApiTests(unittest.TestCase):
         self.assertIn('remote-only',restored['selected'])
         self.assertFalse(restored['busy'])
 
+    def test_agents_md_unify_markdown_save_and_delete(self):
+        (self.root / 'local/.codex/AGENTS.md').parent.mkdir(parents=True, exist_ok=True)
+        (self.root / 'local/.codex/AGENTS.md').write_text('# Grand instructions\nAlways push to main.\n')
+        (self.root / 'studio/.codex/AGENTS.md').parent.mkdir(parents=True, exist_ok=True)
+        (self.root / 'studio/.codex/AGENTS.md').write_text('')
+        junk = self.root / 'studio/.claude/skills/bad-junk'
+        junk.mkdir(parents=True, exist_ok=True)
+        (junk / 'SKILL.md').write_text('---\nname: bad-junk\ndescription: Junk\n---\nDelete me.')
+        (self.root / 'studio/.agents/skills/remote-only/references').mkdir(parents=True, exist_ok=True)
+        (self.root / 'studio/.agents/skills/remote-only/references/notes.md').write_text('# Companion notes\n')
+
+        self.assertTrue(self.post({'action':'scan'})['busy'])
+        report = self.finish()
+        studio_copies = next(m for m in report['machines'] if m['host']=='studio')['copies']
+        remote_copy = next(c for c in studio_copies if c['name']=='remote-only')
+        md_paths = [f['path'] for f in remote_copy['markdown_files']]
+        self.assertEqual(md_paths, ['SKILL.md', 'references/notes.md'])
+        self.assertIn('scripts/nested/run.sh', remote_copy['ignored_files'])
+
+        # Unify AGENTS.md using local version
+        local_copies = next(m for m in report['machines'] if m['host']=='local')['copies']
+        local_agents = next(c for c in local_copies if c['name']=='AGENTS.md')
+        self.post({
+            'action': 'distribute',
+            'revision': report['revision'],
+            'skill': 'AGENTS.md',
+            'selected': ['AGENTS.md'],
+            'choices': {'AGENTS.md': local_agents['digest']},
+            'max_words': 400,
+        })
+        report = self.finish()
+        self.assertEqual((self.root / 'studio/.codex/AGENTS.md').read_text(), '# Grand instructions\nAlways push to main.\n')
+        self.assertEqual((self.root / 'local/.agents/AGENTS.md').read_text(), '# Grand instructions\nAlways push to main.\n')
+
+        # Save edited accompanying Markdown file and distribute
+        self.post({
+            'action': 'save_file',
+            'skill': 'remote-only',
+            'file_path': 'references/notes.md',
+            'content': '# Updated companion notes\nUnified across fleet.\n',
+            'base_digest': remote_copy['digest'],
+            'distribute': True,
+        })
+        report = self.finish()
+        self.assertEqual((self.root / 'local/.codex/skills/remote-only/references/notes.md').read_text(), '# Updated companion notes\nUnified across fleet.\n')
+        self.assertEqual((self.root / 'studio/.codex/skills/remote-only/references/notes.md').read_text(), '# Updated companion notes\nUnified across fleet.\n')
+
+        # Open directory returns materialized local folder and file
+        opened = self.post({'action': 'open_dir', 'skill': 'remote-only'})
+        self.assertTrue(Path(opened['opened_dir']).is_dir())
+        self.assertTrue(Path(opened['opened_file']).is_file())
+
+        # Delete bad-junk across all machines
+        self.post({'action': 'delete', 'skill': 'bad-junk'})
+        report = self.finish()
+        self.assertFalse((self.root / 'studio/.claude/skills/bad-junk').exists())
+        for m in report['machines']:
+            self.assertEqual([c for c in m['copies'] if c['name']=='bad-junk'], [])
+
 if __name__=='__main__':unittest.main()
