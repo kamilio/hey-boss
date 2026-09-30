@@ -1,6 +1,6 @@
 # hey-proxy
 
-Use one local endpoint for OpenAI and Gemini. hey-proxy forwards OpenAI requests, translates Responses API requests for Gemini, and lets you change models through simple overwrite rules. It runs as a Rust binary and includes a local request dashboard.
+Use one local endpoint for OpenAI, Gemini, and your Claude subscription. hey-proxy forwards OpenAI requests, translates Responses API requests for Gemini, and lets you change models through simple overwrite rules. It runs as a Rust binary and includes a local request dashboard.
 
 ## Install and start
 
@@ -39,6 +39,18 @@ Point your client's base URL at **`http://127.0.0.1:8080/v1`**. Open **`http://1
 The overview lists API routes, copyable client base URLs, and model names from your configured aliases, reasoning routes, and fallbacks. It respects API-specific overwrite rules and separates native Gemini model names from Responses model names. It never fetches an upstream model catalog. Click **Refresh config** after editing your config. Host mode uses the same access-key login as the dashboard; client relays show that model configuration belongs to their host.
 
 **Installing or running hey-proxy never changes your Codex configuration.** Codex setup is a separate, optional command.
+
+## Connect your Claude subscription
+
+Add `"claude": {}` under `providers` in your proxy config, then run `hey-proxy claude-login` and start the proxy. hey-proxy owns the OAuth tokens and refreshes them automatically; Claude Code needs only these overrides:
+
+```sh
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+ANTHROPIC_AUTH_TOKEN=hey-proxy \
+claude
+```
+
+Open **http://127.0.0.1:8080/** for session/weekly subscription limits, reset times, and usage freshness. The native `/v1/messages` route preserves Claude requests and streaming responses. [Setup, credential ownership, and research sources](docs/claude-subscription.md).
 
 ## Connect OpenAI
 

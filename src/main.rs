@@ -1,4 +1,5 @@
 mod access;
+mod claude_auth;
 mod config;
 #[cfg(test)]
 mod mode_tests;
@@ -36,6 +37,12 @@ enum Command {
     },
     /// Check configured credential sources without printing their values
     CheckCredentials,
+    /// Sign in to Claude; the proxy stores and refreshes its own OAuth tokens
+    ClaudeLogin {
+        /// Print the authorization URL without opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Encrypt literal API keys in this config using a private local key file
     EncryptConfig,
     /// Internal rollout transport; stdout contains plaintext credentials
@@ -146,6 +153,9 @@ async fn main() -> Result<()> {
     } else {
         config::load_or_create(&path)?
     };
+    if let Some(Command::ClaudeLogin { no_browser }) = &args.command {
+        return claude_auth::login(&config, &path, *no_browser).await;
+    }
     if matches!(args.command, Some(Command::EncryptConfig)) {
         config::protect(&path)?;
         println!("Config credentials encrypted");
@@ -160,6 +170,14 @@ async fn main() -> Result<()> {
     }
     if matches!(args.command, Some(Command::CheckCredentials)) {
         rollout::check_credentials(&config).await?;
+        if let Some(provider) = &config.claude {
+            claude_auth::TokenManager::default()
+                .token(
+                    &provider.credentials_path(Some(&path))?,
+                    &proxy::build_client(&config)?,
+                )
+                .await?;
+        }
         println!("Credential sources ready");
         return Ok(());
     }

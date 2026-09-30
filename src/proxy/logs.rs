@@ -56,7 +56,8 @@ impl UsageReader {
         } else if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
             if !self.first_output
                 && (value["type"].as_str().is_some_and(|kind| {
-                    kind.ends_with(".delta") || kind == "response.output_item.added"
+                    kind.ends_with(".delta")
+                        || matches!(kind, "response.output_item.added" | "content_block_delta")
                 }) || value
                     .get("choices")
                     .and_then(Value::as_array)

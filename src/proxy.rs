@@ -1,5 +1,6 @@
 mod capacity;
 mod chat;
+pub(crate) mod claude;
 mod fallback;
 mod gemini;
 mod guidance;
@@ -48,6 +49,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 struct Service {
     credentials: hey_proxy::credentials::CredentialResolver,
     gemini: gemini::GeminiState,
+    claude: claude::ClaudeState,
     logs: Arc<logs::Store>,
     access_config: Option<PathBuf>,
     state: RwLock<Loaded>,
@@ -114,7 +116,7 @@ fn unbounded_model_wait(config: &Config) -> bool {
     config.mode == Mode::Client || config.fallbacks.values().any(|targets| !targets.is_empty())
 }
 
-fn build_client(config: &Config) -> Result<reqwest::Client> {
+pub(crate) fn build_client(config: &Config) -> Result<reqwest::Client> {
     let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15));
@@ -149,6 +151,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
     }
     let service = Arc::new(Service {
         credentials: Default::default(),
+        claude: Default::default(),
         gemini: gemini::GeminiState::new(source.as_deref())?,
         logs: match options.logs {
             Some(logs) => logs,
@@ -173,6 +176,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         .route("/", axum::routing::get(overview::page))
         .route("/overview.js", axum::routing::get(overview::script))
         .route("/overview/api", axum::routing::get(overview::data))
+        .route("/claude/usage", axum::routing::get(claude::usage))
         .route("/logs", axum::routing::get(logs::page))
         .route("/logs/dashboard.js", axum::routing::get(logs::script))
         .route("/logs/api", axum::routing::get(logs::entries))
@@ -211,7 +215,7 @@ fn token(request: &Request) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .or_else(|| {
-            messages::is_path(request.uri().path())
+            (messages::is_path(request.uri().path()) || claude::is_path(request.uri().path()))
                 .then(|| {
                     request
                         .headers()
@@ -960,7 +964,12 @@ async fn forward(State(service): State<Arc<Service>>, request: Request) -> Respo
     }
     let guard = logs::RequestGuard::new(service.logs.clone(), id);
     let proxy = Arc::new(snapshot);
-    let response = if chat::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
+    let response = if claude::is_path(request.uri().path())
+        && proxy.config.mode != Mode::Client
+        && proxy.config.claude.is_some()
+    {
+        claude::forward(proxy, request).await
+    } else if chat::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
         chat::forward(proxy, request).await
     } else if messages::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
         messages::forward(proxy, request).await

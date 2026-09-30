@@ -77,3 +77,43 @@ test('throughput uses successful completed lifetimes and separates reported reas
   const summary=summarize([e,{...e,output_tokens:600,first_output_ms:100},{...e,state:'streaming',output_tokens:900}]);
   assert.equal(summary.outputRate,150);assert.equal(summary.visibleRate,100);assert.equal(summary.speedSamples,2);assert.equal(summary.firstOutput,100);assert.equal(summary.totalDuration,2000);
 });
+
+// Exercise the actual overview script with a minimal DOM: upstream model labels
+// are text, unknown usage is never rendered as zero, and stale status is visible.
+test('Claude limits render unknown and stale readings safely', async () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  class Element {
+    constructor(tag='div') { this.tag=tag; this.children=[]; this.listeners={}; this.hidden=false; this.value=''; this.dataset={}; this.textContent=''; this.classList={toggle(){}}; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children=children; }
+    addEventListener(name, fn) { this.listeners[name]=fn; }
+    setAttribute(name, value) { this[name]=value; }
+    removeAttribute(name) { delete this[name]; }
+    get hash() { return this.href; }
+  }
+  const nodes = new Map();
+  const html=fs.readFileSync(require.resolve('../src/proxy/overview.html'),'utf8');
+  for(const match of html.matchAll(/id="([^"]+)"/g)) nodes.set(match[1],new Element());
+  const catalog={mode:'standalone',relay:false,apis:[{id:'claude',name:'Claude subscription',description:'Native',configured:true,base_path:'',routes:[],models:[]}]};
+  const payload={state:'stale',updated_at:1790800000,error:'Waiting before retrying',data:{windows:[{label:'<img src=x onerror=bad()>',used_percent:null,resets_at:null},{label:'Weekly',used_percent:112,resets_at:'bad-date'}],extra_usage:{enabled:false}}};
+  let usageCalls=0;
+  const context={document:{getElementById:id=>{assert.ok(nodes.has(id),`Missing element ${id}`);return nodes.get(id);},createElement:tag=>new Element(tag),documentElement:new Element(),addEventListener(){},hidden:false},location:{origin:'http://localhost',hash:''},window:{addEventListener(){}},setInterval(){},clearTimeout(){},setTimeout(){},localStorage:{setItem(){}},fetch:async path=>({ok:true,status:200,json:async()=>path==='/overview/api'?catalog:(usageCalls++,payload)})};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../src/proxy/overview.js'),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(usageCalls,1);
+  const cards=nodes.get('usage-windows').children;
+  assert.equal(cards.length,2);
+  assert.equal(cards[0].children[0].textContent,'<img src=x onerror=bad()>');
+  assert.equal(cards[0].children.some(n=>n.tag==='progress'),false);
+  assert.equal(cards[0].children[1].textContent,'Usage not reported');
+  assert.equal(cards[1].children.find(n=>n.tag==='progress').value,100);
+  assert.equal(cards[1].children.at(-1).textContent,'Reset time not reported');
+  assert.match(nodes.get('usage-status').textContent,/Stale/);
+  assert.equal(nodes.get('extra-usage').textContent,'Extra usage is disabled.');
+  context.fetch=async()=>({ok:false,status:401});
+  await nodes.get('refresh-usage').listeners.click();
+  assert.match(nodes.get('usage-error').textContent,/session expired/);
+  assert.match(nodes.get('usage-status').textContent,/stale/);
+  assert.equal(nodes.get('refresh-usage').disabled,false);
+});

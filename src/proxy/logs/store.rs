@@ -298,7 +298,8 @@ impl Store {
     pub fn usage(&self, id: u64, value: &Value) {
         let usage = value
             .pointer("/usage")
-            .or_else(|| value.pointer("/response/usage"));
+            .or_else(|| value.pointer("/response/usage"))
+            .or_else(|| value.pointer("/message/usage"));
         let Some(usage) = usage else { return };
         let mut input = usage
             .get("input_tokens")
@@ -397,7 +398,8 @@ impl Store {
             }
             let missing_completed = source == "stream_end"
                 && entry.streaming
-                && entry.path.trim_end_matches('/').ends_with("/responses")
+                && (entry.path.trim_end_matches('/').ends_with("/responses")
+                    || entry.path.trim_end_matches('/') == "/v1/messages")
                 && entry.terminal.is_none();
             // Codex closes SSE after response.completed, without waiting for HTTP EOF.
             let completed_disconnect = source == "client_disconnect"
@@ -456,6 +458,8 @@ impl Store {
                 | "response.incomplete"
                 | "error"
                 | "proxy.stream.done"
+                | "message_start"
+                | "message_stop"
         ) && !has_error
             && !matches!(response_status, Some("completed" | "failed" | "incomplete"))
         {
@@ -464,13 +468,16 @@ impl Store {
         self.update(id, "response_event", json!({"type":kind}), |entry| {
             if let Some(response_id) = value
                 .pointer("/response/id")
+                .or_else(|| value.pointer("/message/id"))
                 .or_else(|| value.get("id"))
                 .and_then(Value::as_str)
             {
                 entry.response_id = Some(response_id.chars().take(128).collect());
             }
-            if (matches!(kind, "response.completed" | "proxy.stream.done")
-                || response_status == Some("completed"))
+            if (matches!(
+                kind,
+                "response.completed" | "proxy.stream.done" | "message_stop"
+            ) || response_status == Some("completed"))
                 && entry.terminal.as_deref() != Some("failed")
             {
                 entry.terminal = Some("succeeded".into());
@@ -483,6 +490,7 @@ impl Store {
                 entry.error_code = value
                     .pointer("/response/error/code")
                     .or_else(|| value.pointer("/error/code"))
+                    .or_else(|| value.pointer("/error/type"))
                     .or_else(|| value.pointer("/response/incomplete_details/reason"))
                     .or_else(|| value.pointer("/incomplete_details/reason"))
                     .and_then(Value::as_str)

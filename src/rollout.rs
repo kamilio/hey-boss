@@ -616,6 +616,7 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
         });
         remote.api_keys.clear();
         remote.gemini = None;
+        remote.claude = None;
         remote.aliases.clear();
         remote.fallbacks.clear();
         remote.upstream_url = "https://api.openai.com".into();
@@ -628,7 +629,11 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
 /// A missing/unavailable 1Password source must fail before replacing a service.
 pub(crate) async fn check_credentials(config: &Config) -> Result<()> {
     use hey_proxy::{credentials::CredentialResolver, gemini::Auth};
-    if config.api_keys.is_empty() && config.gemini.is_none() && config.mode != Mode::Client {
+    if config.api_keys.is_empty()
+        && config.gemini.is_none()
+        && config.claude.is_none()
+        && config.mode != Mode::Client
+    {
         bail!("No provider credentials configured; edit the proxy config first");
     }
     let resolver = CredentialResolver::default();

@@ -1,0 +1,321 @@
+use super::*;
+use axum::routing::any;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    (
+        url,
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+    )
+}
+fn config(dir: &Path, upstream: &str) -> Config {
+    let path = dir.join("claude.json");
+    crate::claude_auth::tests::fixture(&path, crate::claude_auth::now() + 3600);
+    serde_json::from_value(json!({"listen":"127.0.0.1:8080","providers":{"claude":{"upstream_url":upstream,"credentials_file":path,"usage_cache_seconds":30}},"retry":{"max_retries":0}})).unwrap()
+}
+fn input(stream: bool) -> String {
+    // Whitespace, signatures and tool names must survive byte-for-byte.
+    format!(
+        r#"{{ "model": "claude-test", "stream": {stream}, "max_tokens": 32, "system": "You are Claude Code, Anthropic's official CLI for Claude.", "messages": [{{"role":"assistant","content":[{{"type":"thinking","thinking":"private","signature":"unchanged"}},{{"type":"tool_use","id":"call_1","name":"Bash","input":{{"command":"true"}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"call_1","content":"done"}}]}}] }}"#
+    )
+}
+
+#[test]
+fn claude_config_roundtrips_and_rejects_unsafe_destinations_and_client_credentials() {
+    let config: Config =
+        serde_json::from_value(json!({"listen":"127.0.0.1:8080","providers":{"claude":{}}}))
+            .unwrap();
+    config.validate().unwrap();
+    let roundtrip: Config = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+    assert!(roundtrip.claude.is_some());
+    let p = roundtrip.claude.unwrap();
+    assert_eq!(
+        p.credentials_path(Some(Path::new("/tmp/example.json")))
+            .unwrap(),
+        Path::new("/tmp/example.claude.json")
+    );
+    for url in [
+        "http://example.com",
+        "https://user:secret@api.anthropic.com",
+        "https://api.anthropic.com/path",
+        "https://api.anthropic.com/?q=x",
+    ] {
+        let p = ProviderConfig {
+            upstream_url: url.into(),
+            ..Default::default()
+        };
+        assert!(p.validate(Mode::Standalone).is_err());
+    }
+    let mut client = config;
+    client.mode = Mode::Client;
+    client.connection = Some(crate::config::ClientConnection {
+        url: "http://localhost:8080".into(),
+        api_key: "local".into(),
+    });
+    assert!(client.validate().is_err());
+}
+
+#[tokio::test]
+async fn native_messages_preserve_wire_bytes_and_replace_all_client_credentials() {
+    let expected = input(false);
+    let compare = expected.clone();
+    let app = Router::new().fallback(any(move |request: Request| {
+        let compare = compare.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            assert_eq!(parts.uri, "/v1/messages?beta=true");
+            assert_eq!(parts.headers["authorization"], "Bearer sk-ant-oat01-synthetic-old");
+            assert_eq!(parts.headers["user-agent"], "claude-code/synthetic");
+            assert_eq!(parts.headers["anthropic-beta"], "future-feature,oauth-2025-04-20");
+            for name in ["x-api-key","cookie","openai-project","x-hop"] { assert!(!parts.headers.contains_key(name)); }
+            assert_eq!(axum::body::to_bytes(body, 65536).await.unwrap(), compare);
+            ([("anthropic-ratelimit-unified-5h-utilization", "0.25"), ("request-id", "req-native")], axum::Json(json!({"type":"message","id":"msg_1","model":"claude-test","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"cache_read_input_tokens":10,"cache_creation_input_tokens":2,"output_tokens":3}})))
+        }
+    }));
+    let (upstream, upstream_task) = serve(app).await;
+    let dir = tempfile::tempdir().unwrap();
+    let logs = Arc::new(logs::Store::default());
+    let (url, proxy_task) = serve(
+        router_with(
+            config(dir.path(), &upstream),
+            Options {
+                logs: Some(logs.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{url}/v1/messages?beta=true"))
+        .bearer_auth("local-placeholder")
+        .header("x-api-key", "local-secret")
+        .header("cookie", "session=local")
+        .header("openai-project", "local-project")
+        .header("connection", "x-hop")
+        .header("x-hop", "drop")
+        .header("user-agent", "claude-code/synthetic")
+        .header("anthropic-beta", "future-feature")
+        .body(expected)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["anthropic-ratelimit-unified-5h-utilization"],
+        "0.25"
+    );
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["content"][0]["text"], "ok");
+    let entry = &logs.recent()[0];
+    assert_eq!(entry.input_tokens, Some(16));
+    assert_eq!(entry.output_tokens, Some(3));
+    assert_eq!(entry.upstream_request_id.as_deref(), Some("req-native"));
+    let serialized = serde_json::to_string(entry).unwrap();
+    for private in ["local-placeholder", "sk-ant-oat", "unchanged", "private"] {
+        assert!(!serialized.contains(private));
+    }
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn native_stream_is_unchanged_and_counts_split_messages_usage() {
+    let sse = concat!(
+        "event: message_start\r\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_sse\",\"usage\":{\"input_tokens\":4,\"cache_read_input_tokens\":10,\"cache_creation_input_tokens\":2,\"output_tokens\":0}}}\r\n\r\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"héllo\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    );
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(move || async move {
+        let chunks = sse
+            .as_bytes()
+            .iter()
+            .map(|b| Ok::<_, std::io::Error>(Bytes::from(vec![*b])))
+            .collect::<Vec<_>>();
+        (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            Body::from_stream(futures_util::stream::iter(chunks)),
+        )
+    })))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let logs = Arc::new(logs::Store::default());
+    let (url, proxy_task) = serve(
+        router_with(
+            config(dir.path(), &upstream),
+            Options {
+                logs: Some(logs.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let reply = reqwest::Client::new()
+        .post(format!("{url}/v1/messages"))
+        .body(input(true))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(reply, sse);
+    let entry = &logs.recent()[0];
+    assert_eq!(entry.input_tokens, Some(16));
+    assert_eq!(entry.output_tokens, Some(7));
+    assert_eq!(entry.cached_input_tokens, Some(10));
+    assert_eq!(entry.cache_write_tokens, Some(2));
+    assert_eq!(entry.response_id.as_deref(), Some("msg_sse"));
+    assert_eq!(entry.state, "succeeded");
+    assert!(entry.first_output_ms.is_some());
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn native_count_and_rate_limits_are_forwarded_without_retries() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let called = count.clone();
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(move |request: Request| {
+        let called = called.clone();
+        async move {
+            called.fetch_add(1, Ordering::SeqCst);
+            if request.uri().path().ends_with("count_tokens") { axum::Json(json!({"input_tokens":42})).into_response() }
+            else { (StatusCode::TOO_MANY_REQUESTS, [("retry-after","90"),("anthropic-ratelimit-unified-status","rejected")], axum::Json(json!({"type":"error","error":{"type":"rate_limit_error","message":"Limit reached"}}))).into_response() }
+        }
+    }))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, proxy_task) = serve(router(config(dir.path(), &upstream)).unwrap()).await;
+    let client = reqwest::Client::new();
+    let value: Value = client
+        .post(format!("{url}/v1/messages/count_tokens"))
+        .body(input(false))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(value["input_tokens"], 42);
+    let response = client
+        .post(format!("{url}/v1/messages"))
+        .body(input(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["retry-after"], "90");
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn usage_is_account_wide_allowlisted_cached_and_stale_on_rate_limit() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let called = count.clone();
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(move |request: Request| {
+        let called = called.clone();
+        async move {
+            assert_eq!(request.uri(), "/api/oauth/usage");
+            assert_eq!(request.headers()["anthropic-beta"], OAUTH_BETA);
+            assert_eq!(request.headers()["authorization"], "Bearer sk-ant-oat01-synthetic-old");
+            if called.fetch_add(1, Ordering::SeqCst) > 0 {
+                return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "120")], "private error body").into_response();
+            }
+            axum::Json(json!({"five_hour":{"utilization":25,"resets_at":"2026-10-01T01:00:00Z"},"seven_day":{"utilization":null,"resets_at":null},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":70,"scope":{"model":{"display_name":"Example model"}},"resets_at":"2026-10-02T00:00:00Z"}],"extra_usage":{"is_enabled":false},"access_token":"PRIVATE_TOKEN","email":"PRIVATE_EMAIL"})).into_response()
+        }
+    }))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, proxy_task) = serve(router(config(dir.path(), &upstream)).unwrap()).await;
+    let first: Value = reqwest::get(format!("{url}/claude/usage"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["state"], "ok");
+    assert_eq!(first["data"]["windows"][0]["used_percent"], 25.0);
+    assert!(first["data"]["windows"][1]["used_percent"].is_null());
+    assert_eq!(first["data"]["windows"][2]["label"], "Example model");
+    assert!(!first.to_string().contains("PRIVATE"));
+    let mut jobs = Vec::new();
+    for _ in 0..5 {
+        let url = url.clone();
+        jobs.push(tokio::spawn(async move {
+            reqwest::get(format!("{url}/claude/usage")).await.unwrap()
+        }));
+    }
+    for job in jobs {
+        assert_eq!(
+            job.await.unwrap().headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    let stale: Value = reqwest::get(format!("{url}/claude/usage"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stale["state"], "stale");
+    assert_eq!(stale["updated_at"], first["updated_at"]);
+    assert_eq!(stale["data"], first["data"]);
+    assert!(!stale.to_string().contains("private error"));
+    assert!(stale["retry_after_seconds"].as_u64().unwrap() >= 119);
+    reqwest::get(format!("{url}/claude/usage")).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn usage_requires_host_auth_and_client_relay_uses_host_credentials() {
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(|| async {
+        axum::Json(json!({"five_hour":{"utilization":12}}))
+    })))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let access = crate::access::ensure(&path, &[]).unwrap();
+    let mut host = config(dir.path(), &upstream);
+    host.mode = Mode::Host;
+    let (host_url, host_task) = serve(
+        router_with(
+            host,
+            Options {
+                access_config: Some(path),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        reqwest::get(format!("{host_url}/claude/usage"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let relay: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","mode":"client","connection":{"url":host_url,"api_key":access.local}})).unwrap();
+    let (relay_url, relay_task) = serve(router(relay).unwrap()).await;
+    let value: Value = reqwest::get(format!("{relay_url}/claude/usage"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(value["data"]["windows"][0]["used_percent"], 12.0);
+    relay_task.abort();
+    host_task.abort();
+    upstream_task.abort();
+}

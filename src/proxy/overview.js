@@ -2,6 +2,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   let catalog, selected, timer;
+  let usageBusy = false;
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
     if (text !== undefined) element.textContent = text;
@@ -42,10 +43,10 @@
     }
     $('model-table').hidden = models.length === 0;
     $('empty').hidden = models.length !== 0;
-    $('empty').textContent = query ? 'No configured models match your search.' : catalog.relay ? 'Model names are configured on the host.' : !selected.configured ? 'Configure a provider to use this API.' : 'No model names are listed for this API in the current config.';
+    $('empty').textContent = query ? 'No configured models match your search.' : catalog.relay ? 'Model names are configured on the host.' : !selected.configured ? 'Configure a provider to use this API.' : selected.id === 'claude' ? 'Use the model selected in Claude Code. Native Claude requests pass through unchanged.' : 'No model names are listed for this API in the current config.';
   }
   function selectApi() {
-    selected = catalog.apis.find(api => `#${api.id}` === location.hash) || catalog.apis[0];
+    selected = catalog.apis.find(api => `#${api.id}` === location.hash) || catalog.apis.find(api => api.configured) || catalog.apis[0];
     for (const link of $('api-nav').children) {
       if (link.hash === `#${selected.id}`) link.setAttribute('aria-current', 'true');
       else link.removeAttribute('aria-current');
@@ -89,6 +90,8 @@
       $('relay-note').hidden = !catalog.relay;
       $('catalog').hidden = false;
       selectApi();
+      $('claude-usage').hidden = !catalog.relay && !catalog.apis.some(api => api.id === 'claude' && api.configured);
+      if (!$('claude-usage').hidden) loadUsage();
     } catch (error) {
       $('error').textContent = error.message;
       $('error').hidden = false;
@@ -97,6 +100,58 @@
       $('refresh').disabled = false;
     }
   }
+  async function loadUsage() {
+    if (usageBusy || document.hidden || $('claude-usage').hidden) return;
+    usageBusy = true;
+    $('refresh-usage').disabled = true;
+    try {
+      const response = await fetch('/claude/usage', {cache: 'no-store'});
+      if (response.status === 401) throw new Error('Your session expired. Reload the page to sign in.');
+      if (!response.ok) throw new Error(`Could not load limits (HTTP ${response.status}).`);
+      const usage = await response.json();
+      $('usage-windows').replaceChildren();
+      $('extra-usage').hidden = true;
+      $('usage-error').hidden = !usage.error;
+      $('usage-error').textContent = usage.error || '';
+      if (usage.state === 'disabled') {
+        $('usage-status').textContent = 'Claude is not configured on this proxy host.';
+        return;
+      }
+      const fetched = usage.updated_at ? new Date(usage.updated_at * 1000).toLocaleString() : null;
+      $('usage-status').textContent = fetched ? `${usage.state === 'stale' ? 'Stale · last updated' : 'Updated'} ${fetched}` : 'No subscription reading available yet. Run hey-proxy claude-login on the proxy host.';
+      for (const window of usage.data?.windows || []) {
+        const card = node('article', undefined, 'usage-card');
+        card.append(node('h3', window.label));
+        const used = window.used_percent;
+        if (typeof used === 'number' && Number.isFinite(used)) {
+          card.append(node('strong', `${used.toLocaleString(undefined, {maximumFractionDigits:1})}% used`));
+          const bar = node('progress');
+          bar.max = 100; bar.value = Math.min(100, Math.max(0, used));
+          bar.setAttribute('aria-label', `${window.label}: ${used}% used`);
+          card.append(bar);
+          card.classList.toggle('full', used >= 90);
+        } else card.append(node('p', 'Usage not reported'));
+        const reset = window.resets_at ? new Date(window.resets_at) : null;
+        card.append(node('p', reset && Number.isFinite(reset.getTime()) ? `Resets ${reset.toLocaleString()}` : 'Reset time not reported'));
+        $('usage-windows').append(card);
+      }
+      const extra = usage.data?.extra_usage;
+      if (extra) {
+        $('extra-usage').hidden = false;
+        $('extra-usage').textContent = extra.enabled === false ? 'Extra usage is disabled.' : `Extra usage: ${extra.enabled === true ? 'enabled' : 'status not reported'}${typeof extra.used_percent === 'number' ? ` · ${extra.used_percent.toLocaleString(undefined, {maximumFractionDigits:1})}% used` : ''}.`;
+      }
+    } catch (error) {
+      $('usage-error').hidden = false;
+      $('usage-error').textContent = error.message;
+      $('usage-status').textContent = 'Refresh failed · any displayed limits are stale.';
+    } finally {
+      usageBusy = false;
+      $('refresh-usage').disabled = false;
+    }
+  }
+  $('refresh-usage').addEventListener('click', loadUsage);
+  setInterval(loadUsage, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadUsage(); });
   $('origin').textContent = location.origin;
   $('refresh').addEventListener('click', load);
   $('search').addEventListener('input', () => { if (selected) renderModels(); });

@@ -138,6 +138,23 @@ fn catalog(config: &Config) -> Value {
     let gemini = config.gemini.is_some();
     let apis = vec![
         Api {
+            id: "claude",
+            name: "Claude subscription",
+            description: "Native Claude Code Messages with proxy-owned subscription login and automatic token refresh. Model names, tools and signed content pass through unchanged. Aliases do not apply to this native route.",
+            base_path: "",
+            routes: vec![
+                ("POST", "/v1/messages", "Native JSON or SSE"),
+                ("POST", "/v1/messages/count_tokens", "Native token counting"),
+                (
+                    "GET",
+                    "/claude/usage",
+                    "Subscription limits and reset times",
+                ),
+            ],
+            configured: !relay && config.claude.is_some(),
+            models: Vec::new(),
+        },
+        Api {
             id: "responses",
             name: "Responses",
             description: "Responses requests for OpenAI and Gemini. Supports HTTP streaming, tools and reasoning. Gemini uses the Responses converter.",

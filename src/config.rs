@@ -29,6 +29,7 @@ pub struct Config {
     pub api_keys: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini: Option<hey_proxy::gemini::ProviderConfig>,
+    pub claude: Option<crate::proxy::claude::ProviderConfig>,
     #[serde(default)]
     pub default: DefaultRoute,
     #[serde(default = "default_credential_cache_seconds")]
@@ -93,6 +94,8 @@ struct ConfigFile {
 #[serde(deny_unknown_fields)]
 struct Providers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    claude: Option<crate::proxy::claude::ProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     openai: Option<OpenAiProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gemini: Option<hey_proxy::gemini::ProviderConfig>,
@@ -140,6 +143,7 @@ impl TryFrom<ConfigFile> for Config {
             upstream_url: file.upstream_url,
             api_keys: file.api_keys,
             gemini: file.gemini,
+            claude: file.providers.claude,
             default: file.default,
             credential_cache_seconds: file.credential_cache_seconds,
             aliases: file.aliases,
@@ -166,6 +170,7 @@ impl Serialize for Config {
                     credential_cache_seconds: self.credential_cache_seconds,
                 }),
                 gemini: self.gemini.clone(),
+                claude: self.claude.clone(),
             }
         };
         let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"skip_blocked_security_work":self.skip_blocked_security_work});
@@ -396,6 +401,7 @@ impl Default for Config {
             model_registry: None,
             fallbacks: BTreeMap::new(),
             gemini: None,
+            claude: None,
             credential_cache_seconds: 2400,
             ssh_hosts: Vec::new(),
             mode: Mode::Standalone,
@@ -520,6 +526,7 @@ impl Config {
                 || !self.aliases.is_empty()
                 || !self.fallbacks.is_empty()
                 || self.gemini.is_some()
+                || self.claude.is_some()
             {
                 bail!(
                     "Client config must not contain upstream API keys, aliases or fallback rules"
@@ -616,6 +623,9 @@ impl Config {
         hey_proxy::fallback::validate(&self.fallbacks)?;
         if !(1..=86400).contains(&self.credential_cache_seconds) {
             bail!("OpenAI credential_cache_seconds must be 1..86400");
+        }
+        if let Some(claude) = &self.claude {
+            claude.validate(self.mode)?;
         }
         if let Some(gemini) = &self.gemini {
             gemini.validate()?;

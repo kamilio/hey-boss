@@ -2,7 +2,7 @@
 name = "hey-proxy"
 version = "0.1.0"
 edition = "2024"
-description = "Local OpenAI and Gemini proxy with model overwrites, fallbacks, and a request dashboard"
+description = "Local OpenAI, Gemini, and Claude subscription proxy with model routing and usage dashboards"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/kamilio/hey-proxy"

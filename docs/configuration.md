@@ -127,3 +127,7 @@ hey-proxy configure-codex \
 ```
 
 `hey-proxy verify` checks the proxy and its connection. Add `--codex` only if you also want to verify an already-configured Codex installation. Verification does not modify Codex files.
+
+## Claude subscription provider
+
+`providers.claude` enables native Claude Code Messages with proxy-owned OAuth authentication and subscription limits. See [Claude setup and provider options](claude-subscription.md).
