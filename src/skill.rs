@@ -1,4 +1,5 @@
 //! Canonical agent skill, cross-agent/fleet skill sync, and skill policy audit.
+pub mod manager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -172,30 +173,57 @@ fn extract_description(markdown: &str) -> String {
     String::new()
 }
 
-type SkillBundle = Vec<(String, Vec<u8>)>;
+type SkillBundle = Vec<(String, Vec<u8>, bool)>;
 
 fn collect_skill_files(skill_dir: &Path) -> io::Result<SkillBundle> {
-    let mut out = Vec::new();
-    let skill_md = skill_dir.join("SKILL.md");
-    if !skill_md.is_file() {
-        return Ok(out);
-    }
-    let refs_dir = skill_dir.join("references");
-    if refs_dir.is_dir() {
-        let mut entries: Vec<_> = fs::read_dir(&refs_dir)?.filter_map(|e| e.ok()).collect();
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(root: &Path, dir: &Path, out: &mut SkillBundle, size: &mut u64) -> io::Result<()> {
+        let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<io::Result<_>>()?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
-            let p = entry.path();
-            if p.is_file()
-                && let Some(name) = p.file_name().and_then(|n| n.to_str())
-                && !name.starts_with('.')
-            {
-                out.push((format!("references/{name}"), fs::read(&p)?));
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_symlink() {
+                return Err(io::Error::other("Skill bundles cannot contain symlinks"));
+            }
+            if metadata.is_dir() {
+                walk(root, &path, out, size)?;
+            } else if metadata.is_file() {
+                *size += metadata.len();
+                if *size > 4 * 1024 * 1024 || out.len() >= 512 {
+                    return Err(io::Error::other("Skill bundle exceeds 4 MiB or 512 files"));
+                }
+                out.push((
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    fs::read(&path)?,
+                    metadata.permissions().mode() & 0o111 != 0,
+                ));
             }
         }
+        Ok(())
     }
-    out.push(("SKILL.md".into(), fs::read(&skill_md)?));
+    let mut out = Vec::new();
+    if !skill_dir.join("SKILL.md").is_file() {
+        return Ok(out);
+    }
+    walk(skill_dir, skill_dir, &mut out, &mut 0)?;
+    // Publish the entrypoint after supporting files.
+    out.sort_by_key(|(path, _, _)| (path == "SKILL.md", path.clone()));
     Ok(out)
+}
+fn write_bundle_file(path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    atomic_write(path, bytes)?;
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+    )
 }
 
 fn analyze_entry(
@@ -382,11 +410,15 @@ pub fn audit_report(home: &Path, project_dir: Option<&Path>) -> Value {
 }
 
 fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<SkillBundle>> {
+    let managed = home.join(".hey-boss/skills").join(name);
+    if managed.join("SKILL.md").is_file() {
+        return collect_skill_files(&managed).map(Some);
+    }
     if name == "hey-boss" {
         return Ok(Some(
             FILES
                 .iter()
-                .map(|(rel, text)| ((*rel).to_string(), text.as_bytes().to_vec()))
+                .map(|(rel, text)| ((*rel).to_string(), text.as_bytes().to_vec(), false))
                 .collect(),
         ));
     }
@@ -403,7 +435,7 @@ fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<Ski
             .join("skills")
             .join(format!("{name}.md"));
         if flat.is_file() {
-            return Ok(Some(vec![("SKILL.md".into(), fs::read(&flat)?)]));
+            return Ok(Some(vec![("SKILL.md".into(), fs::read(&flat)?, false)]));
         }
     }
     Ok(None)
@@ -431,9 +463,9 @@ pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result
         };
         for &(_, root_dir) in AGENT_ROOTS {
             let dest_dir = home.join(root_dir).join("skills").join(&name);
-            for (rel, bytes) in &bundle {
+            for (rel, bytes, executable) in &bundle {
                 let target = dest_dir.join(rel);
-                atomic_write(&target, bytes)?;
+                write_bundle_file(&target, bytes, *executable)?;
                 paths.push(target);
             }
         }
@@ -443,23 +475,16 @@ pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result
 
 pub fn install(home: &Path) -> io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for &(_, root) in AGENT_ROOTS {
-        let directory = home.join(root).join("skills/hey-boss");
-        paths.extend(install_directory(&directory)?);
-    }
-    // Also port any selected global skills (such as stacked-prs) across Codex, Agents, and Claude.
     for name in selected_skills(home) {
-        if name == "hey-boss" {
+        // An unrelated unportable skill must not prevent installing the core integration.
+        let Ok(Some(bundle)) = load_canonical_skill_bundle(home, &name) else {
             continue;
-        }
-        if let Ok(Some(bundle)) = load_canonical_skill_bundle(home, &name) {
-            for &(_, root) in AGENT_ROOTS {
-                let dest_dir = home.join(root).join("skills").join(&name);
-                for (rel, bytes) in &bundle {
-                    let target = dest_dir.join(rel);
-                    atomic_write(&target, bytes)?;
-                    paths.push(target);
-                }
+        };
+        for &(_, root) in AGENT_ROOTS {
+            for (relative, bytes, executable) in &bundle {
+                let path = home.join(root).join("skills").join(&name).join(relative);
+                write_bundle_file(&path, bytes, *executable)?;
+                paths.push(path);
             }
         }
     }
@@ -476,14 +501,17 @@ pub fn archive_for_home(home: Option<&Path>) -> io::Result<Vec<u8>> {
 
     if let Some(h) = home {
         for name in selected_skills(h) {
-            if name == "hey-boss" || !is_valid_skill_name(&name) {
+            if !is_valid_skill_name(&name) {
                 continue;
             }
             if let Ok(Some(bundle)) = load_canonical_skill_bundle(h, &name) {
-                for (rel, bytes) in bundle {
+                for (rel, bytes, executable) in bundle {
                     let staged = temporary.0.join(&name).join(&rel);
-                    atomic_write(&staged, &bytes)?;
-                    archived_paths.push(format!("{name}/{rel}"));
+                    write_bundle_file(&staged, &bytes, executable)?;
+                    let archived = format!("{name}/{rel}");
+                    if !archived_paths.contains(&archived) {
+                        archived_paths.push(archived);
+                    }
                 }
             }
         }
@@ -541,6 +569,40 @@ done
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_version_and_nested_executables_survive_legacy_sync() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::admin::Temporary::new().unwrap();
+        let root = home.0.join(".hey-boss/skills/stacked-prs");
+        fs::create_dir_all(root.join("scripts/nested")).unwrap();
+        fs::write(root.join("SKILL.md"), "Chosen remote version").unwrap();
+        fs::write(root.join("scripts/nested/check"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(
+            root.join("scripts/nested/check"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let older = home.0.join(".codex/skills/stacked-prs");
+        fs::create_dir_all(&older).unwrap();
+        fs::write(older.join("SKILL.md"), "Old local copy").unwrap();
+        install(&home.0).unwrap();
+        for (_, agent) in AGENT_ROOTS {
+            let destination = home.0.join(agent).join("skills/stacked-prs");
+            assert_eq!(
+                fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+                "Chosen remote version"
+            );
+            assert_ne!(
+                fs::metadata(destination.join("scripts/nested/check"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0
+            );
+        }
+    }
 
     #[test]
     fn installation_includes_linked_references() {
