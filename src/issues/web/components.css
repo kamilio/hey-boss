@@ -567,6 +567,8 @@ h1 {
   font-size: 12px;
 }
 .app-navigation {
+  overflow-x: auto;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--line);
   background: var(--hover);
 }
@@ -578,6 +580,7 @@ h1 {
   gap: 28px;
 }
 .navigation-inner > a {
+  flex-shrink: 0;
   display: inline-flex;
   gap: 8px;
   align-items: center;

@@ -688,6 +688,16 @@ specific destination, use `hey-boss companion sync-skill HOST`. Installation and
 connection register destinations and sync automatically. Existing agent sessions
 may need to reload the skill. The registry is `~/.local/share/hey-boss/companion-hosts`.
 
+Open **Skills** (`/skills`) to discover global skills across configured fleet machines,
+compare versions, and distribute selected copies to Codex and Claude. Scans keep
+last-known copies for unavailable machines; distribution reports each destination.
+Changed copies require another scan. Replaced agent folders are backed up under
+`~/.hey-boss/skill-backups`; the chosen library lives in `~/.hey-boss/skills` and is
+also used by companion sync. Static lint checks metadata, word budget, machine paths,
+agent-specific tool names, and missing references. Python 3 and existing SSH access
+are required on scanned machines. Project skills in the web server’s working
+directory are shown for inspection only.
+
 ## Website actions (no VS Code required)
 
 The companion opens websites in your Mac’s default browser and returns a session

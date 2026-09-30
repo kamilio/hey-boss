@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+<title>Skills · Hey Boss</title><link rel="icon" href="/icon.png"><link rel="stylesheet" href="/components.css"><link rel="stylesheet" href="/skills.css">
+<script src="/components.js" defer></script><script src="/quick-issue.js" defer></script><script src="/skills.js" defer></script>
+</head><body><a class="skip-link" href="#skills-main">Skip to skills</a>
+<!--app-shell-->
+<main id="skills-main" tabindex="-1">
+  <header class="skills-heading"><div><p class="skills-eyebrow"><span data-icon="spark"></span>YOUR AGENT TOOLKIT</p><h1>Skills, in sync<span class="heading-dot">.</span></h1><p>Find the good ones. Make them work everywhere.</p></div><button id="skills-scan" class="button" disabled><span data-icon="refresh"></span>Scan all machines</button></header>
+  <section id="skills-summary" class="skills-summary" aria-label="Library summary"><div><strong>—</strong><span>skills discovered</span></div><div><strong>—</strong><span>selected to sync</span></div><div><strong>—</strong><span>need attention</span></div><div><strong>—</strong><span>machines scanned</span></div></section>
+  <details class="skills-machines"><summary><span><span data-icon="monitor"></span> Your machines <span id="machine-summary">Connecting…</span></span><span>View status</span></summary><div id="skills-machines"></div></details>
+  <p id="skills-error" class="skills-error" role="alert" hidden></p>
+  <div class="skills-workspace">
+    <section class="skills-library" aria-label="Skill library">
+      <div class="skills-library-heading"><h2>Library <span id="library-count">0</span></h2><span class="skills-caption">SELECT TO DISTRIBUTE</span></div>
+      <label class="skills-search"><span data-icon="search"></span><input id="skills-search" type="search" placeholder="Search skills or machines…" aria-label="Search skills or machines" autocomplete="off"><kbd>/</kbd></label>
+      <div id="skills-filters" class="skills-filters" role="group" aria-label="Filter skills"><button data-filter="all" aria-pressed="true">All skills</button><button data-filter="selected" aria-pressed="false">Selected</button><button data-filter="attention" aria-pressed="false">Needs attention</button><button data-filter="project" aria-pressed="false">Project</button></div>
+      <div id="skills-list" class="skills-list"><div class="skills-empty"><span class="skills-loader"></span><h3>Gathering your toolkit</h3><p>Skills from each machine will appear here.</p></div></div>
+    </section>
+    <section id="skills-detail" class="skills-detail" aria-label="Skill inspector"><div class="skills-empty"><span data-icon="instructions"></span><h2>A home for your best instructions</h2><p>Choose a skill to compare copies, review compatibility, and select the version to distribute.</p></div></section>
+  </div>
+  <footer class="skills-actionbar"><div><strong id="selection-summary">Loading your library…</strong><p id="skills-status" role="status" aria-live="polite">Connecting to the skill manager</p></div><div class="skills-footer-actions"><button id="skills-reset" class="button" hidden>Discard changes</button><button id="skills-distribute" class="button primary" disabled><span data-icon="sync"></span>Distribute selected</button></div></footer>
+  <p class="skills-footnote">Your selected versions go to Codex, Claude Code, and shared agent skill folders. Unselected skills stay where they are.</p>
+</main></body></html>
