@@ -112,7 +112,7 @@ fn git(path: &Path, args: &[&str]) -> Command {
         .args(args);
     c
 }
-fn git_text(path: &Path, args: &[&str]) -> io::Result<String> {
+pub(super) fn git_text(path: &Path, args: &[&str]) -> io::Result<String> {
     text(&mut git(path, args)).map(|s| s.trim().to_owned())
 }
 pub fn parse_list(bytes: &[u8]) -> io::Result<Vec<Worktree>> {
@@ -577,7 +577,7 @@ fn eligible(
     Ok(head)
 }
 
-fn activity() -> io::Result<(Table, Vec<PathBuf>)> {
+pub(super) fn activity() -> io::Result<(Table, Vec<PathBuf>)> {
     let table = super::processes::inventory()?;
     let mut paths = open_paths()?;
     paths.extend(super::workload_ownership::declared_roots()?);
@@ -695,18 +695,20 @@ pub fn clean(
         for w in trees.iter().skip(1) {
             let metadata = details(w, &repository, &github_url, at);
             let name = w.path.display().to_string();
-            let check = eligible(
-                w,
-                &main,
-                &allowed,
-                &active_paths,
-                table,
-                Policy {
-                    min_age: config.worktree_min_age_days * 86400,
-                    manual: false,
-                },
-                at,
-            );
+            let check = super::cleanup::release_status(&w.path).and_then(|()| {
+                eligible(
+                    w,
+                    &main,
+                    &allowed,
+                    &active_paths,
+                    table,
+                    Policy {
+                        min_age: config.worktree_min_age_days * 86400,
+                        manual: false,
+                    },
+                    at,
+                )
+            });
             let head = match check {
                 Ok(head) => head,
                 Err(detail) => {
@@ -741,6 +743,7 @@ pub fn clean(
                 let fresh_trees = list(&repo)?;
                 let fresh_table = super::processes::inventory()?;
                 let mut fresh_paths = open_paths()?;
+                fresh_paths.extend(super::workload_ownership::declared_roots()?);
                 fresh_paths.extend(active_paths.iter().cloned());
                 let fresh_agents = crate::agents::scan();
                 if !fresh_agents.warnings.is_empty() {
@@ -993,6 +996,7 @@ mod tests {
             )
             .unwrap();
             publish_fixture(&work);
+            crate::health::cleanup::release_fixture(&work);
             remove_checkout(&work).unwrap();
             assert!(!work.exists());
             assert_eq!(git_text(&main, &["rev-parse", "sparse"]).unwrap(), w.head);
@@ -1111,6 +1115,7 @@ mod tests {
             &["remote", "set-url", "origin", remote.to_str().unwrap()],
         )
         .unwrap();
+        crate::health::cleanup::release_fixture(&work);
         remove_checkout(&work).unwrap();
         assert!(!work.exists());
         std::fs::remove_dir_all(root).unwrap();
@@ -1200,6 +1205,7 @@ mod tests {
         std::fs::remove_file(work.join("module")).unwrap();
         std::fs::create_dir(work.join("module")).unwrap();
         publish_fixture(&work);
+        crate::health::cleanup::release_fixture(&work);
         remove_one(&work).unwrap();
         assert!(!work.exists());
         assert!(git_text(&main, &["rev-parse", "refs/heads/keep"]).is_ok());
@@ -1302,6 +1308,7 @@ mod tests {
         std::fs::write(&receipt, "completed fixture work").unwrap();
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
         publish_fixture(&work);
+        crate::health::cleanup::release_fixture(&work);
         remove_one(&work).unwrap();
         assert!(!work.exists() && !admin.exists());
         assert_eq!(
@@ -1457,6 +1464,7 @@ mod tests {
         git_text(&work, &["checkout", "done"]).unwrap();
         // Manual removal of a young published checkout keeps its named branch.
         publish_fixture(&work);
+        crate::health::cleanup::release_fixture(&work);
         remove_one(&work).unwrap();
         assert!(!work.exists());
         assert_eq!(
@@ -1577,6 +1585,7 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
         },
         now(),
     )?;
+    super::cleanup::consume(path)?;
     git_text(
         &main.path,
         &[
@@ -1742,9 +1751,9 @@ fn aggressive_clean(
         if !allowed.iter().any(|r| under(&w.path, r)) || w.bare {
             continue;
         }
-        if let Err(detail) =
+        if let Err(detail) = super::cleanup::release_status(&w.path).and_then(|()| {
             aggressive_eligible(&w, &main, &allowed, &active_paths, &fresh_table, now())
-        {
+        }) {
             items.push(ineligible_item(name, detail, details(&w, "", &None, now())));
             continue;
         }
@@ -1945,6 +1954,7 @@ mod aggressive_tests {
                 .contains("Locked")
         );
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
+        crate::health::cleanup::release_fixture(&work);
         remove_checkout(&work).unwrap();
         assert!(!work.exists());
         assert!(git_text(&main, &["rev-parse", "completed"]).is_ok());
@@ -2188,6 +2198,7 @@ mod aggressive_tests {
         assert!(work.join("file").exists());
         std::fs::remove_file(work.join("local.sqlite")).unwrap();
         let head = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
+        crate::health::cleanup::release_fixture(&work);
         remove_checkout(&work).unwrap();
         assert_eq!(git_text(&main, &["rev-parse", "owned"]).unwrap(), head);
         assert_eq!(

@@ -41,6 +41,32 @@ pub enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect the current cleanup release and ownership; never deletes the target.
+    CleanupCheck {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record that the owner has finished all use of this exact checkout or node_modules.
+    ReleaseCleanup {
+        path: PathBuf,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Withdraw a cleanup release before resuming work or queuing validation.
+    RetainCleanup {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove explicitly released node_modules after fresh ownership and content checks.
+    RemoveDependencies {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// List the configured and connected SSH health clients.
     Hosts {
         #[arg(long)]
@@ -67,7 +93,7 @@ pub enum Action {
         /// Limit managed worker diagnostics to 128 MiB, retaining the latest 64 MiB.
         #[arg(long, action = clap::ArgAction::Set)]
         logs: Option<bool>,
-        /// Expire old worktrees (including dirty/locked), caches and developer processes. SQLite is preserved.
+        /// Expire released idle worktrees, caches and orphan developer processes; preserve ownership and SQLite.
         #[arg(long, action = clap::ArgAction::Set)]
         aggressive: Option<bool>,
     },
@@ -91,13 +117,27 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
             }
             args
         }
-        Action::RemoveWorktree { path, json } => {
+        Action::RemoveWorktree { path, json }
+        | Action::CleanupCheck { path, json }
+        | Action::ReleaseCleanup { path, json, .. }
+        | Action::RetainCleanup { path, json }
+        | Action::RemoveDependencies { path, json } => {
             let mut args = vec![
-                "remove-worktree".into(),
+                match action {
+                    Action::CleanupCheck { .. } => "cleanup-check",
+                    Action::ReleaseCleanup { .. } => "release-cleanup",
+                    Action::RetainCleanup { .. } => "retain-cleanup",
+                    Action::RemoveDependencies { .. } => "remove-dependencies",
+                    _ => "remove-worktree",
+                }
+                .into(),
                 path.to_str()
                     .ok_or_else(|| io::Error::other("Path must be UTF-8"))?
                     .into(),
             ];
+            if let Action::ReleaseCleanup { owner, .. } = action {
+                args.extend(["--owner".into(), owner.clone()]);
+            }
             if *json {
                 args.push("--json".into());
             }
@@ -156,9 +196,16 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
         }
     };
     let control = crate::health::remote::control_path(host);
-    let data = crate::health::remote::execute(host, &args, control)?;
+    let result = crate::health::remote::execute_output(host, &args, control)?;
     use std::io::Write;
-    io::stdout().write_all(&data)
+    io::stdout().write_all(&result.stdout)?;
+    if !result.status.success() {
+        return Err(io::Error::other(format!(
+            "{host}: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 fn print(s: &Snapshot, json: bool) -> io::Result<()> {
@@ -310,8 +357,34 @@ pub fn run(action: &Action) -> io::Result<()> {
         Action::RemoveWorktree { path, json } => {
             let result = store.remove_worktree(path)?;
             print(&result, *json)?;
-            if !*json && !result.errors.is_empty() {
+            if !result.errors.is_empty() {
                 return Err(io::Error::other(result.errors.join("; ")));
+            }
+            Ok(())
+        }
+        Action::CleanupCheck { path, json }
+        | Action::ReleaseCleanup { path, json, .. }
+        | Action::RetainCleanup { path, json }
+        | Action::RemoveDependencies { path, json } => {
+            let (name, owner) = match action {
+                Action::CleanupCheck { .. } => ("check", None),
+                Action::ReleaseCleanup { owner, .. } => ("release", Some(owner.as_str())),
+                Action::RetainCleanup { .. } => ("retain", None),
+                _ => ("remove-dependencies", None),
+            };
+            let receipt = crate::health::cleanup::run(&store, path, name, owner)?;
+            if *json {
+                println!("{}", serde_json::to_string(&receipt)?);
+            } else {
+                println!(
+                    "{}: {}\n{}",
+                    receipt.decision,
+                    receipt.path.display(),
+                    receipt.reason
+                );
+            }
+            if receipt.decision == "rejected" {
+                return Err(io::Error::other(receipt.reason));
             }
             Ok(())
         }

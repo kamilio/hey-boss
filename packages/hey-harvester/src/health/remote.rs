@@ -69,6 +69,21 @@ pub fn script(args: &[String]) -> io::Result<String> {
 }
 
 pub fn execute(host: &str, args: &[String], control: Option<PathBuf>) -> io::Result<Vec<u8>> {
+    let result = execute_output(host, args, control)?;
+    if !result.status.success() {
+        return Err(io::Error::other(format!(
+            "{host}: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        )));
+    }
+    Ok(result.stdout)
+}
+
+pub(crate) fn execute_output(
+    host: &str,
+    args: &[String],
+    control: Option<PathBuf>,
+) -> io::Result<std::process::Output> {
     if !valid_host(host) {
         return Err(io::Error::other("Invalid SSH host"));
     }
@@ -95,14 +110,7 @@ pub fn execute(host: &str, args: &[String], control: Option<PathBuf>) -> io::Res
     } else {
         300
     };
-    let result = output(&mut cmd, Duration::from_secs(timeout))?;
-    if !result.status.success() {
-        return Err(io::Error::other(format!(
-            "{host}: {}",
-            String::from_utf8_lossy(&result.stderr).trim()
-        )));
-    }
-    Ok(result.stdout)
+    output(&mut cmd, Duration::from_secs(timeout))
 }
 
 /// Reuse the companion's existing SSH multiplex connection when available.

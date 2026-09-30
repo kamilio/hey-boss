@@ -68,6 +68,14 @@ pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
     remove_until(path, Instant::now() + Duration::from_secs(30))
 }
 fn remove_until(path: &Path, deadline: Instant) -> io::Result<()> {
+    if path
+        .ancestors()
+        .any(|p| p.file_name().is_some_and(|n| n == "node_modules"))
+    {
+        return Err(super::preserved(
+            "Dependencies require explicit release through remove-dependencies; preserved",
+        ));
+    }
     if Instant::now() >= deadline {
         return Err(io::Error::other(
             "Cleanup time slice exhausted; retry next cycle",
@@ -108,6 +116,21 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn recursive_cache_removal_cannot_bypass_dependency_release() {
+        let root = fixture();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::write(root.join("node_modules/.bin/tsc"), "retained validator").unwrap();
+        assert!(
+            remove_tree(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("explicit release")
+        );
+        assert!(root.join("node_modules/.bin/tsc").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
     fn fixture() -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "harvester-db-{}-{}",
