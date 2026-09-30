@@ -4,7 +4,9 @@ mod replay;
 mod request;
 mod response;
 mod stream;
+mod tool_search;
 mod validate;
+pub use tool_search::HostedSearch;
 
 pub use error::ResponseError;
 pub use partial::PartialCalls;

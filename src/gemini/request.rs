@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -11,6 +11,11 @@ pub struct Tool {
     pub name: String,
     pub namespace: Option<String>,
     pub custom: bool,
+    pub(crate) search: Option<String>,
+    pub(crate) deferred: bool,
+    pub(crate) definition: Value,
+    pub(crate) scopes: Vec<Value>,
+    pub(crate) validator: Option<Arc<jsonschema::Validator>>,
 }
 #[derive(Clone, Debug)]
 pub struct ConvertedRequest {
@@ -290,6 +295,200 @@ fn media(source: &str, mime: Option<&str>, fallback: &str) -> Result<Value> {
     }
 }
 
+fn add_tools(
+    list: &[Value],
+    namespace: &str,
+    tools: &mut BTreeMap<String, Tool>,
+    names: &mut BTreeMap<String, String>,
+    declarations: &mut Vec<Value>,
+    loaded: bool,
+    scopes: &[Value],
+) -> Result<()> {
+    fn unique(
+        list: &[Value],
+        namespace: &str,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        for tool in list {
+            let kind = string(tool, "type")?;
+            if kind == "namespace" {
+                unique(
+                    tool["tools"]
+                        .as_array()
+                        .ok_or_else(|| anyhow!("namespace.tools must be an array"))?,
+                    &format!("{namespace}{}.", string(tool, "name")?),
+                    seen,
+                )?;
+            } else if kind == "function" || kind == "custom" {
+                let name = format!("{namespace}{}", string(tool, "name")?);
+                if !seen.insert(name.clone()) {
+                    bail!("Duplicate tool name {name}");
+                }
+            }
+        }
+        Ok(())
+    }
+    unique(list, namespace, &mut Default::default())?;
+    for tool in list {
+        let kind = string(tool, "type")?;
+        if kind == "namespace" {
+            let ns = string(tool, "name")?;
+            let mut scope = tool.clone();
+            scope.as_object_mut().unwrap().remove("tools");
+            let mut nested = scopes.to_vec();
+            nested.push(scope);
+            add_tools(
+                tool["tools"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("namespace.tools must be an array"))?,
+                &format!("{namespace}{ns}."),
+                tools,
+                names,
+                declarations,
+                loaded,
+                &nested,
+            )?;
+            continue;
+        }
+        if kind == "tool_search" {
+            if !namespace.is_empty() {
+                bail!("tool_search must be declared at the top level");
+            }
+            let execution = match tool.get("execution") {
+                None | Some(Value::Null) => "server",
+                Some(value) => value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("tool_search execution must be a string"))?,
+            };
+            if !["client", "server"].contains(&execution) {
+                bail!("tool_search execution must be client or server");
+            }
+            let native = super::tool_search::native_name();
+            if tools.contains_key(&native) {
+                bail!("Duplicate tool_search declaration");
+            }
+            let parameters = if execution == "client" {
+                tool.get("parameters")
+                    .filter(|v| v.is_object())
+                    .ok_or_else(|| anyhow!("Client tool_search requires parameters"))?
+                    .clone()
+            } else {
+                json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]})
+            };
+            declarations.push(json!({"name":native,"description":tool.get("description").and_then(Value::as_str).unwrap_or("Discover and load tools needed for the task."),"parametersJsonSchema":parameters}));
+            tools.insert(
+                native,
+                Tool {
+                    name: "tool_search".into(),
+                    namespace: None,
+                    custom: false,
+                    search: Some(execution.into()),
+                    deferred: false,
+                    definition: tool.clone(),
+                    scopes: Vec::new(),
+                    validator: None,
+                },
+            );
+            continue;
+        }
+        if !["function", "custom"].contains(&kind) {
+            bail!("OpenAI hosted tool {kind} has no native Gemini equivalent");
+        }
+        // Gemini cannot constrain output to a grammar, so Codex tools such as
+        // apply_patch carry their grammar in the description for the model to follow.
+        let grammar = match tool.get("format") {
+            None | Some(Value::Null) => None,
+            Some(format) => match format.get("type").and_then(Value::as_str) {
+                None | Some("text") => None,
+                Some("grammar") => Some(format!(
+                    "Input must match this {} grammar:\n{}",
+                    format
+                        .get("syntax")
+                        .and_then(Value::as_str)
+                        .unwrap_or("custom"),
+                    string(format, "definition")?
+                )),
+                Some(other) => bail!("Custom tool format {other} has no Gemini equivalent"),
+            },
+        };
+        let name = format!("{namespace}{}", string(tool, "name")?);
+        if let Some(native) = names.get(&name) {
+            let previous = tools.get(native).unwrap();
+            if !loaded || previous.definition != *tool {
+                bail!("Duplicate or conflicting tool name {name}");
+            }
+            if !previous.deferred {
+                continue;
+            }
+        }
+        let native = native_tool_name(&name);
+        if native == super::tool_search::native_name() {
+            bail!("Tool name is reserved for the tool_search shim");
+        }
+        let custom = kind == "custom";
+        let schema = if custom {
+            json!({"type":"object","properties":{"input":{"type":"string"}},"required":["input"]})
+        } else {
+            tool.get("parameters")
+                .cloned()
+                .unwrap_or(json!({"type":"object","properties":{}}))
+        };
+        let validator = if tool["strict"] == true {
+            if tool.get("parameters").is_none() {
+                bail!("Strict tool requires parameters");
+            }
+            Some(Arc::new(
+                jsonschema::options()
+                    .should_validate_formats(true)
+                    .should_ignore_unknown_formats(false)
+                    .build(&schema)
+                    .map_err(|_| anyhow!("Invalid or unresolved strict tool JSON schema"))?,
+            ))
+        } else {
+            None
+        };
+        let mut declaration = json!({"name":native,"parametersJsonSchema":schema});
+        let description = tool.get("description").and_then(Value::as_str);
+        match (description, grammar) {
+            (Some(d), Some(g)) => declaration["description"] = json!(format!("{d}\n\n{g}")),
+            (None, Some(g)) => declaration["description"] = json!(g),
+            _ => {
+                if let Some(description) = tool.get("description") {
+                    declaration["description"] = description.clone();
+                }
+            }
+        }
+        for flag in ["strict", "defer_loading"] {
+            if tool
+                .get(flag)
+                .is_some_and(|v| !v.is_null() && !v.is_boolean())
+            {
+                bail!("Tool {flag} must be a boolean");
+            }
+        }
+        let deferred = !loaded && tool["defer_loading"] == true;
+        if !deferred {
+            declarations.push(declaration);
+        }
+        names.insert(name.clone(), native.clone());
+        tools.insert(
+            native,
+            Tool {
+                name: string(tool, "name")?.to_owned(),
+                namespace: (!namespace.is_empty())
+                    .then(|| namespace.trim_end_matches('.').to_owned()),
+                custom,
+                search: None,
+                deferred,
+                definition: tool.clone(),
+                scopes: scopes.to_vec(),
+                validator,
+            },
+        );
+    }
+    Ok(())
+}
+
 pub fn convert_request(
     request: &Value,
     config: &ProviderConfig,
@@ -393,89 +592,6 @@ pub fn convert_request(
     let mut tools = BTreeMap::new();
     let mut names = BTreeMap::new();
     let mut declarations = Vec::new();
-    fn add_tools(
-        list: &[Value],
-        namespace: &str,
-        tools: &mut BTreeMap<String, Tool>,
-        names: &mut BTreeMap<String, String>,
-        declarations: &mut Vec<Value>,
-    ) -> Result<()> {
-        for tool in list {
-            let kind = string(tool, "type")?;
-            if kind == "namespace" {
-                let ns = string(tool, "name")?;
-                add_tools(
-                    tool["tools"]
-                        .as_array()
-                        .ok_or_else(|| anyhow!("namespace.tools must be an array"))?,
-                    &format!("{namespace}{ns}."),
-                    tools,
-                    names,
-                    declarations,
-                )?;
-                continue;
-            }
-            if !["function", "custom"].contains(&kind) {
-                bail!("OpenAI hosted tool {kind} has no native Gemini equivalent");
-            }
-            if tool.get("strict").and_then(Value::as_bool) == Some(true) {
-                bail!("Strict function schema enforcement has no Gemini equivalent");
-            }
-            // Gemini cannot constrain output to a grammar, so Codex tools such as
-            // apply_patch carry their grammar in the description for the model to follow.
-            let grammar = match tool.get("format") {
-                None | Some(Value::Null) => None,
-                Some(format) => match format.get("type").and_then(Value::as_str) {
-                    None | Some("text") => None,
-                    Some("grammar") => Some(format!(
-                        "Input must match this {} grammar:\n{}",
-                        format
-                            .get("syntax")
-                            .and_then(Value::as_str)
-                            .unwrap_or("custom"),
-                        string(format, "definition")?
-                    )),
-                    Some(other) => bail!("Custom tool format {other} has no Gemini equivalent"),
-                },
-            };
-            let name = format!("{namespace}{}", string(tool, "name")?);
-            if names.contains_key(&name) {
-                bail!("Duplicate tool name {name}");
-            }
-            let native = native_tool_name(&name);
-            let custom = kind == "custom";
-            let schema = if custom {
-                json!({"type":"object","properties":{"input":{"type":"string"}},"required":["input"]})
-            } else {
-                tool.get("parameters")
-                    .cloned()
-                    .unwrap_or(json!({"type":"object","properties":{}}))
-            };
-            let mut declaration = json!({"name":native,"parametersJsonSchema":schema});
-            let description = tool.get("description").and_then(Value::as_str);
-            match (description, grammar) {
-                (Some(d), Some(g)) => declaration["description"] = json!(format!("{d}\n\n{g}")),
-                (None, Some(g)) => declaration["description"] = json!(g),
-                _ => {
-                    if let Some(description) = tool.get("description") {
-                        declaration["description"] = description.clone();
-                    }
-                }
-            }
-            declarations.push(declaration);
-            names.insert(name.clone(), native.clone());
-            tools.insert(
-                native,
-                Tool {
-                    name: string(tool, "name")?.to_owned(),
-                    namespace: (!namespace.is_empty())
-                        .then(|| namespace.trim_end_matches('.').to_owned()),
-                    custom,
-                },
-            );
-        }
-        Ok(())
-    }
     if let Some(list) = request.get("tools") {
         add_tools(
             list.as_array()
@@ -484,10 +600,13 @@ pub fn convert_request(
             &mut tools,
             &mut names,
             &mut declarations,
+            false,
+            &[],
         )?;
     }
     let mut contents = Vec::new();
     let mut system = Vec::new();
+    let mut server_calls = VecDeque::new();
     let mut calls: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
     if let Some(instructions) = request.get("instructions").filter(|v| !v.is_null()) {
         initial_instruction(&mut system, "developer", content_parts(instructions)?);
@@ -537,6 +656,8 @@ pub fn convert_request(
                     &mut tools,
                     &mut names,
                     &mut declarations,
+                    true,
+                    &[],
                 )?;
             }
             "reasoning" => {
@@ -573,6 +694,7 @@ pub fn convert_request(
                         "namespace",
                         "arguments",
                         "input",
+                        "execution",
                     ] {
                         if !replay_field_matches(field, expected.get(field), actual.get(field)) {
                             bail!(
@@ -580,7 +702,10 @@ pub fn convert_request(
                             );
                         }
                     }
-                    if let Some(id) = actual.get("call_id").and_then(Value::as_str) {
+                    if matches!(
+                        actual["type"].as_str(),
+                        Some("function_call" | "custom_tool_call" | "tool_search_call")
+                    ) {
                         let native_call = replay_calls
                             .next()
                             .ok_or_else(|| anyhow!("Invalid replay function calls"))?;
@@ -591,7 +716,14 @@ pub fn convert_request(
                             .get("id")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
-                        calls.insert(id.into(), (native.to_owned(), native_id));
+                        if actual["type"] == "tool_search_call" && actual["execution"] == "server" {
+                            server_calls.push_back((native.to_owned(), native_id));
+                        } else {
+                            calls.insert(
+                                string(actual, "call_id")?.into(),
+                                (native.to_owned(), native_id),
+                            );
+                        }
                     }
                 }
                 let parts = replay["parts"]
@@ -638,6 +770,73 @@ pub fn convert_request(
                     "assistant" => push(&mut contents, "model", parts),
                     _ => bail!("Unsupported role {role}"),
                 }
+            }
+            "tool_search_call" => {
+                let args = item
+                    .get("arguments")
+                    .filter(|v| v.is_object())
+                    .ok_or_else(|| anyhow!("tool_search_call arguments must be an object"))?;
+                let native = super::tool_search::native_name();
+                let mut call = json!({"name":native,"args":args});
+                match string(item, "execution")? {
+                    "client" => {
+                        let id = string(item, "call_id")?;
+                        calls.insert(id.into(), (native, Some(id.into())));
+                        call["id"] = json!(id);
+                    }
+                    "server" => {
+                        if item.get("call_id").is_some_and(|v| !v.is_null()) {
+                            bail!("Server tool_search call_id must be null");
+                        }
+                        server_calls.push_back((native, None));
+                    }
+                    _ => bail!("Invalid tool_search execution"),
+                }
+                push(&mut contents, "model", vec![json!({"functionCall":call})]);
+            }
+            "tool_search_output" => {
+                let (name, native_id) = match string(item, "execution")? {
+                    "client" => calls
+                        .get(string(item, "call_id")?)
+                        .filter(|(name, _)| name == &super::tool_search::native_name())
+                        .cloned()
+                        .ok_or_else(|| anyhow!("tool_search_output has unknown search call_id"))?,
+                    "server" => {
+                        if item.get("call_id").is_some_and(|v| !v.is_null()) {
+                            bail!("Server tool_search call_id must be null");
+                        }
+                        server_calls.pop_front().ok_or_else(|| {
+                            anyhow!("tool_search_output has no preceding server search")
+                        })?
+                    }
+                    _ => bail!("Invalid tool_search execution"),
+                };
+                let loaded = item["tools"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("tool_search_output.tools must be an array"))?;
+                if loaded.iter().any(|tool| tool["type"] == "tool_search") {
+                    bail!(
+                        "tool_search_output must contain callable tools, not another search tool"
+                    );
+                }
+                add_tools(
+                    loaded,
+                    "",
+                    &mut tools,
+                    &mut names,
+                    &mut declarations,
+                    true,
+                    &[],
+                )?;
+                let mut response = json!({"name":name,"response":{"result":item}});
+                if let Some(id) = native_id {
+                    response["id"] = json!(id);
+                }
+                push(
+                    &mut contents,
+                    "user",
+                    vec![json!({"functionResponse":response})],
+                );
             }
             "function_call" | "custom_tool_call" => {
                 let name = tool_identity(item)?;
@@ -714,6 +913,7 @@ pub fn convert_request(
     {
         contents.push(json!({"role":"user","parts":[{"text":"Continue."}]}));
     }
+    super::tool_search::describe_catalog(&tools, &mut declarations);
     let mut body = json!({"contents":contents,"generationConfig":{}});
     if !system.is_empty() {
         body["systemInstruction"] = json!({"parts":system});
@@ -846,19 +1046,33 @@ pub fn convert_request(
                 None,
             )
         } else {
-            if choice["type"] != "function" && choice["type"] != "custom" {
-                bail!("Unsupported tool_choice");
+            if choice["type"] == "tool_search" {
+                if !tools.contains_key(&super::tool_search::native_name()) {
+                    bail!("Unknown selected tool_search");
+                }
+                ("ANY", Some(super::tool_search::native_name()))
+            } else {
+                if choice["type"] != "function" && choice["type"] != "custom" {
+                    bail!("Unsupported tool_choice");
+                }
+                let name = tool_identity(choice)?;
+                if names
+                    .get(&name)
+                    .and_then(|native| tools.get(native))
+                    .is_some_and(|t| t.deferred)
+                {
+                    bail!("Selected tool must be loaded through tool_search first");
+                }
+                (
+                    "ANY",
+                    Some(
+                        names
+                            .get(&name)
+                            .ok_or_else(|| anyhow!("Unknown selected tool {name}"))?
+                            .clone(),
+                    ),
+                )
             }
-            let name = tool_identity(choice)?;
-            (
-                "ANY",
-                Some(
-                    names
-                        .get(&name)
-                        .ok_or_else(|| anyhow!("Unknown selected tool {name}"))?
-                        .clone(),
-                ),
-            )
         };
         body["toolConfig"] = json!({"functionCallingConfig":{"mode":mode}});
         if let Some(name) = allowed {

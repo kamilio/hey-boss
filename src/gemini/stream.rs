@@ -384,6 +384,9 @@ impl ResponseStream {
             let item = response["output"]
                 .get(index)
                 .ok_or_else(|| anyhow!("Invalid completed stream item"))?;
+            if item["type"] == "tool_search_call" && response["status"] != "completed" {
+                continue;
+            }
             if matches!(
                 item["type"].as_str(),
                 Some("function_call" | "custom_tool_call")

@@ -104,11 +104,26 @@ pub(crate) fn output_items(
                 }
                 bail!("Gemini called undeclared tool {native}");
             };
+            if tool
+                .validator
+                .as_ref()
+                .is_some_and(|schema| !schema.is_valid(&args))
+            {
+                bail!("Gemini tool arguments did not satisfy the strict JSON schema");
+            }
+            if tool.deferred {
+                bail!("Gemini called a tool before it was loaded");
+            }
             let call_id = call
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("call_{id}_{index}"));
+            if let Some(execution) = &tool.search {
+                output.push(json!({"id":format!("ts_{id}_{index}"),"type":"tool_search_call","execution":execution,
+                    "status":"completed","call_id":if execution == "client" {json!(call_id)} else {Value::Null},"arguments":args}));
+                continue;
+            }
             let mut item = json!({"id":format!("fc_{id}_{index}"),"type":if tool.custom {"custom_tool_call"} else {"function_call"},"status":"completed","call_id":call_id,"name":tool.name});
             if let Some(namespace) = &tool.namespace {
                 item["namespace"] = json!(namespace);

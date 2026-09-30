@@ -1,8 +1,8 @@
 //! Transport adapter; conversion lives in the reusable hey_proxy library.
 use super::*;
 use hey_proxy::gemini::{
-    Auth, ProviderConfig, ReasoningCodec, ResponseError, ResponseStream, convert_request,
-    convert_response,
+    Auth, ConvertedRequest, HostedSearch, ProviderConfig, ReasoningCodec, ResponseError,
+    ResponseStream, convert_request, convert_response,
 };
 use std::path::Path;
 
@@ -220,6 +220,9 @@ pub(super) async fn forward(
             true
         },
     );
+    if converted.has_hosted_search() {
+        return forward_hosted(proxy.clone(), config.clone(), request, converted).await;
+    }
     let url = match config.endpoint(&converted.model, converted.stream) {
         Ok(v) => v,
         Err(e) => return error(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -314,6 +317,177 @@ pub(super) async fn forward(
                 }
             }
             if eof || converter.is_finished(){if !proxy.fallback_attempt { usage.finish(&proxy.service.logs,proxy.log_id); }break;}
+        }
+    });
+    let mut response = Response::new(body);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", "no".parse().unwrap());
+    response
+        .extensions_mut()
+        .insert(super::fallback::Upstream { gemini: true });
+    response
+}
+
+// Hosted discovery uses bounded unary native turns. The Responses stream emits
+// each completed discovery turn and keeps the connection alive while Google is
+// generating. Client-executed search retains the normal incremental SSE path.
+async fn hosted_turn(
+    proxy: &Arc<Proxy>,
+    config: &ProviderConfig,
+    converted: &ConvertedRequest,
+    id: &str,
+) -> std::result::Result<(Value, Vec<Value>), Box<Response>> {
+    let url = config
+        .endpoint(&converted.model, false)
+        .map_err(|e| Box::new(transport_error(&e.to_string(), "gemini_conversion_error")))?;
+    let upstream = send_native(proxy, config, &url, &converted.body).await?;
+    let result = async {
+        let bytes = bounded_body(upstream, MAX_NATIVE_RESPONSE).await?;
+        let native: Value = serde_json::from_slice(&bytes)?;
+        let mut stream = ResponseStream::new(converted.clone(), id);
+        let mut events = stream.feed(&native)?;
+        if !stream.is_finished() {
+            events.extend(stream.finish(&proxy.service.gemini.codec)?);
+        }
+        let response = events
+            .last()
+            .and_then(|e| e.get("response"))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Gemini turn has no terminal response"))?;
+        Ok::<_, anyhow::Error>((response, events))
+    }
+    .await;
+    result.map_err(|e| Box::new(transport_error(&e.to_string(), "gemini_conversion_error")))
+}
+
+async fn forward_hosted(
+    proxy: Arc<Proxy>,
+    config: ProviderConfig,
+    request: Value,
+    mut converted: ConvertedRequest,
+) -> Response {
+    let id = format!("{:032x}", rand::random::<u128>());
+    let response_id = format!("resp_{id}");
+    let mut search = HostedSearch::new(request, &converted);
+    if !converted.stream {
+        for round in 0..16 {
+            let (mut response, _) =
+                match hosted_turn(&proxy, &config, &converted, &format!("{id}_{round}")).await {
+                    Ok(v) => v,
+                    Err(e) => return *e,
+                };
+            let next = match search.advance(
+                &mut response,
+                &converted,
+                &config,
+                &proxy.service.gemini.codec,
+            ) {
+                Ok(v) => v,
+                Err(e) => return transport_error(&e.to_string(), "gemini_tool_search_error"),
+            };
+            response["id"] = json!(response_id);
+            if let Some(next) = next {
+                converted = next;
+            } else {
+                if !proxy.fallback_attempt {
+                    let mut usage = logs::UsageReader::new(false);
+                    usage.feed(
+                        &serde_json::to_vec(&response).unwrap(),
+                        &proxy.service.logs,
+                        proxy.log_id,
+                    );
+                    usage.finish(&proxy.service.logs, proxy.log_id);
+                }
+                return axum::Json(response).into_response();
+            }
+        }
+        return transport_error(
+            "Gemini tool search exceeded turn limit",
+            "gemini_tool_search_error",
+        );
+    }
+    let body = Body::from_stream(async_stream::stream! {
+        let mut sequence = 0u64;
+        let mut offset = 0usize;
+        let mut usage = logs::UsageReader::new(true);
+        for round in 0..16 {
+            let turn_id = format!("{id}_{round}");
+            let result = {
+            let turn = hosted_turn(&proxy, &config, &converted, &turn_id);
+            tokio::pin!(turn);
+            let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+            loop {
+                tokio::select! {
+                    result = &mut turn => break result,
+                    _ = heartbeat.tick() => yield Ok::<Bytes,std::io::Error>(Bytes::from_static(b": keepalive\n\n")),
+                }
+            }
+            };
+            // Drop the future's borrow before assigning the next converted request.
+            let result = match result {
+                Ok((mut response, events)) => {
+                    let count = response["output"].as_array().map_or(0, Vec::len);
+                    match search.advance(&mut response, &converted, &config, &proxy.service.gemini.codec) {
+                        Ok(next) => Ok((response, events, count, next)),
+                        Err(e) => Err(json!({"code":"gemini_tool_search_error","message":e.to_string()})),
+                    }
+                }
+                Err(response) => {
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.ok();
+                    let body = bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                    Err(body.and_then(|body| body.get("error").cloned()).unwrap_or_else(||
+                        json!({"code":"gemini_tool_search_error","message":"Gemini hosted tool search upstream request failed; retry the request"})))
+                }
+            };
+            let (mut response, events, count, next) = match result {
+                Ok(v) => v,
+                Err(error) => {
+                    let event = json!({"type":"response.failed","sequence_number":sequence,"response":search.failed_response(&response_id,error)});
+                    let bytes = sse_bytes(&event);
+                    if !proxy.fallback_attempt {
+                        usage.feed(&bytes, &proxy.service.logs, proxy.log_id);
+                        usage.finish(&proxy.service.logs, proxy.log_id);
+                    }
+                    yield Ok(bytes);
+                    break;
+                }
+            };
+            response["id"] = json!(response_id);
+            let mut outgoing = Vec::new();
+            for mut event in events {
+                let kind = event["type"].as_str().unwrap_or("");
+                if matches!(kind, "response.completed" | "response.incomplete" | "response.failed") { continue; }
+                if round > 0 && matches!(kind, "response.created" | "response.in_progress") { continue; }
+                if let Some(index) = event["output_index"].as_u64() { event["output_index"] = json!(index + offset as u64); }
+                if let Some(response) = event.get_mut("response") { response["id"] = json!(response_id); }
+                outgoing.push(event);
+            }
+            for (index, item) in response["output"].as_array().unwrap().iter().enumerate().skip(offset + count) {
+                outgoing.push(json!({"type":"response.output_item.added","output_index":index,"item":item}));
+                outgoing.push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+            }
+            offset = response["output"].as_array().unwrap().len();
+            if next.is_none() {
+                let kind = match response["status"].as_str() {Some("completed")=>"response.completed",Some("incomplete")=>"response.incomplete",_=>"response.failed"};
+                outgoing.push(json!({"type":kind,"response":response}));
+            }
+            for mut event in outgoing {
+                event["sequence_number"] = json!(sequence); sequence += 1;
+                let bytes = sse_bytes(&event);
+                if !proxy.fallback_attempt { usage.feed(&bytes, &proxy.service.logs, proxy.log_id); }
+                yield Ok(bytes);
+            }
+            if let Some(next) = next { converted = next; } else {
+                if !proxy.fallback_attempt { usage.finish(&proxy.service.logs, proxy.log_id); }
+                break;
+            }
         }
     });
     let mut response = Response::new(body);
@@ -638,6 +812,120 @@ mod tests {
         task.abort();
         proxy.abort();
     }
+    #[tokio::test]
+    async fn hosted_tool_search_http_and_sse_preserve_discovery_and_replay() {
+        async fn upstream(axum::Json(body): axum::Json<Value>) -> Response {
+            let declarations = body["tools"][0]["functionDeclarations"].as_array().unwrap();
+            let loaded = declarations
+                .iter()
+                .find(|d| d["name"] == hey_proxy::gemini::native_tool_name("lookup"));
+            let parts = if let Some(tool) = loaded {
+                assert!(body["contents"].as_array().unwrap().iter().any(|c| {
+                    c["parts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.get("functionResponse").is_some())
+                }));
+                json!([{"functionCall":{"name":tool["name"],"args":{"id":"C42"},"id":"lookup-id"},"thoughtSignature":"lookup-signature"}])
+            } else {
+                assert_eq!(declarations.len(), 1);
+                json!([{"functionCall":{"name":declarations[0]["name"],"args":{"paths":["lookup"]},"id":"search-id"},"thoughtSignature":"search-signature"}])
+            };
+            axum::Json(json!({"candidates":[{"content":{"role":"model","parts":parts},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}})).into_response()
+        }
+        let (upstream_url, upstream_task) =
+            serve(Router::new().route("/models/test:generateContent", post(upstream))).await;
+        let config = Config {
+            gemini: Some(provider(&upstream_url, "api_key")),
+            ..Config::test_fixture()
+        };
+        let (url, proxy_task) = serve(super::super::router(config).unwrap()).await;
+        for streaming in [false, true] {
+            let request = json!({"model":"gemini/test","stream":streaming,"input":"Find C42","tools":[
+                {"type":"tool_search"},
+                {"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}
+            ]});
+            let response = reqwest::Client::new()
+                .post(format!("{url}/v1/responses"))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body = if streaming {
+                assert_eq!(
+                    response.headers()[header::CONTENT_TYPE],
+                    "text/event-stream"
+                );
+                let bytes = response.bytes().await.unwrap();
+                let events = NativeSse::default().feed(&bytes, true).unwrap();
+                for (index, event) in events.iter().enumerate() {
+                    assert_eq!(event["sequence_number"], index);
+                }
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|e| e["type"] == "response.created")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|e| e["type"] == "response.completed")
+                        .count(),
+                    1
+                );
+                let completed = events.last().unwrap()["response"].clone();
+                let done: Vec<_> = events
+                    .iter()
+                    .filter(|e| e["type"] == "response.output_item.done")
+                    .map(|e| e["item"].clone())
+                    .collect();
+                assert_eq!(json!(done), completed["output"]);
+                for event in &events {
+                    if event["type"] == "response.output_item.done" {
+                        assert_eq!(
+                            event["item"],
+                            completed["output"][event["output_index"].as_u64().unwrap() as usize]
+                        );
+                    }
+                    if let Some(id) = event.pointer("/response/id") {
+                        assert_eq!(id, &completed["id"]);
+                    }
+                }
+                completed
+            } else {
+                response.json::<Value>().await.unwrap()
+            };
+            assert_eq!(body["status"], "completed");
+            assert_eq!(body["usage"]["total_tokens"], 24);
+            assert_eq!(body["output"][1]["type"], "tool_search_call");
+            assert_eq!(body["output"][2]["type"], "tool_search_output");
+            assert_eq!(body["output"][4]["name"], "lookup");
+            // Replay the exact combined public output through the proxy once more.
+            let mut next = request.clone();
+            let mut input = vec![json!({"role":"user","content":"Find C42"})];
+            input.extend(body["output"].as_array().unwrap().clone());
+            input.push(
+                json!({"type":"function_call_output","call_id":"lookup-id","output":"found"}),
+            );
+            next["input"] = json!(input);
+            next["stream"] = json!(false);
+            let replay = reqwest::Client::new()
+                .post(format!("{url}/v1/responses"))
+                .json(&next)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(replay.status(), 200);
+            assert_eq!(replay.json::<Value>().await.unwrap()["status"], "completed");
+        }
+        upstream_task.abort();
+        proxy_task.abort();
+    }
+
     #[tokio::test]
     async fn native_gemini_passthrough_preserves_body_and_strips_query_keys() {
         async fn upstream(request: Request) -> Response {
