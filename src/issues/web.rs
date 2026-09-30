@@ -572,6 +572,18 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             )),
             "/admin.css" => Some(("text/css; charset=utf-8", crate::admin::STYLE.as_bytes())),
             "/" | "/issues" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
+            "/merged-prs" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/merged-prs.html"),
+            )),
+            "/merged-prs.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/merged-prs.js"),
+            )),
+            "/merged-prs.css" => Some((
+                "text/css; charset=utf-8",
+                include_bytes!("web/merged-prs.css"),
+            )),
             "/artifacts" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/artifacts.html"),
@@ -706,6 +718,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/workers"
                     | "/agents"
                     | "/agents/session"
+                    | "/merged-prs"
                     | "/artifacts"
                     | "/skills"
                     | "/admin"

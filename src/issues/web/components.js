@@ -169,6 +169,7 @@ function date(at) {
   }
   function projectNavigation(project) {
     const hash = new URLSearchParams({project});
+    if ($("#nav-merged-prs")) $("#nav-merged-prs").href = `/merged-prs#${hash}`;
     if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
     if ($("#nav-mindmaps")) $("#nav-mindmaps").href = `/mm#${hash}`;
     if ($("#nav-workers")) $("#nav-workers").href = `/agents#${hash}`;
