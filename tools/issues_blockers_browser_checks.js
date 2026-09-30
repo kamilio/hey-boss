@@ -15,7 +15,7 @@ async page => {
   await go(4);
   check(await page.locator('.state-pill.blocked').isVisible(),'Linked issue is Blocked');
   check(await page.locator('.blocked-notice button').isDisabled(),'Cannot reopen with unfinished blockers');
-  await page.getByRole('button',{name:'Add blocker',exact:true}).click();
+  await page.getByRole('button',{name:'Blocker',exact:true}).click();
   await page.getByLabel('Find a blocking issue').fill('SSO');
   await page.getByRole('button',{name:'#2 Restore GitHub SSO access Open',exact:true}).click();
   await page.locator('#blocker-picker-dialog').waitFor({state:'hidden'});
@@ -32,7 +32,7 @@ async page => {
   await go(4);
   check(await page.locator('.state-pill.blocked').isVisible(),'Reopening a blocker blocks dependent again');
   await go(2);
-  await page.getByRole('button',{name:'Add blocker',exact:true}).click();
+  await page.getByRole('button',{name:'Blocker',exact:true}).click();
   await page.getByLabel('Find a blocking issue').fill('Audit');
   await page.getByRole('button',{name:'#4 Audit linked blockers Blocked',exact:true}).click();
   await page.getByText('This dependency would create a cycle',{exact:true}).waitFor();
@@ -52,7 +52,7 @@ async page => {
       check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Detail fits ${scheme}/${width}`);
       check(await page.getByRole('button',{name:'Remove blocker #3',exact:true}).isVisible(),`Blocker control visible ${scheme}/${width}`);
       await page.screenshot({path:`output/playwright/blockers/${scheme}-${width}-detail.png`,fullPage:true});
-      await page.getByRole('button',{name:'Add blocker',exact:true}).click();
+      await page.getByRole('button',{name:'Blocker',exact:true}).click();
       await page.locator('#blocker-picker-results [data-select-blocker]').first().waitFor();
       check(await page.locator('#blocker-picker-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth),`Picker fits ${scheme}/${width}`);
       await page.screenshot({path:`output/playwright/blockers/${scheme}-${width}-picker.png`});
