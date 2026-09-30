@@ -36,6 +36,11 @@ enum Command {
     },
     /// Check configured credential sources without printing their values
     CheckCredentials,
+    /// Encrypt literal API keys in this config using a private local key file
+    EncryptConfig,
+    /// Internal rollout transport; stdout contains plaintext credentials
+    #[command(hide = true)]
+    ExportConfig,
     /// Generate/reuse host credentials; JSON output contains secrets
     #[command(hide = true)]
     HostKeys {
@@ -141,6 +146,15 @@ async fn main() -> Result<()> {
     } else {
         config::load_or_create(&path)?
     };
+    if matches!(args.command, Some(Command::EncryptConfig)) {
+        config::protect(&path)?;
+        println!("Config credentials encrypted");
+        return Ok(());
+    }
+    if matches!(args.command, Some(Command::ExportConfig)) {
+        println!("{}", serde_json::to_string(&config)?);
+        return Ok(());
+    }
     if let Some(Command::Rollout { host }) = args.command {
         return rollout::run(&config, &host).await;
     }
@@ -172,6 +186,7 @@ async fn main() -> Result<()> {
         println!("Config ready: {}", path.display());
         return Ok(());
     }
+    let config = config::protect(&path)?;
     let listen = args.listen.unwrap_or(config.listen);
     let listener = tokio::net::TcpListener::bind(listen)
         .await

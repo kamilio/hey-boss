@@ -330,7 +330,7 @@ impl Service {
                     let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
                     // Another request may have reloaded while we waited for the write lock.
                     if state.fingerprint != fingerprint {
-                        match config::load(path).and_then(|mut config| {
+                        match config::protect(path).and_then(|mut config| {
                             if config.mode != state.config.mode {
                                 anyhow::bail!("Mode changed; restart the proxy to apply it");
                             }

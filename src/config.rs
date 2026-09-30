@@ -1,3 +1,5 @@
+mod secrets;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -750,13 +752,26 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
 /// Reads and validates an existing config without creating one.
 pub fn load(path: &Path) -> Result<Config> {
     let content = fs::read(path).context("Cannot read config")?;
-    let config: Config = serde_json::from_slice(&content).map_err(|e| {
+    // Resolve symlinks so the key belongs to the actual config file.
+    let path = fs::canonicalize(path).context("Cannot locate config")?;
+    parse(&content, &path)
+}
+
+pub fn protect(path: &Path) -> Result<Config> {
+    secrets::protect(path)
+}
+
+fn parse(content: &[u8], path: &Path) -> Result<Config> {
+    let mut value: serde_json::Value = serde_json::from_slice(content).map_err(|e| {
         anyhow::anyhow!(
             "Invalid config JSON at line {}, column {}",
             e.line(),
             e.column()
         )
     })?;
+    secrets::decrypt(&mut value, path)?;
+    let config: Config =
+        serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid config fields"))?;
     config.validate()?;
     Ok(config)
 }
@@ -773,6 +788,66 @@ pub fn fingerprint(path: &Path) -> Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn protects_literal_api_keys_in_opaque_encrypted_fields_and_preserves_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let raw = serde_json::json!({
+            "listen": "127.0.0.1:8080",
+            "providers": {
+                "openai": {
+                    "api_keys": {
+                        "default": "sk-literal-openai-secret",
+                        "shell": "sh://printf '%s' secret",
+                        "vault": "op://Vault/Item/credential"
+                    }
+                },
+                "gemini": {
+                    "auth": "api_key",
+                    "api_key": "AIza-literal-gemini-secret"
+                }
+            }
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        let protected = protect(&path).unwrap();
+        assert_eq!(protected.api_keys["default"], "sk-literal-openai-secret");
+        assert_eq!(protected.api_keys["shell"], "sh://printf '%s' secret");
+        assert_eq!(protected.api_keys["vault"], "op://Vault/Item/credential");
+        assert_eq!(
+            protected.gemini.as_ref().unwrap().api_key.as_deref(),
+            Some("AIza-literal-gemini-secret")
+        );
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("sk-literal-openai-secret"));
+        assert!(!on_disk.contains("AIza-literal-gemini-secret"));
+        let stored: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+        assert!(
+            stored["providers"]["openai"]["api_keys"]["default"]["encrypted"]
+                .as_str()
+                .unwrap()
+                .starts_with("v1:")
+        );
+        assert_eq!(
+            stored["providers"]["openai"]["api_keys"]["shell"],
+            "sh://printf '%s' secret"
+        );
+        assert_eq!(
+            stored["providers"]["openai"]["api_keys"]["vault"],
+            "op://Vault/Item/credential"
+        );
+        assert!(
+            stored["providers"]["gemini"]["api_key"]["encrypted"]
+                .as_str()
+                .unwrap()
+                .starts_with("v1:")
+        );
+        let reloaded = load(&path).unwrap();
+        assert_eq!(reloaded.api_keys, protected.api_keys);
+        assert_eq!(
+            reloaded.gemini.as_ref().unwrap().api_key,
+            protected.gemini.as_ref().unwrap().api_key
+        );
+    }
     #[test]
     fn creates_private_config_and_preserves_edits() {
         let dir = tempfile::tempdir().unwrap();

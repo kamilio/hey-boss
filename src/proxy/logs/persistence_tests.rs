@@ -37,6 +37,7 @@ fn sample(store: &Store, state: &str) -> u64 {
 #[tokio::test]
 async fn dashboard_window_caps_are_explicit_and_keep_newest_records() {
     let (_dir, store) = fixture();
+    store.flush().await.unwrap();
     let connection = Connection::open(&store.database.as_ref().unwrap().path).unwrap();
     connection.execute_batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<50001)
         INSERT INTO requests(request_id,session_id,timestamp_ms,updated_ms,path,method,transport,mode,state,retries,record)
@@ -221,17 +222,23 @@ async fn restart_preserves_completed_records_marks_unfinished_and_uses_new_ids()
     let key = store.recent()[0].request_id.clone();
     assert_eq!(unfinished, 2);
     store.flush().await.unwrap();
-    assert!(Store::open(&Config::test_fixture(), &dir.path().join("config.json")).is_err());
+    let conflict = Store::open(&Config::test_fixture(), &dir.path().join("config.json")).unwrap();
+    assert!(conflict.flush().await.is_err());
+    assert_eq!(
+        conflict.database.as_ref().unwrap().health()["status"],
+        "error"
+    );
+    drop(conflict);
     drop(store);
     let mut reopened = None;
     for _ in 0..100 {
-        match Store::open(&Config::test_fixture(), &dir.path().join("config.json")) {
-            Ok(store) => {
-                reopened = Some(store);
-                break;
-            }
-            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        let candidate =
+            Store::open(&Config::test_fixture(), &dir.path().join("config.json")).unwrap();
+        if candidate.flush().await.is_ok() {
+            reopened = Some(candidate);
+            break;
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let reopened = reopened.unwrap();
     let id = reopened.begin("GET", "/v1/models", "HTTP");
@@ -269,6 +276,7 @@ async fn writer_lock_and_queue_saturation_never_block_forwarding_and_gaps_are_vi
     config.logging.batch_size = 32;
     config.logging.flush_interval_ms = 10;
     let store = Store::open(&config, &dir.path().join("config.json")).unwrap();
+    store.flush().await.unwrap();
     let connection = Connection::open(dir.path().join("requests.sqlite3")).unwrap();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     let started = Instant::now();
@@ -289,8 +297,13 @@ async fn writer_lock_and_queue_saturation_never_block_forwarding_and_gaps_are_vi
             .unwrap()["total"],
         0
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(db.health()["write_errors"].as_u64().unwrap() > 0);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while db.health()["write_errors"].as_u64().unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     connection.execute_batch("ROLLBACK").unwrap();
     store.flush().await.unwrap();
     assert_eq!(db.health()["pending_events"], 0);
@@ -574,6 +587,7 @@ fn gemini_model_uses_pro_list_price_with_cache_and_long_context_boundary() {
 #[tokio::test]
 async fn report_read_concurrency_is_bounded_without_blocking_writer() {
     let (_dir, store) = fixture();
+    store.flush().await.unwrap();
     let db = store.database.as_ref().unwrap().clone();
     let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -942,10 +956,12 @@ async fn startup_repairs_only_proven_old_completion_cancellations_and_keeps_audi
     drop(store);
     let reopened = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            match Store::open(&Config::test_fixture(), &dir.path().join("config.json")) {
-                Ok(store) => break store,
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            let store =
+                Store::open(&Config::test_fixture(), &dir.path().join("config.json")).unwrap();
+            if store.flush().await.is_ok() {
+                break store;
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
@@ -979,9 +995,10 @@ async fn startup_repairs_only_proven_old_completion_cancellations_and_keeps_audi
     );
 }
 
-#[test]
-fn startup_interrupt_sweep_uses_state_index_instead_of_scanning_requests() {
+#[tokio::test]
+async fn startup_interrupt_sweep_uses_state_index_instead_of_scanning_requests() {
     let (_dir, store) = fixture();
+    store.flush().await.unwrap();
     let connection = Connection::open(&store.database.as_ref().unwrap().path).unwrap();
     for statement in [
         format!(

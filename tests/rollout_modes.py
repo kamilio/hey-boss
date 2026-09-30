@@ -96,9 +96,15 @@ elif command.startswith('exec '):
     pidfile = home/'pid'
     def stop():
         if pidfile.exists():
-            try: os.kill(int(pidfile.read_text()), 15)
+            pid = int(pidfile.read_text())
+            try: os.kill(pid, 15)
             except ProcessLookupError: pass
-            time.sleep(0.15)
+            for _ in range(100):
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.02)
+                except ProcessLookupError:
+                    break
     def start():
         if service.sys.platform == 'darwin':
             plist = plistlib.loads((home/'Library/LaunchAgents/com.hey-proxy.plist').read_bytes())
@@ -111,7 +117,8 @@ elif command.startswith('exec '):
             variables = dict([setting.split('=',1)])
         assert variables['TMPDIR'] == str(home/'.hey-proxy/tmp')
         log = open(home/'service.log','ab')
-        process = subprocess.Popen(argv, env=dict(os.environ, **variables), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        process = subprocess.Popen(argv, env=dict(os.environ, **variables), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+        log.close()
         pidfile.write_text(str(process.pid))
     def managed_run(argv, **kwargs):
         if argv[0] not in ('launchctl','systemctl'):
@@ -139,7 +146,9 @@ else: raise AssertionError(command)
         assert calls[0].startswith('fixture-host ')
         host_keys = json.loads((root/'fixture-host/.hey-proxy/config.access-keys.json').read_text())
         client_config = json.loads((root/'fixture-client/.hey-proxy/config.json').read_text())
-        assert client_config['connection']['api_key'] == host_keys['clients']['fixture-client']
+        assert isinstance(client_config['connection']['api_key'], dict) and client_config['connection']['api_key'].get('encrypted', '').startswith('v1:')
+        exported = json.loads(subprocess.run([BINARY, '--config', str(root/'fixture-client/.hey-proxy/config.json'), 'export-config'], check=True, capture_output=True, text=True).stdout)
+        assert exported['connection']['api_key'] == host_keys['clients']['fixture-client']
         response = urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{client_port}/v1/responses', data=b'{"model":"gpt-4.1","input":"fixture"}', headers={'Content-Type':'application/json'}))
         assert json.load(response)['model'] == 'gpt-4.1-mini'
         # Selecting only the client must also update its host and reuse the access key.

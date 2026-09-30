@@ -29,6 +29,7 @@ enum Command {
 }
 #[derive(Default)]
 struct Health {
+    ready: AtomicBool,
     enqueued: AtomicU64,
     committed: AtomicU64,
     pending: AtomicUsize,
@@ -57,70 +58,7 @@ pub(super) const OPEN_REQUESTS: &str = "state IN ('pending','streaming') AND end
 
 impl Database {
     pub fn open(path: PathBuf, config: &Logging, session_id: &str) -> Result<Self> {
-        let parent = path.parent().context("Database path must have a parent")?;
-        if !parent.exists() {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder.create(parent)?;
-        }
-        let private_file = |path: &std::path::Path| -> Result<File> {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create(true).truncate(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let file = options.open(path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            }
-            Ok(file)
-        };
-        let lock = private_file(&path.with_extension("sqlite3.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&lock).context("Logging database is already owned by another proxy; use a separate database for previews")?;
-        private_file(&path)?;
-        let mut connection = Connection::open(&path).context("Open logging database")?;
-        connection.busy_timeout(Duration::from_millis(250))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=1000;")?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 1 {
-            bail!("Logging database schema {version} is newer than this executable supports");
-        }
-        connection.execute_batch(SCHEMA)?;
-        repair_completed_disconnects(&mut connection)?;
-        let transaction = connection.transaction()?;
-        let timestamp = integer(now_ms());
-        transaction.execute(&format!("INSERT INTO request_events(request_id,timestamp_ms,kind,details)
-            SELECT request_id,?1,'interrupted','{{\"source\":\"process_restart\",\"error_code\":\"proxy_process_ended\"}}' FROM requests WHERE {OPEN_REQUESTS}"),[timestamp])?;
-        transaction.execute(&format!("UPDATE requests SET state='interrupted', ended_ms=?1, updated_ms=?1,
-            total_duration_ms=NULL, error_code='proxy_process_ended',
-            record=json_set(record,'$.state','interrupted','$.ended_ms',?1,'$.updated_ms',?1,
-                '$.total_duration_ms',NULL,'$.error_code','proxy_process_ended','$.outcome_source','process_restart')
-            WHERE {OPEN_REQUESTS}"), [timestamp])?;
-        transaction.execute(
-            "INSERT INTO sessions(session_id,started_ms) VALUES(?1,?2)",
-            params![session_id, timestamp],
-        )?;
-        transaction.commit()?;
         let health = Arc::new(Health::default());
-        let historical_drops = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key='dropped_events'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
-        health.dropped.store(historical_drops, Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
         let worker_health = health.clone();
         let closed = Arc::new(AtomicBool::new(false));
@@ -128,11 +66,39 @@ impl Database {
         let config = config.clone();
         let capacity = config.queue_capacity;
         let batch_size = config.batch_size;
+        let worker_path = path.clone();
+        let session_id = session_id.to_owned();
         let worker = std::thread::Builder::new()
             .name("proxy-log-writer".into())
             .spawn(move || {
-                let _database_lock = lock;
-                writer(connection, receiver, worker_health, config, worker_closed);
+                match initialize(&worker_path, &session_id, &worker_health) {
+                    Ok((connection, _database_lock)) => {
+                        worker_health.ready.store(true, Ordering::Release);
+                        writer(connection, receiver, worker_health, config, worker_closed);
+                    }
+                    Err(error) => {
+                        worker_health.write_errors.fetch_add(1, Ordering::Relaxed);
+                        *worker_health
+                            .last_error
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("Logging initialization failed: {error:#}"));
+                        eprintln!(
+                            "Logging initialization failed; proxy remains available: {error:#}"
+                        );
+                        // Keep consuming so failed persistence remains bounded and every
+                        // lost event is counted. Flush senders are dropped (never acknowledged).
+                        while let Ok(command) = receiver.recv() {
+                            if matches!(command, Command::Event(_)) {
+                                worker_health.pending.fetch_sub(1, Ordering::Relaxed);
+                                worker_health.dropped.fetch_add(1, Ordering::Relaxed);
+                                worker_health
+                                    .last_drop_ms
+                                    .store(now_ms(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
             })
             .context("Start logging writer")?
             .thread()
@@ -205,12 +171,15 @@ impl Database {
             "last_drop_ms":h.last_drop_ms.load(Ordering::Relaxed),"write_errors":h.write_errors.load(Ordering::Relaxed),
             "last_error":last_error,"last_commit_ms":last_commit,"commit_duration_us":h.commit_duration_us.load(Ordering::Relaxed),
             "lag_ms":if pending > 0 {now_ms().saturating_sub(last_commit.max(self.started_ms))} else {0},
-            "retention":"all","status":if last_error.is_some(){"error"}else if h.dropped.load(Ordering::Relaxed)>0{"gaps"}else if pending>self.capacity/2{"lagging"}else{"healthy"}})
+            "retention":"all","status":if last_error.is_some(){"error"}else if !h.ready.load(Ordering::Acquire){"initializing"}else if h.dropped.load(Ordering::Relaxed)>0{"gaps"}else if pending>self.capacity/2{"lagging"}else{"healthy"}})
     }
     pub async fn read<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        if !self.health.ready.load(Ordering::Acquire) {
+            bail!("Logging database is initializing or unavailable; retry shortly");
+        }
         let permit = self
             .readers
             .clone()
@@ -240,6 +209,82 @@ impl Database {
         .await
         .context("Historical query worker stopped")?
     }
+}
+
+// All filesystem access, SQLite setup, repairs and recovery run on the writer.
+fn initialize(
+    path: &std::path::Path,
+    session_id: &str,
+    health: &Health,
+) -> Result<(Connection, File)> {
+    let parent = path.parent().context("Database path must have a parent")?;
+    if !parent.exists() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(parent)?;
+    }
+    let private_file = |path: &std::path::Path| -> Result<File> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(file)
+    };
+    let lock = private_file(&path.with_extension("sqlite3.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock).context(
+        "Logging database is already owned by another proxy; use a separate database for previews",
+    )?;
+    private_file(path)?;
+    let mut connection = Connection::open(path).context("Open logging database")?;
+    connection.busy_timeout(Duration::from_millis(250))?;
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=1000;")?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > 1 {
+        bail!("Logging database schema {version} is newer than this executable supports");
+    }
+    connection.execute_batch(SCHEMA)?;
+    repair_completed_disconnects(&mut connection)?;
+    let transaction = connection.transaction()?;
+    let timestamp = integer(now_ms());
+    transaction.execute(&format!("INSERT INTO request_events(request_id,timestamp_ms,kind,details)
+            SELECT request_id,?1,'interrupted','{{\"source\":\"process_restart\",\"error_code\":\"proxy_process_ended\"}}' FROM requests WHERE {OPEN_REQUESTS}"),[timestamp])?;
+    transaction.execute(&format!("UPDATE requests SET state='interrupted', ended_ms=?1, updated_ms=?1,
+            total_duration_ms=NULL, error_code='proxy_process_ended',
+            record=json_set(record,'$.state','interrupted','$.ended_ms',?1,'$.updated_ms',?1,
+                '$.total_duration_ms',NULL,'$.error_code','proxy_process_ended','$.outcome_source','process_restart')
+            WHERE {OPEN_REQUESTS}"), [timestamp])?;
+    transaction.execute(
+        "INSERT INTO sessions(session_id,started_ms) VALUES(?1,?2)",
+        params![session_id, timestamp],
+    )?;
+    transaction.commit()?;
+    let historical_drops = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='dropped_events'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    health
+        .dropped
+        .fetch_add(historical_drops, Ordering::Relaxed);
+    Ok((connection, lock))
 }
 
 // Version-one logging mistook Codex's close after response.completed for a

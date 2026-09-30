@@ -94,7 +94,10 @@ def install(binary, source_config, base_url, codex_home="", model=""):
     retained = deployment.get('retained_openai_keys', {})
     retained_gemini = deployment.get('retained_gemini_key')
     if retained or retained_gemini:
-        existing = json.loads(config_path.read_bytes()) if config_path.exists() else {}
+        # The current binary decrypts in memory using the destination's local key.
+        # Captured stdout is never logged or written to the staging bundle.
+        existing = json.loads(run(str(binary), '--config', str(config_path),
+                                  'export-config', capture_output=True).stdout) if config_path.exists() else {}
         keys = existing.get('providers', {}).get('openai', existing).get('api_keys', {})
         for project, digest in retained.items():
             secret = keys.get(project, '')
@@ -118,7 +121,7 @@ def install(binary, source_config, base_url, codex_home="", model=""):
             with opener.open(profile['base_url'].removesuffix('/v1') + '/logs/api', timeout=20) as response:
                 if response.status != 200:
                     raise RuntimeError('Gemini profile endpoint unavailable')
-    paths = [home / '.cargo/bin/hey-proxy', config_path,
+    paths = [home / '.cargo/bin/hey-proxy', config_path, config_path.with_suffix('.credentials.key'),
              home / 'Library/LaunchAgents/com.hey-proxy.plist',
              home / '.hey-proxy/service-registration.plist',
              home / '.config/systemd/user/hey-proxy.service']
@@ -158,6 +161,7 @@ def _install(binary, source_config, base_url, codex_home, model, prepared, profi
     # running executable or configuration. Resolved secrets never enter the bundle.
     atomic(binary_path, Path(binary).read_bytes(), 0o755)
     atomic(config_path, prepared, 0o600)
+    run(str(binary_path), '--config', str(config_path), 'encrypt-config', stdout=subprocess.DEVNULL)
     config = json.loads(config_path.read_text())
     if config.get('mode', 'standalone') == 'host':
         run(str(binary_path), '--config', str(config_path), 'host-keys', stdout=subprocess.DEVNULL)
