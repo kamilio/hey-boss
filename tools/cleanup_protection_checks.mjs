@@ -65,5 +65,10 @@ try {
   assert(receipts.some(e=>e.decision==='rejected'&&e.path===dependencies));
   assert(receipts.some(e=>e.action==='remove-dependencies'&&e.decision==='accepted'));
   checks.push('Both accepted and rejected outcomes have saved audit receipts');
+  const bin=join(root,'bin');mkdirSync(bin);
+  writeFileSync(join(bin,'ssh'),`#!/bin/sh\nprintf '%s\\n' '{"version":1,"decision":"rejected","reason":"Retained remote owner"}'\necho 'Retained remote owner' >&2\nexit 1\n`,{mode:0o700});
+  env.PATH=bin+':'+process.env.PATH;
+  assert.equal(run(['--host','fixture.invalid','cleanup-check',dependencies],false).reason,'Retained remote owner');
+  checks.push('Remote CLI preserves JSON rejection receipts and a nonzero exit');
   console.log(JSON.stringify({normalCompletion:true,completed:checks.length,checks}));
 } finally { rmSync(root,{recursive:true,force:true}); }
