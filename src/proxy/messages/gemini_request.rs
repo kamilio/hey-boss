@@ -288,8 +288,10 @@ pub(super) fn convert(
                             .is_none(),
                         "Duplicate tool use id"
                     );
-                    native
-                        .push(json!({"functionCall":{"id":id,"name":name,"args":block["input"]}}));
+                    native.push(
+                        json!({"functionCall":{"id":id,"name":name,"args":block["input"]},
+                        "thoughtSignature":hey_proxy::gemini::IMPORTED_THOUGHT_SIGNATURE}),
+                    );
                 }
                 "tool_result" if role == "user" => {
                     fields(

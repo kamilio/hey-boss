@@ -10,7 +10,7 @@ pub use tool_search::HostedSearch;
 
 pub use error::ResponseError;
 pub use partial::PartialCalls;
-pub use replay::{CARRIER_PREFIX, ReasoningCodec};
+pub use replay::{CARRIER_PREFIX, IMPORTED_THOUGHT_SIGNATURE, ReasoningCodec};
 pub use request::native_tool_name;
 pub use request::{ConvertedRequest, Tool, convert_request};
 pub use response::{convert_response, usage};

@@ -792,7 +792,12 @@ pub fn convert_request(
                     }
                     _ => bail!("Invalid tool_search execution"),
                 }
-                push(&mut contents, "model", vec![json!({"functionCall":call})]);
+                push(
+                    &mut contents,
+                    "model",
+                    vec![json!({"functionCall":call,
+                    "thoughtSignature":super::IMPORTED_THOUGHT_SIGNATURE})],
+                );
             }
             "tool_search_output" => {
                 let (name, native_id) = match string(item, "execution")? {
@@ -854,7 +859,8 @@ pub fn convert_request(
                 push(
                     &mut contents,
                     "model",
-                    vec![json!({"functionCall":{"name":native,"args":args,"id":id}})],
+                    vec![json!({"functionCall":{"name":native,"args":args,"id":id},
+                        "thoughtSignature":super::IMPORTED_THOUGHT_SIGNATURE})],
                 );
             }
             "function_call_output" | "custom_tool_call_output" => {

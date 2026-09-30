@@ -376,3 +376,30 @@ fn hosted_search_groups_namespace_results_and_deduplicates_paths() {
         3
     );
 }
+
+#[test]
+fn imported_search_calls_get_compatibility_signatures() {
+    for execution in ["client", "server"] {
+        let mut r = request(execution);
+        let id = if execution == "client" {
+            json!("search-1")
+        } else {
+            Value::Null
+        };
+        r["input"] = json!([
+            {"role":"user","content":"Find a tool"},
+            {"type":"tool_search_call","execution":execution,"call_id":id,"arguments":{"query":"customer","paths":["crm.lookup"]}},
+            {"type":"tool_search_output","execution":execution,"call_id":id,"tools":[tool()]}
+        ]);
+        let body = convert(&r).body;
+        assert_eq!(
+            body["contents"][1]["parts"][0]["thoughtSignature"],
+            IMPORTED_THOUGHT_SIGNATURE
+        );
+        assert_eq!(body["contents"][1]["parts"][0]["functionCall"]["id"], id);
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["id"],
+            id
+        );
+    }
+}

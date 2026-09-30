@@ -603,3 +603,28 @@ fn native_messages_partial_tools_and_omitted_thinking_preserve_signed_replay() {
         assert_eq!(replay.body["contents"].as_array().unwrap().len(), 4);
     }
 }
+
+#[test]
+fn imported_messages_tool_use_gets_compatibility_signature() {
+    let cfg = serde_json::from_value(json!({"api_key":"synthetic"})).unwrap();
+    let codec = hey_proxy::gemini::ReasoningCodec::new(&[7; 32]);
+    let mut value = input();
+    value["messages"] = json!([
+        {"role":"user","content":"Check files"},
+        {"role":"assistant","content":[{"type":"tool_use","id":"one","name":"read","input":{"path":"file.txt"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"one","content":"hello"}]}
+    ]);
+    let native = gemini_request::convert(&value, "gemini/test", None, &cfg, &codec, false).unwrap();
+    assert_eq!(
+        native.body["contents"][1]["parts"][0]["thoughtSignature"],
+        hey_proxy::gemini::IMPORTED_THOUGHT_SIGNATURE
+    );
+    assert_eq!(
+        native.body["contents"][1]["parts"][0]["functionCall"]["id"],
+        "one"
+    );
+    assert_eq!(
+        native.body["contents"][2]["parts"][0]["functionResponse"]["id"],
+        "one"
+    );
+}

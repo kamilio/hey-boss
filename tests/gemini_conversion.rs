@@ -738,3 +738,57 @@ fn sequential_tool_call_preference_is_accepted() {
     r["parallel_tool_calls"] = json!(false);
     assert!(convert_request(&r, &config(), &codec()).is_ok());
 }
+
+#[test]
+fn imported_calls_get_compatibility_signatures_without_rewriting_native_turns() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    assert_eq!(
+        STANDARD.decode(IMPORTED_THOUGHT_SIGNATURE).unwrap(),
+        b"skip_thought_signature_validator"
+    );
+    for summary in ["none", "auto"] {
+        let mut r = request();
+        r["reasoning"]["summary"] = json!(summary);
+        r["input"] = json!([
+            {"role":"user","content":"Inspect the workspace"},
+            {"type":"reasoning","encrypted_content":"foreign-provider-state","summary":[]},
+            {"type":"function_call","name":"exec_command","call_id":"one","arguments":"{\"cmd\":\"pwd\"}"},
+            {"type":"custom_tool_call","namespace":"functions","name":"exec","call_id":"two","input":"text('ok')"},
+            {"type":"function_call_output","call_id":"one","output":"/tmp"},
+            {"type":"custom_tool_call_output","call_id":"two","output":"ok"}
+        ]);
+        // Replay a real signed turn after the imported parallel calls. A native
+        // parallel call can legitimately lack its own signature: keep it exact.
+        let mut original = native();
+        original["candidates"][0]["content"]["parts"][3]
+            .as_object_mut()
+            .unwrap()
+            .remove("thoughtSignature");
+        let response = convert_response(&original, &converted(), &codec(), "mixed").unwrap();
+        r["input"]
+            .as_array_mut()
+            .unwrap()
+            .extend(response["output"].as_array().unwrap().clone());
+        r["input"].as_array_mut().unwrap().extend([
+            json!({"type":"function_call_output","call_id":"native-call-1","output":"file.txt"}),
+            json!({"type":"function_call_output","call_id":"native-call-2","output":"/tmp"}),
+        ]);
+        let body = convert_request(&r, &config(), &codec()).unwrap().body;
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents[1]["parts"].as_array().unwrap().len(), 2);
+        for (index, id) in ["one", "two"].iter().enumerate() {
+            assert_eq!(
+                contents[1]["parts"][index]["thoughtSignature"],
+                IMPORTED_THOUGHT_SIGNATURE
+            );
+            assert_eq!(contents[1]["parts"][index]["functionCall"]["id"], *id);
+            assert_eq!(contents[2]["parts"][index]["functionResponse"]["id"], *id);
+        }
+        assert_eq!(
+            contents[1]["parts"][1]["functionCall"]["args"],
+            json!({"input":"text('ok')"})
+        );
+        assert_eq!(contents[3], original["candidates"][0]["content"]);
+        assert!(!body.to_string().contains("foreign-provider-state"));
+    }
+}
