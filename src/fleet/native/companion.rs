@@ -116,8 +116,11 @@ struct Incoming {
     cancel: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+const SUPERVISOR_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 struct Interruptible<R> {
     input: R,
+    deadline: Instant,
     cancel: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
@@ -131,7 +134,17 @@ impl<R: Read + AsRawFd> Read for Interruptible<R> {
             };
             let ready = unsafe { libc::poll(&mut fd, 1, 100) };
             if ready > 0 {
-                return self.input.read(bytes);
+                let length = self.input.read(bytes)?;
+                if length > 0 {
+                    self.deadline = Instant::now() + SUPERVISOR_IDLE_TIMEOUT;
+                }
+                return Ok(length);
+            }
+            if ready == 0 && Instant::now() >= self.deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Supervisor sent no data for 60 seconds; reconnecting",
+                ));
             }
             if ready < 0 {
                 let error = std::io::Error::last_os_error();
@@ -158,6 +171,7 @@ impl Incoming {
         let thread = std::thread::spawn(move || {
             let mut input = BufReader::new(Interruptible {
                 input,
+                deadline: Instant::now() + SUPERVISOR_IDLE_TIMEOUT,
                 cancel: reader_cancel,
                 stop,
             });
@@ -426,6 +440,64 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silent_transport_expires_and_releases_its_relay_without_peer_eof() {
+        let (root, mut ctx, store) = super::super::context::tests::test_context();
+        // macOS temporary directories can exceed the Unix socket path limit.
+        let relay_state = std::path::PathBuf::from("/tmp")
+            .join(format!("hb-idle-{}", super::super::context::id().unwrap()));
+        std::fs::create_dir(&relay_state).unwrap();
+        ctx.state = relay_state.clone();
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let relay = authority::Relay::start(&ctx, output.clone()).unwrap();
+        let (reader, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancelled = cancel.clone();
+        let (sent, received) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut input = Interruptible {
+                input: reader,
+                deadline: Instant::now(),
+                cancel: cancelled,
+                stop: Arc::new(AtomicBool::new(false)),
+            };
+            let result = input.read(&mut [0_u8; 1]);
+            drop(relay);
+            let _ = sent.send(result);
+        });
+        let result = received.recv_timeout(Duration::from_secs(1));
+        cancel.store(true, Ordering::Release);
+        thread.join().unwrap();
+        let replacement = authority::Relay::start(&ctx, output);
+        let rebound = replacement.is_ok();
+        drop(replacement);
+        drop(store);
+        std::fs::remove_dir_all(relay_state).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            result.unwrap().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(rebound, "Expired transport kept the relay lock");
+    }
+
+    #[test]
+    fn incoming_bytes_renew_the_silent_transport_deadline() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let old = Instant::now() + Duration::from_secs(1);
+        let mut input = Interruptible {
+            input: reader,
+            deadline: old,
+            cancel: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        writer.write_all(b"ping").unwrap();
+        assert_eq!(input.read(&mut [0_u8; 4]).unwrap(), 4);
+        assert!(input.deadline > old + Duration::from_secs(50));
+        input.cancel.store(true, Ordering::Release);
+        assert_eq!(input.read(&mut [0_u8; 1]).unwrap(), 0);
+    }
 
     #[test]
     fn received_pings_refresh_status_while_work_is_blocked_without_advancing_sync() {
