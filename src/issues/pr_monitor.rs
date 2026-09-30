@@ -36,7 +36,7 @@ pub(super) fn merged_history(
         );
     }
     Ok(
-        json!({"pull_requests":prs,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
+        json!({"ok":true,"pull_requests":prs,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
     )
 }
 
@@ -203,6 +203,7 @@ mod tests {
             .record_pr_status("https://github.com/o/r/pull/2", Some("merged"), 3000, None)
             .unwrap();
         let page = merged_history(&store.db, "named:test", 1, 0).unwrap();
+        assert_eq!(page["ok"], true);
         assert_eq!(page["pull_requests"].as_array().unwrap().len(), 1);
         assert_eq!(page["pull_requests"][0]["url"], url);
         assert_eq!(page["pull_requests"][0]["title"], "Ship it");
