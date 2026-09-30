@@ -493,12 +493,29 @@ impl Client {
         if matches!(freshness, Freshness::CachedOnly) {
             return Err(Error::CacheMiss);
         }
+        let now = tokio::time::Instant::now();
+        let caller_deadline = if interactive_read() {
+            now + self.0.config.queue_timeout
+        } else {
+            REQUEST_DEADLINE
+                .try_with(|deadline| *deadline)
+                .ok()
+                .flatten()
+                .map_or(now + self.0.config.queue_timeout, |deadline| {
+                    deadline.min(now + self.0.config.queue_timeout)
+                })
+        };
         let mut receiver = {
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((receiver, interactive)) = inflight.get(&key) {
+            if let Some((receiver, interactive, shared_deadline)) = inflight.get(&key) {
                 if interactive_read() {
                     interactive.store(true, Ordering::Relaxed);
                 }
+                let mut deadline_guard = shared_deadline.lock().unwrap_or_else(|e| e.into_inner());
+                if caller_deadline > *deadline_guard {
+                    *deadline_guard = caller_deadline;
+                }
+                drop(deadline_guard);
                 self.0.metrics.coalesced.fetch_add(1, Ordering::Relaxed);
                 receiver.clone()
             } else {
@@ -517,7 +534,6 @@ impl Client {
                     .try_acquire_owned()
                     .map_err(|_| self.queue_full())?;
                 let (notify, receiver) = watch::channel(None);
-                let now = tokio::time::Instant::now();
                 let resource = if body.is_some() {
                     "graphql"
                 } else if Url::parse(&url).is_ok_and(|u| u.path().contains("/search/")) {
@@ -529,6 +545,7 @@ impl Client {
                 let interactive = INTERACTIVE_READ
                     .try_with(Arc::clone)
                     .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
+                let deadline = Arc::new(Mutex::new(caller_deadline));
                 let job = Job {
                     interactive: interactive.clone(),
                     detail_lane: matches!(
@@ -544,13 +561,7 @@ impl Client {
                     body,
                     cached,
                     notify,
-                    deadline: REQUEST_DEADLINE
-                        .try_with(|deadline| *deadline)
-                        .ok()
-                        .flatten()
-                        .map_or(now + self.0.config.queue_timeout, |deadline| {
-                            deadline.min(now + self.0.config.queue_timeout)
-                        }),
+                    deadline: deadline.clone(),
                     ready_at: now,
                     attempts: 0,
                     resource: resource.into(),
@@ -560,7 +571,7 @@ impl Client {
                     mpsc::error::TrySendError::Closed(_) => Error::Stopped,
                     mpsc::error::TrySendError::Full(_) => self.queue_full(),
                 })?;
-                inflight.insert(key, (receiver.clone(), interactive));
+                inflight.insert(key, (receiver.clone(), interactive, deadline));
                 receiver
             }
         };
@@ -1312,7 +1323,7 @@ mod priority_tests {
                 .lock()
                 .unwrap()
                 .values()
-                .any(|(_, priority)| priority.load(Ordering::Relaxed))
+                .any(|(_, priority, _)| priority.load(Ordering::Relaxed))
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             while client.status().outstanding_requests != 0 {

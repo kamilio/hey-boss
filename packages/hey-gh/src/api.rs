@@ -323,7 +323,9 @@ async fn monitor_loop(client: Client, watch: Watch, state: Arc<Mutex<WatchStatus
         let result = if let Some(resource) = coverage {
             covered_watch_status(&client, &watch, &resource, ci_only).await
         } else {
-            poll_watch(&client, &watch, &mut tracked, ci_only).await
+            crate::client::BACKGROUND_READ
+                .scope((), poll_watch(&client, &watch, &mut tracked, ci_only))
+                .await
         };
         let mut status = state.lock().await;
         let error = result.as_ref().err().map(ToString::to_string);
