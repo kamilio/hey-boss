@@ -382,7 +382,11 @@ fn unsupported_semantics_fail_explicitly() {
         ("conversation", json!("conv")),
         ("background", json!(true)),
         ("store", json!(true)),
-        ("tools", json!([{"type":"web_search"}])),
+        (
+            "tools",
+            json!([{"type":"namespace","name":"ns","tools":[{"type":"web_search"}]}]),
+        ),
+        ("tool_choice", json!({"type":"web_search"})),
         (
             "tools",
             json!([{"type":"function","name":"strict","strict":true}]),
@@ -790,5 +794,46 @@ fn imported_calls_get_compatibility_signatures_without_rewriting_native_turns() 
         );
         assert_eq!(contents[3], original["candidates"][0]["content"]);
         assert!(!body.to_string().contains("foreign-provider-state"));
+    }
+}
+
+#[test]
+fn web_search_grounds_with_google_search() {
+    let function = json!({"type":"function","name":"exec_command","parameters":{"type":"object","properties":{}}});
+    for (tools, choice, expected, mode) in [
+        (
+            json!([{"type":"web_search","external_web_access":true}]),
+            Value::Null,
+            json!([{"googleSearch":{}}]),
+            None,
+        ),
+        (
+            json!([function, {"type":"web_search_preview","search_context_size":"high"}]),
+            json!({"type":"web_search_preview"}),
+            json!([{"functionDeclarations":[{"name":native_tool_name("exec_command"),"parametersJsonSchema":{"type":"object","properties":{}}}]},{"googleSearch":{}}]),
+            Some("AUTO"),
+        ),
+        (
+            json!([{"type":"web_search_2025_08_26","filters":{"allowed_domains":["rust-lang.org"]}}]),
+            json!("auto"),
+            json!([{"googleSearch":{}}]),
+            Some("NONE"),
+        ),
+    ] {
+        let mut r = request();
+        r["tools"] = tools;
+        if !choice.is_null() {
+            r["tool_choice"] = choice;
+        }
+        let converted = convert_request(&r, &config(), &codec()).unwrap();
+        assert_eq!(converted.body["tools"], expected);
+        assert_eq!(
+            converted
+                .body
+                .pointer("/toolConfig/functionCallingConfig/mode")
+                .and_then(Value::as_str),
+            mode
+        );
+        assert!(converted.tools.values().all(|t| t.name != "web_search"));
     }
 }

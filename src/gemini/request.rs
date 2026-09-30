@@ -51,6 +51,12 @@ pub(crate) fn readable_tool_prefix(name: &str) -> String {
         .take(32)
         .collect()
 }
+/// Responses web search in all its versions (`web_search`, `web_search_preview`,
+/// dated snapshots). Gemini grounds with Google Search; domain filters, user
+/// location and context size are hints it cannot enforce.
+fn web_search(kind: &str) -> bool {
+    kind.starts_with("web_search")
+}
 pub fn native_tool_name(name: &str) -> String {
     let hash = Sha256::digest(name.as_bytes());
     let readable = readable_tool_prefix(name);
@@ -389,6 +395,13 @@ fn add_tools(
                     validator: None,
                 },
             );
+            continue;
+        }
+        if web_search(kind) {
+            if !namespace.is_empty() || loaded {
+                bail!("{kind} must be declared in the request tools");
+            }
+            // Declared natively as Google Search grounding in convert_request.
             continue;
         }
         if !["function", "custom"].contains(&kind) {
@@ -924,8 +937,24 @@ pub fn convert_request(
     if !system.is_empty() {
         body["systemInstruction"] = json!({"parts":system});
     }
+    let grounded = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|list| {
+            list.iter()
+                .any(|tool| tool["type"].as_str().is_some_and(web_search))
+        });
     if !declarations.is_empty() {
         body["tools"] = json!([{"functionDeclarations":declarations}]);
+    }
+    if grounded {
+        if body.get("tools").is_none() {
+            body["tools"] = json!([]);
+        }
+        body["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"googleSearch":{}}));
     }
     for (source, dest) in [
         ("max_output_tokens", "maxOutputTokens"),
@@ -1052,7 +1081,20 @@ pub fn convert_request(
                 None,
             )
         } else {
-            if choice["type"] == "tool_search" {
+            if choice["type"].as_str().is_some_and(web_search) {
+                // Gemini decides when to ground; a forced search is a hint.
+                if !grounded {
+                    bail!("Unknown selected web_search");
+                }
+                (
+                    if declarations.is_empty() {
+                        "NONE"
+                    } else {
+                        "AUTO"
+                    },
+                    None,
+                )
+            } else if choice["type"] == "tool_search" {
                 if !tools.contains_key(&super::tool_search::native_name()) {
                     bail!("Unknown selected tool_search");
                 }
