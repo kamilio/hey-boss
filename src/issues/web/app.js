@@ -544,14 +544,14 @@ function listPullRequests(issue) {
 }
 function listCommits(issue, prsEnabled) {
   if (prsEnabled) return "";
-  return (issue.commits || [])
-    .map((c) => {
-      const short = c.short_sha || (c.sha || "").slice(0, 7);
-      const label = c.title ? `${short} · ${c.title}` : short;
-      const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
-      return `<span class="issue-commit-chip"><a class="issue-pr-link issue-commit-link" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}" aria-label="Open commit ${esc(label)}">${icon("code")}<span class="pr-link-title">${esc(short)}</span></a>${trace ? `<a class="list-agent-trace issue-commit-trace" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}</span>`;
-    })
-    .join("");
+  const commits = issue.commits || [];
+  if (!commits.length) return "";
+  const c = commits[commits.length - 1];
+  const short = c.short_sha || (c.sha || "").slice(0, 7);
+  const label = c.title ? `${short} · ${c.title}` : short;
+  const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
+  const more = commits.length > 1 ? `<a class="issue-pr-link issue-commits-more" data-issue="${issue.number}" href="${esc(routeHash({ ...model.route, issue: issue.number }))}" aria-label="View all ${commits.length} commits for issue #${issue.number}">+${commits.length - 1} more</a>` : "";
+  return `<span class="issue-commits-summary"><span class="issue-commit-chip"><a class="issue-pr-link issue-commit-link" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}" aria-label="Open commit ${esc(label)}">${icon("code")}<span class="pr-link-title">${esc(short)}</span></a>${trace ? `<a class="list-agent-trace issue-commit-trace" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}</span>${more}</span>`;
 }
 function renderList(result) {
   if (model.orderDragging) return;
