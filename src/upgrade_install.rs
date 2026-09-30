@@ -35,6 +35,10 @@ fn restart_hey_gh_daemon() {
     let _ = Command::new("/usr/bin/pkill")
         .args(["-TERM", "-f", "hey-gh serve"])
         .status();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-KILL", "-f", "hey-gh serve"])
+        .status();
 }
 fn restart_desktop() -> io::Result<()> {
     restart_hey_gh_daemon();

@@ -91,9 +91,12 @@ pub(super) fn run(ctx: Context) {
 fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) {
     // Both use the shared hey-gh queue, but waiting for ordinary metadata must
     // not add another serial batch before the next required-check observation.
+    // Active issue watches run on the foreground priority lane so background
+    // account/metadata sweeps never starve tracked PRs.
+    let watch_client = client.clone().foreground();
     let (watched, metadata) = runtime.block_on(async {
         tokio::join!(
-            watches::poll_once(ctx, client),
+            watches::poll_once(ctx, &watch_client),
             tokio::time::timeout(Duration::from_secs(40), poll_once(ctx, client))
         )
     });

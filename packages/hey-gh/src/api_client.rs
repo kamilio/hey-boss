@@ -148,6 +148,11 @@ impl ApiClient {
         self.background = true;
         self
     }
+    /// Use the daemon's interactive priority lane for active issue watches.
+    pub fn foreground(mut self) -> Self {
+        self.background = false;
+        self
+    }
     fn pr_query(&self, freshness: Freshness) -> Result<Vec<(&'static str, String)>> {
         let mut query = freshness_query(freshness)?;
         if self.background {

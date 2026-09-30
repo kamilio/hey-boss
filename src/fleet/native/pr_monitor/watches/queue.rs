@@ -35,7 +35,7 @@ pub(super) async fn poll(
     let mut details = VecDeque::new();
     let mut running = tokio::task::JoinSet::new();
     let mut policy_streak = 0_usize;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         while running.len() < 4
             && !ctx.stopped()
