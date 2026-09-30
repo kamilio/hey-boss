@@ -15,11 +15,16 @@ function library(data) {
     return rank(a.name) - rank(b.name) || a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope);
   });
 }
-function needsAttention(skill) { return skill.versions.length>1 || skill.copies.some(c=>c.stale || c.warnings?.length); }
-function visibleSkills(skills, query, filter, selected) {
+function needsAttention(skill, machines) {
+  if (Array.isArray(machines) && machines.length > 1) {
+    return !machineCoverage(skill, machines).allGreen || skill.copies.some(c => c.stale);
+  }
+  return skill.versions.length > 1 || skill.copies.some(c => c.stale);
+}
+function visibleSkills(skills, query, filter, selected, machines) {
   query = query.trim().toLocaleLowerCase();
   return skills.filter(s=>(filter==='project'?s.scope==='project':s.scope==='global') &&
-    (filter!=='selected'||selected.has(s.name)) && (filter!=='attention'||needsAttention(s)) &&
+    (filter!=='selected'||selected.has(s.name)) && (filter!=='attention'||needsAttention(s, machines)) &&
     `${s.name} ${s.copies.map(c=>`${c.description} ${c.host} ${c.hostname}`).join(' ')}`.toLocaleLowerCase().includes(query));
 }
 function unresolved(skills, selected, choices) {
@@ -97,12 +102,106 @@ function diffFiles(baseCopy, compareCopy) {
     return {path, status, ...diff};
   });
 }
-if(typeof module!=='undefined') module.exports={library,visibleSkills,unresolved,computeDiff,diffFiles,getMarkdownFiles};
+const shortHost = host => String(host || '').replace(/\.local$/i, '') || 'local';
+function machineCoverage(skill, machines) {
+  const known = [...new Set((machines || []).map(m => typeof m === 'string' ? m : m?.host).filter(Boolean))];
+  const present = [...new Set(skill?.machines || [])];
+  const missing = known.filter(h => !present.includes(h));
+  const onAllMachines = known.length > 1 && missing.length === 0 && present.length >= known.length;
+  const inSync = (skill?.versions || []).length <= 1;
+  const allGreen = onAllMachines && inSync;
+  const tone = allGreen
+    ? 'green'
+    : (!inSync || (known.length > 1 && present.length <= 1) ? 'red' : 'orange');
+  const tags = allGreen
+    ? [{ label: 'All machines', host: 'all', tone: 'green', isAll: true, title: `Present and unified on all ${known.length} machines (${present.map(shortHost).join(', ')})` }]
+    : present.map(h => ({
+        label: shortHost(h),
+        host: h,
+        tone,
+        isAll: false,
+        title: missing.length
+          ? `On ${h} · missing on ${missing.map(shortHost).join(', ')}`
+          : (!inSync ? `On ${h} · multiple versions across machines` : `Only on ${h}`)
+      }));
+  return { known, present, missing, onAllMachines, inSync, allGreen, tone, tags };
+}
+if(typeof module!=='undefined') module.exports={library,visibleSkills,unresolved,computeDiff,diffFiles,getMarkdownFiles,machineCoverage,shortHost};
 if(typeof document!=='undefined') (()=>{
   const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), icon=HeyBossUI.icon;
   let data={machines:[],selected:[],choices:{}}, skills=[], selected=new Set(), choices={}, active='', filter='all', csrf='', dirty=false, pending=false, timer, previewDigest='', compareDigest='', maxWords=400;
   let activeFile='', editingMarkdown=false, editorDraft='', codeMirrorInstance=null, editorScriptPromise=null, deletePromptSkill='';
   const labels={codex:'Codex',claude:'Claude',agents:'Shared agents',project:'Repository',library:'Saved library'};
+  function renderMachineTags(skill, includeMissing=false){
+    const cov = machineCoverage(skill, data.machines);
+    const pills = cov.tags.map(t => `<span class="machine-tag is-${esc(t.tone)}" title="${esc(t.title)}">${esc(t.label)}</span>`).join('');
+    const conflictPill = !cov.inSync ? `<span class="machine-tag is-red" title="Different content across machines">${skill.versions.length} versions · Diff</span>` : '';
+    const missingPill = includeMissing && cov.missing.length ? `<span class="machine-tag is-missing" title="Not installed on ${esc(cov.missing.join(', '))}">Missing: ${esc(cov.missing.map(shortHost).join(', '))}</span>` : '';
+    return `<span class="machine-tags">${pills}${conflictPill}${missingPill}</span>`;
+  }
+  function openDeleteSkillModal(skillName, trigger){
+    const skill=skills.find(s=>s.name===skillName&&s.scope==='global')||{name:skillName,copies:[],machines:[]};
+    deletePromptSkill=skill.name;
+    let dialog=$('#skill-delete-dialog');
+    if(!dialog){
+      dialog=document.createElement('dialog');
+      dialog.id='skill-delete-dialog';
+      dialog.className='skill-delete-dialog';
+      dialog.setAttribute('aria-labelledby','skill-delete-title');
+      dialog.setAttribute('aria-describedby','skill-delete-description');
+      document.body.append(dialog);
+    }
+    const copyCount=skill.copies?.length||1;
+    const machineNames=(skill.machines||[]).map(shortHost).join(', ')||'connected machines';
+    dialog.innerHTML=`<div class="skill-delete-dialog-head">
+      <span class="skill-delete-dialog-icon">${icon('trash')||icon('alert')||'×'}</span>
+      <div>
+        <span class="skills-eyebrow">REMOVE SKILL</span>
+        <h2 id="skill-delete-title">Delete skill from all machines?</h2>
+      </div>
+    </div>
+    <div class="skill-delete-target">
+      <strong class="skill-delete-name">${esc(skill.name)}</strong>
+      <span class="skill-delete-meta">${copyCount} ${copyCount===1?'copy':'copies'} · ${esc(machineNames)}</span>
+    </div>
+    <p id="skill-delete-description" class="skill-delete-body">This removes <strong>${esc(skill.name)}</strong> from Codex, Claude Code, and shared agent skill folders across all connected machines.</p>
+    <p class="skill-delete-hint">A timestamped backup copy is automatically saved in <code>.hey-boss/skill-backups</code> on each machine.</p>
+    <p id="skill-delete-error" class="skill-delete-error" role="alert" hidden></p>
+    <div class="skill-delete-actions">
+      <button type="button" class="button" id="skill-delete-cancel" data-delete-cancel autofocus>Cancel</button>
+      <button type="button" class="button danger" id="skill-delete-confirm" data-delete-confirm="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Delete skill</button>
+    </div>`;
+    const closeDialog=()=>{
+      deletePromptSkill='';
+      if(typeof dialog.close==='function'&&dialog.open) dialog.close();
+      else dialog.removeAttribute('open');
+      if(trigger?.isConnected) trigger.focus({preventScroll:true});
+    };
+    const cancelBtn=dialog.querySelector('[data-delete-cancel]');
+    const confirmBtn=dialog.querySelector('[data-delete-confirm]');
+    if(cancelBtn) cancelBtn.onclick=closeDialog;
+    if(confirmBtn) confirmBtn.onclick=async()=>{
+      if(pending)return;
+      cancelBtn.disabled=true;
+      confirmBtn.disabled=true;
+      confirmBtn.textContent='Deleting…';
+      editingMarkdown=false;
+      await action('delete',{skill:skill.name});
+      closeDialog();
+    };
+    dialog.onclick=e=>{if(e.target===dialog&&!pending)closeDialog();};
+    dialog.oncancel=e=>{
+      if(pending){e.preventDefault();return;}
+      deletePromptSkill='';
+      if(trigger?.isConnected) setTimeout(()=>trigger.focus({preventScroll:true}),0);
+    };
+    if(typeof dialog.showModal==='function'){
+      if(!dialog.open) dialog.showModal();
+    }else{
+      dialog.setAttribute('open','');
+    }
+    cancelBtn?.focus({preventScroll:true});
+  }
   function fail(e){$('#skills-error').textContent=e.message;$('#skills-error').hidden=false;}
   function loadEditorBundle(){
     if(window.HeyBossArtifactEditor)return Promise.resolve();
@@ -140,10 +239,10 @@ if(typeof document!=='undefined') (()=>{
     const focusValue=restore?focus.dataset[restore]:null;
     const global=skills.filter(s=>s.scope==='global'), busy=pending||data.busy;
     $('#skills-main').classList.toggle('is-busy',!!busy);
-    $('#skills-summary').innerHTML=[[global.length,'skills discovered'],[global.filter(s=>selected.has(s.name)).length,'selected to sync'],[global.filter(needsAttention).length,'need attention'],[(data.machines||[]).filter(m=>m.scanned_at).length,'machines scanned']].map(([n,label])=>`<div><strong>${n}</strong><span>${label}</span></div>`).join('');
-    const machines=data.machines||[], attention=machines.filter(m=>m.state==='attention'||m.errors?.length).length;
+    $('#skills-summary').innerHTML=[[global.length,'skills discovered'],[global.filter(s=>selected.has(s.name)).length,'selected to sync'],[global.filter(s=>needsAttention(s,data.machines)).length,'not on all machines'],[(data.machines||[]).filter(m=>m.scanned_at).length,'machines scanned']].map(([n,label])=>`<div><strong>${n}</strong><span>${label}</span></div>`).join('');
+    const machines=data.machines||[], attention=machines.filter(m=>m.error).length;
     $('#machine-summary').textContent=busy?'Scanning or syncing…':`${machines.length} known${attention?` · ${attention} need attention`:''}`;
-    $('#skills-machines').innerHTML=machines.map(m=>`<article class="machine-card"><div>${icon('monitor')}<strong>${esc(m.hostname||m.host)}</strong><span class="skill-pill ${m.state==='attention'?'amber':'green'}">${m.state==='synced'?'Synced':m.state==='online'?'Scanned':'Needs attention'}</span></div><p>${esc(m.host==='local'?'This machine':m.host)} · ${(m.copies||[]).length} copies${m.scanned_at?` · ${esc(new Date(m.scanned_at*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}`:''}</p>${m.error?`<p class="machine-error">${esc(m.error)} · Last known copies are kept.</p>`:''}${m.errors?.length?`<details><summary>${m.errors.length} skipped item(s)</summary>${m.errors.map(e=>`<p class="machine-error">${esc(e)}</p>`).join('')}</details>`:''}</article>`).join('')||'<p>No machine inventory yet. Scan to discover your skills.</p>';
+    $('#skills-machines').innerHTML=machines.map(m=>`<article class="machine-card"><div>${icon('monitor')}<strong>${esc(m.hostname||m.host)}</strong><span class="skill-pill ${m.error?'amber':'green'}">${m.state==='synced'?'Synced':m.error?'Offline / cached':'Online'}</span></div><p>${esc(m.host==='local'?'This machine':m.host)} · ${(m.copies||[]).filter(c=>c.scope==='global').length} copies${m.scanned_at?` · ${esc(new Date(m.scanned_at*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}`:''}</p>${m.error?`<p class="machine-error">${esc(m.error)} · Last known copies are kept.</p>`:''}</article>`).join('')||'<p>No machine inventory yet. Scan to discover your skills.</p>';
     renderList();
     if(!editingMarkdown)renderDetail();
     const conflicts=unresolved(skills,selected,choices), count=global.filter(s=>selected.has(s.name)).length;
@@ -155,14 +254,14 @@ if(typeof document!=='undefined') (()=>{
     if(restore&&!editingMarkdown)document.querySelector(`[data-${restore}="${CSS.escape(focusValue)}"]`)?.focus({preventScroll:true});
   }
   function renderList(){
-    const visible=visibleSkills(skills,$('#skills-search').value,filter,selected);
+    const visible=visibleSkills(skills,$('#skills-search').value,filter,selected,data.machines);
     $('#library-count').textContent=visible.length;
     $('#skills-filters').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.filter===filter)));
     $('#skills-list').innerHTML=visible.map(s=>{
-      const version=current(s)||s.versions[0], warnings=(version.warnings||[]).length;
+      const version=current(s)||s.versions[0];
       const badge = s.name==='hey-boss'?'<span class="skill-required">CORE</span>':s.name==='AGENTS.md'?'<span class="skill-required codex-badge">CODEX</span>':'';
       const canDelete = s.scope==='global' && s.name!=='hey-boss';
-      return `<div class="skill-row ${active===s.key?'is-active':''} ${selected.has(s.name)&&s.scope==='global'?'is-selected':''}">${s.scope==='global'?`<input type="checkbox" data-select="${esc(s.name)}" aria-label="Distribute ${esc(s.name)}" ${selected.has(s.name)?'checked':''} ${s.name==='hey-boss'||pending||data.busy?'disabled':''}>`:`<span class="skill-project-icon">${icon('folder')}</span>`}<button class="skill-open" data-open="${esc(s.key)}" aria-current="${active===s.key}"><span class="skill-row-title">${esc(s.name)}${badge}</span><span class="skill-row-description">${esc(version.description||'No description yet')}</span><span class="skill-row-meta">${s.machines.length} machine${s.machines.length===1?'':'s'}<i></i>${s.versions.length>1?`<span class="amber-text">${s.versions.length} versions · Diff</span>`:'In sync'}${warnings?`<i></i><span class="amber-text">${warnings} lint</span>`:''}</span></button>${canDelete?`<button type="button" class="skill-row-delete" data-delete-row="${esc(s.name)}" title="Delete ${esc(s.name)}" aria-label="Delete ${esc(s.name)}" ${pending||data.busy?'disabled':''}>${icon('trash')||icon('x')||'×'}</button>`:`<span class="skill-row-arrow">${icon('arrow-right')}</span>`}</div>`;
+      return `<div class="skill-row ${active===s.key?'is-active':''} ${selected.has(s.name)&&s.scope==='global'?'is-selected':''}">${s.scope==='global'?`<input type="checkbox" data-select="${esc(s.name)}" aria-label="Distribute ${esc(s.name)}" ${selected.has(s.name)?'checked':''} ${s.name==='hey-boss'||pending||data.busy?'disabled':''}>`:`<span class="skill-project-icon">${icon('folder')}</span>`}<button class="skill-open" data-open="${esc(s.key)}" aria-current="${active===s.key}"><span class="skill-row-title">${esc(s.name)}${badge}</span><span class="skill-row-description">${esc(version.description||'No description yet')}</span><span class="skill-row-meta">${renderMachineTags(s,false)}</span></button>${canDelete?`<button type="button" class="skill-row-delete" data-delete-row="${esc(s.name)}" title="Delete ${esc(s.name)}" aria-label="Delete ${esc(s.name)}" ${pending||data.busy?'disabled':''}>${icon('trash')||icon('x')||'×'}</button>`:`<span class="skill-row-arrow">${icon('arrow-right')}</span>`}</div>`;
     }).join('')||`<div class="skills-empty">${icon(skills.length?'search':'instructions')}<h3>${skills.length?'No matching skills':'Your library starts here'}</h3><p>${skills.length?'Try another search or filter.':'Scan all machines to discover your existing skills.'}</p></div>`;
   }
   function renderDiffSection(skill, chosen, preview){
@@ -229,15 +328,9 @@ if(typeof document!=='undefined') (()=>{
         ${canDelete?`<button type="button" class="button small danger" data-delete-prompt="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Delete skill</button>`:''}
       </div>
     </div>
-    ${deletePromptSkill===skill.name?`<div id="skill-delete-confirm" class="skill-delete-banner" role="alert">
-      <div><strong>Delete “${esc(skill.name)}” from all machines?</strong><p>Removes it from Codex, Claude, and shared agent folders across your machines (backed up in <code>.hey-boss/skill-backups</code>).</p></div>
-      <div class="skill-delete-banner-actions">
-        <button type="button" class="button danger" data-delete-confirm="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Confirm delete</button>
-        <button type="button" class="button" data-delete-cancel>Cancel</button>
-      </div>
-    </div>`:''}
     <p class="skill-description">${esc(preview.description||'Add a clear description to help agents discover this skill.')}</p>
     <div class="skill-targets">
+      ${renderMachineTags(skill,true)}
       <span class="agent-target ${hasAgent('codex')?'present':''}">${icon('code')}Codex <small>${hasAgent('codex')?'found':'not found'}</small></span>
       <span class="agent-target ${hasAgent('claude')?'present':''}">${icon('spark')}Claude <small>${hasAgent('claude')?'found':'not found'}</small></span>
       <span class="skill-pill ${chosen?'green':'amber'}">${chosen?'Unified / chosen':'Pick version to keep'}</span>
@@ -266,7 +359,7 @@ if(typeof document!=='undefined') (()=>{
     <section class="skill-section skill-files-section">
       <div class="skill-section-title">
         <h3>Markdown files <span>${mdFiles.length}</span></h3>
-        <span>${ignored.length?`Ignoring ${ignored.length} code/non-Markdown file(s)`:'Open or edit with the Markdown editor'}</span>
+        <span>Open or edit with the Markdown editor</span>
       </div>
       <div class="skill-md-tabs" role="tablist" aria-label="Skill Markdown files">
         ${mdFiles.map(f=>`<button type="button" role="tab" class="skill-md-tab ${f.path===currentFileObj.path?'is-active':''}" aria-selected="${f.path===currentFileObj.path}" data-md-file="${esc(f.path)}">${icon('docs')||icon('code')}<span>${esc(f.path)}</span></button>`).join('')}
@@ -293,12 +386,7 @@ if(typeof document!=='undefined') (()=>{
         <pre tabindex="0" aria-label="Skill source">${(currentFileObj.text||'').split('\n').map((line,i)=>`<span id="skill-line-${i+1}" data-number="${i+1}">${esc(line)||' '}</span>`).join('')}</pre>
         <p class="skill-source-path">${esc(preview.host)} · ${esc(preview.path)}</p>
       </div>`}
-    </section>
-    <details class="skill-section skill-compat-details" ${warnings.length?'open':''}>
-      <summary class="skill-section-title"><h3>Compatibility check <span class="${warnings.length?'amber-text':'green-text'}">${warnings.length?`${warnings.length} findings`:'No findings'}</span></h3><span>Codex + Claude · Max ${maxWords} words</span></summary>
-      ${warnings.length?`<div class="skill-findings">${warnings.map(w=>`<div class="skill-finding">${icon('warning')}<div><strong>${esc(({metadata:'Skill metadata',too_long:'Keep it short',agent_specific:'Agent-specific setting',machine_path:'Machine-specific path',agent_tool:'Agent-specific tool',broken_reference:'Missing reference'})[w.kind]||w.kind)}</strong><p>${esc(w.message)}</p></div>${w.line?`<button data-line="${w.line}" title="Show source line ${w.line}">L${w.line}</button>`:''}</div>`).join('')}</div>`:`<div class="skill-clean">${icon('check')}No portability issues found by the static checks.</div>`}
-      <div class="skill-policy"><label>Main instruction budget <input id="skill-word-budget" type="number" min="50" max="2000" step="50" value="${maxWords}" ${pending||data.busy?'disabled':''}> words</label></div>
-    </details>`;
+    </section>`;
     if(editingMarkdown){
       const host=$('#skill-codemirror-host'), ta=$('#skill-markdown-textarea');
       if(ta) ta.oninput=()=>{editorDraft=ta.value;};
@@ -318,7 +406,7 @@ if(typeof document!=='undefined') (()=>{
     if(delRow){
       e.stopPropagation();
       const s=skills.find(x=>x.name===delRow.dataset.deleteRow&&x.scope==='global');
-      if(s){active=s.key;deletePromptSkill=s.name;editingMarkdown=false;renderList();renderDetail();}
+      if(s){active=s.key;editingMarkdown=false;renderList();renderDetail();openDeleteSkillModal(s.name,delRow);}
       return;
     }
     const b=e.target.closest('[data-open]');
@@ -399,20 +487,7 @@ if(typeof document!=='undefined') (()=>{
       return;
     }
     if(delPrompt){
-      deletePromptSkill=delPrompt.dataset.deletePrompt;
-      renderDetail();
-      return;
-    }
-    if(delCancel){
-      deletePromptSkill='';
-      renderDetail();
-      return;
-    }
-    if(delConfirm){
-      const targetName=delConfirm.dataset.deleteConfirm;
-      deletePromptSkill='';
-      editingMarkdown=false;
-      await action('delete',{skill:targetName});
+      openDeleteSkillModal(delPrompt.dataset.deletePrompt,delPrompt);
       return;
     }
     if(line){

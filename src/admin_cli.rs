@@ -55,6 +55,27 @@ pub enum SkillAction {
         /// Optional project directory to scan for project skills (defaults to current working directory).
         #[arg(long = "project-dir")]
         project_dir: Option<std::path::PathBuf>,
+        /// Scan all fleet machines instead of only the local directory.
+        #[arg(long)]
+        fleet: bool,
+    },
+    /// Scan all fleet machines for skills and show machine coverage tags.
+    #[command(visible_alias = "fleet")]
+    Scan,
+    /// Distribute and unify selected (or specified) skills across all fleet machines (Codex, Claude, Agents).
+    #[command(visible_alias = "unify", visible_alias = "push")]
+    Distribute {
+        /// Optional skill name(s) to distribute immediately across all machines (defaults to all selected skills).
+        names: Vec<String>,
+        /// Source machine host (e.g. local, devbox, kamils-macbook-pro) or digest prefix to keep when versions differ.
+        #[arg(long = "from")]
+        from: Option<String>,
+    },
+    /// Delete a skill from all connected fleet machines (saving a backup in .hey-boss/skill-backups).
+    #[command(visible_alias = "rm", visible_alias = "remove")]
+    Delete {
+        /// Name of the skill to delete across all machines.
+        name: String,
     },
     /// Sync selected (or specified) skills across Codex (.codex), Claude (.claude), Agents (.agents), and optional SSH hosts.
     Sync {
@@ -85,13 +106,51 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
         ),
         SkillAction::Show => print!("{}", hey_boss::skill::MARKDOWN),
         SkillAction::Install => return install_skill(home, options.json),
-        SkillAction::List { project_dir } => {
+        SkillAction::List { project_dir, fleet } => {
+            if *fleet {
+                let report = hey_boss::skill::manager::scan_blocking()
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                if options.json {
+                    println!("{report}");
+                } else {
+                    print_fleet_skill_report(&report);
+                }
+                return Ok(());
+            }
             let cwd = project_dir.clone().or_else(|| std::env::current_dir().ok());
             let report = hey_boss::skill::audit_report(home, cwd.as_deref());
             if options.json {
                 println!("{report}");
             } else {
                 print_skill_audit(&report);
+            }
+        }
+        SkillAction::Scan => {
+            let report = hey_boss::skill::manager::scan_blocking()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            if options.json {
+                println!("{report}");
+            } else {
+                print_fleet_skill_report(&report);
+            }
+        }
+        SkillAction::Distribute { names, from } => {
+            let report = hey_boss::skill::manager::distribute_blocking(names, from.as_deref())
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            if options.json {
+                println!("{report}");
+            } else {
+                println!("{}", report["message"].as_str().unwrap_or("Distributed skills across fleet."));
+                print_fleet_skill_report(&report);
+            }
+        }
+        SkillAction::Delete { name } => {
+            let report = hey_boss::skill::manager::delete_blocking(name)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            if options.json {
+                println!("{report}");
+            } else {
+                println!("{}", report["message"].as_str().unwrap_or("Deleted skill across fleet."));
             }
         }
         SkillAction::Sync { names, hosts } => {
@@ -236,6 +295,68 @@ Project Skills:"
                 }
             }
         }
+    }
+}
+
+fn print_fleet_skill_report(report: &serde_json::Value) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let machines = report["machines"].as_array().cloned().unwrap_or_default();
+    let known_hosts: Vec<String> = machines
+        .iter()
+        .filter_map(|m| m["host"].as_str().map(str::to_owned))
+        .collect();
+    println!("Machines ({}):", known_hosts.len());
+    for m in &machines {
+        let host = m["host"].as_str().unwrap_or("?");
+        let state = m["state"].as_str().unwrap_or("?");
+        let copies = m["copies"]
+            .as_array()
+            .map(|a| a.iter().filter(|c| c["scope"] == "global").count())
+            .unwrap_or(0);
+        println!("  - {:<26} [{}] ({} copies)", host, state, copies);
+    }
+    let mut by_skill: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    for m in &machines {
+        let host = m["host"]
+            .as_str()
+            .unwrap_or("?")
+            .trim_end_matches(".local")
+            .to_owned();
+        for c in m["copies"].as_array().into_iter().flatten() {
+            if c["scope"] != "global" {
+                continue;
+            }
+            let name = c["name"].as_str().unwrap_or("?").to_owned();
+            let digest = c["digest"].as_str().unwrap_or("").to_owned();
+            let entry = by_skill.entry(name).or_default();
+            entry.0.insert(host.clone());
+            entry.1.insert(digest);
+        }
+    }
+    println!("\nFleet Skill Coverage ({} skills):", by_skill.len());
+    for (name, (hosts, digests)) in by_skill {
+        let on_all = known_hosts.len() > 1 && hosts.len() >= known_hosts.len();
+        let in_sync = digests.len() <= 1;
+        let tag = if on_all && in_sync {
+            "\x1b[32m[ALL MACHINES]\x1b[0m".to_owned()
+        } else if !in_sync {
+            format!(
+                "\x1b[31m[{} · {} versions]\x1b[0m",
+                hosts.into_iter().collect::<Vec<_>>().join(", "),
+                digests.len()
+            )
+        } else if hosts.len() <= 1 && known_hosts.len() > 1 {
+            format!(
+                "\x1b[31m[{}]\x1b[0m",
+                hosts.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            format!(
+                "\x1b[33m[{}]\x1b[0m",
+                hosts.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        };
+        println!("  {:<28} {}", name, tag);
     }
 }
 
