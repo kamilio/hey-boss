@@ -656,7 +656,7 @@ fn run() -> std::io::Result<()> {
         let worktrees = hey_boss::issues::worktree_ownership::declared_worktrees()
             .map_err(std::io::Error::other)?;
         if *json {
-            println!("{}", serde_json::json!({"version":1,"worktrees":worktrees}));
+            println!("{}", serde_json::json!({"version":2,"worktrees":worktrees}));
         } else {
             for worktree in worktrees {
                 println!("{}", worktree.display());
