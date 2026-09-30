@@ -44,7 +44,14 @@ pub(super) async fn poll(
         {
             // Required checks get three of every four admissions while both
             // lanes have work. Slow policies must not starve known completions.
-            let next = if !details.is_empty() && (required.is_empty() || policy_streak >= 3) {
+            let finishing_batch =
+                tokio::time::Instant::now() + Duration::from_secs(20) >= deadline;
+            let next = if !details.is_empty()
+                && (required.is_empty()
+                    || policy_streak >= 3
+                    || details.len() >= 2
+                    || finishing_batch)
+            {
                 details.pop_front()
             } else {
                 required.pop_front()
@@ -152,13 +159,16 @@ pub(super) async fn poll(
     // A batch can end before the detail lane runs; never leave an immortal
     // "fetching" record when required checks alone were collected.
     for task in details {
+        let now = crate::issues::worker::now();
+        schedule.defer_details(&task.url, now);
         Store::open(&ctx.path)?.finish_github_fetch(
             &task.url,
             task.started,
-            crate::issues::worker::now(),
+            now,
             schedule.next_at(&task.url),
             Some("Required checks fetched; details deferred to the next poll"),
         )?;
     }
+    ctx.atomic_json(path, &serde_json::to_value(&schedule)?)?;
     Ok(())
 }
