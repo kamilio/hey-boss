@@ -15,7 +15,13 @@ pub const AGENT_ROOTS: &[(&str, &str)] = &[
     ("agents", ".agents"),
     ("claude", ".claude"),
 ];
-pub const DEFAULT_SELECTED_SKILLS: &[&str] = &["hey-boss", "stacked-prs", "hey-gh", "stop-slop"];
+pub const DEFAULT_SELECTED_SKILLS: &[&str] = &[
+    "hey-boss",
+    "AGENTS.md",
+    "stacked-prs",
+    "hey-gh",
+    "stop-slop",
+];
 
 // Publish references before the entrypoint so its links already resolve.
 pub const FILES: &[(&str, &str)] = &[
@@ -111,11 +117,12 @@ pub fn set_selected_skills(home: &Path, selected: &[String]) -> io::Result<BTree
 }
 
 fn is_valid_skill_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    name == "AGENTS.md"
+        || (!name.is_empty()
+            && !name.starts_with('.')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
