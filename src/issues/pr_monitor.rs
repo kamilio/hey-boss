@@ -15,9 +15,34 @@ fn merged_tasks(db: &Connection) -> Result<Vec<(Project, i64)>> {
         .query_map([], |r| Ok((Project { id:r.get(0)?, name:r.get(1)? },r.get::<_,i64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub(super) fn merged_history(
+    db: &Connection,
+    project: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Value> {
+    let mut query = db.prepare("SELECT pr.url,max(pr.pr_title),min(pr.merged_at),min(pr.checked_at) FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND i.deleted_at IS NULL GROUP BY pr.url ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3")?;
+    let mut prs = query.query_map(params![project,i64::from(limit)+1,offset], |r| Ok(json!({"url":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"merged_at":r.get::<_,Option<i64>>(2)?,"observed_at":r.get::<_,Option<i64>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let more = prs.len() > limit as usize;
+    prs.truncate(limit as usize);
+    let mut links = db.prepare("SELECT i.number,i.title FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.url=?2 AND i.deleted_at IS NULL ORDER BY i.number")?;
+    for pr in &mut prs {
+        pr["issues"] = json!(
+            links
+                .query_map(params![project, pr["url"].as_str()], |r| Ok(
+                    json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?})
+                ))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        );
+    }
+    Ok(
+        json!({"pull_requests":prs,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
+    )
+}
+
 impl Store {
     pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<TrackedPullRequest>> {
-        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND i.state<>'closed' AND pr.status<>'merged' GROUP BY pr.url ORDER BY pr.url")?;
+        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.status='merged' AND pr.merged_at IS NULL)) GROUP BY pr.url ORDER BY pr.url")?;
         Ok(query
             .query_map([], |r| {
                 Ok(TrackedPullRequest {
@@ -37,6 +62,19 @@ impl Store {
         error: Option<&str>,
     ) -> Result<()> {
         self.db.execute("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE url=?1 AND status<>'merged' AND (checked_at IS NULL OR checked_at<=?3)", params![url,status,checked_at,error])?;
+        Ok(())
+    }
+
+    pub(crate) fn record_pr_merge_details(
+        &mut self,
+        url: &str,
+        title: &str,
+        merged_at: Option<&str>,
+        checked_at: i64,
+    ) -> Result<()> {
+        // Keep terminal status immutable, but allow historical merges to acquire
+        // their GitHub timestamp. Stale metadata never overwrites a newer read.
+        self.db.execute("UPDATE issue_pull_requests SET pr_title=?2,checked_at=max(coalesce(checked_at,0),?4),merged_at=coalesce(merged_at,CAST(strftime('%s',?3) AS INTEGER)*1000) WHERE url=?1 AND status='merged' AND (checked_at IS NULL OR checked_at<=?4) AND (pr_title IS NOT ?2 OR (merged_at IS NULL AND strftime('%s',?3) IS NOT NULL))",params![url,title,merged_at,checked_at])?;
         Ok(())
     }
 
@@ -100,6 +138,46 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merged_history_deduplicates_and_preserves_github_dates() {
+        let (mut store, _, root) = fixture();
+        let url = "https://github.com/o/r/pull/1";
+        store
+            .record_pr_status(url, Some("merged"), 2000, None)
+            .unwrap();
+        store
+            .record_pr_merge_details(url, "Ship it", Some("2026-09-29T23:30:00Z"), 2000)
+            .unwrap();
+        // A stale response cannot replace the title or move a merge to another day.
+        store
+            .record_pr_merge_details(url, "Old title", Some("2026-09-28T00:00:00Z"), 1000)
+            .unwrap();
+        store
+            .record_pr_status("https://github.com/o/r/pull/2", Some("merged"), 3000, None)
+            .unwrap();
+        let page = merged_history(&store.db, "named:test", 1, 0).unwrap();
+        assert_eq!(page["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(page["pull_requests"][0]["url"], url);
+        assert_eq!(page["pull_requests"][0]["title"], "Ship it");
+        assert_eq!(page["pull_requests"][0]["merged_at"], 1790724600000_i64);
+        assert_eq!(
+            page["pull_requests"][0]["issues"].as_array().unwrap().len(),
+            4
+        );
+        assert_eq!(page["next_offset"], 1);
+        let older = merged_history(&store.db, "named:test", 1, 1).unwrap();
+        assert!(older["pull_requests"][0]["merged_at"].is_null());
+        assert_eq!(older["pull_requests"][0]["observed_at"], 3000);
+        assert!(older["next_offset"].is_null());
+        assert!(
+            merged_history(&store.db, "another", 10, 0).unwrap()["pull_requests"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn fixture() -> (Store, Actor, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "hb-pr-monitor-{}",
@@ -290,6 +368,16 @@ mod tests {
         let prs = registry::pull_requests(&store.db, "named:test", 1).unwrap();
         assert_eq!(prs[0]["status"], "merged");
         assert!(prs[0]["error"].is_null());
+        assert!(
+            store
+                .tracked_pull_requests()
+                .unwrap()
+                .iter()
+                .any(|pr| pr.url == url)
+        );
+        store
+            .record_pr_merge_details(url, "Merged PR", Some("2026-09-29T23:30:00Z"), 30)
+            .unwrap();
         assert!(
             !store
                 .tracked_pull_requests()

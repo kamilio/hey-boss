@@ -234,6 +234,10 @@ pub enum Operation {
         #[serde(default)]
         include_hidden: bool,
     },
+    MergedPullRequests {
+        limit: u32,
+        offset: u32,
+    },
     HideProject,
     RestoreProject,
     Workers {
@@ -580,6 +584,7 @@ impl Operation {
         !matches!(
             self,
             Self::Projects { .. }
+                | Self::MergedPullRequests { .. }
                 | Self::Workers { .. }
                 | Self::PreviewWorker { .. }
                 | Self::GlobalSettings
@@ -617,6 +622,7 @@ impl Operation {
             | Self::Batch { .. }
             | Self::Mindmap { .. }
             | Self::Projects { .. }
+            | Self::MergedPullRequests { .. }
             | Self::HideProject
             | Self::RestoreProject
             | Self::Workers { .. }

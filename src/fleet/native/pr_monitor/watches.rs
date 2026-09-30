@@ -140,6 +140,16 @@ async fn poll_required(
         store
             .record_pr_status(url, status, timestamp(response.validated_at_ms)?, None)
             .map_err(storage)?;
+        if status == Some("merged") {
+            store
+                .record_pr_merge_details(
+                    url,
+                    response.data["title"].as_str().unwrap_or(""),
+                    response.data["merged_at"].as_str(),
+                    timestamp(response.validated_at_ms)?,
+                )
+                .map_err(storage)?;
+        }
         let mut actor = ctx
             .actor()
             .map_err(|error| hey_gh::Error::Invalid(error.to_string()))?;
