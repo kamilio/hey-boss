@@ -46,3 +46,10 @@
 .assignment-trace { margin: 8px 0 0; font-size: 12px; font-weight: 500; }
 .assignment-trace a { color: var(--accent); text-decoration: none; }
 .assignment-trace a:hover { text-decoration: underline; }
+.issue-work .issue-assignment select { min-height: 36px; padding: 6px 9px; font-size: 13px; }
+.issue-work .github-fetch-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; }
+.issue-work .github-fetch { flex: 1 1 110px; min-width: 0; }
+.issue-work .github-fetch + .github-fetch { flex-basis: 100%; margin-top: 0; }
+.issue-work .github-fetch-state { margin: 0; font-size: 12px; }
+.issue-work .github-fetch-now { margin: 0; min-height: 30px; padding: 4px 8px; font-size: 11px; }
+.issue-work .github-fetch .assignment-hint { margin: 2px 0 0; font-size: 10px; }

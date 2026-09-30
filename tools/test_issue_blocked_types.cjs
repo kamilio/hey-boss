@@ -29,6 +29,7 @@ assert.doesNotMatch(closedActions, /disabled/, 'Closed issues can reopen into de
 assert.match(context.issueStateActions(dependency), /disabled/, 'Reopen cannot bypass active dependencies');
 console.log('COMPLETE: closed issue reopening retains dependency protection');
 
+vm.runInContext(fs.readFileSync('src/issues/web/components.js', 'utf8'), context);
 context.esc = s => String(s ?? "");
 context.routeHash = () => "#test";
 const cardHtml = context.blockers.card({

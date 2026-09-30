@@ -262,5 +262,20 @@ function date(at) {
     }
 
   }
-  return {requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  function infoTip(id, label, text) {
+    return `<span class="info-tip"><button type="button" class="info-tip-button" popovertarget="${esc(id)}" aria-label="${esc(label)}" aria-describedby="${esc(id)}">${icon("info")}</button><span id="${esc(id)}" class="info-tip-content" popover role="tooltip">${esc(text)}</span></span>`;
+  }
+  if (typeof document !== "undefined") document.addEventListener("beforetoggle", event => {
+    const tip = event.target;
+    if (event.newState !== "open" || !tip.classList.contains("info-tip-content")) return;
+    const rect = tip.previousElementSibling.getBoundingClientRect();
+    const width = Math.min(260, window.innerWidth - 32);
+    tip.style.width = width + "px";
+    tip.style.left = Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16)) + "px";
+    const below = rect.bottom < window.innerHeight / 2;
+    tip.style.top = below ? rect.bottom + 6 + "px" : "auto";
+    tip.style.bottom = below ? "auto" : window.innerHeight - rect.top + 6 + "px";
+    tip.style.maxHeight = Math.max(80, (below ? window.innerHeight - rect.bottom : rect.top) - 22) + "px";
+  }, true);
+  return {infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();

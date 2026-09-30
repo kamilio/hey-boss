@@ -38,11 +38,15 @@
     if (a.kind === "agent") targets.unshift({id:"active", name:description.label, disabled:true});
     const options = targets.map(t => `<option value="${esc(t.id)}"${t.id === selected ? " selected" : ""}${t.disabled ? " disabled" : ""}>${esc(t.name)}</option>`).join("");
     const trace = a.actor && value.project?.id && issue.number ? '/agents/session#' + new URLSearchParams({project: value.project.id, issue: issue.number, agent: a.actor}) : null;
-    return `<div class="side-section issue-assignment"><label class="side-heading" for="issue-assignment">Assignment${helpers.icon(description.icon)}</label><select id="issue-assignment" data-assignment-select aria-describedby="assignment-detail"${editable ? "" : " disabled"}>${options}</select><p id="assignment-detail" class="assignment-detail">${esc(issue.draft ? "Mark ready before assigning this issue." : description.detail)}</p>${trace ? `<p class="assignment-trace"><a href="${esc(trace)}">Open agent conversation →</a></p>` : ""}${fetchOverview(issue)}${editable && !hasPr ? '<p class="assignment-hint">Attach a PR to enable the GitHub watcher.</p>' : ""}</div>`;
+    const help = [issue.draft ? "Mark ready before assigning." : description.detail,
+      a.kind === "github" ? "Fetch now runs on the next watcher cycle, subject to GitHub rate limits." : "",
+      editable && !hasPr ? "Attach a PR to enable the GitHub watcher." : ""].filter(Boolean).join(" ");
+    const detail = issue.attempt_hold ? "Pickup paused" : issue.draft ? "Draft" : a.actor ? description.detail : a.kind === "machine" ? "Waiting for an agent" : a.kind === "github" && !a.waiting && issue.state !== "closed" && !issue.deleted_at ? "Agent queued" : "";
+    return `<div class="side-section issue-assignment"><div class="side-heading"><label for="issue-assignment">Assignment</label>${HeyBossUI.infoTip("assignment-help", "About assignment", help)}</div><select id="issue-assignment" data-assignment-select aria-describedby="assignment-help"${editable ? "" : " disabled"}>${options}</select>${detail ? `<p class="assignment-detail">${esc(detail)}</p>` : ""}${trace ? `<p class="assignment-trace"><a href="${esc(trace)}">Agent conversation →</a></p>` : ""}${fetchOverview(issue)}</div>`;
   }
   function fetchTime(value) {
     const date = typeof value === "number" && value > 0 ? new Date(value) : null;
-    return date && Number.isFinite(date.getTime()) ? `<time datetime="${date.toISOString()}" data-absolute title="${esc(date.toLocaleString())}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit"}))}</time>` : "Not recorded yet";
+    return date && Number.isFinite(date.getTime()) ? `<time datetime="${date.toISOString()}" data-absolute title="${esc(date.toLocaleString())}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit"}))}</time>` : "";
   }
   function fetchOverview(issue) {
     if (current(issue).kind !== "github") return "";
@@ -56,10 +60,11 @@
       const queued = f.requested_at > (f.started_at || 0) || !!f.requested_at && !fetching;
       const error = f.error || snapshot.error;
       const delayed = f.next_at > now;
-      const label = !active ? "Monitoring stopped" : fetching ? "Fetching GitHub…" : queued ? "Fetch queued" : interrupted ? "Fetch interrupted; waiting to retry" : error ? "Fetch needs retry" : !f.finished_at ? "Waiting for first fetch" : "Watching checks and reviews";
-      return {busy:fetching || queued, html:`<div class="github-fetch"><p class="github-fetch-state" role="status">${prs.length > 1 ? link(pr.url, "PR #" + pr.url.split("/").filter(Boolean).pop()) + " · " : ""}${esc(label)}</p><p class="assignment-hint">Last fetch ${fetchTime(f.finished_at)}</p>${active && delayed ? `<p class="assignment-hint">${error || queued ? "Retry after" : "Next poll after"} ${fetchTime(f.next_at)}</p>` : ""}${error ? `<p class="github-status-error">${esc(error)}</p>` : ""}</div>`};
+      const label = !active ? "Monitoring stopped" : fetching ? "Fetching GitHub…" : queued ? "Fetch queued" : interrupted ? "Fetch interrupted" : error ? "Fetch needs retry" : !f.finished_at ? "Awaiting first fetch" : "Watching";
+      const lastFetch = fetchTime(f.finished_at);
+      return {busy:fetching || queued, html:`<div class="github-fetch"><p class="github-fetch-state" role="status">${prs.length > 1 ? link(pr.url, "PR #" + pr.url.split("/").filter(Boolean).pop()) + " · " : ""}${esc(label)}</p>${lastFetch ? `<p class="assignment-hint">Last fetch ${lastFetch}</p>` : ""}${active && delayed && (error || queued) ? `<p class="assignment-hint">Retry after ${fetchTime(f.next_at)}</p>` : ""}${error ? `<p class="github-status-error">${esc(error)}</p>` : ""}</div>`};
     });
-    return `<div class="github-fetch-overview">${rows.map(row => row.html).join("")}${active && prs.length ? `<button type="button" class="github-fetch-now" data-action="refresh_github"${rows.some(row => row.busy) ? " disabled" : ""}>Fetch now</button><p class="assignment-hint">Fetches on the next watcher cycle, subject to GitHub rate limits.</p>` : ""}</div>`;
+    return `<div class="github-fetch-overview">${rows.map(row => row.html).join("")}${active && prs.length ? `<button type="button" class="github-fetch-now" data-action="refresh_github"${rows.some(row => row.busy) ? " disabled" : ""}>Fetch now</button>` : ""}</div>`;
   }
   const checkState = state => ({failure:"Failed",satisfied:"Passed",success:"Passed",pending:"Running",missing:"Not reported",unknown:"Unknown",not_required:"No required checks"}[state] || state || "Unknown");
   function status(issue, helpers) {
@@ -67,6 +72,7 @@
     if (!watch && current(issue).kind !== "github") return "";
     const prs = Object.entries(watch?.prs || {}).sort(([a],[b]) => Number(b === watch?.trigger?.url) - Number(a === watch?.trigger?.url));
     const omittedPrs = Number.isSafeInteger(watch?.omitted_prs) && watch.omitted_prs > 0 ? `<p class="assignment-hint">${watch.omitted_prs} additional pull requests omitted from this summary. See the linked PRs for full details.</p>` : "";
+    if (!prs.length && !watch?.error && watch?.monitoring !== false && !omittedPrs) return "";
     const paused = watch?.monitoring === false ? `<p class="assignment-hint">${watch.stopped_reason === "no_open_pull_requests" ? "No open GitHub pull requests remain." : "Monitoring paused. Last recorded status:"}</p>` : "";
     const error = watch?.error ? `<p class="github-status-error" role="status"><strong>Status unavailable</strong><br>${esc(watch.error)}</p>` : "";
     const entries = prs.map(([url, snapshot]) => {
@@ -91,7 +97,7 @@
       const observed = date && Number.isFinite(date.getTime()) ? `<p class="github-observed">Observed <time datetime="${date.toISOString()}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}</time></p>` : "";
       return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}</h4><p class="github-check-summary${failed.length && !terminal && !changed ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${sourceErrors}${checks ? `<details><summary>${changed ? "Last recorded required checks" : "Required checks"}</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${summary}${observed}</article>`;
     }).join("");
-    return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries || (!error && !paused ? '<p class="assignment-detail">Waiting for the first GitHub status.</p>' : "")}${omittedPrs}</section>`;
+    return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries}${omittedPrs}</section>`;
   }
   function initWatcher({list, context, read, refresh, actorName, bossName, icon}) {
     if (document.querySelector(".github-watcher-dialog")) return;
