@@ -2067,11 +2067,13 @@ function prPurposeOptions(purpose = "unspecified") {
 }
 function renderCommits(issue, prsEnabled) {
   if (prsEnabled) return "";
-  return `<div class="side-section"><h2 class="side-heading">Commits${icon("code")}</h2><p class="field-help pr-purpose-help">Deduplicated commits and agent traces.</p><div class="pr-links commit-links">${(issue.commits || []).map((c) => {
+  const commits = issue.commits || [];
+  return `<details class="side-section commit-section"><summary class="commit-summary">${icon("code")}<span>Commits</span><span class="commit-count">${commits.length}</span><span class="commit-chevron" aria-hidden="true">›</span></summary><div class="commit-links">${[...commits].reverse().map((c) => {
     const short = c.short_sha || (c.sha || "").slice(0, 7);
     const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
-    return `<div class="pr-link commit-link"><div class="pr-link-heading"><a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(c.sha)}">${icon("code")} <code>${esc(short)}</code>${c.title ? ` <span>${esc(c.title)}</span>` : ""}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove commit ${esc(short)}" data-remove-commit="${esc(c.sha)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}</div>`;
-  }).join("") || "<p>No commits attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add commit-add"><summary>${icon("plus")}Attach a commit</summary><form id="commit-form"><label class="field-label" for="commit-ref">Commit SHA, HEAD, or URL</label><input class="text-input" id="commit-ref" type="text" required placeholder="HEAD or https://github.com/…/commit/…"><button class="button small" type="submit">Attach commit</button></form></details><p id="commit-error" class="form-error" role="alert" hidden></p>`}</div>`;
+    const label = [c.sha, c.title].filter(Boolean).join(" ");
+    return `<div class="commit-link"><a class="commit-target" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}"><code>${esc(short)}</code>${c.title ? `<span class="commit-title">${esc(c.title)}</span>` : ""}</a>${trace ? `<a class="icon-button commit-trace-link" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}${issue.deleted_at ? "" : `<button type="button" class="icon-button" title="Remove commit ${esc(short)}" aria-label="Remove commit ${esc(short)}" data-remove-commit="${esc(c.sha)}">${icon("x")}</button>`}</div>`;
+  }).join("") || "<p>No commits attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add commit-add"><summary>${icon("plus")}Attach a commit</summary><form id="commit-form"><label class="field-label" for="commit-ref">Commit SHA, HEAD, or URL</label><input class="text-input" id="commit-ref" type="text" required placeholder="HEAD or https://github.com/…/commit/…"><button class="button small" type="submit">Attach commit</button></form></details><p id="commit-error" class="form-error" role="alert" hidden></p>`}</details>`;
 }
 async function changeCommit(action, commit) {
   const project = model.project.id,
