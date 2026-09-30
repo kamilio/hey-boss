@@ -1,0 +1,18 @@
+const assert = require('node:assert/strict');
+const {library, visibleSkills, unresolved} = require('../src/issues/web/skills.js');
+const copy = (name,digest,agent='codex',scope='global') => ({name,digest,agent,scope,text:'Use git.',description:'Stacks',warnings:[]});
+const data = {machines:[{host:'laptop',state:'online',copies:[copy('stacked-prs','a'),copy('stacked-prs','a','claude')]},{host:'desktop',state:'attention',copies:[copy('stacked-prs','b'),copy('remote-only','c'),copy('local-task','p','agents','project')]}]};
+const skills = library(data);
+assert.equal(skills.length,3);
+const stack = skills.find(s=>s.name==='stacked-prs');
+assert.equal(stack.versions.length,2);
+assert.equal(stack.copies.length,3);
+assert.equal(stack.machines.length,2);
+assert.equal(skills.find(s=>s.name==='remote-only').copies[0].stale,true);
+assert.deepEqual(unresolved(skills,new Set(['stacked-prs']),{}),['stacked-prs']);
+assert.deepEqual(unresolved(skills,new Set(['stacked-prs']),{'stacked-prs':'b'}),[]);
+assert.deepEqual(unresolved(skills,new Set(['stacked-prs']),{'stacked-prs':'deleted'}),['stacked-prs']);
+assert.equal(visibleSkills(skills,'desktop','all',new Set()).length,2);
+assert.equal(visibleSkills(skills,'','selected',new Set(['stacked-prs'])).length,1);
+assert.equal(visibleSkills(skills,'','project',new Set()).length,1);
+console.log('Skill library aggregation, conflicts, stale copies, and filtering passed');

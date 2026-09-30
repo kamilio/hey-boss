@@ -528,6 +528,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     if request.method() == &Method::Get {
+        if path == "/api/skills" {
+            return json_response(crate::skill::manager::report()?);
+        }
         if path == "/api/admin/catalog" {
             static CATALOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
             if let Some(value) = CATALOG.get() {
@@ -552,6 +555,15 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             ));
         }
         let asset: Option<(&str, &[u8])> = match path.as_str() {
+            "/skills" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/skills.html"),
+            )),
+            "/skills.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/skills.js"),
+            )),
+            "/skills.css" => Some(("text/css; charset=utf-8", include_bytes!("web/skills.css"))),
             "/admin" => Some(("text/html; charset=utf-8", crate::admin::HTML.as_bytes())),
             "/admin.js" => Some((
                 "text/javascript; charset=utf-8",
@@ -688,7 +700,13 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         if let Some((kind, data)) = asset {
             if matches!(
                 path.as_str(),
-                "/" | "/issues" | "/mm" | "/workers" | "/agents" | "/agents/session" | "/artifacts"
+                "/" | "/issues"
+                    | "/mm"
+                    | "/workers"
+                    | "/agents"
+                    | "/agents/session"
+                    | "/artifacts"
+                    | "/skills"
             ) {
                 let issues = matches!(path.as_str(), "/" | "/issues");
                 let shell = include_str!("web/app-shell.html")
@@ -823,6 +841,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet/configuration",
             "/api/mm",
             "/api/admin/preview",
+            "/api/skills",
         ]
         .contains(&path.as_str())
     {
@@ -846,6 +865,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/skills" {
+            return json_response(crate::skill::manager::act(serde_json::from_slice(&bytes)?)?);
         }
         if path == "/api/admin/preview" {
             #[derive(Deserialize)]

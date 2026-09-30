@@ -230,16 +230,7 @@
           </p>
           <label class="workflow-toggle"><input type="checkbox" id="global-auto-close-prs" /><span>Close tasks when their fix PRs merge</span></label>
           <p class="field-help">Closes a task after every attached fix PR is merged. PR statuses keep updating when this is off.</p>
-          <div id="global-skills-section" class="skills-sync-section">
-            <div class="skills-sync-header">
-              <div>
-                <span class="field-label">Skill Repository &amp; Agent Sync</span>
-                <p class="field-help">Pick which skills sync across Codex (<code>.codex</code>), Claude (<code>.claude</code>), Agents (<code>.agents</code>), and fleet machines.</p>
-              </div>
-              <button type="button" class="button small" id="global-skills-sync-now">Sync selected skills</button>
-            </div>
-            <div id="global-skills-list" class="skills-audit-list" aria-label="Skills audit list"></div>
-          </div>
+          <a class="button skill-manager-link" href="/skills">Open skill manager →</a>
           <p
             id="global-settings-error"
             class="form-error"
