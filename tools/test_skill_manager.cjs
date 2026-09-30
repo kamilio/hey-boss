@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {library, visibleSkills, unresolved, computeDiff, diffFiles, getMarkdownFiles} = require('../src/issues/web/skills.js');
+const {library, visibleSkills, unresolved, computeDiff, diffFiles, getMarkdownFiles, machineCoverage, shortHost} = require('../src/issues/web/skills.js');
 const copy = (name,digest,agent='codex',scope='global',text='Use git.') => ({name,digest,agent,scope,text,description:'Stacks',warnings:[]});
 const data = {machines:[
   {host:'laptop',state:'online',copies:[copy('stacked-prs','a','codex','global','Line 1\nLine 2\nOld line\nLine 4'),copy('stacked-prs','a','claude','global','Line 1\nLine 2\nOld line\nLine 4'),copy('AGENTS.md','m1','codex','global','# Grand instructions\nAlways test.')]},
@@ -35,5 +35,28 @@ assert.equal(filesDiff.find(f=>f.path==='references/guide.md').status, 'modified
 assert.equal(filesDiff.find(f=>f.path==='references/guide.md').additions, 1);
 assert.equal(filesDiff.find(f=>f.path==='references/guide.md').deletions, 1);
 assert.equal(getMarkdownFiles({name:'AGENTS.md',text:'# Codex'})[0].path, 'AGENTS.md');
+
+const fleetMachines = [{host:'local'},{host:'devbox'},{host:'kamils-macbook-pro.local'}];
+const allSyncedCov = machineCoverage({machines:['local','devbox','kamils-macbook-pro.local'],versions:[{digest:'a'}]}, fleetMachines);
+assert.equal(allSyncedCov.allGreen, true);
+assert.equal(allSyncedCov.tone, 'green');
+assert.equal(allSyncedCov.tags.length, 1);
+assert.equal(allSyncedCov.tags[0].label, 'All machines');
+assert.equal(allSyncedCov.tags[0].tone, 'green');
+
+const partialCov = machineCoverage({machines:['local','devbox'],versions:[{digest:'a'}]}, fleetMachines);
+assert.equal(partialCov.allGreen, false);
+assert.equal(partialCov.tone, 'orange');
+assert.deepEqual(partialCov.tags.map(t=>t.label), ['local','devbox']);
+
+const singleMachineCov = machineCoverage({machines:['kamils-macbook-pro.local'],versions:[{digest:'a'}]}, fleetMachines);
+assert.equal(singleMachineCov.allGreen, false);
+assert.equal(singleMachineCov.tone, 'red');
+assert.deepEqual(singleMachineCov.tags.map(t=>t.label), ['kamils-macbook-pro']);
+
+const conflictAllCov = machineCoverage({machines:['local','devbox','kamils-macbook-pro.local'],versions:[{digest:'a'},{digest:'b'}]}, fleetMachines);
+assert.equal(conflictAllCov.allGreen, false);
+assert.equal(conflictAllCov.tone, 'red');
+assert.deepEqual(conflictAllCov.tags.map(t=>t.label), ['local','devbox','kamils-macbook-pro']);
 
 console.log('Skill library aggregation, GitHub diffing, multi-file Markdown, conflicts, and filtering passed');

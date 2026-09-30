@@ -14,11 +14,13 @@
     <section class="skills-library" aria-label="Skill library">
       <div class="skills-library-heading"><h2>Library <span id="library-count">0</span></h2><span class="skills-caption">SELECT TO DISTRIBUTE</span></div>
       <label class="skills-search"><span data-icon="search"></span><input id="skills-search" type="search" placeholder="Search skills or machines…" aria-label="Search skills or machines" autocomplete="off"><kbd>/</kbd></label>
-      <div id="skills-filters" class="skills-filters" role="group" aria-label="Filter skills"><button data-filter="all" aria-pressed="true">All skills</button><button data-filter="selected" aria-pressed="false">Selected</button><button data-filter="attention" aria-pressed="false">Needs attention</button><button data-filter="project" aria-pressed="false">Project</button></div>
+      <div id="skills-filters" class="skills-filters" role="group" aria-label="Filter skills"><button data-filter="all" aria-pressed="true">All skills</button><button data-filter="selected" aria-pressed="false">Selected</button><button data-filter="attention" aria-pressed="false">Needs attention</button></div>
       <div id="skills-list" class="skills-list"><div class="skills-empty"><span class="skills-loader"></span><h3>Gathering your toolkit</h3><p>Skills from each machine will appear here.</p></div></div>
     </section>
     <section id="skills-detail" class="skills-detail" aria-label="Skill inspector"><div class="skills-empty"><span data-icon="instructions"></span><h2>A home for your best instructions</h2><p>Choose a skill to compare copies, review compatibility, and select the version to distribute.</p></div></section>
   </div>
   <footer class="skills-actionbar"><div><strong id="selection-summary">Loading your library…</strong><p id="skills-status" role="status" aria-live="polite">Connecting to the skill manager</p></div><div class="skills-footer-actions"><button id="skills-reset" class="button" hidden>Discard changes</button><button id="skills-distribute" class="button primary" disabled><span data-icon="sync"></span>Distribute selected</button></div></footer>
   <p class="skills-footnote">Your selected versions go to Codex, Claude Code, and shared agent skill folders. Unselected skills stay where they are.</p>
-</main></body></html>
+</main>
+<dialog id="skill-delete-dialog" class="skill-delete-dialog" aria-labelledby="skill-delete-title" aria-describedby="skill-delete-description"></dialog>
+</body></html>
