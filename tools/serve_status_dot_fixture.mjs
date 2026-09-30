@@ -19,7 +19,7 @@ for(const [title,level,comment] of [
  ['Review a long update','orange','A'.repeat(500)],
  ['Keep status text safe','green','<img src=x onerror=alert(1)> & "quoted" status stays plain text.'],
 ]){
- const number=cli(['create','--title',title,'--body','Keep the work easy to follow.']).issue.number;
+ const number=cli(['create','--at-bottom','--title',title,'--body','Keep the work easy to follow.']).issue.number;
  if(level){cli(['claim',String(number)]);cli(['status',String(number),level,'--comment',comment]);}
 }
 const web=spawn(binary,['issue','--project',project.id,'web','--port','4798','--no-discovery','--json'],{env,stdio:['ignore','inherit','inherit']});

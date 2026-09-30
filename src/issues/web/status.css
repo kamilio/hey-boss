@@ -9,6 +9,8 @@
 .issue-progress-help{display:none;position:absolute;z-index:20;bottom:calc(100% + 8px);left:0;width:min(300px,calc(100vw - 72px));padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--solid);color:var(--text);box-shadow:0 4px 16px #0002;font-size:12px;font-weight:400;line-height:1.5;white-space:normal;overflow-wrap:anywhere}
 .issue-progress:not(.progress-help-dismissed):hover .issue-progress-help,.issue-progress:not(.progress-help-dismissed):focus .issue-progress-help{display:block}
 .issue-progress:hover,.issue-progress:focus{z-index:3}
+/* Let the active card escape large-list row paint containment and sibling rows. */
+.issue-row:has(.issue-progress:not(.progress-help-dismissed):is(:hover,:focus)){content-visibility:visible;z-index:3}
 .progress-help-below .issue-progress-help{bottom:auto;top:calc(100% + 8px)}
 .progress-help-below::after{bottom:auto;top:100%}
 .issue-progress-card{margin:0 0 20px;border:1px solid var(--line);border-radius:10px;background:var(--surface);overflow:hidden}
