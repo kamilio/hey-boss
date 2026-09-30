@@ -36,9 +36,20 @@ async page => {
   await page.screenshot({path:`output/playwright/issue94/${mode}-${theme}-${width}-tooltip.png`});
   await page.keyboard.press('Escape');check(!await help.isVisible(),'Escape dismisses tooltip');
   await page.locator('.issue-title').first().focus();check(!await help.isVisible(),'Moving focus closes tooltip');
+  // Large queues give rows paint containment; cards must escape neighboring rows.
+  await page.locator('#issue-list').evaluate(el=>el.classList.add('large-list'));
+  await first.hover();
+  const uncovered=el=>{const r=el.getBoundingClientRect();return [r.top+10,r.top+r.height/2,r.bottom-10].every(y=>[r.left+10,r.left+r.width/2,r.right-10].every(x=>el.contains(document.elementFromPoint(x,y))));};
+  check(await help.evaluate(uncovered),'Large-list hover card paints above neighboring rows');
+  await first.focus();await page.mouse.move(0,0);
+  check(await help.evaluate(uncovered),'Large-list keyboard card paints above neighboring rows');
+  await page.keyboard.press('Escape');
+  check(await first.evaluate(el=>getComputedStyle(el.closest('.issue-row')).contentVisibility)==='auto','Dismissed rows retain deferred layout');
+  await page.locator('.issue-title').first().focus();
   const long=page.locator('[data-issue-number="5"] .issue-progress');await long.hover();
   check((await long.locator('.issue-progress-help').textContent()).includes('A'.repeat(500)),'All 500 characters retained');
   check(await fits(long.locator('.issue-progress-help')),'Unbroken message wraps');
+  check(await long.locator('.issue-progress-help').evaluate(uncovered),'Long large-list status paints above adjacent rows');
   await page.screenshot({path:`output/playwright/issue94/${mode}-${theme}-${width}-long.png`});
   await page.mouse.move(0,0);await page.locator('[data-issue-number="6"] .issue-progress').hover();
   check(await page.locator('.issue-progress img').count()===0,'HTML-like message is escaped');
