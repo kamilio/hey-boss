@@ -113,6 +113,9 @@ impl Schedule {
             hey_gh::Error::GitHub {
                 status: 403 | 404, ..
             } => 1_800_000,
+            hey_gh::Error::Deadline | hey_gh::Error::QueueFull | hey_gh::Error::Invalid(_) => {
+                15_000 * (1_i64 << entry.failures.min(2))
+            }
             _ => 60_000 * (1_i64 << entry.failures.min(5)),
         };
         entry.attempted_at = now;
@@ -217,5 +220,21 @@ mod tests {
         );
         assert_eq!(restored.due(&prs, 661_000), vec!["b"]);
         assert!(restored.due(&prs, 2_401_000).contains(&"a".into()));
+    }
+
+    #[test]
+    fn deadline_and_stale_validation_errors_retry_quickly_instead_of_stalling_for_half_an_hour() {
+        let mut schedule = Schedule::default();
+        let prs = vec![pr("a", None, false)];
+        schedule.failure("a", 1_000, &hey_gh::Error::Deadline);
+        assert!(schedule.due(&prs, 30_999).is_empty());
+        assert_eq!(schedule.due(&prs, 31_000), vec!["a"]);
+        schedule.failure(
+            "a",
+            31_000,
+            &hey_gh::Error::Invalid("GitHub CI evidence is stale".into()),
+        );
+        assert!(schedule.due(&prs, 90_999).is_empty());
+        assert_eq!(schedule.due(&prs, 91_000), vec!["a"]);
     }
 }

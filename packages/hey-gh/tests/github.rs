@@ -2143,13 +2143,8 @@ async fn completed_jobs_reuse_verified_parent_versions_but_refresh_and_reruns_re
     h.phase(2);
     let client = h.client();
     let policy = Freshness::MaxAge(Duration::ZERO);
-    assert!(
-        client
-            .ci_for_pr("acme/demo", 7, policy)
-            .await
-            .unwrap()
-            .complete
-    );
+    let first = client.ci_for_pr("acme/demo", 7, policy).await.unwrap();
+    assert!(first.complete);
     let count = || {
         h.calls()
             .iter()
@@ -2157,12 +2152,20 @@ async fn completed_jobs_reuse_verified_parent_versions_but_refresh_and_reruns_re
             .count()
     };
     assert_eq!(count(), 1);
+    {
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        let stale = first.observed_at_ms.saturating_sub(600_000);
+        db.execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1,'$.fetched_at_ms',?1) WHERE key LIKE '%completed-jobs://%'",
+            [stale],
+        )
+        .unwrap();
+    }
+    let reused = client.ci_for_pr("acme/demo", 7, policy).await.unwrap();
+    assert!(reused.complete);
     assert!(
-        client
-            .ci_for_pr("acme/demo", 7, policy)
-            .await
-            .unwrap()
-            .complete
+        reused.oldest_validation_at_ms >= first.observed_at_ms,
+        "completed-jobs memo reuse must not taint oldest_validation_at_ms with its creation age"
     );
     assert_eq!(count(), 1);
     assert!(
