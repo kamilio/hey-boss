@@ -21,7 +21,7 @@ pub(crate) const MAX_ACTIVE_BUCKETS: usize = 3;
 
 pub(crate) type SharedResult = Option<Result<Arc<Response>>>;
 pub(crate) type Inflight =
-    Arc<Mutex<HashMap<String, (watch::Receiver<SharedResult>, Arc<AtomicBool>)>>>;
+    Arc<Mutex<HashMap<String, (watch::Receiver<SharedResult>, Arc<AtomicBool>, Arc<Mutex<Instant>>)>>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RateLimit {
@@ -82,7 +82,7 @@ pub(crate) struct Job {
     pub body: Option<serde_json::Value>,
     pub cached: Option<Response>,
     pub notify: watch::Sender<SharedResult>,
-    pub deadline: Instant,
+    pub deadline: Arc<Mutex<Instant>>,
     pub ready_at: Instant,
     pub attempts: u32,
     pub resource: String,
@@ -93,6 +93,12 @@ pub(crate) struct Job {
 // Details share core quota, but cannot hold its lifecycle/CI socket. Body reads
 // retain their lane; headers reach the scheduler before any body wait so quota
 // exhaustion and shared cooldowns take effect immediately.
+impl Job {
+    pub(crate) fn deadline(&self) -> Instant {
+        *self.deadline.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 struct Active {
     resource: String,
     detail_lane: bool,
@@ -160,6 +166,7 @@ impl Scheduler {
             self.metrics
                 .active
                 .store(active.len() as u64, Ordering::Relaxed);
+            tokio::task::yield_now().await;
             while let Ok(mut job) = rx.try_recv() {
                 if let Some(resource) = routes.get(&job.key) {
                     job.resource.clone_from(resource);
@@ -181,8 +188,8 @@ impl Scheduler {
             // Expiry is independent of quota availability, including exhausted
             // buckets whose next reset might be an hour away.
             if let Some(index) = pending.iter().position(|j| {
-                j.deadline <= now
-                    || ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline
+                j.deadline() <= now
+                    || ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline()
             }) {
                 let job = pending.remove(index).expect("existing queue entry");
                 let ready = ready(&job, &budgets, global_next.max(secondary_until));
@@ -244,7 +251,7 @@ impl Scheduler {
                 .timeout(
                     self.config
                         .request_timeout
-                        .min(job.deadline.saturating_duration_since(now)),
+                        .min(job.deadline().saturating_duration_since(now)),
                 );
                 if let Some(cache) = &job.cached
                     && job.body.is_none()
@@ -284,9 +291,9 @@ impl Scheduler {
                     if active.len() >= max_active || lane_busy(&active, job) {
                         // Busy lanes wake on completion; never spin on their old
                         // ready time. Their queued deadlines still expire on time.
-                        job.deadline
+                        job.deadline()
                     } else {
-                        ready(job, &budgets, global).min(job.deadline)
+                        ready(job, &budgets, global).min(job.deadline())
                     }
                 })
                 .min();
@@ -312,12 +319,12 @@ impl Scheduler {
                         Ok(r) => r,
                         Err(e) => {
                             tracing::warn!(request_id=%job.request_id,resource=%job.resource,attempt=job.attempts,timed_out=e.is_timeout(),"GitHub transport attempt failed");
-                            if Instant::now() >= job.deadline {
+                            if Instant::now() >= job.deadline() {
                                 self.finish(job, Err(Error::Deadline));
                                 continue;
                             }
                             if job.attempts < self.config.max_attempts
-                                && Instant::now() < job.deadline
+                                && Instant::now() < job.deadline()
                             {
                                 job.ready_at = Instant::now() + transient_backoff(job.attempts);
                                 pending.push_back(job);
@@ -520,7 +527,7 @@ impl Scheduler {
                 } else {
                     secondary_until = secondary_until.max(quota_deadline(wait));
                 }
-                if job.attempts >= self.config.max_attempts || quota_deadline(wait) >= job.deadline
+                if job.attempts >= self.config.max_attempts || quota_deadline(wait) >= job.deadline()
                 {
                     self.finish(
                         job,

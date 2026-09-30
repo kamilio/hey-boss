@@ -161,12 +161,17 @@ impl Client {
             let merge = pr.data["merge_commit_sha"]
                 .as_str()
                 .filter(|sha| crate::repository::valid_sha(sha));
-            let ci = self
-                .required_ci_report(repository, head, merge, freshness)
-                .await?;
-            let mut errors = ci.errors.clone();
             let branch_path = format!("repos/{repository}/branches/{}", segment(&base));
-            let branch = self.get(&branch_path, freshness).await;
+            let protection_path = format!("{branch_path}/protection/required_status_checks");
+            let rules_path = format!("repos/{repository}/rules/branches/{}", segment(&base));
+            let (ci_res, branch, protection_res, rules_first_res) = tokio::join!(
+                self.required_ci_report(repository, head, merge, freshness),
+                self.get(&branch_path, freshness),
+                self.policy_get(&protection_path, freshness),
+                self.policy_get(&rules_path, freshness),
+            );
+            let ci = ci_res?;
+            let mut errors = ci.errors.clone();
             if let Ok(branch) = &branch
                 && !branch.data["commit"]["sha"]
                     .as_str()
@@ -189,13 +194,7 @@ impl Client {
             }
             let mut requirements = BTreeSet::new();
             let mut strict = false;
-            match self
-                .policy_get(
-                    &format!("{branch_path}/protection/required_status_checks"),
-                    freshness,
-                )
-                .await
-            {
+            match protection_res {
                 Ok(r) => {
                     if !r.data["strict"].is_boolean()
                         || (!r.data["contexts"].is_array() && !r.data["checks"].is_array())
@@ -240,8 +239,7 @@ impl Client {
                 }) if protected == Some(false) || message == "Branch not protected" => {}
                 Err(e) => errors.push(source("branch_protection", e)),
             }
-            let rules_path = format!("repos/{repository}/rules/branches/{}", segment(&base));
-            let rules_result = match self.policy_get(&rules_path, freshness).await {
+            let rules_result = match rules_first_res {
                 Ok(first) if first.link.is_none() && first.data.is_array() => {
                     Ok(first.data.as_array().cloned().unwrap_or_default())
                 }
@@ -353,11 +351,14 @@ impl Client {
             } else {
                 "satisfied"
             };
-            let final_pr = if matches!(freshness, Freshness::CachedOnly) {
-                pr.clone()
+            let (final_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
+                (pr.clone(), None)
             } else {
-                self.pull_request(repository, number, Freshness::Revalidate)
-                    .await?
+                let (pr_res, branch_res) = tokio::join!(
+                    self.pull_request(repository, number, Freshness::Revalidate),
+                    self.get(&branch_path, Freshness::Revalidate),
+                );
+                (pr_res?, Some(branch_res))
             };
             if pr.data["node_id"] != final_pr.data["node_id"]
                 || pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
@@ -366,8 +367,7 @@ impl Client {
             {
                 continue;
             }
-            if !matches!(freshness, Freshness::CachedOnly) {
-                let confirmed = self.get(&branch_path, Freshness::Revalidate).await;
+            if let Some(confirmed) = confirmed_opt {
                 if let (Ok(before), Ok(after)) = (&branch, &confirmed) {
                     if before.data["commit"]["sha"] != after.data["commit"]["sha"] {
                         continue;
