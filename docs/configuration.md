@@ -1,6 +1,6 @@
 # Configuration
 
-The default file is `~/.hey-proxy/config.json`. Use `--config PATH` for another file. First run and `--init` create a missing minimal file with private permissions on Unix; neither overwrites an existing config.
+The default file is `~/.hey-proxy/config.json`. Use `--config PATH` for another file. First run and `--init` create a missing minimal file with private permissions on Unix. `--init` validates an existing config without changing it; normal startup encrypts literal credentials as described below.
 
 OpenAI is the default provider for unprefixed model names on `/v1/responses`. Prefix a model with `gemini/` to use Gemini conversion. `openai/` is an optional explicit prefix. Gemini's native endpoints use the configured Gemini provider directly.
 
@@ -29,6 +29,18 @@ Give each credential a project name, then select a project in an alias:
 An alias's `api_key` is the project name, never the key itself. A reasoning route can also specify `api_key`; it takes precedence over the alias's project. Gemini uses its own provider authentication.
 
 `providers.openai.upstream_url` defaults to `https://api.openai.com`. Set it to a compatible API's service root if needed. `providers.openai.credential_cache_seconds` and `providers.gemini.credential_cache_seconds` control command-result caching; each defaults to 2400 seconds. Native ADC manages its own token refresh.
+
+## Encrypted credentials
+
+Normal startup, credential hot reload, and remote installation automatically replace literal OpenAI, Gemini, and client connection keys with opaque fields:
+
+```json
+"api_keys": {"default": {"encrypted": "v1:..."}}
+```
+
+To encrypt an existing config without starting the service, run `hey-proxy encrypt-config` (or add `--config PATH`). `sh://` and `op://` references stay as references. To change a key, replace its encrypted object with the new literal string; the proxy encrypts it when the config reloads.
+
+Each config uses a separate private key file, such as `config.credentials.key`, with owner-only permissions. Keep that file with the config when moving or backing it up. This keeps API keys out of ordinary config inspection; a process running as the same user can still decrypt them. Migration replaces the config atomically without creating a plaintext backup.
 
 ## API-specific overwrites
 
@@ -60,6 +72,8 @@ Persistent request metadata is enabled by default. To disable it:
 ```
 
 The default database is `requests.sqlite3` beside the proxy config. Use `logging.database` to change its path. Prompts, payloads, credentials, and raw error messages are excluded from this history. Retention does not automatically delete old records.
+
+Database initialization, recovery, and writes run on a dedicated background thread. Startup and forwarded requests do not wait for SQLite; request events enter a bounded, nonblocking queue and are written in batches. Historical queries read the database only when requested. While the database initializes or is unavailable, the proxy keeps serving and the dashboard can show recent requests from memory. `/logs/api/health` reports initialization, errors, and dropped events if persistence cannot keep up.
 
 ## Remote setup
 

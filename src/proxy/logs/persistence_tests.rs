@@ -269,6 +269,49 @@ async fn restart_preserves_completed_records_marks_unfinished_and_uses_new_ids()
 }
 
 #[tokio::test]
+async fn database_initialization_failure_keeps_proxy_available_and_counts_lost_events() {
+    let dir = tempfile::tempdir().unwrap();
+    // A regular file cannot contain the logging database directory.
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"synthetic obstacle").unwrap();
+    let mut config = Config::test_fixture();
+    config.logging.database = Some(
+        blocked
+            .join("requests.sqlite3")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let store = Arc::new(Store::open(&config, &dir.path().join("config.json")).unwrap());
+    let id = store.begin("POST", "/v1/responses", "HTTP");
+    store.complete(id, "succeeded", "test", None, 0);
+    assert!(store.flush().await.is_err());
+    let db = store.database.as_ref().unwrap();
+    let health = db.health();
+    assert_eq!(health["status"], "error");
+    assert_eq!(health["pending_events"], 0);
+    assert_eq!(health["dropped_events"], health["enqueued_events"]);
+    assert!(health["dropped_events"].as_u64().unwrap() > 0);
+    assert!(db.read(|_| Ok(())).await.is_err());
+
+    let app = router_with(
+        config,
+        Options {
+            logs: Some(store),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let (url, task) = serve(app).await;
+    let response = reqwest::get(format!("{url}/logs/api?local=true"))
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
 async fn writer_lock_and_queue_saturation_never_block_forwarding_and_gaps_are_visible() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::test_fixture();

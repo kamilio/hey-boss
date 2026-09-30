@@ -752,6 +752,12 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
 /// Reads and validates an existing config without creating one.
 pub fn load(path: &Path) -> Result<Config> {
     let content = fs::read(path).context("Cannot read config")?;
+    // Rollout checks a plaintext candidate through a pipe, without putting its
+    // credentials in a staging file. Linux /dev/stdin resolves to a procfs pipe
+    // descriptor, which canonicalize cannot follow to a filesystem path.
+    if path == Path::new("/dev/stdin") {
+        return parse(&content, path);
+    }
     // Resolve symlinks so the key belongs to the actual config file.
     let path = fs::canonicalize(path).context("Cannot locate config")?;
     parse(&content, &path)
@@ -848,6 +854,49 @@ mod tests {
             protected.gemini.as_ref().unwrap().api_key
         );
     }
+    #[test]
+    fn encrypted_credentials_are_stable_and_reject_missing_keys_or_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let raw = serde_json::json!({
+            "listen": "127.0.0.1:8080",
+            "mode": "client",
+            "connection": {"url": "http://localhost:8081", "api_key": "synthetic-host-key"}
+        });
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        protect(&path).unwrap();
+        let encrypted = fs::read(&path).unwrap();
+        protect(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), encrypted);
+        assert_eq!(
+            load(&path).unwrap().connection.unwrap().api_key,
+            "synthetic-host-key"
+        );
+
+        let mut damaged: serde_json::Value = serde_json::from_slice(&encrypted).unwrap();
+        let ciphertext = damaged["connection"]["api_key"]["encrypted"]
+            .as_str()
+            .unwrap();
+        let mut ciphertext = ciphertext.as_bytes().to_vec();
+        // Alter the nonce while preserving a valid version and base64 encoding.
+        ciphertext[3] = if ciphertext[3] == b'A' { b'B' } else { b'A' };
+        damaged["connection"]["api_key"]["encrypted"] =
+            String::from_utf8(ciphertext).unwrap().into();
+        fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
+        assert!(load(&path).is_err());
+        assert!(protect(&path).is_err());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
+            damaged
+        );
+
+        fs::write(&path, &encrypted).unwrap();
+        fs::remove_file(path.with_extension("credentials.key")).unwrap();
+        assert!(protect(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), encrypted);
+        assert!(!path.with_extension("credentials.key").exists());
+    }
+
     #[test]
     fn creates_private_config_and_preserves_edits() {
         let dir = tempfile::tempdir().unwrap();
