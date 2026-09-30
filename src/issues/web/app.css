@@ -2123,6 +2123,47 @@ dialog::backdrop {
 .commit-trace-row {
   margin-top: 4px;
 }
+.commit-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.commit-summary::-webkit-details-marker { display: none; }
+.commit-summary > svg { width: 14px; height: 14px; }
+.commit-chevron { margin-left: auto; transform: rotate(90deg); }
+.commit-section[open] > .commit-summary > .commit-chevron { transform: rotate(270deg); }
+.commit-count { font-size: 11px; font-weight: 400; }
+.commit-links {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.commit-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line);
+}
+.commit-link:last-child { border-bottom: 0; }
+.commit-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.commit-target code { flex: none; font-size: 11px; }
+.commit-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-link .icon-button { flex: none; width: 28px; height: 28px; padding: 5px; }
+.commit-section .commit-add { margin-top: 6px; }
 #commit-form .button {
   margin-top: 8px;
 }
