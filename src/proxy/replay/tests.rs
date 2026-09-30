@@ -42,6 +42,38 @@ fn only_foreign_reasoning_at_the_responses_input_boundary_is_removed() {
     }
 }
 
+#[test]
+fn gemini_item_ids_are_dropped_when_a_thread_moves_to_openai() {
+    let hex = "20f22b2775b9994b15d85c7f315f9aa8";
+    let mut request = json!({"model":"ultima-alpha","input":[
+        {"type":"custom_tool_call","id":format!("fc_{hex}_2"),"call_id":"call_1","name":"apply_patch","input":"*** Begin Patch"},
+        {"type":"custom_tool_call_output","call_id":"call_1","output":"ok"},
+        {"type":"function_call","id":format!("fc_{hex}_0_1"),"call_id":"call_2","name":"exec_command","arguments":"{}"},
+        {"type":"message","id":format!("msg_{hex}_3"),"role":"assistant","content":[{"type":"output_text","text":"done"}]},
+        {"type":"function_call","id":"fc_68d1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7","call_id":"call_3","name":"exec_command","arguments":"{}"},
+        {"type":"message","id":format!("msg_{hex}"),"role":"assistant","content":[]}
+    ]});
+    assert!(for_openai("/v1/responses", &mut request));
+    let ids: Vec<_> = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.get("id").cloned())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            None,
+            None,
+            None,
+            None,
+            Some(json!("fc_68d1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7")),
+            Some(json!(format!("msg_{hex}")))
+        ]
+    );
+    assert!(!for_openai("/v1/responses", &mut request));
+}
+
 struct Server {
     url: String,
     task: tokio::task::JoinHandle<()>,
@@ -173,6 +205,7 @@ async fn review_preserves_policy_action_and_routing_for_allow_and_deny() {
         let mut expected = request.clone();
         expected["model"] = json!("review-model");
         expected["input"].as_array_mut().unwrap().remove(1);
+        expected["input"][1].as_object_mut().unwrap().remove("id");
         assert_eq!(*actual, expected);
         assert_eq!(headers["authorization"], "Bearer synthetic-codex");
         assert_eq!(headers["x-codex-guardian"], "reviewer");
@@ -240,7 +273,9 @@ async fn native_openai_errors_are_preserved_without_retry_or_fallback() {
         );
         let records = seen.lock().unwrap();
         assert_eq!(records.len(), before + 1);
-        assert_eq!(records.last().unwrap().2["input"], invalid["input"]);
+        let mut expected = invalid["input"].clone();
+        expected[2].as_object_mut().unwrap().remove("id");
+        assert_eq!(records.last().unwrap().2["input"], expected);
     }
 }
 

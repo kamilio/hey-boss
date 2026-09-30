@@ -124,7 +124,7 @@ pub(crate) fn output_items(
                     "status":"completed","call_id":if execution == "client" {json!(call_id)} else {Value::Null},"arguments":args}));
                 continue;
             }
-            let mut item = json!({"id":format!("fc_{id}_{index}"),"type":if tool.custom {"custom_tool_call"} else {"function_call"},"status":"completed","call_id":call_id,"name":tool.name});
+            let mut item = json!({"id":format!("{}_{id}_{index}",if tool.custom {"ctc"} else {"fc"}),"type":if tool.custom {"custom_tool_call"} else {"function_call"},"status":"completed","call_id":call_id,"name":tool.name});
             if let Some(namespace) = &tool.namespace {
                 item["namespace"] = json!(namespace);
             }
