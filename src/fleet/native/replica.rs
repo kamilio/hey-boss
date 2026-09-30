@@ -216,6 +216,8 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
                 ("status", json!("unknown")),
                 ("checked_at", Value::Null),
                 ("error", Value::Null),
+                ("merged_at", Value::Null),
+                ("pr_title", Value::Null),
             ]
         } else {
             vec![("auto_close_merged_prs", json!(1))]
@@ -548,6 +550,8 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             ("status", json!("unknown")),
             ("checked_at", Value::Null),
             ("error", Value::Null),
+            ("merged_at", Value::Null),
+            ("pr_title", Value::Null),
         ] {
             let current = old.get(column).cloned().unwrap_or(default);
             for row in [&mut before, &mut after] {
@@ -3632,7 +3636,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'fix','merged',456)",[]).unwrap();
+        main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at,merged_at,pr_title) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'fix','merged',456,400,'Ship it')",[]).unwrap();
         main.db
             .execute("UPDATE global_settings SET auto_close_merged_prs=0", [])
             .unwrap();
@@ -3648,6 +3652,8 @@ mod tests {
         let pr = &rows(&agent.db, "SELECT * FROM issue_pull_requests", &[]).unwrap()[0];
         assert_eq!(pr["status"], "merged");
         assert_eq!(pr["checked_at"], 456);
+        assert_eq!(pr["merged_at"], 400);
+        assert_eq!(pr["pr_title"], "Ship it");
         assert_eq!(
             rows(
                 &agent.db,
@@ -3658,10 +3664,13 @@ mod tests {
             0
         );
         let mut legacy = pr.clone();
-        for key in ["status", "checked_at", "error"] {
+        for key in ["status", "checked_at", "error", "merged_at", "pr_title"] {
             legacy.as_object_mut().unwrap().remove(key);
         }
         put_row(&agent.db, "issue_pull_requests", &legacy).unwrap();
+        let restored = &rows(&agent.db, "SELECT * FROM issue_pull_requests", &[]).unwrap()[0];
+        assert_eq!(restored["merged_at"], 400);
+        assert_eq!(restored["pr_title"], "Ship it");
         assert_eq!(
             rows(&agent.db, "SELECT status FROM issue_pull_requests", &[]).unwrap()[0]["status"],
             "merged"

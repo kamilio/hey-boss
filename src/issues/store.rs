@@ -150,6 +150,8 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ),
     ("issue_pull_requests", "checked_at", "INTEGER"),
     ("issue_pull_requests", "error", "TEXT"),
+    ("issue_pull_requests", "merged_at", "INTEGER"),
+    ("issue_pull_requests", "pr_title", "TEXT"),
     (
         "issue_pull_requests",
         "purpose",
@@ -781,7 +783,8 @@ fn validate(r: &Request) -> Result<()> {
             }
         }
         Operation::Status { comment, .. } => status::validate(comment)?,
-        Operation::History { limit, .. }
+        Operation::MergedPullRequests { limit, .. }
+        | Operation::History { limit, .. }
         | Operation::StatusHistory { limit, .. }
         | Operation::Comments { limit, .. } => page(*limit)?,
         _ => {}
@@ -1262,6 +1265,9 @@ impl Store {
         super::commits::migrate(&db)?;
         steering::migrate(&db)?;
         assignments::migrate(&db)?;
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_pr_merged_history' AND type='index')", [], |r|r.get::<_,bool>(0))? {
+            db.execute_batch("CREATE INDEX issue_pr_merged_history ON issue_pull_requests(project_id,status,url,merged_at)")?;
+        }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
@@ -1711,6 +1717,9 @@ impl Store {
             )?,
             Operation::WorkerPreview { .. } | Operation::WorkerRun { .. } => {
                 workers::execute(&tx, &project, &r.operation, now)?
+            }
+            Operation::MergedPullRequests { limit, offset } => {
+                pr_monitor::merged_history(&tx, &project.id, *limit, *offset)?
             }
             Operation::Projects { include_hidden } => {
                 let mut query = tx.prepare("SELECT p.id,p.name,

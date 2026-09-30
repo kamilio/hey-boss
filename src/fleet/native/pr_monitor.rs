@@ -209,6 +209,14 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
                         None
                     },
                 )?;
+                if status == Some("merged") {
+                    store.record_pr_merge_details(
+                        &url,
+                        data["title"].as_str().unwrap_or(""),
+                        data["merged_at"].as_str(),
+                        checked_at,
+                    )?;
+                }
                 if let Some(status) = status {
                     schedule.success(
                         &url,
