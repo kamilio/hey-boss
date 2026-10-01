@@ -146,6 +146,9 @@ enum Action {
         id: String,
         #[arg(long)]
         body: String,
+        /// Override the agent comment limit of 2 lines and 300 characters.
+        #[arg(long)]
+        allow_long_comment: bool,
         #[arg(long)]
         quote: Option<String>,
         #[arg(long)]
@@ -308,9 +311,11 @@ pub fn run(options: &Options) -> Result<()> {
             body,
             quote,
             parent,
+            allow_long_comment,
         } => Operation::Comment {
             id: id.clone(),
             body: body.clone(),
+            allow_long_comment: *allow_long_comment,
             quote: quote.clone(),
             prefix: None,
             suffix: None,

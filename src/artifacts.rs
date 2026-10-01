@@ -47,6 +47,8 @@ pub enum Operation {
     Comment {
         id: String,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_long_comment: bool,
         quote: Option<String>,
         prefix: Option<String>,
         suffix: Option<String>,
@@ -180,6 +182,7 @@ impl Operation {
                 prefix,
                 suffix,
                 parent,
+                ..
             } => {
                 identifier(id, "artifact ID", 128)?;
                 text(body)?;

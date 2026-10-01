@@ -10,6 +10,42 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn agent_comment_cli_rejects_long_text_and_preserves_explicit_overrides() {
+    let f = Fixture::new();
+    f.create();
+    let text = "Long investigation detail. ".repeat(30);
+    let error = f.fail("session-a", &["comment", "1", "--body", &text], 2);
+    assert_eq!(error["error"]["code"], "comment_too_long");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--allow-long-comment")
+    );
+    assert_eq!(f.run("reader", &["view", "1"])["comment_count"], 0);
+    let args = [
+        "comment",
+        "1",
+        "--body",
+        &text,
+        "--allow-long-comment",
+        "--request-id",
+        "long-comment",
+    ];
+    let saved = f.run("session-a", &args);
+    assert_eq!(f.run("session-a", &args)["comment_id"], saved["comment_id"]);
+    f.run("human:boss", &["comment", "1", "--body", &text]);
+    for action in ["block", "close"] {
+        f.fail("session-a", &[action, "1", "--comment", &text], 2);
+        f.run(
+            "session-a",
+            &[action, "1", "--comment", &text, "--allow-long-comment"],
+        );
+    }
+    assert_eq!(f.run("reader", &["view", "1"])["comment_count"], 4);
+}
+
+#[test]
 fn overlong_issue_titles_split_without_losing_content() {
     let f = Fixture::new();
     let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
@@ -1917,7 +1953,10 @@ fn large_markdown_is_complete_and_history_pages_make_progress() {
     let body = vec![0_u8; 1024 * 1024];
     success(f.stdin(&["create", "--title", "Large", "--body", "-"], &body));
     for _ in 0..3 {
-        success(f.stdin(&["comment", "1", "--body", "-"], &body));
+        success(f.stdin(
+            &["comment", "1", "--body", "-", "--allow-long-comment"],
+            &body,
+        ));
     }
     let view = f.run("reader", &["view", "1"]);
     assert_eq!(view["issue"]["body"].as_str().unwrap().as_bytes(), body);
@@ -1973,7 +2012,10 @@ fn issue_comments_keep_resolution_and_advance_through_large_bodies() {
     f.create();
     let body = vec![0_u8; 1024 * 1024];
     for _ in 0..3 {
-        success(f.stdin(&["comment", "1", "--body", "-"], &body));
+        success(f.stdin(
+            &["comment", "1", "--body", "-", "--allow-long-comment"],
+            &body,
+        ));
     }
     let first = f.run("reader", &["comments", "1"]);
     let id = first["comments"][0]["id"].as_i64().unwrap().to_string();
