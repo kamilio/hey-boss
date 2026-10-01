@@ -74,9 +74,12 @@ fn permission_denied(error: &rusqlite::Error) -> bool {
 fn connection_error(source: std::io::Error) -> rusqlite::Error {
     let message = if source.kind() == std::io::ErrorKind::PermissionDenied {
         format!(
-            "Database service access denied: {source}. A sandbox or OS permission may block the local socket. \
-             Retry hey-boss as a standalone command without pipes or redirection; if still denied, request approval for that command. \
-             Compact reads: issue list --limit 20 (text), or mm show --bodies none."
+            "Database service access denied: {source}.\n\
+             A sandbox or OS permission may block the local socket.\n\
+             Retry hey-boss as a standalone command without pipes or redirection.\n\
+             If still denied, request approval for that command.\n\
+             Compact reads: hey-boss issue list --limit 20 (text)\n\
+             or hey-boss mm show --bodies none."
         )
     } else {
         format!("Database service unavailable: {source}")
