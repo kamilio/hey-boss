@@ -352,6 +352,7 @@
         </div>
         <div class="project-settings-body">
           <div id="settings-panel-instructions" role="tabpanel" aria-labelledby="settings-tab-instructions" tabindex="0">
+<div id="project-layout-prompts"></div>
 <section class="settings-section" aria-labelledby="settings-base-title">
               <h3 id="settings-base-title">Implementation</h3>
               <p class="field-help" id="project-prompt-live-help">Saving prompt edits also updates running agents that use these instructions, including connected devices. They keep their progress and session. Workspace and delivery instructions are added automatically.</p>
@@ -359,6 +360,7 @@
               <textarea class="text-input" id="project-prompt" rows="3" required maxlength="32000" aria-describedby="project-prompt-live-help"></textarea>
               <p class="field-help">{{issue_command}} retrieves the issue. Use {{number}} for its number. Start with /goal to enable a goal. {{create_issue_command poe-code}} creates an issue in poe-code.</p>
             </section>
+<details class="settings-section"><summary>Task context sections</summary><p class="field-help">Edit section wording here; arrange or omit sections in Prompt sequence above. Use {{number}}, {{project}}, and shell-quoted {{project_arg}} for task values.</p><div id="project-context-prompts"></div></details>
           </div>
           <div id="settings-panel-planning" role="tabpanel" aria-labelledby="settings-tab-planning" tabindex="0" hidden>
 <section class="settings-section" aria-labelledby="settings-plan-title">
@@ -396,6 +398,7 @@
   <div class="branch-footer"><span id="project-source-prs">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="prs">Use default</button></div></div><div class="workflow-branch" data-branch="main"><div class="branch-heading"><label for="project-prompt-main"><small>Otherwise</small><strong>Push to main</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-main" rows="3" maxlength="32000" aria-describedby="project-source-main"></textarea>
   <div class="branch-footer"><span id="project-source-main">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="main">Use default</button></div></div></div></section>
+<details class="settings-section"><summary>Live updates and continuation</summary><div id="project-runtime-prompts"></div></details>
           </div>
           <div id="settings-panel-chief" role="tabpanel" aria-labelledby="settings-tab-chief" tabindex="0" hidden>
 <section class="settings-section chief-settings" aria-labelledby="settings-chief-title">
@@ -409,6 +412,7 @@
                 <button class="button" id="project-chief-run" type="button">Run Chief now</button>
                 <p class="field-help" id="project-chief-run-status" role="status"></p>
               </details>
+              <div id="project-chief-context-prompts"></div>
               <details id="project-chief-instructions" open><summary>Chief instructions</summary>
                 <label class="field-label" for="project-chief-prompt">Organizing prompt</label>
                 <textarea class="text-input" id="project-chief-prompt" rows="7" maxlength="32000" required aria-describedby="project-chief-prompt-help"></textarea>
