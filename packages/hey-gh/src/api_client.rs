@@ -25,6 +25,16 @@ pub struct ApiClient {
     background: bool,
 }
 impl ApiClient {
+    /// Authenticated GitHub identity, using the shared daemon cache.
+    pub async fn viewer(&self, freshness: Freshness) -> Result<crate::Response> {
+        self.read(
+            self.http
+                .get(self.url("v1/viewer"))
+                .query(&self.pr_query(freshness)?),
+        )
+        .await
+    }
+
     /// Lightweight lifecycle metadata, sharing the daemon cache and quota queue.
     /// Does not hydrate CI/comments/reviews or register a background watch.
     pub async fn pull_request(

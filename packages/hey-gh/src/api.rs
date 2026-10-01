@@ -87,6 +87,7 @@ impl Api {
     pub fn router_with_auth(&self, token: Option<String>) -> Router {
         Router::new()
             .route("/v1/status", get(status))
+            .route("/v1/viewer", get(viewer))
             .route("/v1/pr-status", get(pr_status))
             .route("/v1/prs/{owner}/{repo}", get(my_prs))
             .route("/v1/prs/{owner}/{repo}/{number}", get(pr))
@@ -685,6 +686,17 @@ async fn pr(
             .await?,
     ))
 }
+async fn viewer(
+    State(api): State<Api>,
+    Query(query): Query<ReadQuery>,
+) -> ApiResult<Json<crate::Response>> {
+    Ok(Json(
+        query
+            .run(api.0.client.get("user", query.freshness()?))
+            .await?,
+    ))
+}
+
 async fn pr_metadata(
     State(api): State<Api>,
     Path((owner, repo, number)): Path<(String, String, u64)>,

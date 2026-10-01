@@ -10,7 +10,7 @@ const project = 'github.com/example/runtime';
 const now = Date.now();
 const rows = Array.from({length:104}, (_, i) => ({url:`https://github.com/example/runtime/pull/${1000+i}`,title:i===0?'Keep background requests responsive when a companion reconnects and a very long repository name crosses the phone screen':'Improve the runtime '+i,merged_at:now-i*3600000,issues:[{number:i+1,title:i===0?'A linked issue with a long title that should wrap naturally':'Runtime task '+i}]}));
 rows.push({url:'https://github.com/example/runtime/pull/999',title:'Earlier merge without a recorded date',merged_at:null,observed_at:now,issues:[]});
-let failing=false, delayed=false;
+let failing=false, delayed=false, pending=false;
 const server=createServer(async(req,res)=>{
   res.setHeader('Content-Type','application/json');
   if(req.url==='/api/bootstrap')return res.end(JSON.stringify({ok:true,csrf:'fixture',project:{id:project,name:'Runtime'},projects:[{id:project,name:'Runtime'},{id:'named:empty',name:'Empty project'}]}));
@@ -21,7 +21,7 @@ const server=createServer(async(req,res)=>{
     if(failing){res.statusCode=503;return res.end(JSON.stringify({ok:false,error:{message:'Connection interrupted. Retry.'}}));}
     if(delayed)await new Promise(done=>setTimeout(done,350));
     const data=value.project===project?rows:[],offset=value.operation.offset||0,limit=value.operation.limit;
-    return res.end(JSON.stringify({ok:true,pull_requests:data.slice(offset,offset+limit),next_offset:offset+limit<data.length?offset+limit:null}));
+    return res.end(JSON.stringify({ok:true,pull_requests:data.slice(offset,offset+limit),authorship_pending:pending,next_offset:offset+limit<data.length?offset+limit:null}));
   }
   if(req.url==='/mobile'){
     res.setHeader('Content-Type','text/html');return res.end(readFileSync('mobile/public/issue-web/merged-prs.html'));
@@ -71,8 +71,12 @@ try{
   failing=false;await page.locator('#merged-refresh').click();await page.waitForFunction(()=>document.querySelectorAll('.merge-row').length===100);
   assert.equal(await page.locator('#merged-error').isVisible(),false);
   await page.locator('#project-trigger').click();await page.locator('[data-project="named:empty"]').click();
-  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged PRs'));
+  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged fix PRs authored by your GitHub account'));
   assert.equal(await page.locator('.merge-row').count(),0);
+  pending=true;await page.locator('#merged-refresh').click();
+  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('Checking GitHub authors'));
+  pending=false;
+  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged fix PRs authored by your GitHub account'));
   delayed=true;
   await page.evaluate(project=>location.hash=new URLSearchParams({project}),project);
   await page.waitForTimeout(75);

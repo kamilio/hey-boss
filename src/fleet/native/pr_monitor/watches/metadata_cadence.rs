@@ -1,5 +1,19 @@
 use super::*;
 
+fn receive_metadata_request(server: &tiny_http::Server) -> tiny_http::Request {
+    loop {
+        let request = server
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .expect("Both polling batches must progress while the other waits");
+        if request.url().starts_with("/v1/viewer?") {
+            request.respond(tiny_http::Response::from_string(json!({"data":{"id":42},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string()).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())).unwrap();
+        } else {
+            return request;
+        }
+    }
+}
+
 #[test]
 fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
@@ -32,10 +46,7 @@ fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
     let database = ctx.path.clone();
     let serving = std::thread::spawn(move || {
-        let incoming = server
-            .recv_timeout(Duration::from_secs(3))
-            .unwrap()
-            .expect("Ordinary metadata read");
+        let incoming = receive_metadata_request(&server);
         assert!(incoming.url().ends_with("metadata?max_age_seconds=300"));
         Store::open(&database)
             .unwrap()
@@ -107,12 +118,7 @@ fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
         let (ci, policy, metadata) = evidence(true, false);
         let mut ordinary_metadata = metadata.clone();
         ordinary_metadata["data"]["number"] = json!(2);
-        let receive = || {
-            server
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap()
-                .expect("Both polling batches must progress while the other waits")
-        };
+        let receive = || receive_metadata_request(&server);
         // Withhold both responses until both batches have started. Serial
         // polling would wait here and also add both batches to the next wakeup.
         let first = receive();

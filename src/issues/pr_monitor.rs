@@ -5,6 +5,7 @@ pub(crate) struct TrackedPullRequest {
     pub url: String,
     pub checked_at: Option<i64>,
     pub closed: bool,
+    pub backfill: bool,
 }
 
 fn merged_tasks(db: &Connection) -> Result<Vec<(Project, i64)>> {
@@ -21,8 +22,13 @@ pub(super) fn merged_history(
     limit: u32,
     offset: u32,
 ) -> Result<Value> {
-    let mut query = db.prepare("SELECT pr.url,max(pr.pr_title),min(pr.merged_at),min(pr.checked_at) FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND i.deleted_at IS NULL GROUP BY pr.url ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3")?;
-    let mut prs = query.query_map(params![project,i64::from(limit)+1,offset], |r| Ok(json!({"url":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"merged_at":r.get::<_,Option<i64>>(2)?,"observed_at":r.get::<_,Option<i64>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let viewer: Option<i64> = db.query_row(
+        "SELECT github_user_id FROM global_settings WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut query = db.prepare("SELECT pr.url,max(pr.pr_title),min(pr.merged_at),min(pr.checked_at) FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND pr.author_id=?4 AND i.deleted_at IS NULL GROUP BY pr.url ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3")?;
+    let mut prs = query.query_map(params![project,i64::from(limit)+1,offset,viewer], |r| Ok(json!({"url":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"merged_at":r.get::<_,Option<i64>>(2)?,"observed_at":r.get::<_,Option<i64>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more = prs.len() > limit as usize;
     prs.truncate(limit as usize);
     let mut links = db.prepare("SELECT i.number,i.title FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.url=?2 AND pr.purpose='fix' AND i.deleted_at IS NULL ORDER BY i.number")?;
@@ -35,20 +41,44 @@ pub(super) fn merged_history(
                 .collect::<rusqlite::Result<Vec<_>>>()?
         );
     }
+    let authorship_pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND i.deleted_at IS NULL AND (?2 IS NULL OR pr.author_id IS NULL))", params![project,viewer], |row| row.get(0))?;
     Ok(
-        json!({"ok":true,"pull_requests":prs,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
+        json!({"ok":true,"pull_requests":prs,"authorship_pending":authorship_pending,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
     )
 }
 
 impl Store {
+    pub(crate) fn record_github_user(&mut self, id: i64) -> Result<()> {
+        let current: Option<i64> = self.db.query_row(
+            "SELECT github_user_id FROM global_settings WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if id > 0 && current != Some(id) {
+            self.db.execute("UPDATE global_settings SET github_user_id=?1 WHERE id=1 AND github_user_id IS NOT ?1", [id])?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_pr_author(&mut self, url: &str, id: i64) -> Result<()> {
+        if id > 0 {
+            self.db.execute(
+                "UPDATE issue_pull_requests SET author_id=?2 WHERE url=?1 AND author_id IS NOT ?2",
+                params![url, id],
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<TrackedPullRequest>> {
-        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.status='merged' AND pr.merged_at IS NULL)) GROUP BY pr.url ORDER BY pr.url")?;
+        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.purpose='fix' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed'),min(pr.status='merged') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.status='merged' AND (pr.merged_at IS NULL OR (pr.purpose='fix' AND pr.author_id IS NULL)))) GROUP BY pr.url ORDER BY pr.url")?;
         Ok(query
             .query_map([], |r| {
                 Ok(TrackedPullRequest {
                     url: r.get(0)?,
                     checked_at: r.get(1)?,
                     closed: r.get(2)?,
+                    backfill: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -140,6 +170,67 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn merged_history_requires_confirmed_current_account_authorship() {
+        let (mut store, _, root) = fixture();
+        for number in 1..=2 {
+            store
+                .record_pr_status(
+                    &format!("https://github.com/o/r/pull/{number}"),
+                    Some("merged"),
+                    2000,
+                    None,
+                )
+                .unwrap();
+        }
+        store
+            .record_pr_author("https://github.com/o/r/pull/1", 42)
+            .unwrap();
+        store
+            .record_pr_author("https://github.com/o/r/pull/2", 99)
+            .unwrap();
+        store.record_github_user(42).unwrap();
+        let result = merged_history(&store.db, "named:test", 1, 0).unwrap();
+        assert_eq!(result["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["pull_requests"][0]["url"],
+            "https://github.com/o/r/pull/1"
+        );
+        assert!(result["next_offset"].is_null());
+        assert_eq!(result["authorship_pending"], false);
+        store.db.execute("UPDATE issue_pull_requests SET author_id=NULL WHERE url='https://github.com/o/r/pull/2'", []).unwrap();
+        let pending = merged_history(&store.db, "named:test", 10, 0).unwrap();
+        assert_eq!(pending["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(pending["authorship_pending"], true);
+        let backfill = store
+            .tracked_pull_requests()
+            .unwrap()
+            .into_iter()
+            .find(|pr| pr.url.ends_with("/2"))
+            .unwrap();
+        assert!(backfill.backfill);
+        assert!(backfill.checked_at.is_none());
+        store
+            .record_pr_author("https://github.com/o/r/pull/2", 99)
+            .unwrap();
+        store.record_github_user(99).unwrap();
+        assert_eq!(
+            merged_history(&store.db, "named:test", 10, 0).unwrap()["pull_requests"][0]["url"],
+            "https://github.com/o/r/pull/2"
+        );
+        store
+            .db
+            .execute("UPDATE global_settings SET github_user_id=NULL", [])
+            .unwrap();
+        assert!(
+            merged_history(&store.db, "named:test", 10, 0).unwrap()["pull_requests"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn merged_history_backfills_closed_tasks_and_repairs_fleet_capture() {
         let (mut store, _, root) = fixture();
         let url = "https://github.com/o/r/pull/1";
@@ -169,6 +260,20 @@ mod tests {
         let captured: Value = serde_json::from_str(&captured).unwrap();
         assert_eq!(captured["pr_title"], "Historical merge");
         assert_eq!(captured["merged_at"], 1790724600000_i64);
+        store.record_pr_author(url, 99).unwrap();
+        let captured: String = store
+            .db
+            .query_row(
+                "SELECT value FROM capture_log ORDER BY rowid DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&captured).unwrap()["author_id"],
+            99
+        );
+        store.record_pr_author(url, 42).unwrap();
         assert!(
             !store
                 .tracked_pull_requests()
@@ -192,6 +297,10 @@ mod tests {
         for (issue, pr, purpose) in [(2, 4, "prerequisite"), (3, 5, "unspecified"), (4, 6, "fix")] {
             store.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES('named:test',?1,?2,?3,0,?4)",params![issue,format!("https://github.com/o/r/pull/{pr}"),actor.id,purpose]).unwrap();
         }
+        store
+            .db
+            .execute("UPDATE issue_pull_requests SET author_id=42", [])
+            .unwrap();
         for pr in 1..=6 {
             let url = format!("https://github.com/o/r/pull/{pr}");
             store
@@ -326,6 +435,14 @@ mod tests {
         store
             .db
             .execute("UPDATE issues SET state='closed' WHERE number=5", [])
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE global_settings SET github_user_id=42", [])
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE issue_pull_requests SET author_id=42", [])
             .unwrap();
         (store, actor, root)
     }

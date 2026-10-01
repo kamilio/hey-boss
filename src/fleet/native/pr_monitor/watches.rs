@@ -24,6 +24,7 @@ pub(super) async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
             url,
             checked_at: None,
             closed: false,
+            backfill: false,
         })
         .collect();
     let requested = store.requested_github_fetches()?;
@@ -141,6 +142,9 @@ async fn poll_required(
             .record_pr_status(url, status, timestamp(response.validated_at_ms)?, None)
             .map_err(storage)?;
         if status == Some("merged") {
+            if let Some(id) = response.data["user"]["id"].as_i64() {
+                store.record_pr_author(url, id).map_err(storage)?;
+            }
             store
                 .record_pr_merge_details(
                     url,

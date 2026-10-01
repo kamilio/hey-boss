@@ -218,9 +218,13 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
                 ("error", Value::Null),
                 ("merged_at", Value::Null),
                 ("pr_title", Value::Null),
+                ("author_id", Value::Null),
             ]
         } else {
-            vec![("auto_close_merged_prs", json!(1))]
+            vec![
+                ("auto_close_merged_prs", json!(1)),
+                ("github_user_id", Value::Null),
+            ]
         };
         for (column, default) in defaults {
             row.as_object_mut()
@@ -3636,9 +3640,12 @@ mod tests {
                 [],
             )
             .unwrap();
-        main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at,merged_at,pr_title) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'fix','merged',456,400,'Ship it')",[]).unwrap();
+        main.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at,merged_at,pr_title,author_id) VALUES('named:Native fleet',1,'https://github.com/example/repo/pull/1','human:fixture',123,'fix','merged',456,400,'Ship it',42)",[]).unwrap();
         main.db
-            .execute("UPDATE global_settings SET auto_close_merged_prs=0", [])
+            .execute(
+                "UPDATE global_settings SET auto_close_merged_prs=0,github_user_id=42",
+                [],
+            )
             .unwrap();
         let agent = Fixture::new();
         install_capture(&agent.db, "agent", "agent").unwrap();
@@ -3654,6 +3661,17 @@ mod tests {
         assert_eq!(pr["checked_at"], 456);
         assert_eq!(pr["merged_at"], 400);
         assert_eq!(pr["pr_title"], "Ship it");
+        assert_eq!(pr["author_id"], 42);
+        let mut settings = rows(&agent.db, "SELECT * FROM global_settings", &[])
+            .unwrap()
+            .remove(0);
+        assert_eq!(settings["github_user_id"], 42);
+        settings.as_object_mut().unwrap().remove("github_user_id");
+        put_row(&agent.db, "global_settings", &settings).unwrap();
+        assert_eq!(
+            rows(&agent.db, "SELECT github_user_id FROM global_settings", &[]).unwrap()[0]["github_user_id"],
+            42
+        );
         assert_eq!(
             rows(
                 &agent.db,
@@ -3664,13 +3682,21 @@ mod tests {
             0
         );
         let mut legacy = pr.clone();
-        for key in ["status", "checked_at", "error", "merged_at", "pr_title"] {
+        for key in [
+            "status",
+            "checked_at",
+            "error",
+            "merged_at",
+            "pr_title",
+            "author_id",
+        ] {
             legacy.as_object_mut().unwrap().remove(key);
         }
         put_row(&agent.db, "issue_pull_requests", &legacy).unwrap();
         let restored = &rows(&agent.db, "SELECT * FROM issue_pull_requests", &[]).unwrap()[0];
         assert_eq!(restored["merged_at"], 400);
         assert_eq!(restored["pr_title"], "Ship it");
+        assert_eq!(restored["author_id"], 42);
         assert_eq!(
             rows(&agent.db, "SELECT status FROM issue_pull_requests", &[]).unwrap()[0]["status"],
             "merged"

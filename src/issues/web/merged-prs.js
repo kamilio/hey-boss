@@ -26,7 +26,7 @@ const HeyBossMergedPRs = (() => {
     const $ = selector => document.querySelector(selector);
     HeyBossUI.icons();
     const mobile = document.documentElement.dataset.issueMobile === 'true';
-    let boot, context, generation=0, rows=[], next=null, busy=false;
+    let boot, context, generation=0, rows=[], next=null, busy=false, timer;
     const picker = new HeyBossUI.ProjectPicker({onSelect:project=>{location.hash=new URLSearchParams({project,...(context.host?{host:context.host}:{})});}});
     const error = message => {$('#merged-error').textContent=message;$('#merged-error').hidden=!message;};
     async function request(operation, project, host) {
@@ -37,6 +37,7 @@ const HeyBossMergedPRs = (() => {
     }
     async function load(reset=false) {
       if(busy&&!reset)return;
+      clearTimeout(timer);
       const seq=++generation, current={...context}; busy=true;error('');
       $('#merged-more').disabled=true;$('#merged-refresh').disabled=true;
       $('#merged-status').textContent='Loading merged PRs…';
@@ -46,8 +47,9 @@ const HeyBossMergedPRs = (() => {
         rows=reset?value.pull_requests:[...new Map([...rows,...value.pull_requests].map(pr=>[pr.url,pr])).values()];next=value.next_offset;
         $('#merged-list').innerHTML=render(rows,current);
         HeyBossUI.icons($('#merged-list'));
-        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:'No merged fix PRs yet. PRs marked as fixes will appear here after GitHub confirms the merge.';
+        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:value.authorship_pending?'Checking GitHub authors before showing your merged PRs…':'No merged fix PRs authored by your GitHub account yet.';
         $('#merged-more').hidden=next===null;
+        if(value.authorship_pending){if(rows.length)$('#merged-status').textContent+=' · Checking remaining PR authors…';timer=setTimeout(()=>load(true),3000);}
       } catch(e) {if(seq===generation){error(e.message);$('#merged-status').textContent='';}}
       finally {if(seq===generation){busy=false;$('#merged-more').disabled=false;$('#merged-refresh').disabled=false;}}
     }
