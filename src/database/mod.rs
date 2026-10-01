@@ -71,6 +71,20 @@ fn permission_denied(error: &rusqlite::Error) -> bool {
             .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied))
 }
 
+fn connection_error(source: std::io::Error) -> rusqlite::Error {
+    let message = if source.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "Database service access denied: {source}. A sandbox or OS permission may block the local socket. \
+             Retry hey-boss as a standalone command without pipes or redirection; if still denied, request approval for that command. \
+             Compact reads: issue list --limit 20 (text), or mm show --bodies none."
+        )
+    } else {
+        format!("Database service unavailable: {source}")
+    };
+    // Retain the kind: a denied connection must never bootstrap another owner.
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(source.kind(), message)))
+}
+
 pub trait Params {
     fn values(self) -> Result<Vec<Value>>;
 }
@@ -175,12 +189,7 @@ impl Connection {
         })
     }
     pub fn connect(path: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(owner::socket_path(path)).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                e.kind(),
-                format!("Database service unavailable: {e}"),
-            )))
-        })?;
+        let stream = UnixStream::connect(owner::socket_path(path)).map_err(connection_error)?;
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
             .map_err(|e| error(e.to_string()))?;
