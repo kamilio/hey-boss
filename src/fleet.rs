@@ -287,12 +287,6 @@ fn database(path: &std::path::Path) -> std::io::Result<()> {
     use rusqlite::types::{Value as SqlValue, ValueRef};
     use std::io::BufRead;
     let connection = crate::database::maintenance(path).map_err(std::io::Error::other)?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(10))
-        .map_err(std::io::Error::other)?;
-    connection
-        .execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
-        .map_err(std::io::Error::other)?;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     loop {
