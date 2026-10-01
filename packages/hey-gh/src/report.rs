@@ -980,9 +980,7 @@ impl Client {
         };
         for group in workflows.chunks(job_width) {
             let fetch = |index: usize| async move {
-                let Some(run) = group.get(index) else {
-                    return None;
-                };
+                let run = group.get(index)?;
                 if let (Some(id), Some(attempt)) = (run["id"].as_u64(), run["run_attempt"].as_u64())
                 {
                     Some((
