@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ACTIVE_AGENTS_ONLY"] == "1" { auditActiveAgentFilter(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_ARTIFACT_EDITOR_PREVIEW"] {
         app.setActivationPolicy(.regular)
         let launch = ArtifactLaunch(project: "named:Editor visual test", file: path)
@@ -1097,6 +1098,7 @@ func makeAgentPreview() -> AgentsOverview {
         return overview
     }
     overview.local = local
+    overview.activeOnly.state = .off
     overview.grouping.selectedSegment = 0
     overview.remote["devbox"] = AgentSnapshot(host: "devbox", observedAt: now - 60, agents: [local.agents[0]], warnings: [])
     overview.knownGroups = Set((local.agents.map { OverviewRow(agent: $0, host: "This Mac", local: true, stale: false) } + [OverviewRow(agent: local.agents[0], host: "devbox", local: false, stale: true)]).map { overview.groupIdentity($0).0 })
@@ -1111,6 +1113,7 @@ func auditOverviewExpansionPersistence() {
     let fixture = makeAgentPreview().local!
     let overview = AgentsOverview(present: false, cli: nil, preferences: preferences)
     overview.local = fixture
+    overview.activeOnly.state = .off
     overview.rebuild()
     precondition(overview.items.count == 2 && overview.collapsedGroups.count == 2)
     let key = overview.groupIdentity(overview.rows[0]).0
@@ -1128,6 +1131,7 @@ func auditOverviewExpansionPersistence() {
     overview.expansionPersistenceQueue.sync {}
     let restored = AgentsOverview(present: false, cli: nil, preferences: preferences)
     restored.local = fixture
+    restored.activeOnly.state = .off
     restored.rebuild()
     precondition(!restored.collapsedGroups.contains(key) && restored.collapsedGroups.count == 1)
     precondition(restored.expandedAgents == overview.expandedAgents && !restored.expandedAgents.isEmpty)
@@ -1199,7 +1203,48 @@ func auditAgentControlPanel() {
     print("Passed: saved goal re-enable/pause, pending action isolation, stale-turn draft preservation, acknowledged send clears draft")
 }
 
+func auditActiveAgentFilter() {
+    let preview = makeAgentPreview()
+    let overview = AgentsOverview(present: false, cli: nil)
+    overview.local = preview.local
+    overview.remote = preview.remote
+    overview.rebuild()
+    precondition(overview.rows.count == 2, "Default overview must hide idle and stale sessions")
+    precondition(overview.rows.allSatisfy { !$0.stale && $0.agent.state == "Working" })
+    precondition(overview.activeOnly.state == .on && overview.activeOnly.superview != nil)
+    precondition(overview.heading.stringValue == "Agents · 2")
+    let snapshot = try! JSONSerialization.jsonObject(with: Data(overview.snapshotJSON().utf8)) as! [String: Any]
+    precondition(snapshot["filter"] as? String == "active")
+    overview.search.stringValue = "release"
+    overview.rebuild()
+    precondition(overview.rows.isEmpty && !overview.emptyState.isHidden)
+    precondition(overview.emptyHint.stringValue.contains("turn off Active only"))
+    overview.activeOnly.performClick(nil)
+    precondition(overview.rows.count == 1 && overview.rows[0].agent.state == "Idle")
+    overview.search.stringValue = ""
+    overview.rebuild()
+    precondition(overview.rows.count == 4)
+    let allSnapshot = try! JSONSerialization.jsonObject(with: Data(overview.snapshotJSON().utf8)) as! [String: Any]
+    precondition(allSnapshot["filter"] as? String == "all")
+    overview.activeOnly.performClick(nil)
+    precondition(overview.rows.count == 2)
+    let now = Date().timeIntervalSince1970
+    let data = try! JSONSerialization.data(withJSONObject: ["host": "server", "observed_at": now, "warnings": [], "agents":
+        ["Working", "Waiting for input", "Idle", "Completed", "Process detected"].enumerated().map { index, state in
+            ["id": "remote-\(index)", "pid": index + 200, "kind": "Claude", "session_id": "remote-\(index)", "state": state, "evidence": "Fixture"] as [String: Any]
+        }])
+    overview.remote = ["server": AgentSnapshot.decode(data)!]
+    overview.rebuild()
+    precondition(overview.rows.count == 4 && overview.rows.filter { !$0.local }.count == 2)
+    overview.window.setContentSize(NSSize(width: 1000, height: 560))
+    overview.window.contentView!.layoutSubtreeIfNeeded()
+    precondition(overview.activeOnly.frame.minX >= overview.search.frame.maxX)
+    precondition(overview.activeOnly.frame.maxX < overview.performanceLabel.frame.minX)
+    print("Passed: active default, toggle, search, local/remote states, stale exclusion, JSON filter and compact layout")
+}
+
 func auditAgentOverview() -> AgentsOverview {
+    auditActiveAgentFilter()
     auditArrivalLayoutBatching()
     auditMobileOutboxRevisions()
     auditAgentControlPanel()

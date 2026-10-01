@@ -4286,6 +4286,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let window: AgentOverviewWindow
     let table = NSTableView()
     let search = NSSearchField()
+    let activeOnly = NSButton(checkboxWithTitle: "Active only", target: nil, action: nil)
     let filter = NSSegmentedControl(labels: ["All agents", "Codex", "Claude", "Unattributed"], trackingMode: .selectOne, target: nil, action: nil)
     let grouping = NSSegmentedControl(labels: ["Repository", "Worktree", "Ungrouped"], trackingMode: .selectOne, target: nil, action: nil)
     let summary = NSTextField(labelWithString: "Discovering agents…")
@@ -4374,6 +4375,10 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         connection.textColor = .secondaryLabelColor
         search.placeholderString = "Search agents, tasks, repositories, hosts…"
         search.delegate = self
+        activeOnly.state = .on
+        activeOnly.target = self
+        activeOnly.action = #selector(filtersChanged)
+        activeOnly.toolTip = "Show working agents and agents waiting for input. Turn off to include idle and stale sessions."
         filter.selectedSegment = 0
         filter.target = self
         filter.action = #selector(filtersChanged)
@@ -4417,7 +4422,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         emptyState.isHidden = true
         performanceLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         performanceLabel.textColor = .tertiaryLabelColor
-        for view in [title, connection, search, refresh, settings, scroll, emptyState, performanceLabel] {
+        for view in [title, connection, search, activeOnly, refresh, settings, scroll, emptyState, performanceLabel] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -4428,7 +4433,8 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
             refresh.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), refresh.centerYAnchor.constraint(equalTo: title.centerYAnchor),
             settings.trailingAnchor.constraint(equalTo: refresh.leadingAnchor, constant: -10), settings.centerYAnchor.constraint(equalTo: refresh.centerYAnchor),
             search.leadingAnchor.constraint(equalTo: title.leadingAnchor), search.topAnchor.constraint(equalTo: connection.bottomAnchor, constant: 18), search.widthAnchor.constraint(equalToConstant: 300),
-            search.trailingAnchor.constraint(lessThanOrEqualTo: performanceLabel.leadingAnchor, constant: -18),
+            activeOnly.leadingAnchor.constraint(equalTo: search.trailingAnchor, constant: 16), activeOnly.centerYAnchor.constraint(equalTo: search.centerYAnchor),
+            activeOnly.trailingAnchor.constraint(lessThanOrEqualTo: performanceLabel.leadingAnchor, constant: -18),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16), scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16), scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 14), scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
             emptyState.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), emptyState.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), emptyState.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, multiplier: 0.8)
         ])
@@ -4478,7 +4484,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let state = OverviewState(observedAt: Date().timeIntervalSince1970,
             grouping: "repository",
             search: search.stringValue,
-            filter: "all",
+            filter: activeOnly.state == .on ? "active" : "all",
             summary: summary.stringValue, connection: connection.stringValue, scanning: scanning || !hostScans.isEmpty,
             scanError: scanError, local: local, servers: remote.values.sorted { $0.host < $1.host },
             rows: rows, collapsedGroups: collapsedGroups.sorted(), expandedAgents: expandedAgents.sorted(), performance: performanceMetrics(), selectedRow: selectedRow()?.key)
@@ -4753,9 +4759,6 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
             cachedAgentGeneration = agentGeneration; cachedStale = stale
         }
         let all = orderedRows
-        summary.stringValue = "\(all.count) sessions"
-        heading.stringValue = "Agents · \(all.count)"
-        window.title = "Agent overview · \(all.count) sessions"
         statusItem?.button?.title = ""
         let state = connectionState
         let machines = state?["machines"] as? [[String: Any]] ?? []
@@ -4782,6 +4785,12 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
         let query = search.stringValue.lowercased()
         rows = query.isEmpty ? all : zip(all, searchCorpus).compactMap { row, text in text.contains(query) ? row : nil }
+        if activeOnly.state == .on {
+            rows.removeAll { $0.stale || !["Working", "Waiting for input"].contains($0.agent.state) }
+        }
+        summary.stringValue = "\(rows.count) sessions"
+        heading.stringValue = "Agents · \(rows.count)"
+        window.title = "Agent overview · \(rows.count) sessions"
         items = []
         do {
             var groups: [String: [OverviewRow]] = [:]
@@ -4805,7 +4814,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         emptyState.isHidden = !rows.isEmpty
         emptyTitle.stringValue = all.isEmpty ? (scanning ? "Looking for agents…" : "No agents running") : "No matching agents"
-        emptyHint.stringValue = all.isEmpty ? "Start a Claude or Codex session, then reopen or refresh this overview." : "Try a different search or select All agents."
+        emptyHint.stringValue = all.isEmpty ? "Start a Claude or Codex session, then reopen or refresh this overview." : (activeOnly.state == .on ? "Try a different search or turn off Active only to include idle and stale sessions." : "Try a different search.")
         if items != renderedItems || expandedAgents != renderedExpandedAgents {
             let updateStarted = ProcessInfo.processInfo.systemUptime
             let old = renderedItems

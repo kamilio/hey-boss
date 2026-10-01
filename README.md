@@ -788,8 +788,9 @@ These semantics also apply through the server companion and its offline cache.
 
 Run `hey-boss agent overview` on the Mac, or choose **Agent overview** from the new
 menu-bar item. The native window lists Codex and Claude sessions/processes with
-project, latest task, activity, state, and host. Search by task/project/host, filter
-using agent names, open local projects, and copy session IDs. Press ⌘F to focus search and
+project, latest task, activity, state, and host. **Active only** is on by default,
+showing working agents and agents waiting for input; turn it off to include idle
+and stale sessions. Search by task/project/host or agent name. Press ⌘F to focus search and
 replace the current query. Sessions always group by repository, combining normalized
 Git origins across hosts and worktrees. Repository headers carry project identity;
 agent, branch, state, and host appear as compact badges. Click an agent's disclosure
