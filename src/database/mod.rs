@@ -43,9 +43,14 @@ pub(crate) fn maintenance(path: &Path) -> crate::issues::Result<Connection> {
     crate::issues::Store::create_database_if_missing(path)?;
     crate::issues::Store::validate_database_path(path)?;
     if let Ok(connection) = Connection::connect(path) {
+        // The owner already supplies isolated foreign-key settings and FULL
+        // synchronization. Reapplying them would queue reads behind the writer.
         return Ok(connection);
     }
-    local(|| crate::issues::Store::open_connection(path))
+    let connection = local(|| crate::issues::Store::open_connection(path))?;
+    connection.busy_timeout(Duration::from_secs(10))?;
+    connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+    Ok(connection)
 }
 pub(crate) fn remote_enabled() -> bool {
     CLIENTS.load(std::sync::atomic::Ordering::Acquire) && !LOCAL.get()

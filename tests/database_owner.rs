@@ -3,10 +3,117 @@ use hey_boss::database::Connection;
 use serde_json::Value;
 use std::{
     fs,
+    io::Write,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+#[test]
+fn database_inspection_reads_finish_while_another_session_holds_the_writer() {
+    let root = std::env::temp_dir().join(format!("hb-maintenance-reader-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    let path = fixture.root.join("issues.db");
+    let mut owner = hey_boss::database::Owner::start(&path).unwrap().unwrap();
+    let mut connection = fixture.connection();
+    connection
+        .execute_batch("CREATE TABLE inspection(value INTEGER); INSERT INTO inspection VALUES(1)")
+        .unwrap();
+    let transaction = connection
+        .transaction_with_behavior(hey_boss::database::TransactionBehavior::Immediate)
+        .unwrap();
+    transaction
+        .execute("UPDATE inspection SET value=2", [])
+        .unwrap();
+    let mut child = fixture
+        .command(&["fleet", "database", "--path", path.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"sql\":\"SELECT value FROM inspection\",\"args\":[]}\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let finished = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    transaction.commit().unwrap();
+    let output = child.wait_with_output().unwrap();
+    owner.stop();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        finished,
+        "Read-only inspection queued behind an unrelated writer"
+    );
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["rows"], serde_json::json!([[1]]));
+}
+
+#[test]
+fn standalone_database_driver_keeps_constraint_and_durability_defaults() {
+    let root = std::env::temp_dir().join(format!("hb-maintenance-defaults-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    let path = fixture.root.join("private.db");
+    let mut child = fixture
+        .command(&["fleet", "database", "--path", path.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for sql in [
+        "PRAGMA foreign_keys",
+        "PRAGMA synchronous",
+        "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
+        "CREATE TABLE child(parent INTEGER REFERENCES parent(id))",
+        "INSERT INTO child VALUES(99)",
+        "SELECT count(*) FROM sqlite_master WHERE name='issues'",
+    ] {
+        writeln!(input, "{}", serde_json::json!({"sql":sql,"args":[]})).unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies[0]["rows"], serde_json::json!([[1]]));
+    assert_eq!(replies[1]["rows"], serde_json::json!([[2]]));
+    assert_eq!(replies[4]["constraint"], true);
+    assert_eq!(replies[5]["rows"], serde_json::json!([[0]]));
+}
 
 struct Fixture {
     root: PathBuf,
