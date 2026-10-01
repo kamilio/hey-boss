@@ -163,8 +163,8 @@ fn atomic_then_chain_creates_entire_sequence_and_unblocks_step_by_step_on_ready_
         "Expected prerequisite PR URL in instructions: {instructions}"
     );
     assert!(
-        instructions.contains("gh stack"),
-        "Expected gh stack guidance in instructions: {instructions}"
+        instructions.contains("dependency branch as your branch start and PR base"),
+        "Expected stacked PR branch/base guidance in instructions: {instructions}"
     );
 
     // Closing Step 2 unblocks Step 3 automatically.
