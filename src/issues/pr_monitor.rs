@@ -27,20 +27,42 @@ pub(super) fn merged_history(
         [],
         |row| row.get(0),
     )?;
-    let mut query = db.prepare("SELECT pr.url,max(pr.pr_title),min(pr.merged_at),min(pr.checked_at) FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND pr.author_id=?4 AND i.deleted_at IS NULL GROUP BY pr.url ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3")?;
-    let mut prs = query.query_map(params![project,i64::from(limit)+1,offset,viewer], |r| Ok(json!({"url":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"merged_at":r.get::<_,Option<i64>>(2)?,"observed_at":r.get::<_,Option<i64>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // Materialize the PR selection once, then drive indexed URL lookups from it.
+    // CROSS JOIN prevents SQLite from rescanning the selection per task link.
+    let mut query = db.prepare(
+        "WITH history AS MATERIALIZED (
+            SELECT pr.url,max(pr.pr_title) AS title,min(pr.merged_at) AS merged_at,min(pr.checked_at) AS observed_at
+            FROM issue_pull_requests pr
+            JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number
+            WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND pr.author_id=?4 AND i.deleted_at IS NULL
+            GROUP BY pr.url
+            ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3
+        )
+        SELECT h.url,h.title,h.merged_at,h.observed_at,i.number,i.title
+        FROM history h
+        CROSS JOIN issue_pull_requests pr ON pr.project_id=?1 AND pr.url=h.url AND pr.purpose='fix'
+        CROSS JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number
+        WHERE i.deleted_at IS NULL
+        ORDER BY coalesce(h.merged_at,0) DESC,h.url,i.number",
+    )?;
+    let mut rows = query.query(params![project, i64::from(limit) + 1, offset, viewer])?;
+    let mut prs: Vec<Value> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let url: String = row.get(0)?;
+        if prs.last().is_none_or(|pr| pr["url"] != url) {
+            prs.push(json!({
+                "url":url,"title":row.get::<_,Option<String>>(1)?,
+                "merged_at":row.get::<_,Option<i64>>(2)?,
+                "observed_at":row.get::<_,Option<i64>>(3)?,"issues":[]
+            }));
+        }
+        prs.last_mut().unwrap()["issues"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"number":row.get::<_,i64>(4)?,"title":row.get::<_,String>(5)?}));
+    }
     let more = prs.len() > limit as usize;
     prs.truncate(limit as usize);
-    let mut links = db.prepare("SELECT i.number,i.title FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.url=?2 AND pr.purpose='fix' AND i.deleted_at IS NULL ORDER BY i.number")?;
-    for pr in &mut prs {
-        pr["issues"] = json!(
-            links
-                .query_map(params![project, pr["url"].as_str()], |r| Ok(
-                    json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?})
-                ))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        );
-    }
     let authorship_pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND i.deleted_at IS NULL AND (?2 IS NULL OR pr.author_id IS NULL))", params![project,viewer], |row| row.get(0))?;
     Ok(
         json!({"ok":true,"pull_requests":prs,"authorship_pending":authorship_pending,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
@@ -169,6 +191,62 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merged_history_loads_task_links_without_per_pr_queries() {
+        let (store, actor, root) = fixture();
+        for number in 10..522 {
+            let url = format!("https://github.com/o/r/pull/{number}");
+            store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:test',?1,'Task','','open',?2,0,0,1,'[]')", params![number,actor.id]).unwrap();
+            for issue in [5, number] {
+                store.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,author_id,merged_at) VALUES('named:test',?1,?2,?3,0,'fix','merged',42,?4)", params![issue,url,actor.id,number]).unwrap();
+            }
+        }
+        drop(store);
+        let path = root.join("issues.db");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let mut work = Vec::new();
+        for limit in [16, 128, 512] {
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            let result = merged_history(&db, "named:test", limit, 0).unwrap();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            let prs = result["pull_requests"].as_array().unwrap();
+            assert_eq!(prs.len(), limit as usize);
+            for (index, pr) in prs.iter().enumerate() {
+                assert_eq!(
+                    pr["url"],
+                    format!("https://github.com/o/r/pull/{}", 521 - index)
+                );
+                assert_eq!(
+                    pr["issues"],
+                    json!([{"number":5,"title":"Task"},{"number":521-index,"title":"Task"}])
+                );
+            }
+            assert_eq!(
+                result["next_offset"],
+                if limit == 512 {
+                    Value::Null
+                } else {
+                    json!(limit)
+                }
+            );
+            eprintln!("{limit} merged PRs: {commands} RPCs, {steps} VM steps");
+            work.push((limit, commands, steps));
+        }
+        owner.stop();
+        std::fs::remove_dir_all(root).unwrap();
+        for (limit, commands, steps) in work {
+            assert!(
+                commands <= 4,
+                "History must fetch all task links together; got {commands} RPCs for {limit} PRs"
+            );
+            assert!(
+                steps < 110_000,
+                "History must not rescan PRs per task link: {steps} VM steps for {limit} PRs"
+            );
+        }
+    }
+
     #[test]
     fn merged_history_requires_confirmed_current_account_authorship() {
         let (mut store, _, root) = fixture();

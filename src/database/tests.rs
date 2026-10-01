@@ -97,18 +97,11 @@ impl Drop for Fixture {
     }
 }
 
-#[test]
-fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
-    let fixture = Fixture::new();
-    let connection = fixture.connect();
-    connection
-        .execute_batch(
-            "CREATE TABLE rpc_counter(id INTEGER PRIMARY KEY,value INTEGER);
-         WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<128)
-         INSERT INTO rpc_counter SELECT id,id*2 FROM ids;",
-        )
-        .unwrap();
-    let Backend::Remote(remote) = connection.backend else {
+/// Count real service round trips and SQL work, excluding the connection handshake.
+pub(crate) fn measured_connection(
+    path: &Path,
+) -> (Connection, std::thread::JoinHandle<(usize, i64)>) {
+    let Backend::Remote(remote) = Connection::connect(path).unwrap().backend else {
         unreachable!()
     };
     let mut upstream = remote.stream.into_inner().unwrap();
@@ -116,6 +109,7 @@ fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
     let transport = std::thread::spawn(move || {
         let mut server = BufReader::new(server);
         let mut commands = 0;
+        let mut steps = 0;
         while let Some(command) = wire::read::<Command>(&mut server).unwrap() {
             commands += 1;
             wire::write(upstream.get_mut(), &command).unwrap();
@@ -123,20 +117,36 @@ fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
                 let reply = wire::read::<Reply>(&mut upstream).unwrap().unwrap();
                 wire::write(server.get_mut(), &reply).unwrap();
                 if !reply.more {
+                    steps += i64::from(reply.steps);
                     break;
                 }
             }
         }
-        commands
+        (commands, steps)
     });
     let connection = Connection {
         backend: Backend::Remote(Remote {
-            path: fixture.directory.join("issues.db"),
+            path: path.to_owned(),
             stream: RefCell::new(Some(BufReader::new(client))),
             transaction: Cell::new(false),
             last_id: Cell::new(0),
         }),
     };
+    (connection, transport)
+}
+
+#[test]
+fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
+    let fixture = Fixture::new();
+    fixture
+        .connect()
+        .execute_batch(
+            "CREATE TABLE rpc_counter(id INTEGER PRIMARY KEY,value INTEGER);
+         WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<128)
+         INSERT INTO rpc_counter SELECT id,id*2 FROM ids;",
+        )
+        .unwrap();
+    let (connection, transport) = measured_connection(&fixture.directory.join("issues.db"));
     let started = std::time::Instant::now();
     let transaction =
         Transaction::new_unchecked(&connection, TransactionBehavior::Immediate).unwrap();
@@ -154,7 +164,7 @@ fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
     transaction.commit().unwrap();
     let elapsed = started.elapsed();
     drop(connection);
-    let commands = transport.join().unwrap();
+    let (commands, _) = transport.join().unwrap();
     assert_eq!(
         fixture
             .connect()
