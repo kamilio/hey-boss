@@ -616,6 +616,51 @@ mod tests {
     }
 
     #[test]
+    fn pending_approvals_continue_only_for_the_answered_request() {
+        use std::io::Write;
+        let mut approvals = Approvals {
+            pending: vec![],
+            polled: None,
+        };
+        let mut servers = vec![];
+        for id in ["first", "second"] {
+            let (stream, server) = UnixStream::pair().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            servers.push(server);
+            approvals.pending.push(Pending {
+                id: json!(id),
+                item: Value::Null,
+                turn: Value::Null,
+                questions: vec![Question {
+                    task: id.into(),
+                    choices: vec![("Approve once".into(), json!({"decision":"accept"}))],
+                    reading: Some(Reading {
+                        stream,
+                        bytes: vec![],
+                        started: Instant::now(),
+                    }),
+                }],
+                response: json!({}),
+            });
+        }
+        for _ in 0..3 {
+            assert!(approvals.poll().unwrap().is_empty());
+            assert_eq!(approvals.pending.len(), 2);
+        }
+        servers[0]
+            .write_all(br#"{"task_id":"first","status":"ok","result":"Approve once"}"#)
+            .unwrap();
+        servers.remove(0);
+        assert_eq!(
+            approvals.poll().unwrap(),
+            vec![(json!({"id":"first","result":{"decision":"accept"}}), false)]
+        );
+        assert_eq!(approvals.pending.len(), 1);
+        assert_eq!(approvals.pending[0].id, "second");
+        assert!(approvals.poll().unwrap().is_empty());
+    }
+
+    #[test]
     fn inbox_tool_skip_returns_cancellation_without_stopping_the_worker() {
         use std::io::Write;
         let p = prompt("mcpServer/elicitation/request", &json!({"mode":"form"}))

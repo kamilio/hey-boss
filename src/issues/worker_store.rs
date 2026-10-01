@@ -571,6 +571,7 @@ impl Store {
                     .unwrap_or(worker_infrastructure::GUIDANCE)
             );
         }
+        let mut watcher_waiting = false;
         if (own || handed_off)
             && issue.deleted_at.is_none()
             && matches!(issue.state.as_str(), "open" | "ready")
@@ -612,8 +613,8 @@ impl Store {
                     },
                     now(),
                 )?;
-            } else if own && watching {
-                assignments::release_worker(&tx, job, state)?;
+            } else if own && watching && !approval_hold {
+                watcher_waiting = assignments::release_worker(&tx, job, state)?;
             } else if own {
                 assignments::release_claim(
                     &tx,
@@ -655,8 +656,9 @@ impl Store {
         }
         super::super::blockers::reconcile(&tx, &job.project.id, Some(&job.actor.id), now())?;
         let finished = now();
-        let retrying =
-            !matches!(state, "completed" | "cancelled" | "interrupted") && !approval_hold;
+        let retrying = !matches!(state, "completed" | "cancelled" | "interrupted")
+            && !approval_hold
+            && !watcher_waiting;
         let count = if retrying { retry_count(&tx, job)? } else { 0 };
         let retry_at = (retrying
             && issue.state == "open"
@@ -1871,6 +1873,183 @@ mod tests {
             .unwrap();
         assert!(f.issue().assignee.is_none());
         assert!(assignments::is_watching(&f.store.db, &f.job.project.id, 1).unwrap());
+    }
+
+    #[test]
+    fn github_watcher_explicit_handoff_survives_noncompleted_turns_and_restarts() {
+        for state in ["blocked", "interrupted", "failed", "completed"] {
+            let mut f = watching_fixture();
+            f.apply(Operation::Assign {
+                number: 1,
+                target: "github".into(),
+                if_version: f.issue().version,
+            });
+            f.store = Store::open(&f.root.join("issues.db")).unwrap();
+            f.store
+                .worker_finish(&f.job, state, "Waiting for approval")
+                .unwrap();
+            assert_eq!(f.state(), state);
+            assert_eq!(f.issue().state, "open");
+            assert_eq!(
+                f.issue().assignee.as_deref(),
+                Some("watcher:github"),
+                "{state}"
+            );
+            let ack: Option<String> = f
+                .store
+                .db
+                .query_row("SELECT github_ack_event FROM issues", [], |r| r.get(0))
+                .unwrap();
+            assert!(ack.is_some());
+            let retry: Option<i64> = f
+                .store
+                .db
+                .query_row("SELECT retry_at FROM worker_runs", [], |r| r.get(0))
+                .unwrap();
+            assert!(
+                retry.is_none(),
+                "A parked watcher must not advertise an automatic retry"
+            );
+            let url = "https://github.com/example/repo/pull/1";
+            for poll in 1..=3 {
+                let (started, _) = f.store.begin_github_fetch(url, poll * 1000).unwrap();
+                watch_event(&mut f, "first");
+                f.store
+                    .finish_github_fetch(url, started, started + 1, started + 1000, None)
+                    .unwrap();
+                assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+            }
+            watch_event(&mut f, "new-review");
+            assert!(
+                f.issue().assignee.is_none(),
+                "New feedback must still wake the worker"
+            );
+        }
+    }
+
+    #[test]
+    fn github_watcher_blocked_handoff_does_not_consume_later_delivery() {
+        for late_before_handoff in [false, true] {
+            let mut f = watching_fixture();
+            if late_before_handoff {
+                watch_event(&mut f, "late");
+            }
+            f.apply(Operation::Assign {
+                number: 1,
+                target: "github".into(),
+                if_version: f.issue().version,
+            });
+            if !late_before_handoff {
+                watch_event(&mut f, "late");
+            }
+            if !late_before_handoff {
+                let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+                f.store
+                    .worker_steering_result(
+                        instruction["request_id"].as_str().unwrap(),
+                        "delivered",
+                        None,
+                    )
+                    .unwrap();
+            }
+            f.store
+                .worker_finish(&f.job, "blocked", "Could not finish new feedback")
+                .unwrap();
+            assert!(f.issue().assignee.is_none());
+        }
+    }
+
+    #[test]
+    fn github_watcher_handoff_is_scoped_to_the_run_and_unchanged_requirements() {
+        for changed in ["run", "body"] {
+            let mut f = watching_fixture();
+            f.apply(Operation::Assign {
+                number: 1,
+                target: "github".into(),
+                if_version: f.issue().version,
+            });
+            if changed == "run" {
+                f.store
+                    .db
+                    .execute("DELETE FROM agent_steering", [])
+                    .unwrap();
+                f.store
+                    .db
+                    .execute("UPDATE worker_runs SET id='resumed-run'", [])
+                    .unwrap();
+                f.job.id = "resumed-run".into();
+                // Receiving the same event in a resumed session does not reuse
+                // the previous attempt's deliberate handoff.
+                let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
+                f.store
+                    .worker_steering_result(
+                        instruction["request_id"].as_str().unwrap(),
+                        "delivered",
+                        None,
+                    )
+                    .unwrap();
+            } else {
+                f.store
+                    .db
+                    .execute("UPDATE issues SET body='New requirements'", [])
+                    .unwrap();
+            }
+            f.store
+                .worker_finish(&f.job, "blocked", "Unfinished work")
+                .unwrap();
+            assert!(f.issue().assignee.is_none(), "{changed}");
+        }
+    }
+
+    #[test]
+    fn github_watcher_companion_handoff_uses_the_reported_run_identity() {
+        let mut f = watching_fixture();
+        // The assignment authority sees companion runs through fleet state,
+        // not through its own worker_runs table.
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET finished_at=1", [])
+            .unwrap();
+        f.store
+            .db
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);",
+            )
+            .unwrap();
+        f.store.db.execute("INSERT OR REPLACE INTO fleet_state VALUES('machines',?1)", [json!([{"workers":[{"runs":[{"id":f.job.id,"project_id":f.job.project.id,"number":1,"actor_id":f.job.actor.id,"finished_at":null}]}]}]).to_string()]).unwrap();
+        f.apply(Operation::Assign {
+            number: 1,
+            target: "github".into(),
+            if_version: f.issue().version,
+        });
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET finished_at=NULL", [])
+            .unwrap();
+        f.store
+            .worker_finish(&f.job, "blocked", "Waiting for external approval")
+            .unwrap();
+        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+    }
+
+    #[test]
+    fn github_watcher_explicit_approval_hold_still_requires_user_action() {
+        let mut f = watching_fixture();
+        f.apply(Operation::Assign {
+            number: 1,
+            target: "github".into(),
+            if_version: f.issue().version,
+        });
+        f.store
+            .worker_finish(
+                &f.job,
+                "blocked",
+                "Codex needs input or approval: request cancelled",
+            )
+            .unwrap();
+        assert_eq!(f.issue().state, "blocked");
+        assert!(f.issue().manual_blocked);
+        assert!(f.issue().assignee.is_none());
     }
 
     #[test]

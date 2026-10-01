@@ -19,7 +19,7 @@ test('machine and agent are successive states of the same assignment', () => {
 
 test('watcher distinguishes waiting, pending pickup, and active work', () => {
   const describe = extra => assignments.describe({...base, assignment: {kind: 'github', ...extra}}, helpers);
-  assert.match(describe({waiting: true}).detail, /Waiting/);
+  assert.equal(describe({waiting: true}).detail, 'Waiting for new GitHub findings.');
   assert.match(describe({waiting: false}).detail, /queued/);
   assert.match(describe({actor: 'codex:123', machine_name: 'Devbox'}).detail, /Codex.*Devbox/);
   assert.equal(describe({waiting: true}).label, 'GitHub watcher');

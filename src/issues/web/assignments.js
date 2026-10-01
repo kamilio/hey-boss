@@ -16,7 +16,7 @@
   }
   function describeAssignment(issue, {actorName, bossName}) {
     const a = current(issue), machine = a.machine_name || a.machine;
-    if (a.kind === "github") return {label:"GitHub watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for required failures or all checks to finish." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
+    if (a.kind === "github") return {label:"GitHub watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for new GitHub findings." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
     if (a.kind === "machine") return {label:machine || "Machine", detail:"Waiting for an agent.", icon:"monitor"};
     if (a.kind === "agent") return {label:actorName(a.actor), detail:machine ? `Working on ${machine}.` : "Agent is working.", icon:"user"};
     if (a.kind === "boss") return {label:bossName, detail:"Assigned to you.", icon:"user"};

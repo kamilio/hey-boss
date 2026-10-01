@@ -170,7 +170,34 @@ pub(super) fn assign(
             params![project.id, issue.number, machine],
         )?;
     }
-    Ok(json!({"target":target,"previous_assignee":previous,"assignee":issue.assignee}))
+    let mut data = json!({"target":target,"previous_assignee":previous,"assignee":issue.assignee});
+    if retain_claim && previous.as_deref() == Some(&actor.id) {
+        // Assignment runs on the supervisor, including companion handoffs.
+        // Scope the acknowledgement to this attempt, not a reusable session ID.
+        if let Some(run) = live_issue_run(db, &project.id, issue.number, &actor.id)? {
+            data["github_handoff"] = json!({"run":run,"event":status["event"]});
+        }
+    }
+    Ok(data)
+}
+
+fn live_issue_run(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    actor: &str,
+) -> Result<Option<String>> {
+    let local = db.query_row("SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 AND finished_at IS NULL",params![project,number,actor],|r|r.get(0)).optional()?;
+    if local.is_some()
+        || !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_state' AND type='table')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(local);
+    }
+    Ok(db.query_row("SELECT json_extract(r.value,'$.id') FROM fleet_state s,json_each(s.value) m,json_each(m.value,'$.workers') w,json_each(w.value,'$.runs') r WHERE s.key='machines' AND json_extract(r.value,'$.project_id')=?1 AND json_extract(r.value,'$.number')=?2 AND json_extract(r.value,'$.actor_id')=?3 AND json_extract(r.value,'$.finished_at') IS NULL LIMIT 1",params![project,number,actor],|r|r.get(0)).optional()?)
 }
 
 fn live_claim(db: &Connection, actor: Option<&str>) -> Result<bool> {
@@ -725,9 +752,20 @@ pub(super) fn release_worker(
     db: &Connection,
     job: &crate::issues::worker::Job,
     state: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let (_, status) = saved(db, &job.project.id, job.number())?;
-    let next = (state == "completed" && delivered_to(db, &job.id, &status)?).then_some(WATCHER);
+    // A deliberate handoff can end with a blocked/interrupted result while
+    // waiting for external input. Consume only that run's exact snapshot;
+    // later evidence and events never delivered to the worker stay runnable.
+    let handed_off = db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee')=?3 AND json_extract(data,'$.github_handoff.run')=?4 AND json_extract(data,'$.github_handoff.event') IS ?5 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id,job.id,status["event"].as_str()],|r|r.get::<_,bool>(0))?;
+    let handed_off = handed_off
+        && own_handoff(
+            db,
+            job,
+            &get_issue(db, &job.project.id, job.number(), true)?,
+        )?;
+    let next = ((state == "completed" || handed_off) && delivered_to(db, &job.id, &status)?)
+        .then_some(WATCHER);
     if next.is_none() {
         db.execute("UPDATE issues SET state='open' WHERE project_id=?1 AND number=?2 AND assignee=?3 AND state='ready'",params![job.project.id,job.number(),job.actor.id])?;
     }
@@ -748,7 +786,7 @@ pub(super) fn release_worker(
         now,
         &json!({"target":"github","previous_assignee":job.actor.id,"assignee":next}),
     )?;
-    Ok(())
+    Ok(next.is_some())
 }
 
 pub(super) fn release_claim(
