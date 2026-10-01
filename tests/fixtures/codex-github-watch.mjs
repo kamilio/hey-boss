@@ -10,7 +10,11 @@ const session = randomUUID();
 let turn, phase;
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const record = value => appendFileSync('github-worker.jsonl', JSON.stringify({...value, session}) + '\n');
-const status = text => JSON.parse(text.split('\n').find(line => line.startsWith('{"github_status":'))).github_status;
+const status = () => {
+  const view = spawnSync(process.env.HEY_BOSS_TEST_CLI,['issue','--json','--agent','codex:'+session,'view','1'],{encoding:'utf8'});
+  assert.equal(view.status,0,view.stdout+view.stderr);
+  return JSON.parse(view.stdout).issue.github_status;
+};
 const finish = () => {
   send({method:'item/completed',params:{threadId:session,turnId:turn,item:{type:'agentMessage',text:JSON.stringify({status:'completed',summary:'Synthetic GitHub findings handled.'})}}});
   send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:'completed'}}});
@@ -26,7 +30,8 @@ for await (const line of createInterface({input:process.stdin})) {
     assert(!turn, 'The active turn should be steered, not replaced');
     phase = existsSync('github-launches.txt') ? Number(readFileSync('github-launches.txt','utf8')) + 1 : 1;
     writeFileSync('github-launches.txt', String(phase));
-    const initial = status(params.input[0].text);
+    assert(params.input[0].text.includes('hey-boss issue pr list 1'));
+    const initial = status();
     assert(initial.event);
     assert.equal(initial.monitoring,true);
     const claim = spawnSync(process.env.HEY_BOSS_TEST_CLI,['issue','--json','--agent','codex:'+session,'claim','1'],{encoding:'utf8'});
@@ -41,7 +46,7 @@ for await (const line of createInterface({input:process.stdin})) {
     assert.equal(phase,1);
     assert.equal(params.expectedTurnId,turn);
     assert(!params.input[0].text.includes('Boss added an instruction'), 'Automatic evidence must not impersonate a human instruction');
-    const update = status(params.input[0].text);
+    const update = status();
     assert.equal(Object.values(update.prs)[0].evidence.complete,true);
     if (process.env.HEY_BOSS_TEST_REJECT_STEERING === '1') {
       record({type:'steer_rejected',phase,status:update});
