@@ -423,6 +423,7 @@ fn ssh(host: &str) -> io::Result<Command> {
         return Err(error("Invalid SSH host"));
     }
     let mut command = Command::new("ssh");
+    hey_boss::ssh::reuse_connection(&mut command, &state()?, host);
     command
         .args([
             "-T",

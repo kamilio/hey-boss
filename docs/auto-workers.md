@@ -22,6 +22,10 @@ The local web app and paired web app edit the same supervisor file.
 
 The supervisor owns `~/.hey-boss/fleet.yaml`. Machine keys are SSH host names;
 `local` means the supervisor. Worker IDs are stable and unique across the fleet.
+Registered companions in `~/.hey-boss/config.json` also stay connected for sync,
+even with no saved workers. Live standalone workers receive allocations without
+being enrolled in the YAML. Removing a saved worker drains it; it does not
+disconnect that machine's journal or independent workers.
 
 ```yaml
 machines:

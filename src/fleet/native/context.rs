@@ -223,12 +223,24 @@ impl Context {
     pub fn inventory(&self) -> Result<Vec<Value>> {
         if super::configuration::is_yaml(&self.desired) {
             let saved = super::configuration::load(self)?;
-            return Ok(saved["runtime"]["machines"]
+            let mut hosts: std::collections::BTreeMap<String, Value> = self
+                .legacy_inventory()?
+                .into_iter()
+                .map(|entry| (entry["host"].as_str().unwrap().to_owned(), json!([])))
+                .collect();
+            // Saved worker removal must not disconnect a registered companion:
+            // independent workers and its durable journal still need transport.
+            for (host, machine) in saved["runtime"]["machines"]
                 .as_object()
                 .into_iter()
                 .flatten()
-                .filter(|(host, _)| host.as_str() != "local")
-                .map(|(host, m)| json!({"host":host,"workers":m["workers"]}))
+            {
+                hosts.insert(host.clone(), machine["workers"].clone());
+            }
+            hosts.remove("local");
+            return Ok(hosts
+                .into_iter()
+                .map(|(host, workers)| json!({"host":host,"workers":workers}))
                 .collect());
         }
         let mut hosts = self.legacy_inventory()?;
@@ -260,7 +272,7 @@ impl Context {
                 hosts.push(entry);
             }
         }
-        if hosts.is_empty() {
+        if value.get("ssh_hosts").is_none() {
             let path = self.state.join("companion-hosts");
             self.protect_file(&path)?;
             match fs::read_to_string(path) {
