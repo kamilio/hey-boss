@@ -3,6 +3,9 @@ use super::*;
 use crate::issues::worker::{Job, ProjectConfig, now};
 use crate::issues::worker_infrastructure;
 pub(super) const HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_issue_history ON worker_runs(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
+// Delete only the range older than the hundredth-newest event. A missing
+// boundary is NULL, so short histories are left intact.
+const PRUNE_WORKER_EVENTS: &str = "DELETE FROM worker_events WHERE run_id=?1 AND id < (SELECT id FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 1 OFFSET 99)";
 type ActiveProcess = (Job, Option<u32>, Option<String>);
 
 impl Store {
@@ -483,7 +486,7 @@ impl Store {
                 params![id, timestamp, text],
             )?;
             tx.execute("UPDATE worker_runs SET last_event=?2,updated_at=?3,goal=coalesce(?4,goal) WHERE id=?1 AND finished_at IS NULL",params![id,text,timestamp,goal])?;
-            tx.execute("DELETE FROM worker_events WHERE run_id=?1 AND id NOT IN(SELECT id FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 100)",[id])?;
+            tx.execute(PRUNE_WORKER_EVENTS, [id])?;
             tx.commit()?;
             Ok(())
         })();
@@ -2365,6 +2368,58 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn progress_retention_uses_the_index_boundary_without_rechecking_retained_events() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE worker_events(id INTEGER PRIMARY KEY,run_id TEXT NOT NULL,created_at INTEGER NOT NULL,text TEXT NOT NULL);
+            CREATE INDEX worker_events_run ON worker_events(run_id,id DESC);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+            INSERT INTO worker_events SELECT x*2,'other',0,'unchanged' FROM n;
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<105)
+            INSERT INTO worker_events SELECT x*2+1,'run',0,'progress' FROM n;
+            INSERT INTO worker_events VALUES(30001,'short',0,'first'),(30002,'short',0,'second');").unwrap();
+        assert_eq!(db.execute(PRUNE_WORKER_EVENTS, ["run"]).unwrap(), 5);
+        assert_eq!(db.execute(PRUNE_WORKER_EVENTS, ["short"]).unwrap(), 0);
+        assert_eq!(db.execute(PRUNE_WORKER_EVENTS, ["missing"]).unwrap(), 0);
+        let retained: Vec<i64> = db
+            .prepare("SELECT id FROM worker_events WHERE run_id='run' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(retained, (6..=105).map(|n| n * 2 + 1).collect::<Vec<_>>());
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM worker_events WHERE run_id='other'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            10000
+        );
+        let mut measurements = Vec::new();
+        for added in [false, true] {
+            if added {
+                db.execute("INSERT INTO worker_events VALUES(40001,'run',0,'new')", [])
+                    .unwrap();
+            }
+            let mut prune = db.prepare(PRUNE_WORKER_EVENTS).unwrap();
+            assert_eq!(prune.execute(["run"]).unwrap(), usize::from(added));
+            measurements.push(prune.get_status(rusqlite::StatementStatus::VmStep));
+        }
+        eprintln!(
+            "Progress retention: {} VM steps idle, {} after one event",
+            measurements[0], measurements[1]
+        );
+        for steps in measurements {
+            assert!(
+                steps < 500,
+                "Retention must seek to the old-event range: {steps} VM steps"
+            );
+        }
     }
 
     #[test]
