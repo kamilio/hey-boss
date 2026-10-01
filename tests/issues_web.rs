@@ -502,6 +502,46 @@ fn progress_is_read_only_on_the_web_and_history_is_a_separate_read() {
 }
 
 #[test]
+fn chief_route_requires_csrf_json_and_a_request_object() {
+    let web = Web::start();
+    let path = "/api/fleet/chief";
+    assert_eq!(
+        web.http(
+            "POST",
+            path,
+            &[("Content-Type", "application/json")],
+            b"null"
+        )
+        .status,
+        403
+    );
+    assert_eq!(
+        web.http(
+            "POST",
+            path,
+            &[
+                ("X-Hey-Boss-CSRF", &web.token),
+                ("Content-Type", "text/plain")
+            ],
+            b"null"
+        )
+        .status,
+        400
+    );
+    let reply = web.http(
+        "POST",
+        path,
+        &[
+            ("X-Hey-Boss-CSRF", &web.token),
+            ("Content-Type", "application/json"),
+        ],
+        b"null",
+    );
+    assert_eq!(reply.status, 400);
+    assert_eq!(reply.json()["error"]["message"], "Expected a Chief request");
+}
+
+#[test]
 fn takeover_requires_csrf_and_json_before_contacting_the_fleet() {
     let web = Web::start();
     let body = br#"{"host":"local","run":"synthetic"}"#;
