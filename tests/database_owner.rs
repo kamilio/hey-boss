@@ -98,6 +98,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
             .unwrap(),
     );
     drop(fixture.connection());
+    fixture.create("Sandbox read test");
     let path = fixture.root.join("issues.db").canonicalize().unwrap();
     let identity = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
     let startup = PathBuf::from(format!(
@@ -105,31 +106,99 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
         unsafe { libc::getuid() },
         &identity[..24]
     ));
-    let command = fixture.command(&["issue", "--project", "Sandbox test", "--json", "projects"]);
-    let mut sandbox = Command::new("/usr/bin/sandbox-exec");
-    sandbox
-        .args([
-            "-p",
-            "(version 1)(allow default)(deny network-outbound)(deny process-fork)",
-        ])
-        .arg(command.get_program())
-        .args(command.get_args())
-        .current_dir(&fixture.root);
-    for (name, value) in command.get_envs() {
-        if let Some(value) = value {
-            sandbox.env(name, value);
-        } else {
-            sandbox.env_remove(name);
+    for args in [
+        vec!["issue", "list", "--project", "Database owner", "--all"],
+        vec![
+            "mm",
+            "show",
+            "--project",
+            "Database owner",
+            "--bodies",
+            "none",
+        ],
+    ] {
+        for json in [false, true] {
+            let mut args = args.clone();
+            if json {
+                args.push("--json");
+            }
+            let command = fixture.command(&args);
+            for piped in [false, true] {
+                for denied in [false, true] {
+                    let mut invocation = if denied {
+                        let mut sandbox = Command::new("/usr/bin/sandbox-exec");
+                        sandbox.args(["-p", "(version 1)(allow default)(deny network-outbound)"]);
+                        sandbox
+                    } else {
+                        Command::new("/usr/bin/env")
+                    };
+                    if piped {
+                        // Positional arguments preserve quoting; pipefail checks
+                        // the CLI's status rather than the successful consumer.
+                        invocation.args([
+                            "/bin/bash",
+                            "-o",
+                            "pipefail",
+                            "-c",
+                            "\"$@\" | cat",
+                            "--",
+                        ]);
+                    }
+                    invocation
+                        .arg(command.get_program())
+                        .args(command.get_args())
+                        .current_dir(&fixture.root);
+                    for (name, value) in command.get_envs() {
+                        if let Some(value) = value {
+                            invocation.env(name, value);
+                        } else {
+                            invocation.env_remove(name);
+                        }
+                    }
+                    let output = invocation.output().unwrap();
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert_eq!(
+                        output.status.code(),
+                        Some(if denied { 1 } else { 0 }),
+                        "{args:?}, piped={piped}, denied={denied}: {stdout}{stderr}"
+                    );
+                    if denied {
+                        let message = if json {
+                            assert!(stderr.is_empty(), "{stderr}");
+                            let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+                            assert_eq!(error["ok"], false);
+                            assert_eq!(error["error"]["code"], "database_error");
+                            error["error"]["message"].as_str().unwrap().to_owned()
+                        } else {
+                            assert!(stdout.is_empty(), "{stdout}");
+                            stderr.into_owned()
+                        };
+                        assert!(
+                            message.contains("Database service access denied"),
+                            "{message}"
+                        );
+                        assert!(
+                            message.contains("Operation not permitted")
+                                || message.contains("Permission denied"),
+                            "{message}"
+                        );
+                        assert!(
+                            message.contains("without pipes or redirection"),
+                            "{message}"
+                        );
+                        assert!(message.contains("approval"), "{message}");
+                        assert!(message.contains("mm show --bodies none"), "{message}");
+                    } else if json {
+                        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+                        assert_eq!(value["ok"], true, "{value}");
+                    } else {
+                        assert!(stdout.contains("Database owner"), "{stdout}");
+                    }
+                }
+            }
         }
     }
-    let output = sandbox.output().unwrap();
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        error.contains("Operation not permitted") || error.contains("Permission denied"),
-        "{error}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert!(
         !startup.exists(),
         "Denied clients must not try to start another service"

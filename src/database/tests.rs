@@ -1,6 +1,29 @@
 use super::*;
 use std::{sync::mpsc, time::Duration};
 
+#[test]
+fn socket_access_denials_keep_their_kind_and_recovery_guidance() {
+    for errno in [libc::EPERM, libc::EACCES] {
+        let source = std::io::Error::from_raw_os_error(errno);
+        let original = source.to_string();
+        let error = connection_error(source);
+        assert!(permission_denied(&error));
+        let domain = crate::issues::Error::from(error);
+        assert_eq!(domain.code, "database_error");
+        assert_eq!(domain.exit_code(), 1);
+        assert!(domain.message.contains(&original));
+        assert!(domain.message.contains("Database service access denied"));
+        assert!(domain.message.contains("without pipes or redirection"));
+    }
+    for errno in [libc::ENOENT, libc::ECONNREFUSED] {
+        let source = std::io::Error::from_raw_os_error(errno);
+        let expected = format!("Database service unavailable: {source}");
+        let error = connection_error(source);
+        assert!(!permission_denied(&error));
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
 /// A private transport that disconnects immediately before or after COMMIT.
 /// All other requests go through the real database service protocol.
 pub(crate) fn lose_commit_response(
