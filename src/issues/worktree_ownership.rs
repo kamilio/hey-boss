@@ -19,8 +19,19 @@ fn read(db: &Connection, home: Option<&Path>) -> Result<BTreeSet<PathBuf>> {
         .prepare("SELECT attempt_hold FROM issues WHERE attempt_hold IS NOT NULL LIMIT 10001")?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let reserved = tx.prepare("SELECT i.origin FROM fleet_allocations a JOIN issues i ON i.project_id=a.project_id AND i.number=a.issue_number WHERE a.node=?1 AND i.state IN ('open','ready') AND i.deleted_at IS NULL LIMIT 10001")?
-        .query_map([&machine], |r| r.get::<_, Option<String>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // A known assignee's metadata is validated below and owns the checkout.
+    // The issue author's older origin may be absent or belong to another machine.
+    // Missing assignee records still require the reservation's checkout hint.
+    let reserved = tx
+        .prepare(
+            "SELECT i.origin FROM fleet_allocations a JOIN issues i
+             ON i.project_id=a.project_id AND i.number=a.issue_number
+             WHERE a.node=?1 AND i.state IN ('open','ready') AND i.deleted_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM agents owner WHERE owner.id=i.assignee)
+             LIMIT 10001",
+        )?
+        .query_map([&machine], |r| r.get::<_, Option<String>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let queued = tx.prepare("SELECT a.metadata FROM worker_runs r LEFT JOIN agents a ON a.id=r.actor_id WHERE r.machine=?1 AND r.finished_at IS NULL LIMIT 10001")?
         .query_map([&machine], |r| r.get::<_, Option<String>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     tx.commit()?;
@@ -210,6 +221,44 @@ mod tests {
     }
 
     #[test]
+    fn known_assignee_protects_checkout_without_a_valid_allocation_origin() {
+        let db = fixture();
+        claim(&db, "owner", "local", "open", "unknown");
+        db.execute_batch(
+            "UPDATE issues SET project_id='project',number=1;
+            INSERT INTO fleet_allocations VALUES('project',1,'local');",
+        )
+        .unwrap();
+        let expected = BTreeSet::from([PathBuf::from("/declared/owner")]);
+        assert_eq!(read(&db, None).unwrap(), expected);
+        db.execute(
+            "UPDATE issues SET origin=?1",
+            [r#"{"machine":"foreign","cwd":"/author/checkout"}"#],
+        )
+        .unwrap();
+        assert_eq!(read(&db, None).unwrap(), expected);
+
+        db.execute(
+            "UPDATE agents SET metadata=json_set(metadata,'$.cwd','relative')",
+            [],
+        )
+        .unwrap();
+        assert!(read(&db, None).is_err());
+    }
+
+    #[test]
+    fn missing_assignee_metadata_does_not_discard_unresolved_reservation() {
+        let db = fixture();
+        db.execute_batch(
+            "INSERT INTO issues(assignee,state,project_id,number)
+            VALUES('missing-owner','open','project',1);
+            INSERT INTO fleet_allocations VALUES('project',1,'local');",
+        )
+        .unwrap();
+        assert!(read(&db, None).is_err());
+    }
+
+    #[test]
     fn invalid_ownership_is_an_error_not_an_empty_success() {
         let db = fixture();
         claim(&db, "active", "local", "open", "running");
@@ -231,6 +280,11 @@ mod tests {
         claim(&db, "boss", "local", "ready", "unknown");
         claim(&db, "unbound-agent", "local", "open", "unknown");
         claim(&db, "queued-project", "local", "open", "unknown");
+        db.execute_batch(
+            "UPDATE issues SET project_id='project',number=1 WHERE assignee='boss';
+            INSERT INTO fleet_allocations VALUES('project',1,'local');",
+        )
+        .unwrap();
         db.execute(
             "UPDATE agents SET metadata=json_set(metadata,'$.cwd',?1) WHERE id IN ('boss','unbound-agent')",
             [home.to_str().unwrap()],
