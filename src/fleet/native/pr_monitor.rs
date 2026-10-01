@@ -147,7 +147,17 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
 }
 
 async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
+    let viewer = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.viewer(Freshness::MaxAge(Duration::from_secs(3600))),
+    )
+    .await;
     let mut store = Store::open(&ctx.path)?;
+    if let Ok(Ok(viewer)) = viewer
+        && let Some(id) = viewer.data["id"].as_i64()
+    {
+        store.record_github_user(id)?;
+    }
     let mut actor = ctx.actor()?;
     actor.id = "human:pr-monitor".into();
     store.close_merged_pull_requests(&actor)?;
@@ -187,7 +197,8 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
             )?;
             continue;
         };
-        let result = tokio_read(client, &repository, number).await;
+        let backfill = prs.iter().any(|pr| pr.url == url && pr.backfill);
+        let result = tokio_read(client, &repository, number, backfill).await;
         let mut store = Store::open(&ctx.path)?;
         // A task may enter watching while this ordinary read is in flight.
         // Its cached metadata must not race the watcher's fresher observation.
@@ -199,6 +210,11 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
                 let checked_at = i64::try_from(response.validated_at_ms)?;
                 let data = response.data;
                 let status = pr_status(&data, &repository, number);
+                if status.is_some()
+                    && let Some(id) = data["user"]["id"].as_i64()
+                {
+                    store.record_pr_author(&url, id)?;
+                }
                 store.record_pr_status(
                     &url,
                     status,
@@ -273,15 +289,29 @@ async fn tokio_read(
     client: &ApiClient,
     repository: &str,
     number: u64,
+    backfill: bool,
 ) -> hey_gh::Result<hey_gh::Response> {
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        client.pull_request(
-            repository,
-            number,
-            Freshness::MaxAge(Duration::from_secs(300)),
-        ),
-    )
+    tokio::time::timeout(Duration::from_secs(20), async {
+        // Authorship and merge dates of confirmed merges can be backfilled
+        // from old metadata without revalidating every historical PR.
+        if backfill {
+            match client
+                .pull_request(repository, number, Freshness::CachedOnly)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(hey_gh::Error::CacheMiss) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        client
+            .pull_request(
+                repository,
+                number,
+                Freshness::MaxAge(Duration::from_secs(300)),
+            )
+            .await
+    })
     .await
     .map_err(|_| hey_gh::Error::Deadline)?
 }
@@ -323,15 +353,20 @@ mod tests {
     }
     #[test]
     fn polling_fetches_only_metadata_persists_status_and_closes_the_task() {
-        polling_scenario(false);
+        polling_scenario(false, false);
     }
 
     #[test]
     fn rate_limit_stops_batch_and_persisted_cooldown_stops_retries() {
-        polling_scenario(true);
+        polling_scenario(true, false);
     }
 
-    fn polling_scenario(rate_limited: bool) {
+    #[test]
+    fn merged_authorship_backfill_reads_cached_metadata_without_revalidation() {
+        polling_scenario(false, true);
+    }
+
+    fn polling_scenario(rate_limited: bool, backfill: bool) {
         use crate::issues::{Project, Request};
         use std::sync::{Arc, atomic::AtomicBool};
         let root = std::env::temp_dir().join(format!(
@@ -366,6 +401,11 @@ mod tests {
         store.execute(&request).unwrap();
         request.operation=serde_json::from_value(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/1","purpose":"fix"})).unwrap();
         store.execute(&request).unwrap();
+        if backfill {
+            store
+                .record_pr_status("https://github.com/o/r/pull/1", Some("merged"), 1, None)
+                .unwrap();
+        }
         if rate_limited {
             request.operation = serde_json::from_value(json!({"action":"add_pull_request","number":1,"url":"https://github.com/o/r/pull/2","purpose":"fix"})).unwrap();
             store.execute(&request).unwrap();
@@ -374,11 +414,24 @@ mod tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let origin = format!("http://{}/", server.server_addr());
         let serving = std::thread::spawn(move || {
+            let viewer = server
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .expect("Viewer request");
+            assert_eq!(viewer.url(), "/v1/viewer?max_age_seconds=3600");
+            viewer.respond(tiny_http::Response::from_string(json!({"data":{"id":42,"login":"me"},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string()).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())).unwrap();
             let request = server
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap()
                 .expect("Metadata request");
-            assert_eq!(request.url(), "/v1/prs/o/r/1/metadata?max_age_seconds=300");
+            assert_eq!(
+                request.url(),
+                if backfill {
+                    "/v1/prs/o/r/1/metadata?cached_only=true"
+                } else {
+                    "/v1/prs/o/r/1/metadata?max_age_seconds=300"
+                }
+            );
             let response = if rate_limited {
                 tiny_http::Response::from_string(
                     json!({"code":"rate_limited","error":"cooldown"}).to_string(),
@@ -386,7 +439,7 @@ mod tests {
                 .with_status_code(503)
                 .with_header(tiny_http::Header::from_bytes("Retry-After", "600").unwrap())
             } else {
-                tiny_http::Response::from_string(json!({"data":{"number":1,"state":"closed","merged":true,"base":{"repo":{"full_name":"o/r"}}},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string())
+                tiny_http::Response::from_string(json!({"data":{"number":1,"state":"closed","merged":true,"user":{"id":42},"base":{"repo":{"full_name":"o/r"}}},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string())
             };
             request
                 .respond(response.with_header(
@@ -419,6 +472,13 @@ mod tests {
         if !rate_limited {
             assert_eq!(value["issue"]["closed_by"], "human:pr-monitor");
             assert_eq!(value["issue"]["pull_requests"][0]["status"], "merged");
+            request.operation = serde_json::from_value(
+                json!({"action":"merged_pull_requests","limit":10,"offset":0}),
+            )
+            .unwrap();
+            let history = store.execute(&request).unwrap();
+            assert_eq!(history["pull_requests"].as_array().unwrap().len(), 1);
+            assert_eq!(history["authorship_pending"], false);
         } else {
             assert!(value["issue"]["pull_requests"][1]["error"].is_null());
             assert!(value["issue"]["pull_requests"][0]["checked_at"].is_null());

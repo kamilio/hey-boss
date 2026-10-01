@@ -17,9 +17,14 @@ const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
             "error",
             "merged_at",
             "pr_title",
+            "author_id",
         ],
     ),
-    ("global_settings", "id", &["auto_close_merged_prs"]),
+    (
+        "global_settings",
+        "id",
+        &["auto_close_merged_prs", "github_user_id"],
+    ),
 ];
 fn capture_repairs(db: &Connection) -> Result<Vec<(String, String)>> {
     let mut repairs = Vec::new();

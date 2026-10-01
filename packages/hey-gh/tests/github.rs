@@ -105,6 +105,28 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn viewer_api_reuses_authenticated_identity_without_extra_requests() {
+    let h = Harness::new().await;
+    let client = h.client();
+    let expected = client.get("user", Freshness::Revalidate).await.unwrap();
+    let api = hey_gh::api::Api::new(client.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sdk = hey_gh::ApiClient::new(
+        format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    let observed = sdk.viewer(Freshness::CachedOnly).await.unwrap();
+    assert_eq!(observed.data, expected.data);
+    assert_eq!(observed.data["id"], 42);
+    assert_eq!(h.calls().len(), 1);
+    assert!(client.watches().await.unwrap().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
 async fn metadata_api_reuses_shared_cache_without_hydrating_or_watching() {
     let h = Harness::new().await;
     let client = h.client();
@@ -669,7 +691,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         normalized
     };
     let value = match normalized.as_str() {
-        "/user" => json!({"login":"me"}),
+        "/user" => json!({"id":42,"login":"me"}),
         "/repos/acme/demo/pulls" => json!([
             {"number":7,"user":{"login":"me"}}, {"number":8,"user":{"login":"other"}}]),
         "/repos/acme/demo/pulls/7" => {

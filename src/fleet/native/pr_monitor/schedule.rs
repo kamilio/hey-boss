@@ -165,6 +165,7 @@ mod tests {
             url: url.into(),
             checked_at,
             closed,
+            backfill: false,
         }
     }
 
