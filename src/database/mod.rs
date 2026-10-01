@@ -279,7 +279,25 @@ impl Connection {
         params: P,
         f: impl FnOnce(&Row<'_>) -> Result<T>,
     ) -> Result<T> {
-        self.prepare(sql)?.query_row(params, f)
+        match &self.backend {
+            Backend::Local(_) => self.prepare(sql)?.query_row(params, f),
+            Backend::Remote(remote) => {
+                // Query already returns column metadata. A separate Prepare RPC
+                // adds a round trip for every lookup, including under a writer lease.
+                let reply = remote.call(Command::Query {
+                    sql: sql.into(),
+                    values: params.values()?.into_iter().map(SqlValue::from).collect(),
+                })?;
+                let values = reply
+                    .rows
+                    .first()
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                f(&Row::Remote {
+                    columns: &reply.columns,
+                    values,
+                })
+            }
+        }
     }
     pub fn pragma_update<V: ToSql>(&self, schema: Option<&str>, name: &str, v: V) -> Result<()> {
         match &self.backend {
