@@ -46,7 +46,7 @@ const HeyBossMergedPRs = (() => {
         rows=reset?value.pull_requests:[...new Map([...rows,...value.pull_requests].map(pr=>[pr.url,pr])).values()];next=value.next_offset;
         $('#merged-list').innerHTML=render(rows,current);
         HeyBossUI.icons($('#merged-list'));
-        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:'No merged PRs yet. Tracked PRs will appear here after GitHub confirms the merge.';
+        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:'No merged fix PRs yet. PRs marked as fixes will appear here after GitHub confirms the merge.';
         $('#merged-more').hidden=next===null;
       } catch(e) {if(seq===generation){error(e.message);$('#merged-status').textContent='';}}
       finally {if(seq===generation){busy=false;$('#merged-more').disabled=false;$('#merged-refresh').disabled=false;}}
