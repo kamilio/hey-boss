@@ -7,7 +7,7 @@ use super::*;
 use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-pub(super) use usage::usage;
+pub(super) use usage::{reading, usage};
 
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 

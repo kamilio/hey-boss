@@ -10,6 +10,7 @@ mod overview;
 mod recovery;
 mod replay;
 mod sse;
+mod subscription;
 mod websocket;
 use crate::config::{self, Config, Fingerprint, IpVersion, Mode};
 use anyhow::Result;
@@ -189,6 +190,14 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         .route("/overview.js", axum::routing::get(overview::script))
         .route("/overview/api", axum::routing::get(overview::data))
         .route("/claude/usage", axum::routing::get(claude::usage))
+        .route(
+            "/usage/v1/accounts",
+            axum::routing::get(subscription::accounts),
+        )
+        .route(
+            "/usage/v1/{provider}/{account}",
+            axum::routing::get(subscription::usage),
+        )
         .route("/logs", axum::routing::get(logs::page))
         .route("/logs/dashboard.js", axum::routing::get(logs::script))
         .route("/logs/api", axum::routing::get(logs::entries))
@@ -267,6 +276,7 @@ async fn authenticate(
     }
     let path = request.uri().path();
     if !matches!(path, "/" | "/apis" | "/claude/usage")
+        && !path.starts_with("/usage/")
         && !path.starts_with("/overview")
         && !path.starts_with("/logs")
     {

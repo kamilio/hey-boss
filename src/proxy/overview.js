@@ -125,6 +125,9 @@
         const used = window.used_percent;
         if (typeof used === 'number' && Number.isFinite(used)) {
           card.append(node('strong', `${used.toLocaleString(undefined, {maximumFractionDigits:1})}% used`));
+          if (typeof window.remaining_percent === 'number' && Number.isFinite(window.remaining_percent)) {
+            card.append(node('p', `${window.remaining_percent.toLocaleString(undefined, {maximumFractionDigits:1})}% left`));
+          }
           const bar = node('progress');
           bar.max = 100; bar.value = Math.min(100, Math.max(0, used));
           bar.setAttribute('aria-label', `${window.label}: ${used}% used`);
@@ -139,6 +142,12 @@
       if (extra) {
         $('extra-usage').hidden = false;
         $('extra-usage').textContent = extra.enabled === false ? 'Extra usage is disabled.' : `Extra usage: ${extra.enabled === true ? 'enabled' : 'status not reported'}${typeof extra.used_percent === 'number' ? ` · ${extra.used_percent.toLocaleString(undefined, {maximumFractionDigits:1})}% used` : ''}.`;
+        if (extra.spend) {
+          const spend = extra.spend;
+          const money = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
+            ? `${spend.currency} ${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}` : 'unknown';
+          $('extra-usage').textContent += ` Provider-reported monthly extra spend: ${money(spend.used)} · cap: ${money(spend.limit)} · remaining: ${money(spend.remaining)} · above cap: ${money(spend.over_limit)}. This is separate from estimated API-equivalent spend.`;
+        }
       }
     } catch (error) {
       $('usage-error').hidden = false;

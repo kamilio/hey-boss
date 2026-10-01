@@ -6,6 +6,7 @@ mod mode_tests;
 mod model_registry;
 mod proxy;
 mod rollout;
+mod usage_cli;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -29,6 +30,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Check remaining subscription quota and provider-reported extra spend
+    Usage(usage_cli::Args),
     /// Install/update the proxy and sync its config on SSH hosts
     Rollout {
         /// Only deploy these configured hosts (repeatable)
@@ -100,6 +103,9 @@ fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::Usage(usage)) = args.command {
+        return usage_cli::run(usage, args.config).await;
+    }
     if let Some(Command::ConfigureGemini {
         base_url,
         model,

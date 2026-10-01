@@ -33,6 +33,12 @@ test('Claude limits render unknown and stale readings safely', async () => {
   assert.equal(cards[1].children.at(-1).textContent,'Reset time not reported');
   assert.match(nodes.get('usage-status').textContent,/Stale/);
   assert.equal(nodes.get('extra-usage').textContent,'Extra usage is disabled.');
+  payload.data.extra_usage = {enabled:false, spend:{currency:'USD',used:12.5,limit:10,remaining:0,over_limit:2.5}};
+  await nodes.get('refresh-usage').listeners.click();
+  assert.match(nodes.get('extra-usage').textContent,/disabled.*monthly extra spend: USD 12.50.*remaining: USD 0.00.*above cap: USD 2.50/);
+  payload.data.extra_usage = {enabled:true, spend:{currency:'USD',used:0,limit:null,remaining:null,over_limit:null}};
+  await nodes.get('refresh-usage').listeners.click();
+  assert.match(nodes.get('extra-usage').textContent,/monthly extra spend: USD 0.00.*cap: unknown.*remaining: unknown/);
   context.fetch=async()=>({ok:false,status:401});
   await nodes.get('refresh-usage').listeners.click();
   assert.match(nodes.get('usage-error').textContent,/session expired/);

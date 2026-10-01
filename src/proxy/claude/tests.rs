@@ -388,6 +388,15 @@ async fn usage_requires_host_auth_and_client_relay_uses_host_credentials() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    for path in ["/usage/v1/accounts", "/usage/v1/claude/default"] {
+        assert_eq!(
+            reqwest::get(format!("{host_url}{path}"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
     let relay: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","mode":"client","connection":{"url":host_url,"api_key":access.local}})).unwrap();
     let (relay_url, relay_task) = serve(router(relay).unwrap()).await;
     let value: Value = reqwest::get(format!("{relay_url}/claude/usage"))
@@ -397,7 +406,185 @@ async fn usage_requires_host_auth_and_client_relay_uses_host_credentials() {
         .await
         .unwrap();
     assert_eq!(value["data"]["windows"][0]["used_percent"], 12.0);
+    let sdk =
+        hey_proxy::usage::Client::new(&relay_url, Some("caller-key-never-forwarded")).unwrap();
+    assert_eq!(sdk.accounts().await.unwrap().accounts[0].provider, "claude");
+    assert_eq!(
+        sdk.usage("claude", "default")
+            .await
+            .unwrap()
+            .reading
+            .data
+            .unwrap()
+            .windows[0]
+            .remaining_percent,
+        Some(88.0)
+    );
+    assert_eq!(
+        sdk.usage("codex", "default").await.unwrap_err(),
+        hey_proxy::usage::Error::Http(501)
+    );
+    assert_eq!(
+        sdk.usage("claude", "other").await.unwrap_err(),
+        hey_proxy::usage::Error::Http(404)
+    );
+    let dashboard: Value = reqwest::get(format!("{host_url}/logs/api/dashboard"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(dashboard.get("rpm").is_none()); // Host authentication still applies.
+    let dashboard: Value = reqwest::Client::new()
+        .get(format!("{host_url}/logs/api/dashboard"))
+        .bearer_auth(&access.local)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dashboard["rpm"], 0);
     relay_task.abort();
     host_task.abort();
     upstream_task.abort();
+}
+
+#[tokio::test]
+async fn sdk_usage_shares_cache_and_preserves_provider_backoff() {
+    use hey_proxy::usage::{Client, State as UsageState};
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(move || {
+        let calls = calls.clone();
+        async move {
+            if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "120")], "PRIVATE").into_response();
+            }
+            axum::Json(json!({"five_hour":{"utilization":25},"seven_day":{"utilization":101},
+                "extra_usage":{"is_enabled":true,"used_credits":250,"monthly_limit":1000},"token":"PRIVATE"})).into_response()
+        }
+    }))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, proxy_task) = serve(router(config(dir.path(), &upstream)).unwrap()).await;
+    let client = Client::new(&format!("{url}/v1"), None).unwrap();
+    let accounts = client.accounts().await.unwrap();
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(accounts.accounts[0].id, "default");
+    assert_eq!(count.load(Ordering::SeqCst), 0); // Startup/listing never query quota.
+    let first = client.usage("claude", "default").await.unwrap();
+    assert_eq!(first.reading.state, UsageState::Ok);
+    let data = first.reading.data.as_ref().unwrap();
+    assert_eq!(data.windows[0].remaining_percent, Some(75.0));
+    assert_eq!(data.windows[1].remaining_percent, Some(0.0));
+    assert_eq!(
+        data.extra_usage
+            .as_ref()
+            .unwrap()
+            .spend
+            .as_ref()
+            .unwrap()
+            .remaining,
+        Some(7.5)
+    );
+    let legacy: Value = reqwest::get(format!("{url}/claude/usage"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(legacy["updated_at"], first.reading.updated_at.unwrap());
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    let stale = client.usage("claude", "default").await.unwrap();
+    assert_eq!(stale.reading.state, UsageState::Stale);
+    assert_eq!(stale.reading.updated_at, first.reading.updated_at);
+    assert!(stale.reading.retry_after_seconds.unwrap() >= 119);
+    assert_eq!(
+        serde_json::to_value(stale.reading.data).unwrap(),
+        serde_json::to_value(first.reading.data).unwrap()
+    );
+    assert!(
+        !serde_json::to_string(&client.usage("claude", "default").await.unwrap())
+            .unwrap()
+            .contains("PRIVATE")
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        client.usage("codex", "default").await.unwrap_err(),
+        hey_proxy::usage::Error::Http(501)
+    );
+    assert_eq!(
+        client.usage("claude", "other").await.unwrap_err(),
+        hey_proxy::usage::Error::Http(404)
+    );
+    let dashboard: Value = reqwest::get(format!("{url}/logs/api/dashboard"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dashboard["rpm"], 0);
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn pending_quota_fetch_does_not_block_native_requests() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let arrived = entered.clone();
+    let released = release.clone();
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(move |request: Request| {
+        let entered = arrived.clone();
+        let release = released.clone();
+        async move {
+            if request.uri().path() == "/api/oauth/usage" {
+                entered.notify_one();
+                release.notified().await;
+                return axum::Json(json!({"five_hour":{"utilization":25}}));
+            }
+            assert_eq!(request.uri().path(), "/v1/messages");
+            axum::Json(
+                json!({"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}),
+            )
+        }
+    })))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, proxy_task) = serve(router(config(dir.path(), &upstream)).unwrap()).await;
+    let client = hey_proxy::usage::Client::new(&url, None).unwrap();
+    let quota = tokio::spawn(async move { client.usage("claude", "default").await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{url}/v1/messages"))
+        .timeout(Duration::from_secs(2))
+        .header("content-type", "application/json")
+        .body(input(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    assert!(!quota.is_finished());
+    release.notify_one();
+    quota.await.unwrap();
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn usage_without_a_configured_provider_is_disabled_not_zero() {
+    let (url, task) = serve(router(Config::default()).unwrap()).await;
+    let sdk = hey_proxy::usage::Client::new(&url, None).unwrap();
+    assert!(sdk.accounts().await.unwrap().accounts.is_empty());
+    let usage = sdk.usage("claude", "default").await.unwrap();
+    assert_eq!(usage.reading.state, hey_proxy::usage::State::Disabled);
+    assert!(usage.reading.data.is_none());
+    assert!(usage.reading.updated_at.is_none());
+    task.abort();
 }

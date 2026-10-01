@@ -55,14 +55,45 @@ fn normalize(value: &Value) -> Result<Value> {
             windows.push(json!({"id":format!("limit_{index}"),"label":label,"group":bounded(&limit["group"]),"used_percent":percent(&limit["percent"]),"resets_at":bounded(&limit["resets_at"])}));
         }
     }
+    for window in &mut windows {
+        window["remaining_percent"] =
+            json!(percent(&window["used_percent"]).map(|used| (100.0 - used).max(0.0)));
+    }
     let extra = &value["extra_usage"];
     let extra = extra.is_object().then(|| json!({"enabled":extra["is_enabled"].as_bool(),"used_percent":percent(&extra["utilization"]),
-        "used_credits":percent(&extra["used_credits"]),"monthly_limit":percent(&extra["monthly_limit"]),"currency":bounded(&extra["currency"])}));
+        "used_credits":percent(&extra["used_credits"]),"monthly_limit":percent(&extra["monthly_limit"]),"currency":bounded(&extra["currency"]),
+        "remaining_percent":percent(&extra["utilization"]).map(|used| (100.0 - used).max(0.0)),
+        "spend":extra_spend(extra)}));
     ensure!(
         !windows.is_empty() || extra.is_some(),
         "Claude did not report any subscription limits"
     );
     Ok(json!({"windows":windows,"extra_usage":extra}))
+}
+// OAuth extra_usage uses hundredths of the currency unit, USD when omitted.
+// Keep legacy raw fields above; expose explicit major-unit amounts for all clients.
+fn extra_spend(extra: &Value) -> Option<hey_proxy::usage::SpendLimit> {
+    let currency = match &extra["currency"] {
+        Value::Null => "USD".to_owned(),
+        Value::String(code) if code.trim().is_empty() => "USD".to_owned(),
+        Value::String(code)
+            if code.trim().len() == 3 && code.trim().bytes().all(|c| c.is_ascii_alphabetic()) =>
+        {
+            code.trim().to_ascii_uppercase()
+        }
+        _ => return None, // Unrecognized units must never silently become dollars.
+    };
+    let used = percent(&extra["used_credits"]).map(|n| n / 100.0);
+    let limit = percent(&extra["monthly_limit"]).map(|n| n / 100.0);
+    Some(hey_proxy::usage::SpendLimit {
+        currency,
+        period: "monthly".into(),
+        used,
+        limit,
+        remaining: used.zip(limit).map(|(used, limit)| (limit - used).max(0.0)),
+        over_limit: used.zip(limit).map(|(used, limit)| (used - limit).max(0.0)),
+        resets_at: None,
+    })
 }
 fn retry_delay(headers: &HeaderMap) -> Duration {
     let raw = headers
@@ -90,8 +121,13 @@ pub(in crate::proxy) async fn usage(
     if proxy.config.mode == Mode::Client {
         return super::super::forward(State(service), request).await;
     }
+    reply(reading(&proxy).await)
+}
+
+pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
+    let service = &proxy.service;
     let Some(provider) = &proxy.config.claude else {
-        return reply(json!({"state":"disabled"}));
+        return json!({"state":"disabled"});
     };
     let path = match service
         .claude
@@ -101,14 +137,12 @@ pub(in crate::proxy) async fn usage(
     {
         Ok(path) => path,
         Err(_) => {
-            return reply(
-                json!({"state":"error","error":"Claude credential store is not configured"}),
-            );
+            return json!({"state":"error","error":"Claude credential store is not configured"});
         }
     };
     let token = match service.claude.tokens.token(&path, &proxy.client).await {
         Ok(token) => token,
-        Err(error) => return reply(json!({"state":"error","error":error.to_string()})),
+        Err(error) => return json!({"state":"error","error":error.to_string()}),
     };
     let identity: [u8; 32] = Sha256::digest(
         format!("{}\0{}\0{}", path.display(), provider.upstream_url, token).as_bytes(),
@@ -123,7 +157,7 @@ pub(in crate::proxy) async fn usage(
         };
     }
     if cache.retry_at.is_some_and(|t| t > Instant::now()) {
-        return reply(cache.value());
+        return cache.value();
     }
     let mut delay = Duration::from_secs(provider.usage_cache_seconds);
     let result = async {
@@ -159,5 +193,49 @@ pub(in crate::proxy) async fn usage(
             cache.error = Some(error.to_string());
         }
     }
-    reply(cache.value())
+    cache.value()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remaining_and_extra_spend_have_explicit_units_and_preserve_unknowns() {
+        let data = normalize(&json!({
+            "five_hour":{"utilization":112},"seven_day":{"utilization":null},
+            "extra_usage":{"is_enabled":false,"used_credits":1250,"monthly_limit":1000,"utilization":125}
+        })).unwrap();
+        assert_eq!(data["windows"][0]["remaining_percent"], 0.0);
+        assert!(data["windows"][1]["remaining_percent"].is_null());
+        assert_eq!(data["extra_usage"]["used_credits"], 1250.0); // Legacy contract.
+        assert_eq!(
+            data["extra_usage"]["spend"],
+            json!({"currency":"USD","period":"monthly","used":12.5,"limit":10.0,"remaining":0.0,"over_limit":2.5,"resets_at":null})
+        );
+        assert_eq!(data["extra_usage"]["remaining_percent"], 0.0);
+        let data = normalize(
+            &json!({"extra_usage":{"is_enabled":true,"used_credits":0,"monthly_limit":null}}),
+        )
+        .unwrap();
+        assert_eq!(data["extra_usage"]["spend"]["used"], 0.0);
+        assert!(data["extra_usage"]["spend"]["remaining"].is_null());
+        assert!(data["extra_usage"]["remaining_percent"].is_null());
+        for bad in [json!(-1), json!("1250"), Value::Null] {
+            let spend =
+                extra_spend(&json!({"used_credits":bad,"monthly_limit":1000,"currency":" eur "}))
+                    .unwrap();
+            assert_eq!(spend.currency, "EUR");
+            assert_eq!(spend.used, None);
+            assert_eq!(spend.remaining, None);
+        }
+        assert!(extra_spend(&json!({"currency":"not money","used_credits":100})).is_none());
+        assert!(extra_spend(&json!({"currency":12,"used_credits":100})).is_none());
+        let zero_cap = extra_spend(&json!({"used_credits":100,"monthly_limit":0})).unwrap();
+        assert_eq!(zero_cap.remaining, Some(0.0));
+        assert_eq!(zero_cap.over_limit, Some(1.0));
+        let available = extra_spend(&json!({"used_credits":250,"monthly_limit":1000})).unwrap();
+        assert_eq!(available.remaining, Some(7.5));
+        assert_eq!(available.over_limit, Some(0.0));
+    }
 }

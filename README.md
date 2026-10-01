@@ -50,7 +50,22 @@ ANTHROPIC_AUTH_TOKEN=hey-proxy \
 claude
 ```
 
-Open **http://127.0.0.1:8080/** for session/weekly subscription limits, reset times, and usage freshness. The native `/v1/messages` route preserves Claude requests and streaming responses. [Setup, credential ownership, and research sources](docs/claude-subscription.md).
+Open **http://127.0.0.1:8080/apis** for session/weekly subscription limits, reset times, usage freshness, and provider-reported extra spend. The native `/v1/messages` route preserves Claude requests and streaming responses. [Setup, credential ownership, and research sources](docs/claude-subscription.md).
+
+## Check remaining subscription usage
+
+```sh
+hey-proxy usage                         # Claude/default: quota left and extra spend
+hey-proxy usage --json                  # Versioned, machine-readable reading
+hey-proxy usage --accounts              # Configured provider/account aliases
+hey-proxy usage --provider claude --account default
+```
+
+The CLI queries the running proxy at the address in `--config`. Host mode reads its local proxy access key; client mode queries its connected host through the local relay. To query another proxy, use `--base-url https://your-proxy` and set `HEY_PROXY_TOKEN` to that proxy's access key. The `/v1` client base URL is also accepted. Subscription OAuth tokens stay on the proxy host.
+
+Remaining percentages and reset times are account-wide, including usage outside this proxy. Extra spend shows the provider-reported monthly amount, cap, remaining budget, and amount above that cap. It is separate from the dashboard's estimated API-equivalent spend. Unknown values remain unknown; cached and stale readings retain their timestamps. CLI exit status is nonzero when the reading is stale, disabled, or unavailable; `--json` still prints that reading when the server returns one.
+
+The Rust SDK is available as `hey_proxy::usage::Client`, with typed provider/account readings and `accounts()` / `usage(provider, account)` methods. [CLI, SDK, and API details](docs/claude-subscription.md#cli-and-rust-sdk). Only `claude/default` is currently supported; the versioned contract is ready for future Codex accounts.
 
 ## Connect OpenAI
 
