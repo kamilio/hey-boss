@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {library, visibleSkills, unresolved, computeDiff, diffFiles, getMarkdownFiles, machineCoverage, shortHost} = require('../src/issues/web/skills.js');
+const {library, visibleSkills, unresolved, computeDiff, diffFiles, getMarkdownFiles, machineCoverage, shortHost, rolloutFeedback} = require('../src/issues/web/skills.js');
 const copy = (name,digest,agent='codex',scope='global',text='Use git.') => ({name,digest,agent,scope,text,description:'Stacks',warnings:[]});
 const data = {machines:[
   {host:'laptop',state:'online',copies:[copy('stacked-prs','a','codex','global','Line 1\nLine 2\nOld line\nLine 4'),copy('stacked-prs','a','claude','global','Line 1\nLine 2\nOld line\nLine 4'),copy('AGENTS.md','m1','codex','global','# Grand instructions\nAlways test.')]},
@@ -59,4 +59,16 @@ assert.equal(conflictAllCov.allGreen, false);
 assert.equal(conflictAllCov.tone, 'red');
 assert.deepEqual(conflictAllCov.tags.map(t=>t.label), ['local','devbox','kamils-macbook-pro']);
 
-console.log('Skill library aggregation, GitHub diffing, multi-file Markdown, conflicts, and filtering passed');
+const failedMachines = [{host:'local'}, {host:'devbox',state:'attention',error:'AGENTS.md changed since scanning <remote>'}];
+assert.equal(machineCoverage({machines:['local','devbox'],versions:[{digest:'a'}]}, failedMachines).allGreen, false);
+const feedback = rolloutFeedback({machines:failedMachines,message:'Distribution needs attention'});
+assert.match(feedback, /role="alert"/);
+assert.match(feedback, /devbox/);
+assert.match(feedback, /changed since scanning &lt;remote&gt;/);
+assert.match(feedback, /data-refresh-inventory/);
+assert.match(rolloutFeedback({busy:true,machines:[],message:'Unifying AGENTS.md…'}), /role="status"/);
+assert.match(rolloutFeedback({error:'Request failed',machines:[]}), /Request failed/);
+assert.doesNotMatch(rolloutFeedback({machines:[],message:'Distributed'}), /data-refresh-inventory/);
+assert.equal(library({machines:[{host:'devbox',state:'conflict',error:'Inventory refreshed',copies:[copy('stacked-prs','b')]}]})[0].copies[0].stale, false);
+
+console.log('Skill library, diffs, conflict feedback, coverage, and filtering passed');

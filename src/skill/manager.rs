@@ -1144,6 +1144,22 @@ fn run_delete(home: &Path, hosts: &[String], skill: &str) {
     }
 }
 
+fn install(home: &Path, host: &str, input: &Value) -> Result<Value> {
+    match transport(home, host, input) {
+        Err(error) if error.to_string().contains("changed since scanning") => {
+            // Refresh the conflicting copies for review, but never retry a write
+            // against content the user has not seen yet.
+            let mut refreshed =
+                transport(home, host, &json!({"action":"scan"})).map_err(|_| error)?;
+            refreshed["error"] = json!(
+                "Files changed since the last scan. Inventory refreshed. Review the versions below, then choose the version to keep again."
+            );
+            Ok(refreshed)
+        }
+        result => result,
+    }
+}
+
 fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distribute: bool) {
     for batch in hosts.chunks(4) {
         std::thread::scope(|scope| {
@@ -1155,7 +1171,7 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
                     if previous.is_none() { return (host.clone(), Err(Error::conflict("New machine: scan before distributing"))); }
                     json!({"action":"install","sources":sources,"expected":expected})
                 } else { json!({"action":"scan", "project": if host == "local" { std::env::current_dir().ok() } else { None }}) };
-                (host.clone(), transport(home, host, &input))
+                (host.clone(), if distribute { install(home, host, &input) } else { transport(home, host, &input) })
             })).collect();
             for handle in handles {
                 let (host, result) = handle.join().unwrap();
@@ -1176,14 +1192,22 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
                                 .unwrap()
                                 .extend(project_copies);
                         }
-                        value["state"] = json!(if distribute { "synced" } else { "online" });
+                        value["state"] = json!(if value["error"].is_string() {
+                            "conflict"
+                        } else if distribute {
+                            "synced"
+                        } else {
+                            "online"
+                        });
                         value["scanned_at"] = json!(
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs()
                         );
-                        value["error"] = Value::Null;
+                        if !value["error"].is_string() {
+                            value["error"] = Value::Null;
+                        }
                         value
                     }
                     Err(error) => {
@@ -1210,7 +1234,9 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
         .machines
         .iter()
         .filter(|m| {
-            m["state"] == "attention" || m["errors"].as_array().is_some_and(|a| !a.is_empty())
+            m["error"].is_string()
+                || m["state"] == "attention"
+                || m["errors"].as_array().is_some_and(|a| !a.is_empty())
         })
         .count();
     current.message = if failures > 0 {
@@ -1229,6 +1255,50 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn changed_destination_is_refreshed_for_review_and_can_be_retried() {
+        let temp = crate::admin::Temporary::new().unwrap();
+        let path = temp.0.join(".codex/AGENTS.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "# Original\n").unwrap();
+        let before = transport(&temp.0, "local", &json!({"action":"scan"})).unwrap();
+        let source = before["copies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|copy| copy["name"] == "AGENTS.md" && copy["agent"] == "codex")
+            .unwrap()
+            .clone();
+        fs::write(&path, "# Changed elsewhere\n").unwrap();
+        let refreshed = install(
+            &temp.0,
+            "local",
+            &json!({
+                "action":"install", "sources":[source.clone()], "expected":before["copies"]
+            }),
+        )
+        .unwrap();
+        assert!(refreshed["error"].as_str().unwrap().contains("Review"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Changed elsewhere\n");
+        assert!(
+            refreshed["copies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|copy| copy["agent"] == "codex" && copy["digest"] != source["digest"])
+        );
+        let applied = install(
+            &temp.0,
+            "local",
+            &json!({
+                "action":"install", "sources":[source], "expected":refreshed["copies"]
+            }),
+        )
+        .unwrap();
+        assert!(applied["error"].is_null());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Original\n");
+    }
+
     #[test]
     fn lint_finds_portability_issues_and_broken_links() {
         let text = "---\nname: example\ndescription: Work\nallowed-tools: Bash\n---\nUse functions.exec in /Users/alex/repo. Read [guide](references/missing.md).";
