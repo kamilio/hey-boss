@@ -918,8 +918,12 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
     let original = prompts[0].as_str().unwrap();
     let resumed = prompts[1].as_str().unwrap();
     assert!(resumed.starts_with(original));
-    assert!(resumed.contains("never blindly replay it"));
-    assert!(resumed.contains("never bypasses permissions or verification"));
+    assert!(
+        resumed.contains(
+            "Reconcile uncertain mutations before retrying; reuse the original request ID"
+        )
+    );
+    assert!(resumed.contains("Retries still require permissions and verification"));
     replacement.stop();
 }
 
@@ -1163,7 +1167,7 @@ fn github_events_start_fresh_but_retries_of_delivered_work_can_resume() {
             turn["params"]["input"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("latest-failure")
+                .contains("hey-boss issue pr list 1")
         );
     }
 }
@@ -1555,7 +1559,7 @@ fn infrastructure_outages_retry_automatically_and_resume_after_recovery() {
             r["method"] == "turn/start"
                 && r["params"]["input"][0]["text"]
                     .as_str()
-                    .is_some_and(|s| s.contains("never blindly replay"))
+                    .is_some_and(|s| s.contains("Reconcile uncertain mutations before retrying"))
         }));
         worker.stop();
     }
