@@ -115,6 +115,7 @@ impl Store {
                 project,
                 actor,
                 &Operation::Close {
+                    allow_long_comment: false,
                     number: *number,
                     comment: Some(format!(
                         "Automatically closed: all fix PRs merged.\n\n{}",

@@ -60,6 +60,9 @@ hey-boss issue comment 1 --body 'Reproduced; working on a fix.'
 hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 ```
 
+Agent comments are limited to 2 lines and 300 characters. Rejections offer
+`--allow-long-comment` for an explicit override; human comments are exempt.
+
 Projects default to the Git repository (including its worktrees), or the current
 directory. `whoami` shows your session identity; `unassign` returns unfinished
 work to the pool. Use `--body -` for Markdown on stdin, `--json` for automation,

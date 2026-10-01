@@ -586,6 +586,7 @@ impl Store {
                     &job.project,
                     &job.actor,
                     &Operation::Comment {
+                        allow_long_comment: false,
                         number: job.number(),
                         body: format!("### Worker completed\n\n{summary}"),
                     },
@@ -644,6 +645,7 @@ impl Store {
                 &job.project,
                 &job.actor,
                 &Operation::Block {
+                    allow_long_comment: false,
                     blockers: None,
                     number: job.number(),
                     comment: Some(format!(
@@ -764,6 +766,7 @@ mod tests {
             }
             let mut fixture = Self { store, job, root };
             fixture.apply(Operation::Comment {
+                allow_long_comment: false,
                 number: 1,
                 body: "Existing history".into(),
             });
@@ -871,6 +874,7 @@ mod tests {
                 }
             };
             f.apply(Operation::Block {
+                allow_long_comment: false,
                 number: 1,
                 blockers: None,
                 comment: Some(summary.into()),
@@ -879,6 +883,7 @@ mod tests {
             f.store.db.execute("UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,retry_at=NULL,retry_count=0", params![f.job.id,if mode=="infrastructure" {"infrastructure_blocked"} else {"failed"},summary,now()]).unwrap();
             if mode == "later-edit" {
                 f.apply(Operation::Comment {
+                    allow_long_comment: false,
                     number: 1,
                     body: "Keep this held; I am investigating".into(),
                 });
@@ -1089,6 +1094,7 @@ mod tests {
     fn a_crash_after_closing_an_issue_is_still_a_failed_run() {
         let mut f = HandoffFixture::new(false);
         f.apply(Operation::Close {
+            allow_long_comment: false,
             number: 1,
             comment: None,
             force: false,
@@ -1367,6 +1373,7 @@ mod tests {
                 }
                 "closed" => {
                     f.apply(Operation::Close {
+                        allow_long_comment: false,
                         number: 1,
                         comment: None,
                         force: false,
@@ -2234,6 +2241,7 @@ mod tests {
         for prs in [false, true] {
             let mut f = HandoffFixture::new(prs);
             f.apply(Operation::Close {
+                allow_long_comment: false,
                 number: 1,
                 comment: Some("Source/group explicitly completed".into()),
                 force: false,

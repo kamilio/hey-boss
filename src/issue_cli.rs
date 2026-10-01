@@ -434,6 +434,9 @@ enum Action {
         number: i64,
         #[command(flatten)]
         body: Body,
+        /// Override the agent comment limit of 2 lines and 300 characters.
+        #[arg(long)]
+        allow_long_comment: bool,
     },
     /// Publish a short progress update (green=on track, orange=at risk, red=in trouble).
     Status {
@@ -462,6 +465,9 @@ enum Action {
         /// Save a final Markdown comment in the same transaction.
         #[arg(long)]
         comment: Option<String>,
+        /// Override the agent comment limit of 2 lines and 300 characters.
+        #[arg(long, requires = "comment")]
+        allow_long_comment: bool,
         /// Close even when another session owns the claim.
         #[arg(long)]
         force: bool,
@@ -486,6 +492,9 @@ enum Action {
         blockers: Vec<i64>,
         #[arg(long)]
         comment: Option<String>,
+        /// Override the agent comment limit of 2 lines and 300 characters.
+        #[arg(long, requires = "comment")]
+        allow_long_comment: bool,
         #[arg(long)]
         force: bool,
     },
@@ -1067,8 +1076,13 @@ impl Options {
                 number: *number,
                 force: *force,
             },
-            Action::Comment { number, body } => Operation::Comment {
+            Action::Comment {
+                number,
+                body,
+                allow_long_comment,
+            } => Operation::Comment {
                 number: *number,
+                allow_long_comment: *allow_long_comment,
                 body: body
                     .read()?
                     .ok_or_else(|| Error::invalid("comment requires --body or --file"))?,
@@ -1102,10 +1116,12 @@ impl Options {
                 number,
                 comment,
                 force,
+                allow_long_comment,
             } => Operation::Close {
                 number: *number,
                 comment: comment.clone(),
                 force: *force,
+                allow_long_comment: *allow_long_comment,
             },
             Action::BlockedBy {
                 number,
@@ -1123,12 +1139,14 @@ impl Options {
                 blockers,
                 comment,
                 force,
+                allow_long_comment,
             } => {
                 eprintln!(
                     "Warning: blocking should be rare. Make every effort to resolve the issue first; raise questions and ask the user for help via hey-boss notif ask. Explain the blocker in --comment. Reopen when it can proceed."
                 );
                 Operation::Block {
                     number: *number,
+                    allow_long_comment: *allow_long_comment,
                     blockers: if blockers.is_empty() {
                         None
                     } else {

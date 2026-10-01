@@ -545,6 +545,7 @@ fn validate(r: &Request) -> Result<()> {
             "This operation requires an agent identity",
         ));
     }
+    super::comment_limits::validate(r)?;
     if let Some(key) = &r.request_id {
         identifier(key, "request ID", 256)?;
         if !r.operation.writes() {

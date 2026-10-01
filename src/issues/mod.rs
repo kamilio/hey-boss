@@ -3,6 +3,7 @@ pub(crate) mod authority;
 mod discovery;
 pub(crate) use store::chief;
 pub(crate) mod blockers;
+mod comment_limits;
 pub mod commits;
 mod dependency_notices;
 mod fleet;
@@ -74,7 +75,7 @@ impl Error {
     }
     pub fn exit_code(&self) -> i32 {
         match self.code.as_str() {
-            "invalid_input" | "identity_unavailable" => 2,
+            "invalid_input" | "identity_unavailable" | "comment_too_long" => 2,
             "not_found" => 3,
             "conflict"
             | "subtask_claim_conflict"
@@ -514,6 +515,8 @@ pub enum Operation {
     Comment {
         number: i64,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_long_comment: bool,
     },
     Status {
         number: i64,
@@ -539,6 +542,8 @@ pub enum Operation {
         number: i64,
         comment: Option<String>,
         force: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_long_comment: bool,
     },
     SetBlockers {
         number: i64,
@@ -554,6 +559,8 @@ pub enum Operation {
         blockers: Option<Vec<i64>>,
         comment: Option<String>,
         force: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_long_comment: bool,
     },
     Reopen {
         number: i64,
