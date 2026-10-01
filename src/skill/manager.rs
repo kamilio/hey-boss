@@ -514,7 +514,9 @@ pub fn distribute_blocking(skills: &[String], from: Option<&str>) -> Result<Valu
             let host = m["host"].as_str().unwrap_or("");
             let hostname = m["hostname"].as_str().unwrap_or(host);
             for c in m["copies"].as_array().into_iter().flatten() {
-                if c["name"].as_str() == Some(name.as_str()) && c["scope"].as_str() == Some("global") {
+                if c["name"].as_str() == Some(name.as_str())
+                    && c["scope"].as_str() == Some("global")
+                {
                     copies.push((host.to_owned(), hostname.to_owned(), c.clone()));
                 }
             }
@@ -538,7 +540,9 @@ pub fn distribute_blocking(skills: &[String], from: Option<&str>) -> Result<Valu
                 )));
             }
         } else if !choices.contains_key(name)
-            || !copies.iter().any(|(_, _, c)| c["digest"].as_str() == choices.get(name).map(String::as_str))
+            || !copies
+                .iter()
+                .any(|(_, _, c)| c["digest"].as_str() == choices.get(name).map(String::as_str))
         {
             let unique: BTreeSet<&str> = copies
                 .iter()

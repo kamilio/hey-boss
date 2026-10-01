@@ -44,8 +44,7 @@ pub(super) async fn poll(
         {
             // Required checks get three of every four admissions while both
             // lanes have work. Slow policies must not starve known completions.
-            let finishing_batch =
-                tokio::time::Instant::now() + Duration::from_secs(30) >= deadline;
+            let finishing_batch = tokio::time::Instant::now() + Duration::from_secs(30) >= deadline;
             let next = if !details.is_empty()
                 && (required.is_empty()
                     || policy_streak >= 3
