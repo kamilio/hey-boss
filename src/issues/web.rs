@@ -875,6 +875,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/preview",
             "/api/inbox",
             "/api/fleet",
+            "/api/fleet/chief",
             "/api/fleet/takeover",
             "/api/fleet/steer",
             "/api/fleet/configuration",
