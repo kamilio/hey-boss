@@ -575,6 +575,62 @@ mod tests {
     }
 
     #[test]
+    fn scaleft_decision_details_remain_readable_at_terminal_sizes() {
+        let mut d = Dashboard::new(
+            vec!["devbox".into(), "kamils-macbook-pro.local".into()],
+            None,
+        );
+        let mut snapshot = Snapshot::default();
+        for (eligible, detail) in [
+            (false, "Owner exited; observing before cleanup"),
+            (false, "Connected or in use; preserved"),
+            (
+                true,
+                "Owner exited; no clients; quiet across repeated checks",
+            ),
+            (
+                false,
+                "Inspection incomplete; preserved: Cannot verify process connections; preserving processes",
+            ),
+        ] {
+            snapshot.processes.push(crate::health::Item {
+                name: "ScaleFT SSH helper · PID 12345".into(),
+                detail: detail.into(),
+                eligible,
+                worktree: None,
+                error: None,
+            });
+        }
+        d.complete(0, Ok(snapshot));
+        d.page = 1;
+        d.detail_scroll = Some(0);
+        for (width, height) in [(120, 24), (80, 24), (48, 20)] {
+            for row in 0..4 {
+                d.row = row;
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                        .unwrap();
+                terminal.draw(|f| render(f, &d)).unwrap();
+                let lines: Vec<String> = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .chunks(width as usize)
+                    .map(|cells| cells.iter().map(|c| c.symbol()).collect())
+                    .collect();
+                let text = lines.join("\n");
+                assert!(text.contains("ScaleFT SSH helper"));
+                assert!(text.contains("PID 12345"));
+                assert!(text.contains(if row == 2 { "eligible" } else { "preserved" }));
+                assert!(text.contains("Esc Back"));
+                assert!(detail_limit(&d, sections(Rect::new(0, 0, width, height))[2]) == 0);
+                // Visible with --nocapture for manual layout review; no golden files.
+                println!("DASHBOARD {width}x{height} row {row}\n{text}\nEND DASHBOARD");
+            }
+        }
+    }
+
+    #[test]
     fn dashboard_distinguishes_new_binary_from_legacy_and_old_scan_evidence() {
         for scan in [None, Some("0123456789abcdef".to_owned())] {
             let mut d = Dashboard::new(vec![], None);
