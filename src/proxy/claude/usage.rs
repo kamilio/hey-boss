@@ -93,7 +93,12 @@ pub(in crate::proxy) async fn usage(
     let Some(provider) = &proxy.config.claude else {
         return reply(json!({"state":"disabled"}));
     };
-    let path = match provider.credentials_path(service.source.as_deref()) {
+    let path = match service
+        .claude
+        .paths
+        .resolve(provider, service.source.as_deref())
+        .await
+    {
         Ok(path) => path,
         Err(_) => {
             return reply(

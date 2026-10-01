@@ -1,6 +1,6 @@
 # hey-proxy
 
-Use one local endpoint for OpenAI, Gemini, and your Claude subscription. hey-proxy forwards OpenAI requests, translates Responses API requests for Gemini, and lets you change models through simple overwrite rules. It runs as a Rust binary and includes a local request dashboard.
+Use one local endpoint for OpenAI, Gemini, and your Claude subscription. hey-proxy forwards OpenAI requests, translates Responses API requests for Gemini, and lets you change models through simple overwrite rules. It runs as a Rust binary and includes a traffic and spend dashboard.
 
 ## Install and start
 
@@ -34,7 +34,7 @@ Normal startup also creates this file if needed. Existing proxy configs are pres
 hey-proxy
 ```
 
-Point your client's base URL at **`http://127.0.0.1:8080/v1`**. Open **`http://127.0.0.1:8080/`** for the API overview, or **`http://127.0.0.1:8080/logs`** for the traffic dashboard.
+Point your client's base URL at **`http://127.0.0.1:8080/v1`**. Open **`http://127.0.0.1:8080/`** (or **`/logs`**) for RPM and estimated spend. The API overview and client setup are at **`http://127.0.0.1:8080/apis`**.
 
 The overview lists API routes, copyable client base URLs, and model names from your configured aliases, reasoning routes, and fallbacks. It respects API-specific overwrite rules and separates native Gemini model names from Responses model names. It never fetches an upstream model catalog. Click **Refresh config** after editing your config. Host mode uses the same access-key login as the dashboard; client relays show that model configuration belongs to their host.
 
@@ -307,7 +307,11 @@ Install and authenticate the [1Password CLI](https://developer.1password.com/doc
 
 ## Dashboard and remote use
 
-The dashboard at `/logs` shows requested and served models, errors, token usage, timing, and estimated spend. Local history persists across restarts. Prompts, response bodies, and credentials are not stored in dashboard history. Prices are estimates based on recognized public model names; unknown models may remain unpriced.
+The default page at `/` (also `/logs`) shows RPM and estimated USD spend for today, this week, and all time. Days use your browser's local midnight; weeks start Monday. Client relays show their host's totals without double counting. API setup and subscription limits are at `/apis`.
+
+The dashboard reads small, cached aggregates rather than request histories. A background writer maintains totals, and forwarding never waits for dashboard queries or disk writes. Accounting snapshots are the default; set `logging.detailed: true` to retain full diagnostic timelines. Historical query and export APIs remain available.
+
+Spend uses reported tokens and published model rates, including Claude cache writes and reads. **Claude subscription usage is shown as its API-equivalent value, not extra subscription charges.** Unrecognized models and missing usage stay unpriced, and logging gaps are visible. Totals survive restarts; disabling persistence makes spend unavailable. Estimates exclude subscription fees, discounts, server-side tool charges and unreported retry usage. No prompts, response bodies or credentials are retained in request history.
 
 For SSH deployment, add hosts to `ssh_hosts` and run `hey-proxy rollout`. This installs the proxy service and syncs its proxy configuration. **Codex setup remains a separate command on each machine.** See [remote setup](docs/configuration.md#remote-setup) for host/client modes and credential requirements.
 

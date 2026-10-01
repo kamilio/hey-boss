@@ -33,7 +33,7 @@ claude
 
 The base URL has **no `/v1` suffix**. `hey-proxy` is a placeholder in standalone loopback mode. In host mode, supply a generated proxy access key instead. The proxy removes the client's authorization and API-key headers and injects its own subscription bearer token. Claude Code's subscription login is not needed.
 
-Open **http://127.0.0.1:8080/** to see subscription limits. The Traffic tab shows request token counts and timing. `hey-proxy check-credentials` checks that the proxy can load/refresh its credentials without printing them.
+Open **http://127.0.0.1:8080/** for RPM and estimated spend today, this week, and all time. Subscription limits and API setup are at **http://127.0.0.1:8080/apis**. `hey-proxy check-credentials` checks that the proxy can load/refresh its credentials without printing them.
 
 ## Transport and limits
 
@@ -43,11 +43,13 @@ Open **http://127.0.0.1:8080/** to see subscription limits. The Traffic tab show
 
 Usage includes activity outside this proxy. The usage panel shows percent used, reset dates in your local timezone, and the last successful fetch time. Polling is coalesced and cached for 60 seconds by default. HTTP 429 honors `Retry-After` (up to a day); temporary failures retain the previous reading marked **stale**. An account/token change clears the usage cache. No OAuth token, email, or arbitrary profile metadata is included in usage responses.
 
-Upstream inference errors, `Retry-After`, and Anthropic rate-limit headers pass back to Claude Code. A rejected access token can refresh and retry once after HTTP 401; started streams and rate-limited model calls are never replayed by this route. Interrupted streams without `message_stop` are recorded as incomplete failures. Subscription request counts are not presented as API spend.
+Upstream inference errors, `Retry-After`, and Anthropic rate-limit headers pass back to Claude Code. A rejected access token can refresh and retry once after HTTP 401; started streams and rate-limited model calls are never replayed by this route. Interrupted streams without `message_stop` are recorded as incomplete failures. The spend dashboard uses reported tokens and published Claude rates to estimate the API-equivalent value of subscription usage; this does not represent additional subscription charges. Cache reads, five-minute and one-hour cache writes, supported fast-mode pricing and US inference geography are included. Unknown models or missing usage remain unpriced. Historical requests without cache-lifetime or speed metadata use standard rates.
 
 ## Credential ownership
 
 For `config.json`, the default encrypted store is `config.claude.json`, with a private sibling `config.claude.key` and a lock file. Access and refresh tokens are encrypted together with AES-256-GCM-SIV. Token/key files are mode 0600 on Unix. Keep the store and key together; anyone able to read both can decrypt the tokens. They are never returned to clients or included in request history/config exports.
+
+Access tokens are cached in memory. Active traffic revalidates the proxy-owned files in the background after 250 ms; file errors invalidate cached credentials. After two seconds without successful validation, requests revalidate before using the token, including the first request after idle time. HTTP 401 invalidates the rejected token immediately. Cold reads, decryption and durable saves run outside the async request workers.
 
 The proxy refreshes near expiry, saves rotated tokens atomically, and locks across processes to prevent two refreshes using the same token. Refresh work finishes its durable save even if the requesting client disconnects. Transient refresh failures back off. If authorization is revoked, run `hey-proxy claude-login` again. Login replaces only the proxy's own credentials.
 
@@ -64,6 +66,8 @@ Optional provider settings:
 Relative credential paths resolve beside the proxy config. `credentials_file` must end in `.json`; its `.key` and `.lock` siblings are reserved. `usage_cache_seconds` accepts 30–3600 seconds. A custom upstream must be an HTTPS root URL; loopback HTTP is supported for testing. It receives your access token, so use only a trusted upstream.
 
 Host mode protects usage with the same access key/session as the dashboard. Client relays request the host's usage and hold no Claude OAuth credentials. Remote rollout does not copy the OAuth store: sign in separately on the machine hosting Claude requests.
+
+Current token prices were checked against [Claude's published pricing](https://docs.claude.com/en/docs/about-claude/pricing) on **2026-10-01**, with explicit dated model aliases cross-checked against [LiteLLM's price catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json). Existing recorded costs are preserved; missing historical Claude estimates are backfilled in bounded batches by the background writer.
 
 ## Research basis
 

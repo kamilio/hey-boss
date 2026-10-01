@@ -247,11 +247,8 @@ pub(super) async fn forward(
         };
         return match convert_response(&native, &converted, &proxy.service.gemini.codec, &id) {
             Ok(response) => {
-                let bytes = serde_json::to_vec(&response).unwrap();
-                let mut usage = logs::UsageReader::new(false);
                 if !proxy.fallback_attempt {
-                    usage.feed(&bytes, &proxy.service.logs, proxy.log_id);
-                    usage.finish(&proxy.service.logs, proxy.log_id);
+                    proxy.service.logs.observe(proxy.log_id, &response);
                 }
                 axum::Json(response).into_response()
             }
@@ -302,7 +299,7 @@ pub(super) async fn forward(
                 if eof && !converter.is_finished(){events.extend(converter.finish(&proxy.service.gemini.codec)?);}Ok(events)
             })();
             match converted {
-                Ok(events)=>for event in events {let bytes=sse_bytes(&event);if !proxy.fallback_attempt { usage.feed(&bytes,&proxy.service.logs,proxy.log_id); }yield Ok(bytes);},
+                Ok(events)=>for event in events {let bytes=sse_bytes(&event);if !proxy.fallback_attempt { usage.observe_value(&event,&proxy.service.logs,proxy.log_id); }yield Ok(bytes);},
                 Err(cause)=>{
                     // Conversion errors contain structural diagnostics, never
                     // response bodies. Omit model-provided tool names as well.
@@ -397,13 +394,7 @@ async fn forward_hosted(
                 converted = next;
             } else {
                 if !proxy.fallback_attempt {
-                    let mut usage = logs::UsageReader::new(false);
-                    usage.feed(
-                        &serde_json::to_vec(&response).unwrap(),
-                        &proxy.service.logs,
-                        proxy.log_id,
-                    );
-                    usage.finish(&proxy.service.logs, proxy.log_id);
+                    proxy.service.logs.observe(proxy.log_id, &response);
                 }
                 return axum::Json(response).into_response();
             }
@@ -452,7 +443,7 @@ async fn forward_hosted(
                     let event = json!({"type":"response.failed","sequence_number":sequence,"response":search.failed_response(&response_id,error)});
                     let bytes = sse_bytes(&event);
                     if !proxy.fallback_attempt {
-                        usage.feed(&bytes, &proxy.service.logs, proxy.log_id);
+                        usage.observe_value(&event, &proxy.service.logs, proxy.log_id);
                         usage.finish(&proxy.service.logs, proxy.log_id);
                     }
                     yield Ok(bytes);
@@ -481,7 +472,7 @@ async fn forward_hosted(
             for mut event in outgoing {
                 event["sequence_number"] = json!(sequence); sequence += 1;
                 let bytes = sse_bytes(&event);
-                if !proxy.fallback_attempt { usage.feed(&bytes, &proxy.service.logs, proxy.log_id); }
+                if !proxy.fallback_attempt { usage.observe_value(&event, &proxy.service.logs, proxy.log_id); }
                 yield Ok(bytes);
             }
             if let Some(next) = next { converted = next; } else {

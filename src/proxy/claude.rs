@@ -1,4 +1,5 @@
 //! Native Claude Code transport; subscription authentication belongs to hey-proxy.
+mod paths;
 #[cfg(test)]
 mod tests;
 mod usage;
@@ -90,6 +91,7 @@ impl ProviderConfig {
 #[derive(Default)]
 pub(super) struct ClaudeState {
     tokens: crate::claude_auth::TokenManager,
+    paths: paths::Cache,
     usage: tokio::sync::Mutex<usage::Cache>,
 }
 
@@ -177,7 +179,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             );
         }
     };
-    let input: Value = match serde_json::from_slice(&bytes) {
+    // This native route forwards the original bytes. Accounting needs only
+    // model/options, so avoid materializing a second copy of conversation history.
+    let input = match logs::metadata(&bytes) {
         Ok(value) => value,
         Err(_) => {
             return messages::error(StatusCode::BAD_REQUEST, "Claude body must be valid JSON");
@@ -192,7 +196,27 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         Some(model.into()),
         "claude",
     );
-    let path = match provider.credentials_path(proxy.service.source.as_deref()) {
+    proxy
+        .service
+        .logs
+        .update(proxy.log_id, "pricing_options", Value::Null, |entry| {
+            entry.speed = input
+                .get("speed")
+                .and_then(Value::as_str)
+                .map(|s| s.chars().take(32).collect());
+            entry.inference_geo = input
+                .get("inference_geo")
+                .and_then(Value::as_str)
+                .map(|s| s.chars().take(32).collect());
+            true
+        });
+    let path = match proxy
+        .service
+        .claude
+        .paths
+        .resolve(provider, proxy.service.source.as_deref())
+        .await
+    {
         Ok(path) => path,
         Err(_) => {
             return messages::error(

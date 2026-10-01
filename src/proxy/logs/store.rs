@@ -26,6 +26,8 @@ pub struct Entry {
     pub mode: String,
     pub requested_model: Option<String>,
     pub routed_model: Option<String>,
+    #[serde(default)]
+    pub response_model: Option<String>,
     pub requested_reasoning: Option<String>,
     pub routed_reasoning: Option<String>,
     pub route_rule: Option<String>,
@@ -42,6 +44,12 @@ pub struct Entry {
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_1h_tokens: Option<u64>,
+    #[serde(default)]
+    pub speed: Option<String>,
+    #[serde(default)]
+    pub inference_geo: Option<String>,
     pub reasoning_tokens: Option<u64>,
     pub duration_ms: Option<u64>,
     pub total_duration_ms: Option<u64>,
@@ -77,33 +85,50 @@ struct Cache {
 }
 
 pub struct Store {
+    traffic: super::dashboard::Traffic,
+    started: Instant,
     cache: Mutex<Cache>,
     pub(super) remote: Mutex<std::collections::BTreeMap<Option<u64>, super::RemoteCache>>,
     pub(super) window: Mutex<super::WindowCache>,
     pub database: Option<Arc<Database>>,
+    pub(super) dashboard: tokio::sync::Mutex<super::dashboard::Cache>,
     session_id: String,
     mode: String,
+    detailed: bool,
 }
 
 impl Default for Store {
     fn default() -> Self {
         Self {
             cache: Mutex::default(),
+            traffic: super::dashboard::Traffic::default(),
+            started: Instant::now(),
             remote: Mutex::default(),
             window: Mutex::default(),
             database: None,
+            dashboard: tokio::sync::Mutex::default(),
             session_id: format!("{:032x}", rand::random::<u128>()),
             mode: "standalone".into(),
+            detailed: false,
         }
     }
 }
 
 impl Store {
-    pub fn open(config: &Config, config_path: &std::path::Path) -> anyhow::Result<Self> {
-        let mut store = Self {
-            mode: serde_json::to_value(config.mode)?.as_str().unwrap().into(),
+    pub fn memory(config: &Config) -> Self {
+        Self {
+            mode: match config.mode {
+                Mode::Standalone => "standalone",
+                Mode::Host => "host",
+                Mode::Client => "client",
+            }
+            .into(),
+            detailed: config.logging.detailed,
             ..Self::default()
-        };
+        }
+    }
+    pub fn open(config: &Config, config_path: &std::path::Path) -> anyhow::Result<Self> {
+        let mut store = Self::memory(config);
         if config.logging.enabled {
             let directory = config_path
                 .parent()
@@ -138,6 +163,10 @@ impl Store {
             cache.entries.remove(&old);
         }
         let timestamp = now_ms();
+        if self.mode != "client" && transport != "WebSocket handshake" {
+            self.traffic
+                .record(self.started.elapsed().as_millis() as u64);
+        }
         let entry = Entry {
             id,
             request_id: format!("{}-{id}", self.session_id),
@@ -157,6 +186,10 @@ impl Store {
         cache.order.push_back(id);
         id
     }
+    pub fn rpm(&self) -> u64 {
+        self.traffic
+            .count(self.started.elapsed().as_millis() as u64)
+    }
     pub fn recent(&self) -> Vec<Entry> {
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache
@@ -167,6 +200,23 @@ impl Store {
             .collect()
     }
     fn persist(&self, entry: &Entry, kind: &str, mut details: Value) {
+        let Some(database) = &self.database else {
+            return;
+        };
+        // Accounting needs arrival, changed usage and the final snapshot. Avoid
+        // cloning/serializing an entire request for each routing or timing event.
+        if !self.detailed && !matches!(kind, "received" | "usage" | "finished") {
+            return;
+        }
+        if !self.detailed {
+            database.enqueue(Event {
+                entry: entry.clone(),
+                kind: None,
+                details: Value::Null,
+                timestamp_ms: entry.updated_ms,
+            });
+            return;
+        }
         if kind == "attempt_started" {
             details["attempt"] = json!(entry.attempts);
         }
@@ -184,14 +234,12 @@ impl Store {
         if kind == "response_event" {
             details["error_code"] = json!(entry.error_code);
         }
-        if let Some(database) = &self.database {
-            database.enqueue(Event {
-                entry: entry.clone(),
-                kind: kind.into(),
-                details,
-                timestamp_ms: now_ms(),
-            });
-        }
+        database.enqueue(Event {
+            entry: entry.clone(),
+            kind: Some(kind.into()),
+            details,
+            timestamp_ms: now_ms(),
+        });
     }
     pub fn update(
         &self,
@@ -207,6 +255,7 @@ impl Store {
             for value in [
                 &mut entry.requested_model,
                 &mut entry.routed_model,
+                &mut entry.response_model,
                 &mut entry.requested_reasoning,
                 &mut entry.routed_reasoning,
                 &mut entry.route_rule,
@@ -248,14 +297,17 @@ impl Store {
         let Ok(value) = serde_json::from_slice::<Value>(body) else {
             return;
         };
+        self.routing_value_decision(id, config, path, &value);
+    }
+    pub fn routing_value_decision(&self, id: u64, config: &Config, path: &str, value: &Value) {
         let envelope = if value.get("model").and_then(Value::as_str).is_some() {
-            &value
-        } else if value.pointer("/response/model").is_some() {
+            value
+        } else if value.get("response").and_then(|v| v.get("model")).is_some() {
             &value["response"]
-        } else if value.pointer("/session/model").is_some() {
+        } else if value.get("session").and_then(|v| v.get("model")).is_some() {
             &value["session"]
         } else {
-            &value
+            value
         };
         let effort = requested_effort(path, envelope);
         let alias = envelope
@@ -297,9 +349,9 @@ impl Store {
     }
     pub fn usage(&self, id: u64, value: &Value) {
         let usage = value
-            .pointer("/usage")
-            .or_else(|| value.pointer("/response/usage"))
-            .or_else(|| value.pointer("/message/usage"));
+            .get("usage")
+            .or_else(|| value.get("response").and_then(|v| v.get("usage")))
+            .or_else(|| value.get("message").and_then(|v| v.get("usage")));
         let Some(usage) = usage else { return };
         let mut input = usage
             .get("input_tokens")
@@ -333,9 +385,18 @@ impl Store {
                     .saturating_add(writes.unwrap_or(0))
             });
         }
+        let writes_1h = usage
+            .get("cache_creation")
+            .and_then(|v| v.get("ephemeral_1h_input_tokens"))
+            .and_then(Value::as_u64);
         let reasoning = usage
-            .pointer("/output_tokens_details/reasoning_tokens")
-            .or_else(|| usage.pointer("/completion_tokens_details/reasoning_tokens"))
+            .get("output_tokens_details")
+            .and_then(|v| v.get("reasoning_tokens"))
+            .or_else(|| {
+                usage
+                    .get("completion_tokens_details")
+                    .and_then(|v| v.get("reasoning_tokens"))
+            })
             .and_then(Value::as_u64);
         self.update(id, "usage", json!({}), |entry| {
             let before = (
@@ -343,6 +404,7 @@ impl Store {
                 entry.output_tokens,
                 entry.cached_input_tokens,
                 entry.cache_write_tokens,
+                entry.cache_write_1h_tokens,
                 entry.reasoning_tokens,
             );
             if input.is_some() {
@@ -352,6 +414,9 @@ impl Store {
                 }
                 if writes.is_some() {
                     entry.cache_write_tokens = writes;
+                }
+                if writes_1h.is_some() {
+                    entry.cache_write_1h_tokens = writes_1h;
                 }
             }
             if output.is_some() {
@@ -366,6 +431,7 @@ impl Store {
                     entry.output_tokens,
                     entry.cached_input_tokens,
                     entry.cache_write_tokens,
+                    entry.cache_write_1h_tokens,
                     entry.reasoning_tokens,
                 )
         });
@@ -440,15 +506,30 @@ impl Store {
         });
     }
     pub fn observe(&self, id: u64, value: &Value) {
+        if let Some(model) = value
+            .get("model")
+            .or_else(|| value.get("response").and_then(|v| v.get("model")))
+            .or_else(|| value.get("message").and_then(|v| v.get("model")))
+            .and_then(Value::as_str)
+        {
+            self.update(id, "response_model", Value::Null, |entry| {
+                if entry.response_model.as_deref() == Some(model) {
+                    return false;
+                }
+                entry.response_model = Some(model.chars().take(256).collect());
+                true
+            });
+        }
         self.usage(id, value);
         let kind = value["type"].as_str().unwrap_or("");
         let has_error = value.get("error").is_some_and(|v| !v.is_null())
             || value
-                .pointer("/response/error")
+                .get("response")
+                .and_then(|v| v.get("error"))
                 .is_some_and(|v| !v.is_null());
         let response_status = value
             .get("status")
-            .or_else(|| value.pointer("/response/status"))
+            .or_else(|| value.get("response").and_then(|v| v.get("status")))
             .and_then(Value::as_str);
         if !matches!(
             kind,
@@ -467,8 +548,9 @@ impl Store {
         }
         self.update(id, "response_event", json!({"type":kind}), |entry| {
             if let Some(response_id) = value
-                .pointer("/response/id")
-                .or_else(|| value.pointer("/message/id"))
+                .get("response")
+                .and_then(|v| v.get("id"))
+                .or_else(|| value.get("message").and_then(|v| v.get("id")))
                 .or_else(|| value.get("id"))
                 .and_then(Value::as_str)
             {
@@ -488,11 +570,22 @@ impl Store {
             {
                 entry.terminal = Some("failed".into());
                 entry.error_code = value
-                    .pointer("/response/error/code")
-                    .or_else(|| value.pointer("/error/code"))
-                    .or_else(|| value.pointer("/error/type"))
-                    .or_else(|| value.pointer("/response/incomplete_details/reason"))
-                    .or_else(|| value.pointer("/incomplete_details/reason"))
+                    .get("response")
+                    .and_then(|v| v.get("error"))
+                    .and_then(|v| v.get("code"))
+                    .or_else(|| value.get("error").and_then(|v| v.get("code")))
+                    .or_else(|| value.get("error").and_then(|v| v.get("type")))
+                    .or_else(|| {
+                        value
+                            .get("response")
+                            .and_then(|v| v.get("incomplete_details"))
+                            .and_then(|v| v.get("reason"))
+                    })
+                    .or_else(|| {
+                        value
+                            .get("incomplete_details")
+                            .and_then(|v| v.get("reason"))
+                    })
                     .and_then(Value::as_str)
                     .map(|v| v.chars().take(128).collect());
             }

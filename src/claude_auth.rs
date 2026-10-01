@@ -1,4 +1,5 @@
 //! Proxy-owned Claude OAuth credentials. Never reads or writes Claude Code's login.
+mod cache;
 use aes_gcm_siv::{
     Aes256GcmSiv, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -177,7 +178,8 @@ pub(crate) fn is_oauth_token(token: &str) -> bool {
 }
 
 async fn lock(path: &Path) -> Result<fs::File> {
-    let file = private_open(&path.with_extension("lock"), true)?;
+    let path = path.with_extension("lock");
+    let file = tokio::task::spawn_blocking(move || private_open(&path, true)).await??;
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
@@ -255,6 +257,7 @@ async fn exchange(
 pub(crate) struct TokenManager {
     // One refresh owner per process, plus a file lock shared by other proxy processes.
     backoff: Arc<Mutex<Option<(PathBuf, Instant)>>>,
+    cache: Arc<cache::Cache>,
 }
 impl TokenManager {
     pub async fn token(&self, path: &Path, client: &reqwest::Client) -> Result<String> {
@@ -275,20 +278,31 @@ impl TokenManager {
         rejected: Option<String>,
         endpoint: &str,
     ) -> Result<String> {
+        if let Some(cached) = self.cache.get(path, rejected.as_deref()) {
+            return cached;
+        }
         let path = path.to_owned();
         let client = client.clone();
         let endpoint = endpoint.to_owned();
         let backoff = self.backoff.clone();
-        // Finish a rotating-token exchange and durable save even if the caller disconnects.
+        let cache = self.cache.clone();
+        // Finish rotating-token exchanges and durable saves even if the caller
+        // disconnects. Cold file reads and encryption never run on Tokio workers.
         tokio::spawn(async move {
-            let tokens = load(&path)?;
+            let mut gate = backoff.lock().await;
+            if let Some(cached) = cache.get(&path, rejected.as_deref()) { return cached; }
+            let disk_path = path.clone();
+            let tokens = match tokio::task::spawn_blocking(move || load(&disk_path)).await? {
+                Ok(tokens) => tokens,
+                Err(error) => { cache.failure(path, &error); return Err(error); }
+            };
             let usable = |t: &Tokens| t.expires_at > now().saturating_add(60)
                 && rejected.as_ref().is_none_or(|r| r != &t.access_token);
-            if usable(&tokens) { return Ok(tokens.access_token); }
-            let mut gate = backoff.lock().await;
+            if usable(&tokens) { cache.store(path, &tokens); return Ok(tokens.access_token); }
             let _lock = lock(&path).await?;
-            let tokens = load(&path)?;
-            if usable(&tokens) { return Ok(tokens.access_token); }
+            let disk_path = path.clone();
+            let tokens = tokio::task::spawn_blocking(move || load(&disk_path)).await??;
+            if usable(&tokens) { cache.store(path, &tokens); return Ok(tokens.access_token); }
             if gate.as_ref().is_some_and(|(p, until)| p == &path && *until > Instant::now()) {
                 bail!("Claude OAuth refresh is cooling down; retry shortly or run hey-proxy claude-login");
             }
@@ -297,7 +311,9 @@ impl TokenManager {
                 Ok(fresh) => fresh,
                 Err(error) => { *gate = Some((path, Instant::now() + Duration::from_secs(30))); return Err(error); }
             };
-            save(&path, &fresh)?;
+            let (save_path, save_tokens) = (path.clone(), fresh.clone());
+            tokio::task::spawn_blocking(move || save(&save_path, &save_tokens)).await??;
+            cache.store(path, &fresh);
             *gate = None;
             Ok(fresh.access_token)
         }).await.map_err(|_| anyhow::anyhow!("Claude credential operation failed"))?

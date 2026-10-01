@@ -29,7 +29,9 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime},
 };
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+#[cfg(test)]
+use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 /// Services that report the caller's public IP address as plain text, per address family.
@@ -52,6 +54,7 @@ struct Service {
     claude: claude::ClaudeState,
     logs: Arc<logs::Store>,
     access_config: Option<PathBuf>,
+    access_keys: RwLock<(Instant, Option<crate::access::Keys>)>,
     state: RwLock<Loaded>,
     /// Config file to watch; `None` disables hot reload.
     source: Option<PathBuf>,
@@ -158,9 +161,16 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
             None => Arc::new(if let Some(path) = &source {
                 logs::Store::open(&config, path)?
             } else {
-                logs::Store::default()
+                logs::Store::memory(&config)
             }),
         },
+        access_keys: RwLock::new((
+            Instant::now(),
+            options
+                .access_config
+                .as_ref()
+                .and_then(|p| crate::access::read(p).ok()),
+        )),
         access_config: options.access_config,
         state: RwLock::new(Loaded {
             config: Arc::new(config.effective()),
@@ -172,14 +182,20 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         public_ip: Mutex::new([None, None]),
         connectivity_probes: options.connectivity_probes,
     });
+    Service::watch(&service)?;
     Ok(Router::new()
-        .route("/", axum::routing::get(overview::page))
+        .route("/", axum::routing::get(logs::page))
+        .route("/apis", axum::routing::get(overview::page))
         .route("/overview.js", axum::routing::get(overview::script))
         .route("/overview/api", axum::routing::get(overview::data))
         .route("/claude/usage", axum::routing::get(claude::usage))
         .route("/logs", axum::routing::get(logs::page))
         .route("/logs/dashboard.js", axum::routing::get(logs::script))
         .route("/logs/api", axum::routing::get(logs::entries))
+        .route(
+            "/logs/api/dashboard",
+            axum::routing::get(logs::dashboard::data),
+        )
         .route(
             "/logs/reporting.js",
             axum::routing::get(logs::report::script),
@@ -235,7 +251,7 @@ fn token(request: &Request) -> Option<&str> {
                 })
         })
 }
-const LOGIN: &str = "<!doctype html><html lang=\"en\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>hey-proxy access</title><body style=\"background:#101318;color:#e7eaf0;font-family:system-ui;padding:40px\"><h1>Request logs</h1><form method=\"post\" action=\"/logs/login\"><label>Host access key <input name=\"api_key\" type=\"password\" required autocomplete=\"off\"></label><button>Open logs</button></form></body></html>";
+const LOGIN: &str = "<!doctype html><html lang=\"en\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>hey-proxy access</title><body style=\"background:#101318;color:#e7eaf0;font-family:system-ui;padding:40px\"><h1>hey-proxy access</h1><form method=\"post\" action=\"/logs/login\"><label>Host access key <input name=\"api_key\" type=\"password\" required autocomplete=\"off\"></label><button>Continue</button></form></body></html>";
 async fn authenticate(
     State(service): State<Arc<Service>>,
     request: Request,
@@ -245,16 +261,15 @@ async fn authenticate(
     if proxy.config.mode != Mode::Host || request.uri().path() == "/logs/login" {
         return next.run(request).await;
     }
-    let accepted = service
-        .access_config
-        .as_ref()
-        .and_then(|path| crate::access::read(path).ok())
-        .is_some_and(|keys| token(&request).is_some_and(|token| keys.accepts(token)));
+    let accepted = token(&request).is_some_and(|token| service.accepts(token));
     if accepted {
         return next.run(request).await;
     }
     let path = request.uri().path();
-    if path != "/" && !path.starts_with("/overview") && !path.starts_with("/logs") {
+    if !matches!(path, "/" | "/apis" | "/claude/usage")
+        && !path.starts_with("/overview")
+        && !path.starts_with("/logs")
+    {
         let id = service
             .logs
             .begin(request.method().as_str(), request.uri().path(), "HTTP");
@@ -263,18 +278,12 @@ async fn authenticate(
             .logs
             .complete(id, "failed", "authentication", Some("unauthorized"), 0);
     }
-    if path == "/" {
-        let page = LOGIN
-            .replace("Request logs", "hey-proxy overview")
-            .replace("Open logs", "Open overview")
-            .replace(
-                "<label>",
-                "<input type=\"hidden\" name=\"next\" value=\"/\"><label>",
-            );
+    if matches!(path, "/" | "/apis" | "/logs") {
+        let page = LOGIN.replace(
+            "<label>",
+            &format!("<input type=\"hidden\" name=\"next\" value=\"{path}\"><label>"),
+        );
         return (StatusCode::UNAUTHORIZED, axum::response::Html(page)).into_response();
-    }
-    if path == "/logs" {
-        return (StatusCode::UNAUTHORIZED, axum::response::Html(LOGIN)).into_response();
     }
     if messages::is_path(path) {
         return messages::error(
@@ -296,18 +305,14 @@ async fn login(
     State(service): State<Arc<Service>>,
     axum::extract::Form(form): axum::extract::Form<Login>,
 ) -> Response {
-    let accepted = service
-        .access_config
-        .as_ref()
-        .and_then(|path| crate::access::read(path).ok())
-        .is_some_and(|keys| keys.accepts(&form.api_key));
+    let accepted = service.accepts(&form.api_key);
     if !accepted {
         return error(StatusCode::UNAUTHORIZED, "Invalid host access key");
     }
-    let next = if form.next.as_deref() == Some("/") {
-        "/"
-    } else {
-        "/logs"
+    let next = match form.next.as_deref() {
+        Some("/") => "/",
+        Some("/apis") => "/apis",
+        _ => "/logs",
     };
     let mut response = axum::response::Redirect::to(next).into_response();
     if let Ok(value) = header::HeaderValue::from_str(&format!(
@@ -320,69 +325,90 @@ async fn login(
 }
 
 impl Service {
-    /// Returns the current config, reloading the file first if it changed on disk.
-    /// A single `stat` per request keeps this cheap; invalid edits are logged and ignored.
-    fn snapshot(self: &Arc<Self>) -> Proxy {
-        let (config, client) = match &self.source {
-            Some(path) => {
-                let fingerprint = config::fingerprint(path);
-                let current = self.state.read().unwrap_or_else(|e| e.into_inner());
-                if current.fingerprint == fingerprint {
-                    (current.config.clone(), current.client.clone())
-                } else {
-                    drop(current);
-                    let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
-                    // Another request may have reloaded while we waited for the write lock.
-                    if state.fingerprint != fingerprint {
-                        match config::protect(path).and_then(|mut config| {
-                            if config.mode != state.config.mode {
-                                anyhow::bail!("Mode changed; restart the proxy to apply it");
-                            }
-                            if config.logging != state.config.logging {
-                                eprintln!(
-                                    "Config `logging` changed; restart to apply storage settings"
-                                );
-                                config.logging = state.config.logging.clone();
-                            }
-                            let client = if config.ip_version == state.config.ip_version
-                                && unbounded_model_wait(&config)
-                                    == unbounded_model_wait(&state.config)
-                            {
-                                state.client.clone()
-                            } else {
-                                build_client(&config)?
-                            };
-                            Ok((config.effective(), client))
-                        }) {
-                            Ok((config, client)) => {
-                                eprintln!("Config reloaded: {}", path.display());
-                                if config.listen != state.config.listen {
-                                    eprintln!(
-                                        "Config `listen` changed to {}; restart to apply it",
-                                        config.listen
-                                    );
-                                }
-                                state.config = Arc::new(config);
-                                state.client = client;
-                            }
-                            Err(e) => eprintln!(
-                                "Config change ignored, keeping the previous config: {e:#}"
-                            ),
-                        }
-                        state.fingerprint = fingerprint;
-                    }
-                    (state.config.clone(), state.client.clone())
+    // Disk reads, decryption, config protection and client construction never
+    // hold the request snapshot lock. A slow filesystem cannot stall forwarding.
+    fn watch(service: &Arc<Self>) -> Result<()> {
+        if service.source.is_none() && service.access_config.is_none() {
+            return Ok(());
+        }
+        let weak = Arc::downgrade(service);
+        std::thread::Builder::new()
+            .name("proxy-config-watch".into())
+            .spawn(move || {
+                loop {
+                    let Some(service) = weak.upgrade() else { break };
+                    service.refresh_files();
+                    drop(service);
+                    std::thread::sleep(Duration::from_millis(250));
                 }
+            })?;
+        Ok(())
+    }
+
+    fn accepts(&self, token: &str) -> bool {
+        let keys = self.access_keys.read().unwrap_or_else(|e| e.into_inner());
+        // Fail closed if the filesystem/watcher stalls. Revocations are picked
+        // up on the next refresh, and a failed read discards the previous keys.
+        keys.0.elapsed() < Duration::from_secs(1)
+            && keys.1.as_ref().is_some_and(|keys| keys.accepts(token))
+    }
+
+    fn refresh_files(&self) {
+        if let Some(path) = &self.access_config {
+            let keys = crate::access::read(path).ok();
+            *self.access_keys.write().unwrap_or_else(|e| e.into_inner()) = (Instant::now(), keys);
+        }
+        let Some(path) = &self.source else { return };
+        let fingerprint = config::fingerprint(path);
+        let (previous, client) = {
+            let state = self.state.read().unwrap_or_else(|e| e.into_inner());
+            if state.fingerprint == fingerprint {
+                return;
             }
-            None => {
-                let state = self.state.read().unwrap_or_else(|e| e.into_inner());
-                (state.config.clone(), state.client.clone())
-            }
+            (state.config.clone(), state.client.clone())
         };
+        let loaded = config::protect(path).and_then(|mut config| {
+            if config.mode != previous.mode {
+                anyhow::bail!("Mode changed; restart the proxy to apply it");
+            }
+            if config.logging != previous.logging {
+                eprintln!("Config `logging` changed; restart to apply storage settings");
+                config.logging = previous.logging.clone();
+            }
+            let client = if config.ip_version == previous.ip_version
+                && unbounded_model_wait(&config) == unbounded_model_wait(&previous)
+            {
+                client
+            } else {
+                build_client(&config)?
+            };
+            Ok((config.effective(), client))
+        });
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        match loaded {
+            Ok((config, client)) => {
+                eprintln!("Config reloaded: {}", path.display());
+                if config.listen != previous.listen {
+                    eprintln!(
+                        "Config `listen` changed to {}; restart to apply it",
+                        config.listen
+                    );
+                }
+                state.config = Arc::new(config);
+                state.client = client;
+            }
+            Err(e) => eprintln!("Config change ignored, keeping the previous config: {e:#}"),
+        }
+        state.fingerprint = fingerprint;
+    }
+
+    /// Cheap immutable snapshot; the watcher publishes validated config changes.
+    fn snapshot(self: &Arc<Self>) -> Proxy {
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
         Proxy {
             fallback_attempt: false,
-            config,
-            client,
+            config: state.config.clone(),
+            client: state.client.clone(),
             service: self.clone(),
             log_id: 0,
         }
@@ -612,13 +638,30 @@ fn rewrite<'a>(
     path: &str,
     body: Bytes,
 ) -> Result<(Bytes, &'a str), &'static str> {
-    let mut project = config.default.api_key.as_str();
+    let project = config.default.api_key.as_str();
     if body.is_empty() {
         return Ok((body, project));
     }
     let mut value: Value =
         serde_json::from_slice(&body).map_err(|_| "Request body must be valid JSON")?;
-    let guided = config.skip_blocked_security_work && guidance::apply(path, &mut value);
+    let (changed, project) = rewrite_value(config, path, &mut value)?;
+    if changed {
+        Ok((
+            Bytes::from(serde_json::to_vec(&value).map_err(|_| "Cannot serialize request")?),
+            project,
+        ))
+    } else {
+        Ok((body, project))
+    }
+}
+
+fn rewrite_value<'a>(
+    config: &'a Config,
+    path: &str,
+    value: &mut Value,
+) -> Result<(bool, &'a str), &'static str> {
+    let mut project = config.default.api_key.as_str();
+    let guided = config.skip_blocked_security_work && guidance::apply(path, value);
     let model_pointer = if path.contains("/realtime/") && value.pointer("/session/model").is_some()
     {
         "/session/model"
@@ -632,7 +675,7 @@ fn rewrite<'a>(
         .and_then(|model| config.alias_for(model, path))
     {
         aliased = true;
-        let effort = requested_effort(path, &value);
+        let effort = requested_effort(path, value);
         let route = effort.and_then(|effort| alias.reasoning_routes.get(effort));
         if let Some(key) = route
             .and_then(|route| route.api_key.as_ref())
@@ -666,13 +709,7 @@ fn rewrite<'a>(
     if let Some(model) = &explicit_openai {
         *value.pointer_mut(model_pointer).unwrap() = json!(model);
     }
-    if guided || explicit_openai.is_some() || aliased {
-        return Ok((
-            Bytes::from(serde_json::to_vec(&value).map_err(|_| "Cannot serialize request")?),
-            project,
-        ));
-    }
-    Ok((body, project))
+    Ok((guided || explicit_openai.is_some() || aliased, project))
 }
 
 fn capacity_error(status: StatusCode, prefix: &[u8]) -> bool {
@@ -745,20 +782,49 @@ fn retry_delay(config: &Config, attempt: u32, headers: &HeaderMap) -> Duration {
         .min(Duration::from_millis(cap))
 }
 
-// Private temporary files are automatically removed when the request ends.
-// Every retry replays a complete body without retaining binary uploads in RAM.
-struct ReplayBody(tokio::fs::File, tempfile::NamedTempFile, Option<Value>);
-
-impl ReplayBody {
-    fn new() -> std::io::Result<Self> {
-        let temp = tempfile::NamedTempFile::new()?;
-        Ok(Self(tokio::fs::File::from_std(temp.reopen()?), temp, None))
+// JSON was already fully materialized for rewriting. Keep its replayable Bytes
+// in memory instead of writing, rereading and reopening a tempfile per attempt.
+// Binary/multipart uploads remain disk-backed with bounded streaming memory.
+enum ReplayBody {
+    Memory(Bytes, Option<Value>),
+    File(FileBody),
+}
+struct FileBody(tokio::fs::File, tempfile::NamedTempFile);
+impl FileBody {
+    async fn new() -> std::io::Result<Self> {
+        tokio::task::spawn_blocking(|| {
+            let temp = tempfile::NamedTempFile::new()?;
+            Ok(Self(tokio::fs::File::from_std(temp.reopen()?), temp))
+        })
+        .await?
     }
-
+}
+impl ReplayBody {
     async fn request_body(&mut self) -> std::io::Result<reqwest::Body> {
-        Ok(reqwest::Body::wrap_stream(ReaderStream::new(
-            tokio::fs::File::open(self.1.path()).await?,
-        )))
+        match self {
+            Self::Memory(bytes, _) => Ok(reqwest::Body::from(bytes.clone())),
+            Self::File(file) => Ok(reqwest::Body::wrap_stream(ReaderStream::new(
+                tokio::fs::File::open(file.1.path()).await?,
+            ))),
+        }
+    }
+    async fn len(&self) -> std::io::Result<u64> {
+        match self {
+            Self::Memory(bytes, _) => Ok(bytes.len() as u64),
+            Self::File(file) => Ok(file.0.metadata().await?.len()),
+        }
+    }
+    fn take_json(&mut self) -> Option<Value> {
+        match self {
+            Self::Memory(_, value) => value.take(),
+            Self::File(_) => None,
+        }
+    }
+    fn json(&self) -> Option<&Value> {
+        match self {
+            Self::Memory(_, value) => value.as_ref(),
+            Self::File(_) => None,
+        }
     }
 }
 
@@ -828,13 +894,6 @@ async fn prepare_body(
     project: &mut String,
     log: (&logs::Store, u64),
 ) -> Result<ReplayBody> {
-    let mut original = ReplayBody::new()?;
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        original.0.write_all(&chunk?).await?;
-    }
-    original.0.flush().await?;
-    original.0.rewind().await?;
     let kind = content_type
         .split(';')
         .next()
@@ -842,16 +901,18 @@ async fn prepare_body(
         .trim()
         .to_ascii_lowercase();
     if kind == "application/json" || kind.ends_with("+json") {
-        let mut bytes = Vec::new();
-        original.0.read_to_end(&mut bytes).await?;
-        let incoming = logs::json_model(&bytes);
-        log.0.routing_decision(log.1, config, path, &bytes);
-        let (mut rewritten, key) =
-            rewrite(config, path, Bytes::from(bytes)).map_err(anyhow::Error::msg)?;
-        // A body model, when supplied, takes precedence over URL routing.
-        let mut value: Value = serde_json::from_slice(&rewritten).unwrap_or(Value::Null);
+        let bytes = axum::body::to_bytes(body, usize::MAX).await?;
+        let mut value: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)?
+        };
+        let incoming = logs::value_model(&value);
+        log.0.routing_value_decision(log.1, config, path, &value);
+        let (mut changed, key) =
+            rewrite_value(config, path, &mut value).map_err(anyhow::Error::msg)?;
         if config.mode != Mode::Client && replay::for_openai(path, &mut value) {
-            rewritten = Bytes::from(serde_json::to_vec(&value)?);
+            changed = true;
         }
         if guidance::present(&value) {
             log.0.update(
@@ -864,20 +925,37 @@ async fn prepare_body(
                 },
             );
         }
+        // A body model, when supplied, takes precedence over URL routing.
         if value.get("model").is_some() || value.pointer("/session/model").is_some() {
             *project = key.to_owned();
             log.0
-                .route(log.1, incoming, logs::json_model(&rewritten), project);
+                .route(log.1, incoming, logs::value_model(&value), project);
         }
-        original.2 = Some(value);
-        original.0.rewind().await?;
-        original.0.set_len(0).await?;
-        original.0.write_all(&rewritten).await?;
-    } else if kind == "multipart/form-data" {
+        let rewritten = if changed {
+            Bytes::from(serde_json::to_vec(&value)?)
+        } else {
+            bytes
+        };
+        let native = config.mode != Mode::Client
+            && value
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.starts_with("gemini/"));
+        return Ok(ReplayBody::Memory(rewritten, native.then_some(value)));
+    }
+
+    let mut original = FileBody::new().await?;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        original.0.write_all(&chunk?).await?;
+    }
+    original.0.flush().await?;
+    original.0.rewind().await?;
+    if kind == "multipart/form-data" {
         let boundary = multer::parse_boundary(content_type)?;
         let mut fields =
             multer::Multipart::new(ReaderStream::new(original.0.try_clone().await?), &boundary);
-        let mut output = ReplayBody::new()?;
+        let mut output = FileBody::new().await?;
         let mut changed = false;
         while let Some(mut field) = fields.next_field().await? {
             output
@@ -937,24 +1015,30 @@ async fn prepare_body(
             .await?;
         if changed {
             output.0.flush().await?;
-            return Ok(output);
+            return Ok(ReplayBody::File(output));
         }
     }
     original.0.flush().await?;
-    Ok(original)
+    Ok(ReplayBody::File(original))
 }
 
 async fn forward(State(service): State<Arc<Service>>, request: Request) -> Response {
     let mut snapshot = service.snapshot();
-    snapshot.log_id = service
-        .logs
-        .begin(request.method().as_str(), request.uri().path(), "HTTP");
-    let id = snapshot.log_id;
-    if request
+    let websocket = request
         .headers()
         .get(header::UPGRADE)
-        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"))
-    {
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+    snapshot.log_id = service.logs.begin(
+        request.method().as_str(),
+        request.uri().path(),
+        if websocket {
+            "WebSocket handshake"
+        } else {
+            "HTTP"
+        },
+    );
+    let id = snapshot.log_id;
+    if websocket {
         service
             .logs
             .update(id, "websocket_handshake", json!({}), |entry| {
@@ -1047,14 +1131,18 @@ async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
         }
     };
     if body
-        .2
-        .as_ref()
+        .json()
         .and_then(|v| v.get("model"))
         .and_then(Value::as_str)
         .is_some_and(|m| m.starts_with("gemini/"))
         && proxy.config.mode != Mode::Client
     {
-        return gemini::forward(proxy, parts, body.2.take().expect("parsed Gemini request")).await;
+        return gemini::forward(
+            proxy,
+            parts,
+            body.take_json().expect("parsed Gemini request"),
+        )
+        .await;
     }
     let url = format!(
         "{}{}",
@@ -1096,8 +1184,8 @@ async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
     ] {
         headers.remove(name);
     }
-    let body_length = match body.0.metadata().await {
-        Ok(metadata) => metadata.len(),
+    let body_length = match body.len().await {
+        Ok(length) => length,
         Err(_) => {
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2195,11 +2283,35 @@ mod tests {
         let get = || client.get(format!("{url}/v1/test")).send();
         assert_eq!(get().await.unwrap().text().await.unwrap(), "Bearer first");
 
-        // A valid edit applies to the very next request.
+        let wait_for = |expected: &'static str| {
+            let client = client.clone();
+            let url = url.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let actual = client
+                            .get(format!("{url}/v1/test"))
+                            .send()
+                            .await
+                            .unwrap()
+                            .text()
+                            .await
+                            .unwrap();
+                        if actual == expected {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("background config reload");
+            }
+        };
+        // A valid edit is published by the background watcher.
         tokio::time::sleep(Duration::from_millis(20)).await;
         config.api_keys.insert("default".into(), "second".into());
         std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
-        assert_eq!(get().await.unwrap().text().await.unwrap(), "Bearer second");
+        wait_for("Bearer second").await;
         let stored = std::fs::read_to_string(&path).unwrap();
         assert!(!stored.contains("\"second\""));
         assert!(stored.contains("\"encrypted\""));
@@ -2221,7 +2333,7 @@ mod tests {
         // Fixing the file picks it up again.
         config.api_keys.insert("default".into(), "third".into());
         std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
-        assert_eq!(get().await.unwrap().text().await.unwrap(), "Bearer third");
+        wait_for("Bearer third").await;
         proxy_task.abort();
         upstream_task.abort();
     }

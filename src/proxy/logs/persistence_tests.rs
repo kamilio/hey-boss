@@ -9,8 +9,9 @@ use std::collections::HashSet;
 
 fn fixture() -> (tempfile::TempDir, Arc<Store>) {
     let dir = tempfile::tempdir().unwrap();
-    let store =
-        Arc::new(Store::open(&Config::test_fixture(), &dir.path().join("config.json")).unwrap());
+    let mut config = Config::test_fixture();
+    config.logging.detailed = true;
+    let store = Arc::new(Store::open(&config, &dir.path().join("config.json")).unwrap());
     (dir, store)
 }
 fn all() -> Query {
@@ -1137,4 +1138,231 @@ async fn startup_interrupt_sweep_uses_state_index_instead_of_scanning_requests()
             "{statement}: {details:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn dashboard_totals_reconcile_with_durable_history_beyond_memory_limit() {
+    let (_dir, store) = fixture();
+    for _ in 0..650 {
+        sample(&store, "succeeded");
+    }
+    let id = store.begin("POST", "/v1/responses", "HTTP");
+    store.route(
+        id,
+        Some("gpt-5.4".into()),
+        Some("model-primary".into()),
+        "test",
+    );
+    store.flush().await.unwrap();
+    let database = store.database.as_ref().unwrap();
+    let first = database
+        .read(|c| dashboard::totals(c, now_ms()))
+        .await
+        .unwrap();
+    assert_eq!(first["all_time"]["requests"], 651);
+    assert_eq!(first["all_time"]["unpriced_requests"], 1);
+    store.usage(
+        id,
+        &json!({"usage":{"input_tokens":100000,"output_tokens":10000}}),
+    );
+    store.complete(id, "succeeded", "test", None, 0);
+    store.flush().await.unwrap();
+    database
+        .read(|c| {
+            let actual = dashboard::totals(c, now_ms())?;
+            let expected = query::summary(c, &all().filter()?)?;
+            assert_eq!(actual["all_time"]["requests"], expected["requests"]);
+            assert_eq!(
+                actual["all_time"]["priced_requests"],
+                expected["priced_requests"]
+            );
+            assert_eq!(
+                actual["all_time"]["estimated_cost_usd"],
+                expected["estimated_cost_usd"]
+            );
+            assert_eq!(actual["all_time"]["unpriced_requests"], 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn compact_dashboard_handles_disabled_and_failed_persistence() {
+    for enabled in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::test_fixture();
+        config.logging.enabled = enabled;
+        std::fs::write(dir.path().join("obstacle"), "test").unwrap();
+        config.logging.database = Some("obstacle/requests.sqlite3".into());
+        let store = Arc::new(Store::open(&config, &dir.path().join("config.json")).unwrap());
+        sample(&store, "succeeded");
+        let (url, task) = serve(
+            router_with(
+                config,
+                Options {
+                    logs: Some(store),
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        )
+        .await;
+        let response = reqwest::get(format!("{url}/logs/api/dashboard"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let value: Value = response.json().await.unwrap();
+        assert_eq!(value["rpm"], 1);
+        assert_eq!(value["spend"], Value::Null);
+        assert_eq!(value["logging"]["enabled"], enabled);
+        assert!(value.get("entries").is_none());
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn compact_dashboard_retains_stale_spend_until_history_recovers() {
+    let (dir, store) = fixture();
+    sample(&store, "succeeded");
+    store.flush().await.unwrap();
+    let (url, task) = serve(
+        router_with(
+            Config::test_fixture(),
+            Options {
+                logs: Some(store.clone()),
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let endpoint = format!("{url}/logs/api/dashboard");
+    let before: Value = http
+        .get(&endpoint)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before["spend"]["all_time"]["requests"], 1);
+    for (_, at, _) in store.dashboard.lock().await.iter_mut() {
+        *at = Instant::now() - Duration::from_secs(6);
+    }
+    let path = &store.database.as_ref().unwrap().path;
+    let unavailable = dir.path().join("offline.sqlite3");
+    std::fs::rename(path, &unavailable).unwrap();
+    let stale: Value = http
+        .get(&endpoint)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    std::fs::rename(unavailable, path).unwrap();
+    assert_eq!(stale["spend"], before["spend"]);
+    assert!(stale["error"].is_string());
+    sample(&store, "succeeded");
+    store.flush().await.unwrap();
+    let recovered: Value = http
+        .get(&endpoint)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recovered["spend"]["all_time"]["requests"], 2);
+    assert!(recovered.get("error").is_none());
+    assert_eq!(store.dashboard.lock().await.len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn default_accounting_persists_three_snapshots_and_keeps_exact_cost() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::test_fixture();
+    assert!(!config.logging.detailed);
+    let store = Store::open(&config, &dir.path().join("config.json")).unwrap();
+    let id = sample(&store, "succeeded");
+    store.flush().await.unwrap();
+    let db = store.database.as_ref().unwrap();
+    assert_eq!(db.health()["enqueued_events"], 3);
+    let request = store.recent().into_iter().find(|e| e.id == id).unwrap();
+    let expected_cost = pricing::price(&request).cost_nano_usd.unwrap();
+    db.read(move |c| {
+        let events: i64 = c.query_row("SELECT count(*) FROM request_events", [], |r| r.get(0))?;
+        assert_eq!(events, 0, "Detailed timelines are opt-in");
+        let value = dashboard::totals(c, now_ms())?;
+        assert_eq!(value["all_time"]["requests"], 1);
+        assert_eq!(
+            value["all_time"]["estimated_cost_usd"],
+            expected_cost as f64 / 1e9
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn client_dashboard_relays_small_host_totals_without_counting_polls() {
+    let (dir, store) = fixture();
+    sample(&store, "succeeded");
+    store.flush().await.unwrap();
+    let key_path = dir.path().join("host.json");
+    let keys = crate::access::ensure(&key_path, &[]).unwrap();
+    let mut host = Config::test_fixture();
+    host.mode = Mode::Host;
+    let (host_url, host_task) = serve(
+        router_with(
+            host,
+            Options {
+                logs: Some(store.clone()),
+                access_config: Some(key_path),
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let client_config: Config =
+        serde_json::from_value(json!({"mode":"client","listen":"127.0.0.1:8080",
+        "connection":{"url":host_url,"api_key":keys.local}}))
+        .unwrap();
+    let (url, client_task) = serve(router_with(client_config, Options::default()).unwrap()).await;
+    let http = reqwest::Client::new();
+    for _ in 0..3 {
+        let response = http
+            .get(format!("{url}/logs/api/dashboard"))
+            .bearer_auth("local-placeholder")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = response.bytes().await.unwrap();
+        assert!(bytes.len() < 4096);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["source"], "host");
+        assert_eq!(value["rpm"], 1);
+        assert_eq!(value["spend"]["all_time"]["requests"], 1);
+        assert!(!String::from_utf8_lossy(&bytes).contains(&keys.local));
+    }
+    assert_eq!(store.rpm(), 1);
+    assert_eq!(
+        http.get(format!("{url}/logs/api/dashboard?day_start_ms=1"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    client_task.abort();
+    host_task.abort();
 }

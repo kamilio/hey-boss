@@ -140,7 +140,7 @@ async fn overview_http_reads_local_config_and_refreshes_without_discovery() {
         },
     )
     .await;
-    let page = reqwest::get(format!("{url}/")).await.unwrap();
+    let page = reqwest::get(format!("{url}/apis")).await.unwrap();
     assert_eq!(page.status(), 200);
     assert!(page.text().await.unwrap().contains("/overview.js"));
     let response = reqwest::get(format!("{url}/overview/api")).await.unwrap();
@@ -150,13 +150,22 @@ async fn overview_http_reads_local_config_and_refreshes_without_discovery() {
     let mut updated = config();
     updated.aliases[0].from = "renamed-config-alias".into();
     std::fs::write(&path, serde_json::to_vec(&updated).unwrap()).unwrap();
-    let data: Value = reqwest::get(format!("{url}/overview/api"))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(model(api(&data, "responses"), "renamed-config-alias").is_some());
+    let data = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let data: Value = reqwest::get(format!("{url}/overview/api"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if model(api(&data, "responses"), "renamed-config-alias").is_some() {
+                break data;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background catalog refresh");
     assert!(model(api(&data, "responses"), "coding").is_none());
     // The synthetic upstream is unreachable, so successful catalog responses
     // also prove this page does not depend on /v1/models or provider discovery.
@@ -183,7 +192,14 @@ async fn overview_host_login_guards_metadata_and_returns_to_landing_page() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
-    for path in ["/", "/overview/api", "/overview.js"] {
+    for path in [
+        "/",
+        "/apis",
+        "/overview/api",
+        "/overview.js",
+        "/claude/usage",
+        "/logs/api/dashboard",
+    ] {
         assert_eq!(
             client
                 .get(format!("{url}{path}"))
@@ -205,7 +221,7 @@ async fn overview_host_login_guards_metadata_and_returns_to_landing_page() {
     let cookie = login.headers()[header::SET_COOKIE].to_str().unwrap();
     assert!(cookie.ends_with("Path=/"));
     let cookie = cookie.split(';').next().unwrap();
-    for path in ["/", "/overview/api", "/logs"] {
+    for path in ["/", "/apis", "/overview/api", "/logs"] {
         assert_eq!(
             client
                 .get(format!("{url}{path}"))
@@ -217,6 +233,26 @@ async fn overview_host_login_guards_metadata_and_returns_to_landing_page() {
             200
         );
     }
+    let dashboard: Value = client
+        .get(format!("{url}/logs/api/dashboard"))
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        dashboard["rpm"], 0,
+        "Dashboard authentication attempts are not model traffic"
+    );
+    let api_login = client
+        .post(format!("{url}/logs/login"))
+        .form(&[("api_key", keys.local.as_str()), ("next", "/apis")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api_login.headers()[header::LOCATION], "/apis");
     let login = client
         .post(format!("{url}/logs/login"))
         .form(&[

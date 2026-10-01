@@ -19,7 +19,7 @@ use std::{
 
 pub struct Event {
     pub entry: Entry,
-    pub kind: String,
+    pub kind: Option<String>,
     pub details: Value,
     pub timestamp_ms: u64,
 }
@@ -36,6 +36,8 @@ struct Health {
     dropped: AtomicU64,
     write_errors: AtomicU64,
     last_commit_ms: AtomicU64,
+    last_recorded_ms: AtomicU64,
+    busy_since_ms: AtomicU64,
     last_drop_ms: AtomicU64,
     commit_duration_us: AtomicU64,
     last_error: Mutex<Option<String>>,
@@ -129,6 +131,13 @@ impl Database {
     /// The forwarding path never blocks on a queue slot, SQLite, or disk.
     pub fn enqueue(&self, event: Event) {
         let pending = self.health.pending.fetch_add(1, Ordering::Relaxed) + 1;
+        if pending == 1 {
+            // Start a fresh busy period after idle time. Otherwise the next
+            // request's lag would include the entire idle interval.
+            self.health
+                .busy_since_ms
+                .store(event.timestamp_ms, Ordering::Relaxed);
+        }
         match self.sender.try_send(Command::Event(Box::new(event))) {
             Ok(()) => {
                 self.health.enqueued.fetch_add(1, Ordering::Relaxed);
@@ -170,6 +179,8 @@ impl Database {
     pub fn health(&self) -> Value {
         let h = &self.health;
         let last_commit = h.last_commit_ms.load(Ordering::Relaxed);
+        let last_recorded = h.last_recorded_ms.load(Ordering::Relaxed);
+        let busy_since = h.busy_since_ms.load(Ordering::Relaxed);
         let pending = h.pending.load(Ordering::Relaxed);
         let last_error = h
             .last_error
@@ -181,7 +192,7 @@ impl Database {
             "committed_events":h.committed.load(Ordering::Relaxed),"dropped_events":h.dropped.load(Ordering::Relaxed),
             "last_drop_ms":h.last_drop_ms.load(Ordering::Relaxed),"write_errors":h.write_errors.load(Ordering::Relaxed),
             "last_error":last_error,"last_commit_ms":last_commit,"commit_duration_us":h.commit_duration_us.load(Ordering::Relaxed),
-            "lag_ms":if pending > 0 {now_ms().saturating_sub(last_commit.max(self.started_ms))} else {0},
+            "lag_ms":if pending > 0 {now_ms().saturating_sub(last_recorded.max(busy_since).max(self.started_ms))} else {0},
             "retention":"all","status":if last_error.is_some(){"error"}else if !h.ready.load(Ordering::Acquire){"initializing"}else if h.dropped.load(Ordering::Relaxed)>0{"gaps"}else if pending>self.capacity/2{"lagging"}else{"healthy"}})
     }
     pub async fn read<T: Send + 'static>(
@@ -269,6 +280,8 @@ fn initialize(
     }
     connection.execute_batch(SCHEMA)?;
     repair_completed_disconnects(&mut connection)?;
+    backfill_claude_prices(&mut connection)?;
+    super::dashboard::initialize(&mut connection)?;
     let transaction = connection.transaction()?;
     let timestamp = integer(now_ms());
     transaction.execute(&format!("INSERT INTO request_events(request_id,timestamp_ms,kind,details)
@@ -296,6 +309,67 @@ fn initialize(
         .dropped
         .fetch_add(historical_drops, Ordering::Relaxed);
     Ok((connection, lock))
+}
+
+// Previously native Messages usage was retained but never priced. Only fill
+// missing estimates; historical prices already recorded remain unchanged. The
+// migration runs off the listener thread and holds at most 256 records in RAM.
+fn backfill_claude_prices(connection: &mut Connection) -> Result<()> {
+    let done: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='claude_prices_2026_10_01')",
+        [],
+        |r| r.get(0),
+    )?;
+    if done {
+        return Ok(());
+    }
+    let mut cursor = 0i64;
+    loop {
+        let rows = {
+            let mut query = connection.prepare("SELECT seq,record FROM requests WHERE seq>?1
+                AND cost_nano_usd IS NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL
+                AND path IN ('/v1/messages','/v1/messages/','/v1/custom/messages','/custom/v1/messages',
+                    '/v1/custom/chat/completions','/custom/v1/chat/completions')
+                ORDER BY seq LIMIT 256")?;
+            query
+                .query_map([cursor], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if rows.is_empty() {
+            break;
+        }
+        let transaction = connection.transaction()?;
+        for (seq, record) in rows {
+            cursor = seq;
+            let Ok(entry) = serde_json::from_str::<Entry>(&record) else {
+                continue;
+            };
+            let price = pricing::price(&entry);
+            let Some(cost) = price.cost_nano_usd else {
+                continue;
+            };
+            transaction.execute(
+                "UPDATE requests SET cost_nano_usd=?2,price_model=?3,price_version=?4,
+                record=json_set(record,'$.cost_nano_usd',?2,'$.price_model',?3,'$.price_version',?4,
+                    '$.estimated_cost_usd',?5) WHERE seq=?1 AND cost_nano_usd IS NULL",
+                params![
+                    seq,
+                    cost,
+                    price.price_model,
+                    price.price_version,
+                    cost as f64 / 1e9
+                ],
+            )?;
+        }
+        transaction.commit()?;
+    }
+    connection.execute(
+        "INSERT INTO metadata(key,value) VALUES('claude_prices_2026_10_01','1')",
+        [],
+    )?;
+    Ok(())
 }
 
 // Version-one logging mistook Codex's close after response.completed for a
@@ -390,6 +464,9 @@ fn writer(
                         .committed
                         .fetch_add(batch.len() as u64, Ordering::Relaxed);
                     health.last_commit_ms.store(now_ms(), Ordering::Relaxed);
+                    if let Some(timestamp) = batch.iter().map(|event| event.timestamp_ms).max() {
+                        health.last_recorded_ms.store(timestamp, Ordering::Relaxed);
+                    }
                     health
                         .commit_duration_us
                         .store(started.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -429,6 +506,14 @@ fn writer(
 }
 
 fn commit(connection: &mut Connection, batch: &[Box<Event>], drops: u64) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Record<'a> {
+        #[serde(flatten)]
+        entry: &'a Entry,
+        #[serde(flatten)]
+        price: &'a pricing::Price,
+        estimated_cost_usd: Option<f64>,
+    }
     let transaction = connection.transaction()?;
     {
         let mut request = transaction.prepare_cached(UPSERT)?;
@@ -443,11 +528,11 @@ fn commit(connection: &mut Connection, batch: &[Box<Event>], drops: u64) -> Resu
         for item in latest.values() {
             let entry = &item.entry;
             let price = pricing::price(entry);
-            let mut record = serde_json::to_value(entry)?;
-            record["price_model"] = json!(price.price_model);
-            record["price_version"] = json!(price.price_version);
-            record["cost_nano_usd"] = json!(price.cost_nano_usd);
-            record["estimated_cost_usd"] = json!(price.cost_nano_usd.map(|n| n as f64 / 1e9));
+            let record = serde_json::to_string(&Record {
+                entry,
+                price: &price,
+                estimated_cost_usd: price.cost_nano_usd.map(|n| n as f64 / 1e9),
+            })?;
             request.execute(params![
                 entry.request_id,
                 entry.session_id,
@@ -479,14 +564,14 @@ fn commit(connection: &mut Connection, batch: &[Box<Event>], drops: u64) -> Resu
                 price.cost_nano_usd,
                 price.price_version,
                 price.price_model,
-                serde_json::to_string(&record)?
+                record
             ])?;
         }
-        for item in batch {
+        for item in batch.iter().filter(|item| item.kind.is_some()) {
             event.execute(params![
                 item.entry.request_id,
                 integer(item.timestamp_ms),
-                item.kind,
+                item.kind.as_deref(),
                 serde_json::to_string(&item.details)?
             ])?;
         }
@@ -539,6 +624,64 @@ fn integer(value: u64) -> i64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn claude_history_backfill_prices_only_missing_estimates_and_is_idempotent() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        for (id, model, existing) in [
+            (1, "claude-sonnet-4-6", None),
+            (2, "claude-sonnet-4-6", Some(123i64)),
+            (3, "unknown-model", None),
+        ] {
+            let entry = Entry {
+                request_id: format!("old-{id}"),
+                session_id: "old".into(),
+                mode: "standalone".into(),
+                method: "POST".into(),
+                path: "/v1/messages".into(),
+                state: "succeeded".into(),
+                requested_model: Some(model.into()),
+                routed_model: Some(model.into()),
+                input_tokens: Some(1000),
+                output_tokens: Some(100),
+                ..Entry::default()
+            };
+            let mut record = serde_json::to_value(&entry).unwrap();
+            for field in [
+                "response_model",
+                "cache_write_1h_tokens",
+                "speed",
+                "inference_geo",
+            ] {
+                record.as_object_mut().unwrap().remove(field);
+            }
+            connection.execute("INSERT INTO requests(request_id,session_id,timestamp_ms,updated_ms,path,method,
+                transport,mode,state,retries,input_tokens,output_tokens,cost_nano_usd,record)
+                VALUES(?1,'old',0,0,'/v1/messages','POST','HTTP','standalone','succeeded',0,1000,100,?2,?3)",
+                params![entry.request_id,existing,record.to_string()]).unwrap();
+        }
+        backfill_claude_prices(&mut connection).unwrap();
+        backfill_claude_prices(&mut connection).unwrap();
+        let actual = connection
+            .prepare("SELECT cost_nano_usd FROM requests ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get::<_, Option<i64>>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(actual, vec![Some(4_500_000), Some(123), None]);
+        let record: String = connection
+            .query_row(
+                "SELECT record FROM requests WHERE request_id='old-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let record: Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(record["price_model"], "claude-sonnet-4-6");
+        assert_eq!(record["estimated_cost_usd"], 0.0045);
+    }
+
     #[tokio::test]
     async fn delayed_initialization_keeps_startup_and_enqueue_nonblocking() {
         let dir = tempfile::tempdir().unwrap();
@@ -548,7 +691,7 @@ mod tests {
             batch_size: 32,
             ..Logging::default()
         };
-        let database = Database::open_with_initializer(
+        let mut database = Database::open_with_initializer(
             dir.path().join("requests.sqlite3"),
             &config,
             "startup-test",
@@ -559,6 +702,8 @@ mod tests {
             },
         )
         .unwrap();
+        // A long idle interval before the first event is not writer backlog.
+        database.started_ms = now_ms().saturating_sub(60_000);
         assert_eq!(database.health()["status"], "initializing");
         assert!(
             database
@@ -575,13 +720,14 @@ mod tests {
                     ended_ms: Some(now_ms()),
                     ..Entry::default()
                 },
-                kind: "completed".into(),
+                kind: Some("completed".into()),
                 details: json!({}),
                 timestamp_ms: now_ms(),
             });
         }
         assert_eq!(database.health()["pending_events"], 128);
         assert_eq!(database.health()["dropped_events"], 1);
+        assert!(database.health()["lag_ms"].as_u64().unwrap() < 1000);
         assert!(!database.path.exists());
         release.send(()).unwrap();
         database.flush().await.unwrap();
@@ -605,5 +751,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((requests, events, drops.as_str()), (128, 128, "1"));
+    }
+
+    #[tokio::test]
+    async fn http_stream_and_dashboard_respond_before_database_initializes() {
+        use crate::proxy::{Options, router_with};
+        use axum::{Router, body::Body};
+        use std::convert::Infallible;
+        async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (url, task)
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (release, gate) = mpsc::channel();
+        let database = Arc::new(
+            Database::open_with_initializer(
+                dir.path().join("requests.sqlite3"),
+                &Logging::default(),
+                "http-startup-test",
+                move |path, session, health| {
+                    gate.recv_timeout(Duration::from_secs(10))?;
+                    initialize(path, session, health)
+                },
+            )
+            .unwrap(),
+        );
+        let mut store = super::super::Store::default();
+        store.database = Some(database.clone());
+        let store = Arc::new(store);
+        let (upstream_url, upstream) = serve(Router::new().fallback(|| async {
+            let chunks = futures_util::stream::iter([
+                Ok::<_, Infallible>("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"),
+                Ok("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"),
+            ]);
+            ([("content-type", "text/event-stream")], Body::from_stream(chunks))
+        })).await;
+        let config = crate::config::Config {
+            upstream_url,
+            ..crate::config::Config::test_fixture()
+        };
+        let (url, proxy) = serve(
+            router_with(
+                config,
+                Options {
+                    logs: Some(store.clone()),
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!("{url}/v1/responses"))
+            .json(&json!({"model":"gpt-4.1","input":"synthetic","stream":true}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("response.completed")
+        );
+        let dashboard: Value = client
+            .get(format!("{url}/logs/api/dashboard"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(dashboard["rpm"], 1);
+        assert_eq!(dashboard["logging"]["status"], "initializing");
+        assert!(dashboard["spend"].is_null());
+        assert!(!database.path.exists());
+        release.send(()).unwrap();
+        store.flush().await.unwrap();
+        assert_eq!(database.health()["dropped_events"], 0);
+        assert_eq!(database.health()["pending_events"], 0);
+        proxy.abort();
+        upstream.abort();
     }
 }

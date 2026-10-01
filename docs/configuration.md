@@ -63,17 +63,17 @@ The registry configures Pi; it does not clamp arbitrary proxy requests or discov
 
 ## Applying edits
 
-Routing, providers, credentials, and fallback rules reload for new requests. In-flight requests keep their original snapshot. Invalid changes keep the previous configuration active and print an error. Changing `listen` or persistent logging options requires a restart.
+Routing, providers, credentials, and fallback rules reload in the background, normally within 250 ms. New requests use the most recently published configuration. In-flight requests keep their original snapshot. Invalid changes keep the previous configuration active and print an error. Changing `listen` or persistent logging options requires a restart.
 
-Persistent request metadata is enabled by default. To disable it:
+Persistent accounting snapshots are enabled by default. Full lifecycle timelines are opt-in with `"logging": {"detailed": true}`. To disable persistence entirely:
 
 ```json
 "logging": {"enabled": false}
 ```
 
-The default database is `requests.sqlite3` beside the proxy config. Use `logging.database` to change its path. Prompts, payloads, credentials, and raw error messages are excluded from this history. Retention does not automatically delete old records.
+The default database is `requests.sqlite3` beside the proxy config. Use `logging.database` to change its path. Prompts, payloads, credentials, and raw error messages are excluded from this history. Retention does not automatically delete old records. The dashboard never downloads this archive: `/logs/api/dashboard` returns RPM and aggregate spend. It accepts `day_start_ms` and `week_start_ms` together for local calendar boundaries (minute aligned, at most eight days of history); without them it uses UTC.
 
-Database creation, schema setup, recovery, and persistence run on a background writer. Requests enter a bounded queue without waiting for SQLite or disk. `/logs/api?local=true` reports `logging.status` as `initializing` until setup completes. If initialization fails, forwarding and live in-memory logs remain available, the service prints an initialization error, and logging reports `error`. Historical queries return HTTP 503 until the database is ready. Queue overflow increments `dropped_events` and reports gaps; a successful flush confirms queued events were committed. Fix an initialization error and restart to restore persistent logging.
+Database creation, schema setup, recovery, and persistence run on a background writer. Requests enter a bounded queue without waiting for SQLite or disk. `/logs/api/health` reports `status` as `initializing` until setup completes. If initialization fails, forwarding and live in-memory logs remain available, the service prints an initialization error, and logging reports `error`. Historical queries return HTTP 503 until the database is ready. Queue overflow increments `dropped_events` and reports gaps; a successful flush confirms queued events were committed. Fix an initialization error and restart to restore persistent logging.
 
 ## Remote setup
 

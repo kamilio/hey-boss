@@ -215,6 +215,88 @@ async fn native_count_and_rate_limits_are_forwarded_without_retries() {
 }
 
 #[tokio::test]
+async fn native_streams_continue_when_sqlite_is_locked_and_the_accounting_queue_overflows() {
+    let sse = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+    let (upstream, upstream_task) = serve(Router::new().fallback(any(move || async move {
+        let chunks = sse
+            .as_bytes()
+            .chunks(31)
+            .map(|chunk| Ok::<_, std::io::Error>(Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            Body::from_stream(futures_util::stream::iter(chunks)),
+        )
+    })))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path(), &upstream);
+    config.logging.queue_capacity = 128;
+    config.logging.batch_size = 32;
+    config.logging.flush_interval_ms = 10;
+    let logs = Arc::new(logs::Store::open(&config, &dir.path().join("config.json")).unwrap());
+    logs.flush().await.unwrap();
+    let db = logs.database.as_ref().unwrap();
+    let locked = rusqlite::Connection::open(&db.path).unwrap();
+    locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (url, proxy_task) = serve(
+        router_with(
+            config,
+            Options {
+                logs: Some(logs.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for _ in 0..10 {
+            let requests = (0..10).map(|_| async {
+                let response = client
+                    .post(format!("{url}/v1/messages"))
+                    .body(input(true))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.text().await.unwrap(), sse);
+            });
+            futures_util::future::join_all(requests).await;
+        }
+    })
+    .await
+    .expect("Native streaming waited for the locked accounting writer");
+    assert!(db.health()["dropped_events"].as_u64().unwrap() > 0);
+    assert_eq!(logs.rpm(), 100);
+    locked.execute_batch("ROLLBACK").unwrap();
+    logs.flush().await.unwrap();
+    let dashboard: Value = client
+        .get(format!("{url}/logs/api/dashboard"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dashboard["logging"]["status"], "gaps");
+    assert!(dashboard["logging"]["dropped_events"].as_u64().unwrap() > 0);
+    assert_eq!(dashboard["logging"]["pending_events"], 0);
+    assert_eq!(dashboard["rpm"], 100);
+    proxy_task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn usage_is_account_wide_allowlisted_cached_and_stale_on_rate_limit() {
     let count = Arc::new(AtomicUsize::new(0));
     let called = count.clone();

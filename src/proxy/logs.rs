@@ -1,6 +1,8 @@
 use super::*;
+pub(super) mod dashboard;
 mod database;
 mod lifecycle;
+mod observation;
 mod pricing;
 mod query;
 pub(super) mod report;
@@ -29,6 +31,10 @@ struct WindowCache {
 fn routing_config(config: &Config) -> Value {
     json!({"default_project":config.default.api_key,"aliases":config.aliases,"fallbacks":config.fallbacks,"mode":config.mode})
 }
+pub(super) fn metadata(bytes: &[u8]) -> serde_json::Result<Value> {
+    observation::parse(bytes)
+}
+
 // Inspect a bounded copy while forwarding original chunks without waiting for completion.
 // Oversized payloads/events remain opaque; no payload is retained in the store.
 pub(super) struct UsageReader {
@@ -38,6 +44,7 @@ pub(super) struct UsageReader {
     overflow: bool,
     first_output: bool,
     line_nonempty: bool,
+    parsed_bytes: usize,
 }
 impl UsageReader {
     pub(super) fn new(sse: bool) -> Self {
@@ -48,26 +55,33 @@ impl UsageReader {
             overflow: false,
             first_output: false,
             line_nonempty: false,
+            parsed_bytes: 0,
         }
     }
-    fn parse(&mut self, bytes: &[u8], store: &Store, id: u64) {
+    fn parse(&mut self, bytes: &[u8], store: &Store, id: u64) -> bool {
         if bytes.trim_ascii() == b"[DONE]" {
             store.observe(id, &json!({"type":"proxy.stream.done"}));
-        } else if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-            if !self.first_output
-                && (value["type"].as_str().is_some_and(|kind| {
-                    kind.ends_with(".delta")
-                        || matches!(kind, "response.output_item.added" | "content_block_delta")
-                }) || value
-                    .get("choices")
-                    .and_then(Value::as_array)
-                    .is_some_and(|items| !items.is_empty()))
-            {
-                self.first_output = true;
-                store.first_output(id);
-            }
-            store.observe(id, &value);
+        } else if let Ok(value) = observation::parse(bytes) {
+            self.observe_value(&value, store, id);
+        } else {
+            return false;
         }
+        true
+    }
+    pub(super) fn observe_value(&mut self, value: &Value, store: &Store, id: u64) {
+        if !self.first_output
+            && (value["type"].as_str().is_some_and(|kind| {
+                kind.ends_with(".delta")
+                    || matches!(kind, "response.output_item.added" | "content_block_delta")
+            }) || value
+                .get("choices")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty()))
+        {
+            self.first_output = true;
+            store.first_output(id);
+        }
+        store.observe(id, value);
     }
     pub(super) fn feed(&mut self, bytes: &[u8], store: &Store, id: u64) {
         const MAX: usize = 8 * 1024 * 1024;
@@ -86,15 +100,17 @@ impl UsageReader {
                 }
             }
             if self.sse && part.last() == Some(&b'\n') {
-                let line = std::mem::take(&mut self.buffer);
-                let line = line.strip_suffix(b"\n").unwrap_or(&line);
+                let mut storage = std::mem::take(&mut self.buffer);
+                let line = storage.strip_suffix(b"\n").unwrap_or(&storage);
                 let line = line.strip_suffix(b"\r").unwrap_or(line);
                 let blank = !self.line_nonempty;
                 self.line_nonempty = false;
                 if blank {
                     if !self.overflow {
-                        let event = std::mem::take(&mut self.event);
+                        let mut event = std::mem::take(&mut self.event);
                         self.parse(&event, store, id);
+                        event.clear();
+                        self.event = event;
                     }
                     self.overflow = false;
                 } else if !self.overflow
@@ -106,14 +122,19 @@ impl UsageReader {
                     self.event
                         .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
                 }
+                storage.clear();
+                self.buffer = storage;
             }
         }
         if !self.sse
             && !self.overflow
+            && self.parsed_bytes != self.buffer.len()
             && self.buffer.iter().rfind(|b| !b.is_ascii_whitespace()) == Some(&b'}')
         {
             let bytes = std::mem::take(&mut self.buffer);
-            self.parse(&bytes, store, id);
+            if self.parse(&bytes, store, id) {
+                self.parsed_bytes = bytes.len();
+            }
             self.buffer = bytes;
         }
     }
@@ -131,7 +152,7 @@ impl UsageReader {
             }
             let event = std::mem::take(&mut self.event);
             self.parse(&event, store, id);
-        } else {
+        } else if self.parsed_bytes != self.buffer.len() {
             let bytes = std::mem::take(&mut self.buffer);
             self.parse(&bytes, store, id);
         }
@@ -139,14 +160,25 @@ impl UsageReader {
 }
 pub(super) fn json_model(bytes: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    ["/model", "/session/model", "/response/model"]
-        .iter()
-        .find_map(|pointer| {
+    value_model(&value)
+}
+pub(super) fn value_model(value: &Value) -> Option<String> {
+    value
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| {
             value
-                .pointer(pointer)
+                .get("session")
+                .and_then(|v| v.get("model"))
                 .and_then(Value::as_str)
-                .map(str::to_owned)
         })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|v| v.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
 }
 pub(super) fn uri_model(uri: &axum::http::Uri) -> Option<String> {
     if let Some(model) = uri
@@ -160,6 +192,7 @@ pub(super) fn uri_model(uri: &axum::http::Uri) -> Option<String> {
                 .into_owned(),
         );
     }
+    uri.query()?;
     let url = reqwest::Url::parse(&format!("http://localhost{uri}")).ok()?;
     url.query_pairs()
         .find(|(key, _)| key == "model")
@@ -454,7 +487,7 @@ mod tests {
                 .text()
                 .await
                 .unwrap()
-                .contains("Model traffic")
+                .contains("Traffic &amp; spend")
         );
         let script = client
             .get(format!("{url}/logs/dashboard.js"))
@@ -466,7 +499,7 @@ mod tests {
             script.headers()[header::CONTENT_TYPE],
             "text/javascript; charset=utf-8"
         );
-        assert!(script.text().await.unwrap().contains("function estimate"));
+        assert!(script.text().await.unwrap().contains("/logs/api/dashboard"));
         client
             .post(format!("{url}/v1/responses"))
             .json(&json!({"model":"gpt-4.1","input":"private prompt"}))

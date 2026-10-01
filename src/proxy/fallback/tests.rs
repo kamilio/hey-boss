@@ -609,6 +609,22 @@ async fn chain_is_snapshotted_during_reload_and_new_requests_use_edited_models()
     std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     release.notify_one();
     assert_eq!(first.await.unwrap()["model"], "model-secondary");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let catalog = reqwest::get(format!("{url}/overview/api"))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            if catalog.contains("edited-secondary") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background fallback reload");
     release.notify_one();
     assert_eq!(
         post(&url, json!({"model":"model-primary"}))

@@ -365,6 +365,8 @@ pub struct Retry {
 #[serde(default, deny_unknown_fields)]
 pub struct Logging {
     pub enabled: bool,
+    /// Persist all lifecycle events for diagnostics instead of accounting snapshots only.
+    pub detailed: bool,
     /// Relative paths resolve beside the proxy config, never against the current directory.
     pub database: Option<String>,
     pub queue_capacity: usize,
@@ -376,6 +378,7 @@ impl Default for Logging {
     fn default() -> Self {
         Self {
             enabled: true,
+            detailed: false,
             database: None,
             queue_capacity: 65_536,
             batch_size: 512,
