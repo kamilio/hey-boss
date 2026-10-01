@@ -15,6 +15,9 @@ pub const AGENT_ROOTS: &[(&str, &str)] = &[
     ("agents", ".agents"),
     ("claude", ".claude"),
 ];
+const GLOBAL_INSTRUCTION_PATHS: &[&str] =
+    &[".codex/AGENTS.md", ".agents/AGENTS.md", ".claude/CLAUDE.md"];
+// AGENTS.md is selectable for instruction sync, but is never a skill bundle.
 pub const DEFAULT_SELECTED_SKILLS: &[&str] = &[
     "hey-boss",
     "AGENTS.md",
@@ -416,7 +419,75 @@ pub fn audit_report(home: &Path, project_dir: Option<&Path>) -> Value {
     })
 }
 
+fn load_global_instructions(home: &Path) -> io::Result<Option<Vec<u8>>> {
+    for relative in std::iter::once(".hey-boss/skills/AGENTS.md/SKILL.md")
+        .chain(GLOBAL_INSTRUCTION_PATHS.iter().copied())
+    {
+        match fs::read(home.join(relative)) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    // Bogus skill copies are not canonical; preserve them in backups instead.
+    Ok(None)
+}
+
+/// Move the whole entry (including hidden files or symlinks) outside skill discovery.
+fn backup_instruction_path(home: &Path, relative: &str) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let path = home.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => (),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let root = home.join(".hey-boss/skill-backups");
+    fs::create_dir_all(&root)?;
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let backup = loop {
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory = root.join(format!("legacy-{}-{serial}", std::process::id()));
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => break directory.join(relative),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    fs::create_dir_all(backup.parent().unwrap())?;
+    fs::rename(path, backup)
+}
+
+fn install_global_instructions(home: &Path, selected: bool) -> io::Result<Vec<PathBuf>> {
+    let body = if selected {
+        load_global_instructions(home)?
+    } else {
+        None
+    };
+    // Repair old installs even if instruction sync is no longer selected.
+    for (_, root) in AGENT_ROOTS {
+        for name in ["AGENTS.md", "AGENTS.md.md"] {
+            backup_instruction_path(home, &format!("{root}/skills/{name}"))?;
+        }
+    }
+    let mut paths = Vec::new();
+    if let Some(bytes) = body {
+        for relative in GLOBAL_INSTRUCTION_PATHS {
+            let path = home.join(relative);
+            if fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+                backup_instruction_path(home, relative)?;
+                atomic_write(&path, &bytes)?;
+            }
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
 fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<SkillBundle>> {
+    if name == "AGENTS.md" {
+        return Ok(None);
+    }
     let managed = home.join(".hey-boss/skills").join(name);
     if managed.join("SKILL.md").is_file() {
         return collect_skill_files(&managed).map(Some);
@@ -449,7 +520,6 @@ fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<Ski
 }
 
 pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
     let names: BTreeSet<String> = match explicit_names {
         Some(list) if !list.is_empty() => {
             let mut current = selected_skills(home);
@@ -464,6 +534,7 @@ pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result
         _ => selected_skills(home),
     };
 
+    let mut paths = install_global_instructions(home, names.contains("AGENTS.md"))?;
     for name in names {
         let Some(bundle) = load_canonical_skill_bundle(home, &name)? else {
             continue;
@@ -481,8 +552,9 @@ pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result
 }
 
 pub fn install(home: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for name in selected_skills(home) {
+    let names = selected_skills(home);
+    let mut paths = install_global_instructions(home, names.contains("AGENTS.md"))?;
+    for name in names {
         // An unrelated unportable skill must not prevent installing the core integration.
         let Ok(Some(bundle)) = load_canonical_skill_bundle(home, &name) else {
             continue;
@@ -507,7 +579,15 @@ pub fn archive_for_home(home: Option<&Path>) -> io::Result<Vec<u8>> {
         .collect::<Vec<_>>();
 
     if let Some(h) = home {
-        for name in selected_skills(h) {
+        let names = selected_skills(h);
+        if names.contains("AGENTS.md")
+            && let Some(bytes) = load_global_instructions(h)?
+        {
+            // A top-level file cannot be mistaken for a skill directory.
+            atomic_write(&temporary.0.join("AGENTS.md"), &bytes)?;
+            archived_paths.push("AGENTS.md".into());
+        }
+        for name in names {
             if !is_valid_skill_name(&name) {
                 continue;
             }
@@ -551,10 +631,37 @@ trap 'rm -rf "$skill_stage"' EXIT HUP INT TERM
 cat > "$skill_stage/bundle.tar"
 tar -xf "$skill_stage/bundle.tar" -C "$skill_stage"
 rm "$skill_stage/bundle.tar"
+backup_instruction_path() {
+  [ -e "$HOME/$1" ] || [ -L "$HOME/$1" ] || return 0
+  mkdir -p "$HOME/.hey-boss/skill-backups"
+  backup=$(mktemp -d "$HOME/.hey-boss/skill-backups/legacy.XXXXXX")
+  mkdir -p "$(dirname "$backup/$1")"
+  mv "$HOME/$1" "$backup/$1"
+}
+instructions="$skill_stage/AGENTS.md"
+# Accept older senders too, but never install their instruction directory as a skill.
+[ ! -d "$instructions" ] || instructions="$instructions/SKILL.md"
 for root in .codex .agents .claude; do
+  backup_instruction_path "$root/skills/AGENTS.md"
+  backup_instruction_path "$root/skills/AGENTS.md.md"
+  if [ -f "$instructions" ]; then
+    case "$root" in
+      .claude) instruction_name=CLAUDE.md ;;
+      *) instruction_name=AGENTS.md ;;
+    esac
+    destination="$HOME/$root/$instruction_name"
+    if ! cmp -s "$instructions" "$destination"; then
+      mkdir -p "$HOME/$root"
+      pending=$(mktemp "$HOME/$root/.instructions.XXXXXX")
+      cp "$instructions" "$pending"
+      backup_instruction_path "$root/$instruction_name"
+      mv "$pending" "$destination"
+    fi
+  fi
   for skill_dir in "$skill_stage"/*; do
     [ -d "$skill_dir" ] || continue
     skill_name=$(basename "$skill_dir")
+    [ "$skill_name" != AGENTS.md ] || continue
     (
       cd "$skill_dir"
       find . -type f | while IFS= read -r rel; do
@@ -576,6 +683,310 @@ done
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const INSTRUCTIONS: &str = include_str!("issues/web/agent-guide.md");
+    const INSTRUCTION_PATHS: &[&str] =
+        &[".codex/AGENTS.md", ".agents/AGENTS.md", ".claude/CLAUDE.md"];
+
+    fn put(home: &Path, relative: &str, text: &str) {
+        let path = home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn backups(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            if !dir.exists() {
+                return;
+            }
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(&home.join(".hey-boss/skill-backups"), &mut out);
+        out
+    }
+
+    fn assert_backup(tree: &BTreeMap<PathBuf, Vec<u8>>, relative: &str, text: &str) {
+        assert!(
+            tree.iter()
+                .any(|(path, bytes)| path.ends_with(relative) && bytes == text.as_bytes()),
+            "missing backup of {relative}"
+        );
+    }
+
+    fn assert_instruction_installation(apply: impl Fn(&Path)) {
+        let home = crate::admin::Temporary::new().unwrap();
+        put(&home.0, ".hey-boss/skills/AGENTS.md/SKILL.md", INSTRUCTIONS);
+        for (i, (_, root)) in AGENT_ROOTS.iter().enumerate() {
+            put(
+                &home.0,
+                &format!("{root}/skills/AGENTS.md/SKILL.md"),
+                FILES[i].1,
+            );
+            put(
+                &home.0,
+                &format!("{root}/skills/AGENTS.md/.hidden/notes.md"),
+                MARKDOWN,
+            );
+            put(&home.0, INSTRUCTION_PATHS[i], FILES[i].1);
+        }
+        apply(&home.0);
+        for (i, (_, root)) in AGENT_ROOTS.iter().enumerate() {
+            assert!(!home.0.join(root).join("skills/AGENTS.md").exists());
+            assert_eq!(
+                fs::read_to_string(home.0.join(INSTRUCTION_PATHS[i])).unwrap(),
+                INSTRUCTIONS
+            );
+        }
+        let first = backups(&home.0);
+        assert_eq!(first.len(), 9);
+        for (i, (_, root)) in AGENT_ROOTS.iter().enumerate() {
+            assert_backup(
+                &first,
+                &format!("{root}/skills/AGENTS.md/SKILL.md"),
+                FILES[i].1,
+            );
+            assert_backup(
+                &first,
+                &format!("{root}/skills/AGENTS.md/.hidden/notes.md"),
+                MARKDOWN,
+            );
+            assert_backup(&first, INSTRUCTION_PATHS[i], FILES[i].1);
+        }
+        apply(&home.0);
+        assert_eq!(backups(&home.0), first, "repeat must not create backups");
+
+        // An older installer can recreate the same paths with different data.
+        for (_, root) in AGENT_ROOTS {
+            put(
+                &home.0,
+                &format!("{root}/skills/AGENTS.md/SKILL.md"),
+                MARKDOWN,
+            );
+        }
+        apply(&home.0);
+        let later = backups(&home.0);
+        assert_eq!(later.len(), 12);
+        for (path, bytes) in first {
+            assert_eq!(
+                later.get(&path),
+                Some(&bytes),
+                "prior backup was overwritten"
+            );
+        }
+        for (_, root) in AGENT_ROOTS {
+            assert!(!home.0.join(root).join("skills/AGENTS.md").exists());
+            assert_backup(
+                &later,
+                &format!("{root}/skills/AGENTS.md/SKILL.md"),
+                MARKDOWN,
+            );
+        }
+    }
+
+    fn apply_archive(home: &Path, archive: &[u8]) {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        let mut child = Command::new("sh")
+            .args(["-c", &remote_install_script()])
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let sent = child.stdin.take().unwrap().write_all(archive);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            sent.is_ok() && output.status.success(),
+            "Sent {} bytes: {sent:?}; installer {}: {}",
+            archive.len(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn global_instructions_are_not_a_skill_bundle() {
+        let home = crate::admin::Temporary::new().unwrap();
+        put(&home.0, ".hey-boss/skills/AGENTS.md/SKILL.md", INSTRUCTIONS);
+        assert!(
+            load_canonical_skill_bundle(&home.0, "AGENTS.md")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn install_global_instructions_and_backup_stale_copies_repeatably() {
+        assert_instruction_installation(|home| {
+            install(home).unwrap();
+        });
+    }
+
+    #[test]
+    fn sync_global_instructions_and_backup_stale_copies_repeatably() {
+        assert_instruction_installation(|home| {
+            sync_skills(home, Some(&["AGENTS.md".into()])).unwrap();
+        });
+    }
+
+    #[test]
+    fn remote_global_instructions_and_backup_stale_copies_repeatably() {
+        let source = crate::admin::Temporary::new().unwrap();
+        put(
+            &source.0,
+            ".hey-boss/skills/AGENTS.md/SKILL.md",
+            INSTRUCTIONS,
+        );
+        let archive = archive_for_home(Some(&source.0)).unwrap();
+        let tar = source.0.join("bundle.tar");
+        fs::write(&tar, &archive).unwrap();
+        let listing = std::process::Command::new("tar")
+            .args(["-tf"])
+            .arg(tar)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let listing = String::from_utf8(listing.stdout).unwrap();
+        assert!(
+            listing.lines().any(|line| line == "AGENTS.md"),
+            "instructions must be a top-level file: {listing}"
+        );
+        assert!(!listing.contains("AGENTS.md/"));
+        assert_instruction_installation(|home| apply_archive(home, &archive));
+    }
+
+    #[test]
+    fn remote_legacy_instruction_archive_never_creates_a_skill() {
+        let source = crate::admin::Temporary::new().unwrap();
+        put(&source.0, "AGENTS.md/SKILL.md", INSTRUCTIONS);
+        let output = std::process::Command::new("tar")
+            .current_dir(&source.0)
+            .args(["-cf", "-", "AGENTS.md/SKILL.md"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_instruction_installation(|home| apply_archive(home, &output.stdout));
+    }
+
+    #[test]
+    fn instruction_cleanup_moves_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+        for remote in [false, true] {
+            let home = crate::admin::Temporary::new().unwrap();
+            put(&home.0, "original/SKILL.md", INSTRUCTIONS);
+            fs::create_dir_all(home.0.join(".agents/skills")).unwrap();
+            let stale = home.0.join(".agents/skills/AGENTS.md");
+            symlink(home.0.join("original"), &stale).unwrap();
+            let apply = || {
+                if remote {
+                    apply_archive(&home.0, &archive_for_home(None).unwrap());
+                } else {
+                    install(&home.0).unwrap();
+                }
+            };
+            apply();
+            assert!(fs::symlink_metadata(&stale).is_err());
+            assert_eq!(
+                fs::read_to_string(home.0.join("original/SKILL.md")).unwrap(),
+                INSTRUCTIONS
+            );
+            let backup_root = home.0.join(".hey-boss/skill-backups");
+            let first: Vec<_> = fs::read_dir(&backup_root)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(first.len(), 1);
+            assert_eq!(
+                fs::read_link(first[0].join(".agents/skills/AGENTS.md")).unwrap(),
+                home.0.join("original")
+            );
+            // Dangling links must be moved too, not skipped by Path::exists().
+            symlink(home.0.join("missing"), &stale).unwrap();
+            apply();
+            assert!(fs::symlink_metadata(&stale).is_err());
+            assert_eq!(fs::read_dir(&backup_root).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn global_instruction_sources_work_without_a_managed_copy() {
+        for source_path in INSTRUCTION_PATHS {
+            for mode in 0..3 {
+                let source = crate::admin::Temporary::new().unwrap();
+                put(&source.0, source_path, INSTRUCTIONS);
+                let destination = crate::admin::Temporary::new().unwrap();
+                let home = match mode {
+                    0 => {
+                        install(&source.0).unwrap();
+                        &source.0
+                    }
+                    1 => {
+                        sync_skills(&source.0, None).unwrap();
+                        &source.0
+                    }
+                    _ => {
+                        apply_archive(&destination.0, &archive_for_home(Some(&source.0)).unwrap());
+                        &destination.0
+                    }
+                };
+                for path in INSTRUCTION_PATHS {
+                    assert_eq!(fs::read_to_string(home.join(path)).unwrap(), INSTRUCTIONS);
+                }
+                assert!(backups(home).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn stale_instruction_skills_are_backed_up_even_when_unselected_or_without_a_source() {
+        for selected in [false, true] {
+            for mode in 0..3 {
+                let home = crate::admin::Temporary::new().unwrap();
+                if !selected {
+                    set_selected_skills(&home.0, &[]).unwrap();
+                    put(&home.0, ".hey-boss/skills/AGENTS.md/SKILL.md", INSTRUCTIONS);
+                    put(&home.0, ".codex/AGENTS.md", MARKDOWN);
+                }
+                put(&home.0, ".agents/skills/AGENTS.md/SKILL.md", INSTRUCTIONS);
+                put(&home.0, ".claude/skills/AGENTS.md.md", MARKDOWN);
+                let archive = archive_for_home(Some(&home.0)).unwrap();
+                for _ in 0..2 {
+                    match mode {
+                        0 => {
+                            install(&home.0).unwrap();
+                        }
+                        1 => {
+                            sync_skills(&home.0, None).unwrap();
+                        }
+                        _ => apply_archive(&home.0, &archive),
+                    }
+                    assert!(!home.0.join(".agents/skills/AGENTS.md").exists());
+                    assert!(!home.0.join(".claude/skills/AGENTS.md.md").exists());
+                    for path in INSTRUCTION_PATHS {
+                        if !selected && *path == ".codex/AGENTS.md" {
+                            assert_eq!(fs::read_to_string(home.0.join(path)).unwrap(), MARKDOWN);
+                        } else {
+                            assert!(!home.0.join(path).exists());
+                        }
+                    }
+                    let tree = backups(&home.0);
+                    assert_eq!(tree.len(), 2);
+                    assert_backup(&tree, ".agents/skills/AGENTS.md/SKILL.md", INSTRUCTIONS);
+                    assert_backup(&tree, ".claude/skills/AGENTS.md.md", MARKDOWN);
+                }
+            }
+        }
+    }
 
     #[test]
     fn managed_version_and_nested_executables_survive_legacy_sync() {
@@ -659,10 +1070,6 @@ mod tests {
 
     #[test]
     fn remote_bundle_installs_all_files_and_preserves_unmanaged_content() {
-        use std::{
-            io::Write,
-            process::{Command, Stdio},
-        };
         let home = crate::admin::Temporary::new().unwrap();
         let custom = home.0.join(".agents/skills/hey-boss/custom.md");
         std::fs::create_dir_all(custom.parent().unwrap()).unwrap();
@@ -682,22 +1089,7 @@ mod tests {
         std::fs::write(&remote_custom, "User notes").unwrap();
 
         for _ in 0..2 {
-            let mut child = Command::new("sh")
-                .args(["-c", &super::remote_install_script()])
-                .env("HOME", &remote_home.0)
-                .stdin(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let sent = child.stdin.take().unwrap().write_all(&archive);
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                sent.is_ok() && output.status.success(),
-                "Sent {} bytes: {sent:?}; installer {}: {}",
-                archive.len(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            apply_archive(&remote_home.0, &archive);
             for root in [".codex", ".agents", ".claude"] {
                 for (path, text) in super::FILES {
                     assert_eq!(
