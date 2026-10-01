@@ -395,6 +395,48 @@ fn candidates(db: &Connection, c: &Settings, limit: i64) -> Result<Vec<(Project,
         .map(|(_, _, id, number, name)| (Project { id, name }, number))
         .collect())
 }
+
+fn project_pickup_candidates(db: &Connection, c: &Settings) -> Result<Vec<(Project, i64)>> {
+    // Checkout validity applies to a whole project. Inspect its first eligible
+    // issue once, so an unusable project's backlog cannot hide other projects.
+    let scope = if c.projects.is_empty() {
+        ""
+    } else {
+        "AND p.id IN (SELECT value FROM json_each(?1))"
+    };
+    let tags = if c.tags.is_empty() { "" } else { TAG_FILTER };
+    let mut values = Vec::new();
+    if !c.projects.is_empty() || !c.tags.is_empty() {
+        values.push(serde_json::to_string(&c.projects)?);
+    }
+    if !c.tags.is_empty() {
+        values.push(serde_json::to_string(&c.tags)?);
+    }
+    // Drive one indexed queue lookup from each project, then resolve that row
+    // by its primary key. Do not rescan the queue for every candidate issue.
+    let mut query = db.prepare(&format!(
+        "SELECT p.id,p.name,chosen.number
+         FROM projects p
+         CROSS JOIN issues chosen ON chosen.project_id=p.id AND chosen.number=(
+            SELECT i.number FROM issues i WHERE i.project_id=p.id AND {ELIGIBLE} {tags} {PICKUP_READY}
+            ORDER BY i.sort_order,i.created_at,i.number LIMIT 1
+         )
+         WHERE p.hidden_at IS NULL {scope}
+         ORDER BY chosen.sort_order,chosen.created_at,p.id,chosen.number"
+    ))?;
+    Ok(query
+        .query_map(crate::database::params_from_iter(values), |row| {
+            Ok((
+                Project {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                },
+                row.get(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 fn worker_overview(db: &Connection) -> Result<Vec<Value>> {
     worker_overview_for(db, None)
 }
@@ -953,20 +995,18 @@ pub(super) fn reserve(
     for (id, text) in ready_workers(&tx, worker_id)? {
         let settings: Settings = serde_json::from_str(&text)?;
         let mut projects = HashMap::new();
-        for (project, _) in candidates(&tx, &settings, 100)? {
-            if !projects.contains_key(&project.id) {
-                let config = runtime(&tx, &settings, &project)?;
-                let defaults = project_settings(&tx, &project)?;
-                projects.insert(
-                    project.id.clone(),
-                    PreparedProject {
-                        project,
-                        config,
-                        defaults,
-                        valid: false,
-                    },
-                );
-            }
+        for (project, _) in project_pickup_candidates(&tx, &settings)? {
+            let config = runtime(&tx, &settings, &project)?;
+            let defaults = project_settings(&tx, &project)?;
+            projects.insert(
+                project.id.clone(),
+                PreparedProject {
+                    project,
+                    config,
+                    defaults,
+                    valid: false,
+                },
+            );
         }
         prepared.insert(id, (text, projects));
     }
@@ -1001,7 +1041,7 @@ pub(super) fn reserve(
             return Ok(None);
         }
         let settings: Settings = serde_json::from_str(&text)?;
-        for (project, number) in candidates(&tx, &settings, 100)? {
+        for (project, number) in project_pickup_candidates(&tx, &settings)? {
             let Some(prepared) = projects.get(&project.id) else {
                 return Ok(None);
             };
@@ -1200,6 +1240,196 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pickup_rechecks_the_project_head_after_preflight() {
+        let provider = std::env::current_exe().unwrap();
+        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(provider.as_os_str()) {
+            let output = std::process::Command::new(&provider)
+                .args(["--exact", "issues::store::registry::tests::pickup_rechecks_the_project_head_after_preflight", "--nocapture"])
+                .env("HEY_BOSS_CODEX", &provider).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        struct QueueChange {
+            writer: Connection,
+            attempted: std::cell::Cell<bool>,
+            error: std::cell::RefCell<Option<String>>,
+        }
+        unsafe extern "C" fn change_queue(
+            kind: u32,
+            context: *mut std::ffi::c_void,
+            statement: *mut std::ffi::c_void,
+            _: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int {
+            if kind != rusqlite::ffi::SQLITE_TRACE_STMT {
+                return 0;
+            }
+            let change = unsafe { &*context.cast::<QueueChange>() };
+            let sql =
+                unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast())) }
+                    .to_string_lossy();
+            if sql == "BEGIN IMMEDIATE" && !change.attempted.replace(true) {
+                if let Err(error) = change
+                    .writer
+                    .execute("UPDATE issues SET draft=1 WHERE number=1", [])
+                {
+                    *change.error.borrow_mut() = Some(error.to_string());
+                }
+            }
+            0
+        }
+        let root = std::env::temp_dir().join(format!("hb-pickup-recheck-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Queue','Queue',3);
+                INSERT INTO agents VALUES('creator','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                VALUES('named:Queue',1,'First','','open','creator',0,0,1,'[]',1),('named:Queue',2,'Second','','open','creator',0,0,1,'[]',2);").unwrap();
+            let settings = Settings {
+                enabled: true,
+                directory: root.to_string_lossy().into(),
+                projects: vec!["named:Queue".into()],
+                ..Settings::default()
+            };
+            let worker_id = store.register_worker(None, &settings, "unit").unwrap();
+            let change = QueueChange {
+                writer: Connection::open(&path).unwrap(),
+                attempted: std::cell::Cell::new(false),
+                error: std::cell::RefCell::new(None),
+            };
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    store.db.handle(),
+                    rusqlite::ffi::SQLITE_TRACE_STMT,
+                    Some(change_queue),
+                    (&change as *const QueueChange).cast_mut().cast(),
+                );
+            }
+            let selected = reserve(&mut store, "unit", Some(&worker_id));
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(store.db.handle(), 0, None, std::ptr::null_mut());
+            }
+            assert!(change.attempted.get());
+            assert!(
+                change.error.borrow().is_none(),
+                "{:?}",
+                change.error.borrow()
+            );
+            assert_eq!(selected.unwrap().unwrap().number(), 2);
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT issue_number FROM worker_runs", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pickup_reaches_usable_projects_past_large_unusable_queues() {
+        let provider = std::env::current_exe().unwrap();
+        if std::env::var_os("HEY_BOSS_CODEX").as_deref() != Some(provider.as_os_str()) {
+            let output = std::process::Command::new(&provider)
+                .args(["--exact", "issues::store::registry::tests::pickup_reaches_usable_projects_past_large_unusable_queues", "--nocapture"])
+                .env("HEY_BOSS_CODEX", &provider).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        for scoped in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("hb-project-pickup-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let missing = root.join("removed-checkout");
+            fs::create_dir(&missing).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Unavailable','Unavailable',501),('named:Usable','Usable',2);
+                INSERT INTO agents VALUES('creator','{}',0);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<500)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                SELECT 'named:Unavailable',x,'Unavailable task','','open','creator',0,0,1,'[]',x FROM n;
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                VALUES('named:Usable',1,'Usable task','','open','creator',0,0,1,'[]',1000);").unwrap();
+            store
+                .db
+                .execute(
+                    "UPDATE agents SET metadata=json_object('cwd',?1) WHERE id='creator'",
+                    [missing.to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO agents VALUES('usable-creator',json_object('cwd',?1),1)",
+                    [root.to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            store
+                .db
+                .execute(
+                    "UPDATE issues SET created_by='usable-creator' WHERE project_id='named:Usable'",
+                    [],
+                )
+                .unwrap();
+            let settings = Settings {
+                enabled: true,
+                projects: if scoped {
+                    vec!["named:Unavailable".into(), "named:Usable".into()]
+                } else {
+                    vec![]
+                },
+                directories: if scoped {
+                    [
+                        ("named:Unavailable".into(), missing.to_string_lossy().into()),
+                        ("named:Usable".into(), root.to_string_lossy().into()),
+                    ]
+                    .into()
+                } else {
+                    Default::default()
+                },
+                ..Settings::default()
+            };
+            let worker_id = store.register_worker(None, &settings, "unit").unwrap();
+            fs::remove_dir(&missing).unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            let selected = reserve(&mut store, "unit", Some(&worker_id)).unwrap();
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!("Project pickup scoped={scoped}: {commands} RPCs, {steps} VM steps");
+            let job =
+                selected.expect("An unusable project's queue must not hide another project's work");
+            assert_eq!(job.project.id, "named:Usable");
+            assert_eq!(job.number(), 1);
+            assert!(
+                commands < 60,
+                "Pickup repeated project work: {commands} RPCs"
+            );
+            assert!(
+                steps < 20_000,
+                "Pickup scanned the unusable task prefix: {steps} VM steps"
+            );
+        }
+    }
+
     #[test]
     fn attempt_hold_keeps_two_slot_admission_and_other_jobs_intact() {
         let provider = std::env::current_exe().unwrap();
@@ -1983,6 +2213,14 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [5, 6, 7]
             );
+            assert_eq!(
+                project_pickup_candidates(&store.db, &config)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(p, n)| (p.id, n))
+                    .collect::<Vec<_>>(),
+                [("named:Queue".to_owned(), 5)]
+            );
             let filtered = Settings {
                 tags: vec!["ready".into()],
                 ..Settings::default()
@@ -1998,6 +2236,14 @@ mod tests {
                     .map(|(_, n)| n)
                     .collect::<Vec<_>>(),
                 [6, 8, 10]
+            );
+            assert_eq!(
+                project_pickup_candidates(&store.db, &filtered)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(p, n)| (p.id, n))
+                    .collect::<Vec<_>>(),
+                [("named:Queue".to_owned(), 6)]
             );
             let selected = Settings {
                 projects: vec!["named:Queue".into()],
@@ -2124,6 +2370,70 @@ mod tests {
                 pickup_steps < 10000,
                 "Pickup scanned unrelated projects: {pickup_steps} VM steps"
             );
+            let project_steps = AtomicUsize::new(0);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    100,
+                    Some(count_steps),
+                    (&project_steps as *const AtomicUsize).cast_mut().cast(),
+                );
+            }
+            let by_project = project_pickup_candidates(&store.db, &config);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(
+                    store.db.handle(),
+                    0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
+            assert_eq!(
+                by_project
+                    .unwrap()
+                    .into_iter()
+                    .map(|(p, n)| (p.id, n))
+                    .collect::<Vec<_>>(),
+                [("named:A".to_owned(), 4), ("named:B".to_owned(), 4)]
+            );
+            let project_steps = project_steps.load(Ordering::Relaxed);
+            eprintln!(
+                "First candidate per selected project: fewer than {} VM steps",
+                project_steps + 100
+            );
+            assert!(
+                project_steps < 10_000,
+                "Project selection scanned unrelated queues: {project_steps} VM steps"
+            );
+            assert_eq!(
+                project_pickup_candidates(
+                    &store.db,
+                    &Settings {
+                        tags: config.tags.clone(),
+                        ..Settings::default()
+                    }
+                )
+                .unwrap()
+                .into_iter()
+                .map(|(p, n)| (p.id, n))
+                .collect::<Vec<_>>(),
+                [
+                    ("named:Other".to_owned(), 1),
+                    ("named:A".to_owned(), 4),
+                    ("named:B".to_owned(), 4)
+                ]
+            );
+            assert!(
+                project_pickup_candidates(
+                    &store.db,
+                    &Settings {
+                        projects: vec!["named:Missing".into()],
+                        ..Settings::default()
+                    }
+                )
+                .unwrap()
+                .is_empty()
+            );
             let unrestricted_pickup = candidates(
                 &store.db,
                 &Settings {
@@ -2219,6 +2529,14 @@ mod tests {
                     ("named:A".to_owned(), 7),
                     ("named:B".to_owned(), 9)
                 ]
+            );
+            assert_eq!(
+                project_pickup_candidates(&store.db, &config)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(p, n)| (p.id, n))
+                    .collect::<Vec<_>>(),
+                [("named:B".to_owned(), 7), ("named:A".to_owned(), 7)]
             );
             assert_eq!(candidates(&store.db, &config, 1).unwrap()[0].1, 7);
             assert!(candidates(&store.db, &config, 0).unwrap().is_empty());
