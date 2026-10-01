@@ -1,0 +1,1 @@
+Resume saved work. Reconcile uncertain mutations before retrying; reuse the original request ID. If an outage persists, report it and retain continuation state. Retries still require permissions and verification.

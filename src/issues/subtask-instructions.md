@@ -1,2 +1,0 @@
-
-Sibling order is context, not a prerequisite. Only declared dependencies constrain sibling pickup; intentional sequences use blocked-by links. Read the parent and declared prerequisite notes/PRs. Work on this subtask's scope and record verification and handoff details. Completing this subtask does not complete the parent.

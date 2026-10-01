@@ -195,6 +195,13 @@ impl Store {
             if !enabled || !crate::chief_ownership::allowed(&tx, &project, &worker_id)? {
                 continue;
             }
+            let overrides: String = tx.query_row(
+                "SELECT prompt_overrides FROM project_settings WHERE project_id=?1",
+                [&project],
+                |r| r.get(0),
+            )?;
+            let overrides: worker::PromptOverrides = serde_json::from_str(&overrides)?;
+            let prompt = worker::chief_instructions(&project, &prompt, &overrides);
             let started = worker::now();
             tx.execute("INSERT INTO project_chiefs(project_id,machine,cwd,owner_pid,owner_start,next_at,state,worker_id,started_at,last_event) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,?8,'Launching Chief') ON CONFLICT(project_id,machine) DO UPDATE SET session_id=NULL,queued=0,cwd=excluded.cwd,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,pid=NULL,process_start=NULL,next_at=excluded.next_at,state='running',summary='',worker_id=excluded.worker_id,started_at=excluded.started_at,finished_at=NULL,last_event=excluded.last_event",params![project,machine,cwd,owner,start,started+INTERVAL_MS,worker_id,started])?;
             tx.commit()?;
@@ -487,7 +494,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
     crate::codex_permissions::apply(&mut command);
     command
         .args(["--json", "--skip-git-repo-check"])
-        .arg(worker::chief_instructions(&job.project, &job.prompt))
+        .arg(&job.prompt)
         .current_dir(&job.cwd)
         .process_group(0)
         .env("HEY_BOSS_ISSUE_DB", path)

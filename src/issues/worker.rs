@@ -16,7 +16,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const DEFAULT_PLAN_PROMPT: &str = include_str!("prompts/plan.md").trim_ascii_end();
+#[path = "worker_prompts.rs"]
+mod prompts;
+pub use prompts::*;
 pub const DEFAULT_PROMPT: &str = include_str!("prompts/worker.md").trim_ascii_end();
 /// Stored as ordinary labels so task intent uses the existing durable fleet wire format.
 pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
@@ -31,49 +33,15 @@ pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
         None
     }
 }
-pub const DEFAULT_WORKTREE_PROMPT: &str = include_str!("prompts/worktree.md").trim_ascii_end();
-pub const DEFAULT_CHECKOUT_PROMPT: &str = include_str!("prompts/checkout.md").trim_ascii_end();
-pub const DEFAULT_MAIN_PROMPT: &str = include_str!("prompts/main.md").trim_ascii_end();
-pub const DEFAULT_PRS_PROMPT: &str = include_str!("prompts/prs.md").trim_ascii_end();
-
-/// Shared by Chief launches and the review pane, so their visible input agrees.
-pub fn chief_instructions(project: &str, prompt: &str) -> String {
-    format!(
-        "Project: {project}. Use hey-boss issue and mm commands in this project.\n\n{prompt}\n\nRun one organizing pass, then stop. Workers handle all code changes; do not start a goal."
-    )
+/// Shared by Chief launches and the review pane. Values are expanded once.
+pub fn chief_instructions(project: &str, prompt: &str, overrides: &PromptOverrides) -> String {
+    prompts::render(overrides.get("chief_wrapper"), |key| match key {
+        "project" => Some(project.into()),
+        "prompt" => Some(prompt.into()),
+        _ => None,
+    })
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PromptOverrides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan: Option<String>,
-    pub worktree: Option<String>,
-    pub checkout: Option<String>,
-    pub prs: Option<String>,
-    pub main: Option<String>,
-}
-impl PromptOverrides {
-    pub fn validate(&self) -> Result<()> {
-        for text in [
-            &self.plan,
-            &self.worktree,
-            &self.checkout,
-            &self.prs,
-            &self.main,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if text.trim().is_empty() || text.len() > 32000 {
-                return Err(Error::invalid(
-                    "Workflow prompts must contain 1–32000 bytes, or null to use the default",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
 // Old saved templates still load, but delivery instructions now belong to the workflow.
 pub(crate) fn base_prompt(text: &str) -> String {
     let mut output = String::new();
@@ -1252,38 +1220,80 @@ fn worktree_path(job: &Job) -> String {
         .into_owned()
 }
 fn template(text: &str, job: &Job) -> String {
-    let mut output = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("{{") {
-        output.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find("}}") else {
-            output.push_str(&rest[start..]);
-            return output;
-        };
-        let key = rest[start + 2..start + end].trim();
-        let value = match key {
+    template_with(text, job, &[])
+}
+fn template_with(text: &str, job: &Job, values: &[(&str, &str)]) -> String {
+    prompts::render(text, |key| {
+        if let Some((_, value)) = values.iter().find(|(name, _)| *name == key) {
+            return Some((*value).into());
+        }
+        Some(match key {
             "issue_command" => format!("hey-boss issue view {}", number_text(job)),
             "create_issue_command" => create_issue_command(None),
             "project" => job.project.id.clone(),
             "project_arg" => format!("'{}'", job.project.id.replace('\'', "'\\''")),
             "number" => number_text(job),
-            "title" => job.issue["title"].as_str().unwrap().into(),
-            "body" => job.issue["body"].as_str().unwrap().into(),
+            "title" => job.issue["title"].as_str().unwrap_or("").into(),
+            "body" => job.issue["body"].as_str().unwrap_or("").into(),
             "worktree_name" => worktree_name(job),
             "worktree_path" => worktree_path(job),
+            "plan_path" => job.issue["plan"]["path"].as_str().unwrap_or("").into(),
+            "subtask_position" => value_text(&job.issue["subtask_context"]["position"]),
+            "subtask_total" => value_text(&job.issue["subtask_context"]["total"]),
+            "parent_number" => value_text(&job.issue["subtask_context"]["parent"]["number"]),
+            "parent_title" => job.issue["subtask_context"]["parent"]["title"]
+                .as_str()
+                .unwrap_or("")
+                .into(),
+            "parent_state" => job.issue["subtask_context"]["parent"]["state"]
+                .as_str()
+                .unwrap_or("")
+                .into(),
+            "previous_subtask" => task_summary(&job.issue["subtask_context"]["previous"]),
+            "next_subtask" => task_summary(&job.issue["subtask_context"]["next"]),
+            "dependencies" => job.issue["dependency_context"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|dependency| {
+                    format!(
+                        "{} PRs: {}",
+                        task_summary(dependency),
+                        dependency["pull_requests"]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
             "commit_instruction" => String::new(),
             _ => match key.split_once(char::is_whitespace) {
                 Some(("create_issue_command", project)) if !project.trim().is_empty() => {
                     create_issue_command(Some(project.trim()))
                 }
-                _ => rest[start..start + end + 2].into(),
+                _ => return None,
             },
-        };
-        output.push_str(&value);
-        rest = &rest[start + end + 2..];
+        })
+    })
+}
+fn value_text(value: &Value) -> String {
+    value.as_str().map(str::to_owned).unwrap_or_else(|| {
+        if value.is_null() {
+            String::new()
+        } else {
+            value.to_string()
+        }
+    })
+}
+fn task_summary(task: &Value) -> String {
+    if task.is_object() {
+        format!(
+            "#{} {} [{}]",
+            value_text(&task["number"]),
+            task["title"].as_str().unwrap_or(""),
+            task["state"].as_str().unwrap_or("")
+        )
+    } else {
+        "none".into()
     }
-    output.push_str(rest);
-    output
 }
 fn create_issue_command(project: Option<&str>) -> String {
     let target = project
@@ -1334,156 +1344,128 @@ fn prompt(job: &Job) -> (String, bool, String) {
     prompt_with_config(job, &job.config)
 }
 fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
-    let (mut instructions, goal, objective) = task_prompt(job, config);
-    if let Some(status) = job.issue.get("github_status") {
-        instructions.push_str(&format!(
-            "\n\n{}",
-            serde_json::json!({"github_status": status})
-        ));
-    }
-    if let Some(context) = job.issue["subtask_context"].as_object() {
-        let parent = &context["parent"];
-        instructions.push_str(&format!(
-            "\n\nSubtask {} of {} ({}).\nParent: #{} {} [{}]",
-            context["position"],
-            context["total"],
-            "explicit dependencies",
-            parent["number"],
-            parent["title"].as_str().unwrap_or(""),
-            parent["state"].as_str().unwrap_or("")
-        ));
-        for (key, label) in [("previous", "Previous"), ("next", "Next")] {
-            if let Some(sibling) = context[key].as_object() {
-                instructions.push_str(&format!(
-                    "\n{label}: #{} {} [{}]",
-                    sibling["number"],
-                    sibling["title"].as_str().unwrap_or(""),
-                    sibling["state"].as_str().unwrap_or("")
-                ));
-            } else {
-                instructions.push_str(&format!("\n{label}: none"));
+    let (task, goal) = task_prompt(job, config);
+    let artifact = artifact_task(&job.issue).is_some();
+    let dependencies = job.issue["dependency_context"].as_array();
+    let has_dependency_prs = dependencies.is_some_and(|deps| {
+        deps.iter().any(|d| {
+            d["pull_requests"]
+                .as_array()
+                .is_some_and(|prs| !prs.is_empty())
+        })
+    });
+    let section = |key: &str, enabled: bool| {
+        if enabled {
+            template(config.prompt_overrides.get(key), job)
+        } else {
+            String::new()
+        }
+    };
+    let values = [
+        ("task", task),
+        (
+            "workspace",
+            section(
+                if config.worktree_enabled {
+                    "worktree"
+                } else {
+                    "checkout"
+                },
+                !artifact,
+            ),
+        ),
+        (
+            "delivery",
+            section(if config.prs_enabled { "prs" } else { "main" }, !artifact),
+        ),
+        (
+            "plan_document",
+            section("plan_document", job.issue["plan"]["path"].is_string()),
+        ),
+        (
+            "subtask",
+            section("subtask", job.issue["subtask_context"].is_object()),
+        ),
+        (
+            "dependencies",
+            section(
+                "dependencies",
+                dependencies.is_some_and(|deps| !deps.is_empty()),
+            ),
+        ),
+        (
+            "github",
+            section("github", job.issue.get("github_status").is_some()),
+        ),
+        (
+            "handoff",
+            section(
+                "handoff",
+                !artifact
+                    && (config.prs_enabled || has_dependency_prs)
+                    && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs),
+            ),
+        ),
+        ("resume", section("resume", job.resume_session.is_some())),
+    ];
+    let values: Vec<_> = values
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    // Remove only empty standalone slots and their preceding separator. Keep
+    // authored spacing and never expand variables inside substituted content.
+    let mut lines = Vec::new();
+    for line in config.prompt_overrides.get("layout").lines() {
+        let empty_slot = line
+            .trim()
+            .strip_prefix("{{")
+            .and_then(|s| s.strip_suffix("}}"))
+            .is_some_and(|key| {
+                values
+                    .iter()
+                    .any(|(name, value)| *name == key.trim() && value.is_empty())
+            });
+        if empty_slot {
+            if lines
+                .last()
+                .is_some_and(|line: &&str| line.trim().is_empty())
+            {
+                lines.pop();
             }
-        }
-        let project = format!("'{}'", job.project.id.replace('\'', "'\\''"));
-        instructions.push_str(&format!(
-            "\nRead the parent requirements: hey-boss issue view {} --project {project}.",
-            parent["number"]
-        ));
-        instructions.push_str(include_str!("subtask-instructions.md"));
-    }
-    if let Some(dependencies) = job.issue["dependency_context"]
-        .as_array()
-        .filter(|d| !d.is_empty())
-    {
-        instructions
-            .push_str("\n\nPrerequisite task context (read their latest notes and attached PRs):");
-        for dependency in dependencies {
-            instructions.push_str(&format!(
-                "\n#{} {} [{}] PRs: {}",
-                dependency["number"],
-                dependency["title"].as_str().unwrap_or(""),
-                dependency["state"].as_str().unwrap_or(""),
-                dependency["pull_requests"]
-            ));
+        } else {
+            lines.push(line);
         }
     }
-    let has_dependency_prs = job.issue["dependency_context"]
-        .as_array()
-        .is_some_and(|deps| {
-            deps.iter().any(|d| {
-                d["pull_requests"]
-                    .as_array()
-                    .is_some_and(|prs| !prs.is_empty())
-            })
-        });
-    if (config.prs_enabled || has_dependency_prs)
-        && artifact_task(&job.issue).is_none()
-        && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs)
-    {
-        instructions.push_str(&format!("\n\nThis project unblocks dependencies at Ready, before merge. Make stacked PRs when prerequisites have unmerged PRs: start your branch from the preceding/dependency PR branch and use that branch as your PR base, keeping the diff limited to this task (`gh stack link --base main <prereq-pr> <your-pr>`). Read all dependency PRs; coordinate multiple prerequisite branches as needed. If upstream changes or merges, update/rebase your stack and adjust the PR base. Before reworking a Ready task, reopen it so new dependent pickups pause. When your PR is ready for Boss, attach it and run `hey-boss issue ready {} --project '{}'`. You decide readiness; the service does not independently check CI. Leave handoff notes for the next worker.", job.number(), job.project.id.replace('\'', "'\\''")));
-    }
-    if job.resume_session.is_some() {
-        instructions.push_str("\n\nResume the saved work. If a previous database mutation had an unknown outcome, first read and reconcile the current issue state or reuse its original request ID for deduplication; never blindly replay it. If an infrastructure outage still prevents progress, report the active outage and retain the continuation state. An automatic retry never bypasses permissions or verification.");
-    }
+    let instructions = template_with(&lines.join("\n"), job, &values)
+        .trim()
+        .to_owned();
+    let objective = instructions.chars().take(4000).collect();
     (instructions, goal, objective)
 }
-fn task_prompt(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
+fn task_prompt(job: &Job, config: &ProjectConfig) -> (String, bool) {
     let rendered = template(&base_prompt(&config.prompt), job);
-    let after_goal = rendered
-        .trim_start()
+    let goal = strip_goal(&rendered).is_some();
+    let (rendered, fallback) = if artifact_task(&job.issue).is_some() {
+        (
+            template(config.prompt_overrides.get("plan"), job),
+            DEFAULT_PLAN_PROMPT,
+        )
+    } else {
+        (rendered, DEFAULT_PROMPT)
+    };
+    let after_goal = strip_goal(&rendered);
+    let goal = goal || after_goal.is_some();
+    let instructions = match after_goal {
+        Some(rest) if rest.trim().is_empty() => template(fallback, job),
+        Some(rest) => rest.trim_start().to_owned(),
+        None => rendered,
+    };
+    (instructions.trim_end().to_owned(), goal)
+}
+fn strip_goal(text: &str) -> Option<&str> {
+    text.trim_start()
         .strip_prefix("/goal")
-        .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace));
-    let goal = after_goal.is_some();
-    let instructions = if let Some(rest) = after_goal {
-        if rest.trim().is_empty() {
-            template(DEFAULT_PROMPT, job)
-        } else {
-            rest.trim_start().to_owned()
-        }
-    } else {
-        rendered
-    };
-    if artifact_task(&job.issue).is_some() {
-        let rendered = template(
-            config
-                .prompt_overrides
-                .plan
-                .as_deref()
-                .unwrap_or(DEFAULT_PLAN_PROMPT),
-            job,
-        );
-        let after_goal = rendered
-            .trim_start()
-            .strip_prefix("/goal")
-            .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace));
-        let goal = goal || after_goal.is_some();
-        let instructions = if let Some(rest) = after_goal {
-            if rest.trim().is_empty() {
-                template(DEFAULT_PLAN_PROMPT, job)
-            } else {
-                rest.trim_start().to_owned()
-            }
-        } else {
-            rendered
-        };
-        let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
-            format!("{instructions}\n\nPlan document: {path}")
-        } else {
-            instructions
-        };
-        let objective = instructions.trim().chars().take(4000).collect();
-        return (instructions, goal, objective);
-    }
-    let overrides = &config.prompt_overrides;
-    let workspace = if config.worktree_enabled {
-        overrides
-            .worktree
-            .as_deref()
-            .unwrap_or(DEFAULT_WORKTREE_PROMPT)
-    } else {
-        overrides
-            .checkout
-            .as_deref()
-            .unwrap_or(DEFAULT_CHECKOUT_PROMPT)
-    };
-    let delivery = if config.prs_enabled {
-        overrides.prs.as_deref().unwrap_or(DEFAULT_PRS_PROMPT)
-    } else {
-        overrides.main.as_deref().unwrap_or(DEFAULT_MAIN_PROMPT)
-    };
-    let instructions = format!(
-        "{}\n\n{}\n\n{}",
-        instructions.trim_end(),
-        template(workspace, job),
-        template(delivery, job)
-    );
-    let instructions = if let Some(path) = job.issue["plan"]["path"].as_str() {
-        format!("{instructions}\n\nPlan document: {path}")
-    } else {
-        instructions
-    };
-    let objective = instructions.trim().chars().take(4000).collect();
-    (instructions, goal, objective)
+        .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace))
 }
 fn turn_params(session: &str, text: &str) -> Value {
     json!({"threadId":session,"input":[{"type":"text","text":text}],"outputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["completed","blocked"]},"summary":{"type":"string"}},"required":["status","summary"],"additionalProperties":false}})
@@ -1649,6 +1631,7 @@ fn run_thread(
         c.poll_approvals(store, job, stop)?;
         if last_prompt_check.elapsed() >= Duration::from_secs(2) {
             last_prompt_check = Instant::now();
+            let config = store.worker_prompt_config(job)?;
             if let Some(instruction) = store.worker_steering(&job.id)?
                 && store.worker_steering_result(
                     instruction["request_id"].as_str().unwrap(),
@@ -1657,7 +1640,7 @@ fn run_thread(
                 )?
             {
                 let request = instruction["request_id"].as_str().unwrap();
-                let text = steering_text(&instruction);
+                let text = steering_text(&instruction, job, &config);
                 // Persist before sending. A worker crash must never replay an
                 // instruction whose delivery cannot be established.
                 match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":text}]}), store, job, stop) {
@@ -1681,10 +1664,9 @@ fn run_thread(
                     }
                 }
             }
-            let config = store.worker_prompt_config(job)?;
             let next_prompt = prompt_with_config(job, &config).0;
             if next_prompt != applied_prompt {
-                let steering = prompt_update(&next_prompt);
+                let steering = prompt_update(&next_prompt, job, &config);
                 match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":steering}]}), store, job, stop) {
                     Ok(ack) if ack["turnId"] == turn => {
                         applied_prompt = next_prompt;
@@ -1812,6 +1794,7 @@ fn run_thread(
                         ),
                     ));
                 }
+                let config = store.worker_prompt_config(job)?;
                 if let Some(instruction) = store.worker_steering(&job.id)?
                     && store.worker_steering_result(
                         instruction["request_id"].as_str().unwrap(),
@@ -1822,7 +1805,7 @@ fn run_thread(
                     let request = instruction["request_id"].as_str().unwrap();
                     let result = c.rpc(
                         "turn/start",
-                        turn_params(&session, &steering_text(&instruction)),
+                        turn_params(&session, &steering_text(&instruction, job, &config)),
                         store,
                         job,
                         stop,
@@ -1856,12 +1839,11 @@ fn run_thread(
                         }
                     }
                 }
-                let config = store.worker_prompt_config(job)?;
                 let next_prompt = prompt_with_config(job, &config).0;
                 if next_prompt != applied_prompt {
                     let result = c.rpc(
                         "turn/start",
-                        turn_params(&session, &prompt_update(&next_prompt)),
+                        turn_params(&session, &prompt_update(&next_prompt, job, &config)),
                         store,
                         job,
                         stop,
@@ -1883,6 +1865,7 @@ fn run_thread(
                     final_text.clear();
                     continue;
                 }
+                job.config = config;
                 let report = serde_json::from_str::<Value>(final_text.trim())
                     .ok()
                     .filter(|v| {
@@ -1933,7 +1916,19 @@ fn run_thread(
                             ));
                         }
                         Some("active") => {
-                            let result=c.rpc("turn/start",turn_params(&session,"Continue pursuing the saved goal and the assigned issue. Return the required JSON status and summary only after completing and verifying the issue or identifying a blocker."),store,job,stop)?;
+                            let result = c.rpc(
+                                "turn/start",
+                                turn_params(
+                                    &session,
+                                    &template(
+                                        job.config.prompt_overrides.get("goal_continue"),
+                                        job,
+                                    ),
+                                ),
+                                store,
+                                job,
+                                stop,
+                            )?;
                             turn = result["turn"]["id"]
                                 .as_str()
                                 .ok_or_else(|| {
@@ -1966,29 +1961,32 @@ fn run_thread(
     }
 }
 
-fn steering_text(instruction: &Value) -> String {
-    if instruction["request_id"]
+fn steering_text(instruction: &Value, job: &Job, config: &ProjectConfig) -> String {
+    let key = if instruction["request_id"]
         .as_str()
         .is_some_and(|id| id.starts_with("github:"))
     {
-        return instruction["text"].as_str().unwrap().to_owned();
-    }
-    if instruction["scope"] == "dependency" {
-        return format!(
-            "Task dependency update. Preserve your running claim and coordinate the stack.\n\n{}",
-            instruction["text"].as_str().unwrap()
-        );
-    }
-    format!(
-        "Boss added an instruction for your current task ({} scope). Apply it while preserving your session, progress, workspace and delivery requirements. Verify this instruction before reporting completion.\n\n{}",
-        instruction["scope"].as_str().unwrap(),
-        instruction["text"].as_str().unwrap()
+        "github"
+    } else if instruction["scope"] == "dependency" {
+        "dependency_update"
+    } else {
+        "steering"
+    };
+    template_with(
+        config.prompt_overrides.get(key),
+        job,
+        &[
+            ("scope", instruction["scope"].as_str().unwrap_or("")),
+            ("instruction", instruction["text"].as_str().unwrap_or("")),
+        ],
     )
 }
 
-fn prompt_update(instructions: &str) -> String {
-    format!(
-        "Project instructions have changed. Apply the updated instructions below to your current assigned issue, preserving your progress and session. These replace the previous project instructions. Continue the task and verify it against this update before reporting completion. Your existing workspace, delivery mode, and goal lifecycle remain in effect.\n\n{instructions}"
+fn prompt_update(instructions: &str, job: &Job, config: &ProjectConfig) -> String {
+    template_with(
+        config.prompt_overrides.get("prompt_update"),
+        job,
+        &[("instructions", instructions)],
     )
 }
 
@@ -2356,11 +2354,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watcher_steering_is_structured_evidence_without_a_human_instruction_wrapper() {
-        let text = json!({"github_status":{"event":"new","prs":{}}}).to_string();
+    fn watcher_steering_uses_editable_tool_guidance_without_evidence() {
+        let mut job: Job = serde_json::from_value(json!({
+            "id":"run", "worker_id":"worker", "project":project(), "issue":issue(),
+            "comments":[], "owner_pid":0, "owner_start":"", "machine":"test",
+            "config":ProjectConfig::default(), "actor":{ "id":"test", "kind":"agent", "cwd":"/tmp", "machine":"test", "host":"test", "source":"test" }
+        }))
+        .unwrap();
+        let input =
+            json!({"request_id":"github:run:new","scope":"session","text":"large GitHub evidence"});
+        let text = steering_text(&input, &job, &job.config);
+        assert!(text.contains("hey-gh pr view"));
+        assert!(!text.contains("large GitHub evidence"));
+        job.config.prompt_overrides.github = Some("Check {{number}} in {{project}}".into());
         assert_eq!(
-            steering_text(&json!({"request_id":"github:run:new","scope":"session","text":text})),
-            text
+            steering_text(&input, &job, &job.config),
+            "Check 7 in named:a'b $(touch nope)"
         );
     }
 
@@ -2665,6 +2674,84 @@ mod tests {
         );
     }
     #[test]
+    fn github_evidence_is_fetched_on_demand_instead_of_embedded_in_prompts() {
+        let mut task = issue();
+        task["github_status"] = json!({"event":"event-1","prs":{
+            "https://github.com/o/r/pull/1":{"evidence":{"checks":[{"details":"large evidence"}]}}
+        }});
+        let text = preview(&ProjectConfig::default(), &project(), task).0;
+        assert!(!text.contains("large evidence"), "{text}");
+        assert!(!text.contains("github_status"), "{text}");
+        assert!(text.contains("hey-gh pr view"), "{text}");
+    }
+    #[test]
+    fn contextual_prompts_are_overridable_with_single_pass_variables() {
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "prs_enabled":true,
+            "prompt_overrides":{
+                "handoff":"Handoff {{number}}: {{project_arg}}",
+                "github":"Inspect {{title}} with tools.",
+                "dependencies":"Requires:\n{{dependencies}}",
+                "plan_document":"Notes: {{plan_path}}"
+            }
+        }))
+        .unwrap();
+        let mut task = issue();
+        task["plan"] = json!({"path":"/tmp/{{number}}.md"});
+        task["github_status"] = json!({"prs":{}});
+        task["dependency_context"] = json!([{"number":3,"title":"Dependency {{number}}","state":"ready","pull_requests":[]}]);
+        let text = preview(&config, &project(), task).0;
+        assert!(
+            text.contains("Handoff 7: 'named:a'\\''b $(touch nope)'"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Inspect Literal {{body}} with tools."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Requires:\n#3 Dependency {{number}} [ready]"),
+            "{text}"
+        );
+        assert!(text.contains("Notes: /tmp/{{number}}.md"), "{text}");
+        assert!(!text.contains("Dependencies unblock at Ready"), "{text}");
+        assert!(!text.contains("Plan document:"), "{text}");
+    }
+    #[test]
+    fn layout_controls_sequence_and_omission_without_recursive_expansion() {
+        let mut config = ProjectConfig {
+            prompt: "Task {{title}}".into(),
+            prs_enabled: true,
+            prompt_overrides: PromptOverrides {
+                layout: Some("{{delivery}}\n\n{{github}}\n\n{{task}}".into()),
+                prs: Some("Ship {{number}}".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (text, _, objective) = preview(&config, &project(), issue());
+        assert_eq!(text, "Ship 7\n\nTask Literal {{body}}");
+        assert_eq!(objective, text);
+        config.prompt_overrides.layout = None;
+        let text = preview(&config, &project(), issue()).0;
+        assert!(
+            text.starts_with("Task Literal {{body}}\n\nWork in"),
+            "{text}"
+        );
+        assert!(text.contains("Dependencies unblock at Ready"));
+    }
+    #[test]
+    fn chief_wrapper_is_editable_and_substitutions_are_literal() {
+        let overrides = PromptOverrides {
+            chief_wrapper: Some("{{prompt}}\n{{project}}".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            chief_instructions("named:test", "Keep {{project}}", &overrides),
+            "Keep {{project}}\nnamed:test"
+        );
+    }
+    #[test]
     fn configured_prompts_keep_their_instructions_and_add_pr_handoff_context() {
         for prs_enabled in [false, true] {
             for worktree_enabled in [false, true] {
@@ -2694,11 +2781,15 @@ mod tests {
                 assert!(text.starts_with(&base));
                 if prs_enabled {
                     assert!(text.contains("stacked PRs"));
+                    assert!(text.contains("Dependencies unblock at Ready, before merge.\n\n- "));
+                    assert!(text.contains(
+                        "hey-boss issue ready 7 --project 'named:a'\\''b $(touch nope)'"
+                    ));
                 } else {
                     assert_eq!(text, base);
                 }
                 assert!(!goal);
-                assert_eq!(objective, base);
+                assert_eq!(objective, text);
             }
         }
     }
