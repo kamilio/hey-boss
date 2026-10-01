@@ -290,6 +290,94 @@ fn launch_preserves_saved_pauses_and_stopped_workers() {
 }
 
 #[test]
+fn observation_never_probes_saved_checkouts_but_startup_validates_them() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new("observe-without-checkout-probes");
+    let checkout = f.root.join("saved-checkout");
+    fs::create_dir(&checkout).unwrap();
+    fs::write(
+        f.root.join("state/auto-workers.json"),
+        json!({"worker_ids":["saved"]}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        &f.desired,
+        json!({"machines":{"local":{"workers":[
+            {"id":"saved","intent":"pause","config":{
+                "projects":["named:Saved"],
+                "directories":{"named:Saved":checkout}
+            }}
+        ]}}})
+        .to_string(),
+    )
+    .unwrap();
+    let bin = f.root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(
+        &git,
+        "#!/bin/sh\nprintf x >> \"$HEY_BOSS_TEST_GIT_PROBES\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let probes = f.root.join("git-probes");
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let observe = || {
+        for args in [
+            vec!["auto-workers", "status", "--json"],
+            vec!["auto-workers", "config", "--json"],
+            vec!["auto-workers", "watch", "--json", "--count", "1"],
+        ] {
+            let output = f
+                .command(&args)
+                .env("PATH", &path)
+                .env("HEY_BOSS_TEST_GIT_PROBES", &probes)
+                .env("HEY_BOSS_CODEX", f.root.join("missing-codex"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["ok"], true);
+            if args.contains(&"config") {
+                assert_eq!(
+                    value["workers"][0]["config"]["directories"]["named:Saved"],
+                    checkout.to_str().unwrap()
+                );
+                assert_eq!(value["workers"][0]["intent"], "pause");
+            }
+        }
+        assert!(!probes.exists(), "Observation ran Git checkout validation");
+    };
+    observe();
+    fs::remove_dir(&checkout).unwrap();
+    observe();
+    let rejected = f
+        .command(&["auto-workers", "run", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        !rejected.status.success(),
+        "Startup accepted an unavailable checkout"
+    );
+    let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issue_workers", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn invalid_configuration_never_starts_an_earlier_valid_worker() {
     let f = Fixture::new("invalid");
     fs::write(

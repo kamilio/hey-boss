@@ -132,6 +132,32 @@ impl Default for Settings {
     }
 }
 pub fn validate_settings(c: &Settings) -> Result<()> {
+    validate_settings_structure(c)?;
+    if !c.directory.is_empty() && !Path::new(&c.directory).is_dir() {
+        return Err(Error::invalid(
+            "Choose an existing absolute checkout directory",
+        ));
+    }
+    for (project, path) in &c.directories {
+        if !Path::new(path).is_dir() {
+            return Err(Error::invalid(
+                "Choose an existing absolute checkout directory",
+            ));
+        }
+        if !checkout_matches_project(Path::new(path), project)? {
+            return Err(Error::invalid(
+                "A worker checkout belongs to a different project",
+            ));
+        }
+    }
+    if c.enabled {
+        codex_binary()?;
+    }
+    Ok(())
+}
+
+/// Validate saved data without inspecting checkouts or installed executables.
+pub(crate) fn validate_settings_structure(c: &Settings) -> Result<()> {
     super::identifier(&c.name, "worker name", 128)?;
     if !(1..=1024).contains(&c.concurrency) {
         return Err(Error::invalid(
@@ -160,9 +186,7 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
     if let Some(overrides) = &c.prompt_overrides {
         overrides.validate()?;
     }
-    if !c.directory.is_empty()
-        && (!Path::new(&c.directory).is_absolute() || !Path::new(&c.directory).is_dir())
-    {
+    if !c.directory.is_empty() && !Path::new(&c.directory).is_absolute() {
         return Err(Error::invalid(
             "Choose an existing absolute checkout directory",
         ));
@@ -183,19 +207,11 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
                 "Each checkout must belong to a selected project",
             ));
         }
-        if !Path::new(path).is_absolute() || !Path::new(path).is_dir() {
+        if !Path::new(path).is_absolute() {
             return Err(Error::invalid(
                 "Choose an existing absolute checkout directory",
             ));
         }
-        if !checkout_matches_project(Path::new(path), project)? {
-            return Err(Error::invalid(
-                "A worker checkout belongs to a different project",
-            ));
-        }
-    }
-    if c.enabled {
-        codex_binary()?;
     }
     Ok(())
 }

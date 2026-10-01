@@ -1,6 +1,6 @@
 //! Run this machine's saved fleet configuration without creating fresh identities.
 use super::{Result, context::Context, control, replica};
-use crate::issues::worker::{Settings, validate_settings};
+use crate::issues::worker::{Settings, validate_settings, validate_settings_structure};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -33,7 +33,7 @@ fn definitions(value: &Value) -> Result<Vec<Value>> {
             // Retired checkouts may have been deleted; tombstones still prevent
             // their workers from being resurrected after reconnecting.
             if !matches!(intent, "stop" | "drain") {
-                validate_settings(&settings)?;
+                validate_settings_structure(&settings)?;
             }
             let mut result = row.clone();
             result["config"] = json!(settings);
@@ -157,6 +157,13 @@ pub(super) fn run(apply: bool, config_only: bool) -> Result<Value> {
         );
     }
     if apply {
+        // Observation must remain available when a checkout or Codex is missing.
+        // Validate every startup before applying any worker configuration.
+        for definition in &definitions {
+            if !matches!(definition["intent"].as_str(), Some("stop" | "drain")) {
+                validate_settings(&serde_json::from_value(definition["config"].clone())?)?;
+            }
+        }
         let failures = control::apply_workers_locked(&ctx, &definitions)?;
         if !failures.is_empty() {
             return Err(replica::invalid(&failures.join("; ")));
