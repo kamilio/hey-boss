@@ -402,6 +402,42 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     };
     let initial = mm(&["show"]);
     assert_eq!(initial["nodes"][0]["title"], "Authoritative root");
+    // A supervisor journal write may wait for another writer. Its transport
+    // must still serve canonical WAL reads instead of queuing them behind sync.
+    let writer = hey_boss::database::Connection::connect(&main.root.join("issues.db")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    thread::sleep(Duration::from_secs(6)); // At least one five-second sync tick.
+    let mut read = peer.command(&["mm", "--project", "Authority", "--json", "show"]);
+    let mut status = peer.command(&["fleet", "status", "--json"]);
+    let (finished, result) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        finished
+            .send((read.output().unwrap(), status.output().unwrap()))
+            .unwrap()
+    });
+    let during_write = result.recv_timeout(Duration::from_secs(2));
+    writer.execute_batch("ROLLBACK").unwrap();
+    reader.join().unwrap();
+    let (during_write, status) =
+        during_write.expect("canonical map read waited behind supervisor replication");
+    assert!(
+        during_write.status.success(),
+        "{}",
+        String::from_utf8_lossy(&during_write.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&during_write.stdout).unwrap(),
+        initial
+    );
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&status.stdout).unwrap()["authoritative"],
+        true
+    );
     // Workers explicitly inherit the installed issue database. That is not a
     // private-store mismatch and must work with the ordinary fleet state path.
     let home = peer.root.join("home");

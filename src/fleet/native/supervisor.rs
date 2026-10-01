@@ -732,7 +732,7 @@ impl Supervisor {
                 .wait(Duration::from_secs(2u64.pow(failures.min(6)).min(60)));
         }
     }
-    fn channel(&self, host: &str) -> Result<()> {
+    fn channel(self: &Arc<Self>, host: &str) -> Result<()> {
         self.update(host, json!({"state":"connecting"}))?;
         let script = "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; command -v hey-boss >/dev/null 2>&1 || { echo 'Companion binary is missing: hey-boss not found on PATH' >&2; exit 127; }; hey-boss fleet agent --install && exec hey-boss fleet agent --stdio";
         let mut command = Command::new("ssh");
@@ -790,8 +790,8 @@ impl Supervisor {
         );
         replica::allocate(db, node, &workers)
     }
-    fn channel_inner(&self, host: &str, child: &mut Child) -> Result<()> {
-        let mut input = child.stdin.take().unwrap();
+    fn channel_inner(self: &Arc<Self>, host: &str, child: &mut Child) -> Result<()> {
+        let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
         let output = child.stdout.take().unwrap();
         let errors = child.stderr.take().unwrap();
         let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
@@ -811,10 +811,48 @@ impl Supervisor {
             let _ = errors_finished.send(());
         });
         let (incoming, rx) = mpsc::sync_channel(32);
+        let peer = Arc::new(std::sync::OnceLock::<String>::new());
+        let authenticated_peer = peer.clone();
+        let app = self.clone();
+        let replies = input.clone();
+        let (authority_requests, authority_work) = mpsc::sync_channel::<(String, Value)>(1);
+        let authority_errors = incoming.clone();
+        std::thread::spawn(move || {
+            while let Ok((node, message)) = authority_work.recv() {
+                let result = app
+                    .authority_request(&node, &message)
+                    .and_then(|response| send(&mut *replies.lock().unwrap(), response));
+                if let Err(error) = result {
+                    let _ = authority_errors.send(Err(error));
+                    break;
+                }
+            }
+        });
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
             loop {
-                let result = read_frame(&mut reader);
+                let mut handled = false;
+                let result = read_frame(&mut reader).and_then(|frame| {
+                    // Neither database waits nor writing a large pull may
+                    // stop draining the peer's pipe. One bounded authority
+                    // worker serves requests independently of replication;
+                    // complete replies and pulls share the output lock.
+                    if let Some(message) = &frame
+                        && message["version"] == 1
+                        && message["kind"] == "authority_request"
+                        && let Some(node) = authenticated_peer.get()
+                    {
+                        authority_requests
+                            .try_send((node.clone(), message.clone()))
+                            .map_err(|_| invalid("Companion authority queue is unavailable"))?;
+                        handled = true;
+                        return Ok(None);
+                    }
+                    Ok(frame)
+                });
+                if handled {
+                    continue;
+                }
                 let done = !matches!(result, Ok(Some(_)));
                 if incoming.send(result).is_err() || done {
                     break;
@@ -920,18 +958,19 @@ impl Supervisor {
         self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
         send(
-            &mut input,
+            &mut *input.lock().unwrap(),
             json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
+        peer.set(node.to_owned()).unwrap();
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
         while !self.ctx.stopped() {
             if last_ping.elapsed() >= Duration::from_secs(5) {
-                send(&mut input, json!({"kind":"ping"}))?;
+                send(&mut *input.lock().unwrap(), json!({"kind":"ping"}))?;
                 last_ping = Instant::now();
             }
             while let Ok(request) = requests.try_recv() {
-                send(&mut input, request)?;
+                send(&mut *input.lock().unwrap(), request)?;
             }
             if last_message.elapsed() > Duration::from_secs(15) {
                 return Err("Companion heartbeat timed out".into());
@@ -958,13 +997,10 @@ impl Supervisor {
             self.update(host, json!({"heartbeat":now()}))?;
             match message["kind"].as_str() {
                 Some("authority_request") => {
-                    let result = (if message["request"]["kind"] == "issue_numbers" {
-                        self.issue_numbers(node, &message["request"])
-                    } else {
-                        self.authoritative(&message["request"])
-                    })
-                    .unwrap_or_else(authority::failure);
-                    send(&mut input, authority::response(&message["id"], result)?)?;
+                    send(
+                        &mut *input.lock().unwrap(),
+                        self.authority_request(node, &message)?,
+                    )?;
                 }
                 Some("heartbeat") => {
                     workers = self.local_config(
@@ -1059,7 +1095,7 @@ impl Supervisor {
                         (payload, receipts, signals)
                     };
                     pull::send_pull(
-                        &mut input,
+                        &mut *input.lock().unwrap(),
                         payload,
                         receipts,
                         hello["capabilities"]["pull_gzip_chunks"] == true,
@@ -1084,7 +1120,7 @@ impl Supervisor {
                     );
                     for pending in signals {
                         send(
-                            &mut input,
+                            &mut *input.lock().unwrap(),
                             json!({"kind":"signal","id":pending["id"],"worker":pending["worker"],"signal":pending["signal"],"created_at":pending["created_at"]}),
                         )?;
                     }
@@ -1099,7 +1135,7 @@ impl Supervisor {
                         workers = current;
                         revision = updated;
                         send(
-                            &mut input,
+                            &mut *input.lock().unwrap(),
                             json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
@@ -1528,6 +1564,16 @@ impl Supervisor {
             Ok(json!({"ok":true,"project":project,"range":range}))
         })();
         result.map_err(|e| crate::issues::Error::new("fleet_error", e.to_string()))
+    }
+
+    fn authority_request(&self, node: &str, message: &Value) -> Result<Value> {
+        let result = (if message["request"]["kind"] == "issue_numbers" {
+            self.issue_numbers(node, &message["request"])
+        } else {
+            self.authoritative(&message["request"])
+        })
+        .unwrap_or_else(authority::failure);
+        authority::response(&message["id"], result)
     }
 
     fn authoritative(&self, value: &Value) -> crate::issues::Result<Value> {
@@ -2855,7 +2901,7 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let error = app
+        let error = Arc::new(app)
             .channel_inner("test-host", &mut child)
             .unwrap_err()
             .to_string();
@@ -2878,7 +2924,9 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let error = app.channel_inner("test-host", &mut child).unwrap_err();
+        let error = Arc::new(app)
+            .channel_inner("test-host", &mut child)
+            .unwrap_err();
         child.wait().unwrap();
         assert!(error.to_string().contains("Companion closed before hello"));
         assert!(error.to_string().contains("synthetic SSH route failure"));
@@ -2895,7 +2943,9 @@ mod tests {
             .spawn()
             .unwrap();
         let started = Instant::now();
-        let error = app.channel_inner("test-host", &mut child).unwrap_err();
+        let error = Arc::new(app)
+            .channel_inner("test-host", &mut child)
+            .unwrap_err();
         let elapsed = started.elapsed();
         child.kill().unwrap();
         child.wait().unwrap();

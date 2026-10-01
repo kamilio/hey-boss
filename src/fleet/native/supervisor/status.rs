@@ -120,7 +120,7 @@ impl Supervisor {
         if !(1..=100).contains(&limit) {
             return Err(invalid("Status limit must be 1–100"));
         }
-        let db = self.ctx.db()?;
+        let db = crate::issues::Store::open_read_connection(&self.ctx.path)?;
         // One read transaction keeps database counts and their page consistent.
         let tx = db.read_transaction()?;
         let count = |sql: &str| -> Result<usize> {
