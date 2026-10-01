@@ -5,8 +5,6 @@ separate from its lifecycle (Open, Blocked, Closed, Draft) and ordinary comments
 Green means **On track**, orange means **At risk**, and red means **In trouble**.
 Issues without an update have no color in the list.
 
-Claim the issue, then publish a single line of plain language:
-
 ```sh
 hey-boss issue claim 70
 hey-boss issue status 70 green --comment 'The fix passes tests. Checking the phone layout next.'
@@ -18,12 +16,6 @@ Only the current owner of an open, non-draft issue can publish updates. The
 comment must contain 1–500 characters and no line breaks or control characters.
 The command supports the usual project, host, agent, JSON and request-ID options.
 Use the same request ID and payload when retrying an uncertain update.
-Set the final status before closing the issue or handing it to Boss.
-
-Publish an update after claiming, at meaningful changes, and at least every ten
-minutes while actively working. Describe what is happening and what comes next;
-skip command logs and technical lists. Keep lasting findings, decisions,
-questions and final verification in ordinary comments.
 
 The issue list shows a colored dot beside the ticket number. Hover or focus the
 dot to read the status label, full message, previous-owner marker and update time;
