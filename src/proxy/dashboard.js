@@ -33,7 +33,8 @@
           : data.logging.enabled ? 'Waiting for history' : 'Persistent logging is disabled';
       }
       const health = data.logging;
-      const gaps = health.dropped_events || health.write_errors || ['error', 'gaps', 'lagging'].includes(health.status);
+      // Retried writes can recover completely; only active failures or lost events imply gaps.
+      const gaps = health.dropped_events || ['error', 'gaps', 'lagging'].includes(health.status);
       $('status').textContent = data.error || (gaps ? `Logging ${health.status}: ${health.dropped_events || 0} dropped events; estimates may be incomplete.`
         : health.status === 'initializing' ? 'Loading history…' : 'Live');
       $('status').className = data.error || gaps ? 'warning' : '';

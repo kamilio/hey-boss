@@ -110,3 +110,22 @@ test('dashboard keeps stale numbers, exposes gaps and never overlaps refreshes',
   assert.match(app.nodes.get('today-note').textContent, /disabled/);
   assert.equal(app.nodes.get('login').hidden, true);
 });
+
+test('dashboard clears recovered write errors while retaining real accounting gaps', async () => {
+  let logging = {enabled: true, status: 'error', write_errors: 3, dropped_events: 0};
+  const app = dashboard(async () => ({ok: true, json: async () => ({rpm: 3, spend: totals, logging})}));
+  await settled();
+  assert.equal(app.nodes.get('status').className, 'warning');
+  assert.match(app.nodes.get('status').textContent, /Logging error/);
+
+  // Retried writes all committed: the cumulative error counter remains nonzero.
+  logging = {...logging, status: 'healthy', pending_events: 0};
+  await app.refresh();
+  assert.equal(app.nodes.get('status').textContent, 'Live');
+  assert.equal(app.nodes.get('status').className, '');
+
+  logging = {...logging, status: 'gaps', dropped_events: 2};
+  await app.refresh();
+  assert.equal(app.nodes.get('status').className, 'warning');
+  assert.match(app.nodes.get('status').textContent, /2 dropped events/);
+});
