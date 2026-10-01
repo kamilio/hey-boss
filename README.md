@@ -382,8 +382,6 @@ hey-boss notif alert --project Atlas --title Release --icon-file ./brand.png 'Re
 
 Rust callers can configure `Client::new(socket_path).with_appearance(hey_boss::Appearance { severity: Some(hey_boss::Severity::Success), icon: Some("build".into()), icon_path: None })`. Existing `Notification`, `Update`, and `Question` struct literals remain compatible. Appearance applies only to creation requests; all fields are optional on the wire (`severity`, `icon`, `icon_path`).
 
-The agent skill reserves notifications for major outcomes or essential decisions from long-running background work that need attention. Synchronous conversation stays in chat; routine QA, builds, publishing, and individual agent milestones do not generate notifications. Messages are brief and consolidated by the coordinating agent.
-
 Updates accept inline Markdown or a file snapshot:
 
 ```sh

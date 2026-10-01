@@ -25,9 +25,7 @@ hey-boss issue subtask create PARENT --title TITLE --body MARKDOWN
 Blocking releases the claim. Repeat `--by` for several dependencies;
 `issue blocked-by NUMBER BLOCKER...` replaces the dependency list, and omitting
 BLOCKERs clears it. `issue list --state blocked` finds paused work;
-`issue reopen NUMBER` resumes eligibility. Blocking should be rare: make every
-effort to resolve the issue, raise questions through `hey-boss notif ask`, and ask
-the user for help before giving up. Explain the blocker and what enables progress.
+`issue reopen NUMBER` resumes eligibility.
 
 Subtasks are ordinary issues linked atomically on creation. Use
 `issue subtask add PARENT CHILD`, `list PARENT [--all]`, or `remove PARENT CHILD`

@@ -978,4 +978,4 @@ An owner can publish green, orange or red progress updates with
 `hey-boss issue status NUMBER green --comment 'The fix passes tests. Checking the phone layout next.'`.
 The issue list and read-only web viewers show the current message; its separate
 history starts collapsed. Use comments for lasting findings and final verification.
-See [Issue progress](issue-status.md) for ownership rules, periodic updates and sync.
+See [Issue progress](issue-status.md) for ownership rules and sync.
