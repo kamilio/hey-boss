@@ -1791,10 +1791,10 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
             let text = preview["prompt"].as_str().unwrap();
             if prs {
                 let (workflow, handoff) = text
-                    .split_once("\n\nThis project unblocks dependencies at Ready")
+                    .split_once("\n\nDependencies unblock at Ready, before merge.")
                     .expect("PR workflows explain their Ready handoff");
                 assert_eq!(workflow, expected);
-                assert!(handoff.contains("Make stacked PRs"));
+                assert!(handoff.contains("stacked PRs"));
                 assert!(handoff.contains("hey-boss issue ready 1"));
             } else {
                 assert_eq!(text, expected);
@@ -1829,6 +1829,60 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
     assert_eq!(
         web.ok(json!({"action":"project_settings"}))["version"],
         version
+    );
+}
+
+#[test]
+fn prompt_layout_and_context_defaults_round_trip_and_reset() {
+    let web = Web::start();
+    web.ok(json!({"action":"create","title":"Prompt layout fixture","body":"","labels":[]}));
+    let overrides = json!({"layout":"{{delivery}}\n\n{{task}}\n\n{{handoff}}", "handoff":"Review task {{number}}.", "prs":"Publish {{number}}."});
+    web.ok(json!({"action":"configure_project","prompt":"Implement {{number}}.","prs_enabled":true,"prompt_overrides":overrides}));
+    let settings = web.ok(json!({"action":"project_settings"}));
+    assert_eq!(settings["prompt_overrides"], overrides);
+    for key in [
+        "layout",
+        "handoff",
+        "github",
+        "subtask",
+        "dependencies",
+        "resume",
+        "plan_document",
+        "steering",
+        "dependency_update",
+        "prompt_update",
+        "goal_continue",
+        "chief_wrapper",
+    ] {
+        assert!(settings["prompt_defaults"][key].is_string(), "{key}");
+        assert!(
+            settings["prompt_sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|section| section["key"] == key)
+        );
+    }
+    let preview =
+        web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1}));
+    assert_eq!(
+        preview["prompt"],
+        "Publish 1.\n\nImplement 1.\n\nReview task 1."
+    );
+    web.ok(json!({"action":"configure_project","prompt_overrides":{"layout":null,"handoff":null}}));
+    let reset =
+        web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1}));
+    assert!(
+        reset["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Implement 1.")
+    );
+    assert!(
+        reset["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Dependencies unblock at Ready")
     );
 }
 

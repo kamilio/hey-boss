@@ -140,7 +140,12 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
             if options.json {
                 println!("{report}");
             } else {
-                println!("{}", report["message"].as_str().unwrap_or("Distributed skills across fleet."));
+                println!(
+                    "{}",
+                    report["message"]
+                        .as_str()
+                        .unwrap_or("Distributed skills across fleet.")
+                );
                 print_fleet_skill_report(&report);
             }
         }
@@ -150,7 +155,12 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
             if options.json {
                 println!("{report}");
             } else {
-                println!("{}", report["message"].as_str().unwrap_or("Deleted skill across fleet."));
+                println!(
+                    "{}",
+                    report["message"]
+                        .as_str()
+                        .unwrap_or("Deleted skill across fleet.")
+                );
             }
         }
         SkillAction::Sync { names, hosts } => {
@@ -423,7 +433,7 @@ pub fn catalog() -> Value {
     root.build();
     let mut commands = Vec::new();
     walk(&root, &[], &scenarios(), &mut commands);
-    let prompts = [
+    let mut prompts = [
         ("worker", "Shared task", hey_boss::issues::worker::DEFAULT_PROMPT),
         ("plan", "Planning", hey_boss::issues::worker::DEFAULT_PLAN_PROMPT),
         ("worktree", "Dedicated worktree", hey_boss::issues::worker::DEFAULT_WORKTREE_PROMPT),
@@ -431,8 +441,18 @@ pub fn catalog() -> Value {
         ("main", "Push to main", hey_boss::issues::worker::DEFAULT_MAIN_PROMPT),
         ("prs", "Pull request", hey_boss::issues::worker::DEFAULT_PRS_PROMPT),
         ("chief", "Chief", include_str!("issues/prompts/chief.md").trim_ascii_end()),
-    ].map(|(id,title,text)|json!({"id":id,"title":title,"text":text,"source":format!("src/issues/prompts/{id}.md")}));
-    json!({"commands":commands,"prompts":prompts,"chief_wrapper":hey_boss::issues::worker::chief_instructions("{{project}}","{{prompt}}"),"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install","references":hey_boss::skill::references()},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
+    ].map(|(id,title,text)|json!({"id":id,"title":title,"text":text,"source":format!("src/issues/prompts/{id}.md")})).to_vec();
+    let defaults = hey_boss::issues::worker::prompt_defaults();
+    for section in hey_boss::issues::worker::prompt_sections()
+        .as_array()
+        .unwrap()
+    {
+        let key = section["key"].as_str().unwrap();
+        if !prompts.iter().any(|p| p["id"] == key) {
+            prompts.push(json!({"id":key,"title":section["title"],"text":defaults[key],"source":format!("src/issues/prompts/{key}.md")}));
+        }
+    }
+    json!({"commands":commands,"prompts":prompts,"chief_wrapper":hey_boss::issues::worker::chief_instructions("{{project}}","{{prompt}}", &Default::default()),"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install","references":hey_boss::skill::references()},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
 }
 
 fn request(root: &Path, operation: Value) -> io::Result<Request> {

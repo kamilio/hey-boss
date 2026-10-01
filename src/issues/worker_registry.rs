@@ -139,7 +139,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":"explicit","chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"chief_preview_template":worker::chief_instructions("{{project}}", "{{prompt}}"),"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":{"plan":worker::DEFAULT_PLAN_PROMPT,"worktree":worker::DEFAULT_WORKTREE_PROMPT,"checkout":worker::DEFAULT_CHECKOUT_PROMPT,"prs":worker::DEFAULT_PRS_PROMPT,"main":worker::DEFAULT_MAIN_PROMPT},"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":"explicit","chief_enabled":chief_enabled,"chief_prompt":chief_prompt.as_deref().unwrap_or(super::super::chief::DEFAULT_PROMPT),"chief_default_prompt":super::super::chief::DEFAULT_PROMPT,"chief_preview_template":worker::chief_instructions("{{project}}", "{{prompt}}", &prompt_overrides),"prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for

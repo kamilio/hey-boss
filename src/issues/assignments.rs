@@ -699,12 +699,12 @@ pub(super) fn queue_steering(db: &Connection, run: &str) -> Result<()> {
     // Recheck the current event and ownership after acquiring the writer lock.
     // Only unsent watcher snapshots can be replaced; human instructions and
     // messages already handed to the transport retain their delivery state.
-    let Some((id, status)) = steering_update(&tx, run)? else {
+    let Some((id, _status)) = steering_update(&tx, run)? else {
         return tx.commit().map_err(Into::into);
     };
     let prefix = format!("github:{run}:");
     tx.execute("UPDATE agent_steering SET state='superseded',text='' WHERE run_id=?1 AND state='queued' AND request_id<>?2 AND substr(request_id,1,length(?3))=?3",params![run,id,prefix])?;
-    let text = serde_json::to_string(&json!({"github_status":public_status(status,true)}))?;
+    let text = "";
     tx.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,created_at) VALUES(?1,?2,'session',?3,?4)",params![id,run,text,crate::issues::worker::now()])?;
     tx.commit()?;
     Ok(())

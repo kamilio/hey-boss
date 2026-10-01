@@ -1679,7 +1679,13 @@ mod tests {
         watch_event(&mut f, "second");
         assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
         let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        assert!(instruction["text"].as_str().unwrap().contains("second"));
+        assert_eq!(instruction["text"], "");
+        assert!(
+            instruction["request_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("github:")
+        );
         f.store
             .worker_steering_result(
                 instruction["request_id"].as_str().unwrap(),
@@ -1726,7 +1732,10 @@ mod tests {
             let key = format!("event-{index}-{}", "evidence".repeat(4096));
             watch_event(&mut f, &key);
             let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-            assert!(instruction["text"].as_str().unwrap().len() > 32_000);
+            assert_eq!(
+                instruction["text"], "",
+                "Evidence stays in the watcher record"
+            );
             f.store
                 .worker_steering_result(
                     instruction["request_id"].as_str().unwrap(),
@@ -1782,7 +1791,9 @@ mod tests {
             .worker_steering_result("human-message", "delivered", None)
             .unwrap();
         let latest = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        assert!(latest["text"].as_str().unwrap().contains("fourth"));
+        assert_eq!(latest["text"], "");
+        assert_ne!(latest["request_id"], obsolete["request_id"]);
+        assert_ne!(latest["request_id"], first["request_id"]);
         assert_eq!(
             f.store
                 .db
