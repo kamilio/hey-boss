@@ -21,11 +21,11 @@ pub(super) fn merged_history(
     limit: u32,
     offset: u32,
 ) -> Result<Value> {
-    let mut query = db.prepare("SELECT pr.url,max(pr.pr_title),min(pr.merged_at),min(pr.checked_at) FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND i.deleted_at IS NULL GROUP BY pr.url ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3")?;
+    let mut query = db.prepare("SELECT pr.url,max(pr.pr_title),min(pr.merged_at),min(pr.checked_at) FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND i.deleted_at IS NULL GROUP BY pr.url ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3")?;
     let mut prs = query.query_map(params![project,i64::from(limit)+1,offset], |r| Ok(json!({"url":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"merged_at":r.get::<_,Option<i64>>(2)?,"observed_at":r.get::<_,Option<i64>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more = prs.len() > limit as usize;
     prs.truncate(limit as usize);
-    let mut links = db.prepare("SELECT i.number,i.title FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.url=?2 AND i.deleted_at IS NULL ORDER BY i.number")?;
+    let mut links = db.prepare("SELECT i.number,i.title FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.url=?2 AND pr.purpose='fix' AND i.deleted_at IS NULL ORDER BY i.number")?;
     for pr in &mut prs {
         pr["issues"] = json!(
             links
@@ -187,6 +187,61 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn merged_history_excludes_reference_only_prs_before_pagination() {
+        let (mut store, actor, root) = fixture();
+        for (issue, pr, purpose) in [(2, 4, "prerequisite"), (3, 5, "unspecified"), (4, 6, "fix")] {
+            store.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES('named:test',?1,?2,?3,0,?4)",params![issue,format!("https://github.com/o/r/pull/{pr}"),actor.id,purpose]).unwrap();
+        }
+        for pr in 1..=6 {
+            let url = format!("https://github.com/o/r/pull/{pr}");
+            store
+                .record_pr_status(&url, Some("merged"), 2000, None)
+                .unwrap();
+            store
+                .record_pr_merge_details(
+                    &url,
+                    "Merged",
+                    Some(if pr > 2 {
+                        "2026-09-30T12:00:00Z"
+                    } else {
+                        "2026-09-29T12:00:00Z"
+                    }),
+                    2000,
+                )
+                .unwrap();
+        }
+        let page = merged_history(&store.db, "named:test", 1, 0).unwrap();
+        assert_eq!(
+            page["pull_requests"][0]["url"],
+            "https://github.com/o/r/pull/1"
+        );
+        assert_eq!(
+            page["pull_requests"][0]["issues"],
+            json!([
+                {"number":1,"title":"Task"}, {"number":5,"title":"Task"}
+            ])
+        );
+        assert_eq!(page["next_offset"], 1);
+        let next = merged_history(&store.db, "named:test", 1, 1).unwrap();
+        assert_eq!(
+            next["pull_requests"][0]["url"],
+            "https://github.com/o/r/pull/2"
+        );
+        assert!(next["next_offset"].is_null());
+        // A reference can enter delivered history when explicitly reclassified.
+        store.db.execute("UPDATE issue_pull_requests SET purpose='fix' WHERE url='https://github.com/o/r/pull/3'", []).unwrap();
+        assert_eq!(
+            merged_history(&store.db, "named:test", 10, 0).unwrap()["pull_requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn merged_history_deduplicates_and_preserves_github_dates() {
         let (mut store, _, root) = fixture();
         let url = "https://github.com/o/r/pull/1";
@@ -211,7 +266,7 @@ mod tests {
         assert_eq!(page["pull_requests"][0]["merged_at"], 1790724600000_i64);
         assert_eq!(
             page["pull_requests"][0]["issues"].as_array().unwrap().len(),
-            4
+            2
         );
         assert_eq!(page["next_offset"], 1);
         let older = merged_history(&store.db, "named:test", 1, 1).unwrap();
