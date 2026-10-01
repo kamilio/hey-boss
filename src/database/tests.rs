@@ -143,6 +143,77 @@ pub(crate) fn measured_connection(
 }
 
 #[test]
+fn foreign_key_settings_remain_isolated_between_writer_sessions() {
+    let fixture = Fixture::new();
+    let relaxed = fixture.connect();
+    let strict = fixture.connect();
+    relaxed.execute_batch("CREATE TABLE parents(id INTEGER PRIMARY KEY); CREATE TABLE children(id INTEGER PRIMARY KEY,parent INTEGER REFERENCES parents(id)); PRAGMA foreign_keys=OFF").unwrap();
+    let insert = "INSERT INTO children(id,parent) VALUES(?1,99)";
+    assert_eq!(relaxed.execute(insert, [1]).unwrap(), 1);
+    assert!(strict.execute(insert, [2]).is_err());
+    assert_eq!(relaxed.execute(insert, [3]).unwrap(), 1);
+    relaxed.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    assert!(relaxed.execute(insert, [4]).is_err());
+    strict
+        .execute("INSERT INTO parents VALUES(99)", [])
+        .unwrap();
+    assert_eq!(strict.execute(insert, [2]).unwrap(), 1);
+}
+
+#[test]
+fn reused_service_statements_follow_other_sessions_schema_changes_and_recover_from_errors() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect();
+    connection.execute_batch("CREATE TABLE changing(id INTEGER PRIMARY KEY,value TEXT UNIQUE); INSERT INTO changing VALUES(1,'first')").unwrap();
+    let sql = "SELECT * FROM changing WHERE id=?1";
+    assert_eq!(
+        connection
+            .query_row(sql, [1], |row| row.get::<_, String>("value"))
+            .unwrap(),
+        "first"
+    );
+    fixture
+        .connect()
+        .execute_batch("ALTER TABLE changing ADD COLUMN added INTEGER DEFAULT 42")
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row(sql, [1], |row| row.get::<_, i64>("added"))
+            .unwrap(),
+        42
+    );
+    fixture
+        .connect()
+        .execute_batch("ALTER TABLE changing RENAME COLUMN value TO renamed")
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row(sql, [1], |row| row.get::<_, String>("renamed"))
+            .unwrap(),
+        "first"
+    );
+    assert!(connection.query_row(sql, [], |_| Ok(())).is_err());
+    let insert = "INSERT INTO changing(id,renamed) VALUES(?1,?2)";
+    assert!(
+        connection
+            .execute(insert, rusqlite::params![1, "duplicate"])
+            .is_err()
+    );
+    assert_eq!(
+        connection
+            .execute(insert, rusqlite::params![2, "second"])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(sql, [2], |row| row.get::<_, String>("renamed"))
+            .unwrap(),
+        "second"
+    );
+}
+
+#[test]
 fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
     let fixture = Fixture::new();
     fixture

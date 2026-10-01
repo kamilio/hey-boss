@@ -350,7 +350,13 @@ impl Drop for Lease<'_> {
             if !db.is_autocommit() {
                 let _ = db.execute_batch("ROLLBACK");
             }
-            let _ = db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;");
+            // Unlike the PRAGMA setter, db_config preserves prepared statements
+            // when enforcement is already enabled.
+            let _ = db.set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY,
+                true,
+            );
+            let _ = db.execute_batch("PRAGMA synchronous=FULL;");
             drop(db);
         }
         self.1.notify_all();
@@ -492,7 +498,7 @@ fn session(
             Command::ExclusiveSession => true,
             Command::Batch { .. } | Command::Execute { .. } => true,
             Command::Query { sql, .. } if lease.is_none() => reader
-                .prepare(sql)
+                .prepare_cached(sql)
                 .map(|stmt| !stmt.readonly() || stmt.column_count() == 0)
                 .unwrap_or(false),
             _ => false,
@@ -509,7 +515,10 @@ fn session(
             lease
                 .as_ref()
                 .unwrap()
-                .pragma_update(None, "foreign_keys", foreign_keys)
+                .set_db_config(
+                    rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY,
+                    foreign_keys,
+                )
                 .map_err(std::io::Error::other)?;
             unsafe {
                 rusqlite::ffi::sqlite3_set_last_insert_rowid(
@@ -544,7 +553,7 @@ fn session(
             last_id = db.last_insert_rowid();
             reply.last_id = last_id;
             foreign_keys = db
-                .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+                .db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY)
                 .map_err(std::io::Error::other)?;
         }
         if let Err(e) = result {
@@ -574,12 +583,16 @@ fn execute(
             db.execute_batch("BEGIN DEFERRED")?;
         }
         Command::Prepare { sql } => {
+            // Metadata is needed before stepping; prepare it fresh because a
+            // cached statement recompiles lazily after schema changes.
             let stmt = db.prepare(&sql)?;
             reply.parameters = stmt.parameter_count();
             reply.columns = stmt.column_names().into_iter().map(str::to_owned).collect();
         }
         Command::Execute { sql, values } => {
-            reply.changes = db.execute(&sql, rusqlite::params_from_iter(values))?;
+            reply.changes = db
+                .prepare_cached(&sql)?
+                .execute(rusqlite::params_from_iter(values))?;
         }
         Command::Batch { sql } => {
             super::execute_batch(db, &sql)?;
@@ -590,11 +603,21 @@ fn execute(
             db.backup("main", path, None)?;
         }
         Command::Query { sql, values } => {
-            let mut stmt = db.prepare(&sql)?;
-            reply.columns = stmt.column_names().into_iter().map(str::to_owned).collect();
+            let mut stmt = db.prepare_cached(&sql)?;
+            stmt.reset_status(rusqlite::StatementStatus::VmStep);
             let mut cursor = stmt.query(rusqlite::params_from_iter(values))?;
             let mut bytes = 0usize;
             while let Some(row) = cursor.next()? {
+                // Stepping refreshes expired statements, including SELECT *
+                // column counts. Never serialize metadata from before that step.
+                if reply.columns.is_empty() {
+                    reply.columns = row
+                        .as_ref()
+                        .column_names()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                }
                 let values = (0..reply.columns.len())
                     .map(|i| {
                         row.get::<_, rusqlite::types::Value>(i)
@@ -618,6 +641,9 @@ fn execute(
                 }
             }
             drop(cursor);
+            if reply.columns.is_empty() {
+                reply.columns = stmt.column_names().into_iter().map(str::to_owned).collect();
+            }
             reply.more = false;
             reply.steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
         }
@@ -777,3 +803,7 @@ fn start_installed_service(path: &Path) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+#[path = "owner_tests.rs"]
+mod tests;
