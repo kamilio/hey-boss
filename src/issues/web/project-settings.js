@@ -1,6 +1,37 @@
 "use strict";
 const workflowPromptKeys = ["plan", "worktree", "checkout", "prs", "main"];
 let projectPromptDefaults = {};
+function addPromptEditors(sections) {
+  workflowPromptKeys.splice(5);
+  for (const id of ["layout", "context", "runtime", "chief-context"]) $("#project-" + id + "-prompts").replaceChildren();
+  for (const section of sections || []) {
+    const key = section.key;
+    if (workflowPromptKeys.includes(key)) continue;
+    workflowPromptKeys.push(key);
+    const group = key === "layout" ? "layout" : key === "chief_wrapper" ? "chief-context" : ["steering", "dependency_update", "prompt_update", "goal_continue"].includes(key) ? "runtime" : "context";
+    const branch = document.createElement("section");
+    branch.className = "workflow-branch settings-section";
+    branch.dataset.branch = key;
+    const heading = document.createElement("div"); heading.className = "branch-heading";
+    const label = document.createElement("label"); label.htmlFor = "project-prompt-" + key;
+    const title = document.createElement("strong"); title.textContent = section.title; label.append(title);
+    const state = document.createElement("span"); state.className = "branch-state";
+    heading.append(label, state);
+    const help = document.createElement("p"); help.className = "field-help"; help.textContent = section.help;
+    const input = document.createElement("textarea"); input.className = "text-input workflow-prompt";
+    input.id = "project-prompt-" + key; input.rows = key === "layout" ? 12 : 4; input.maxLength = 32000;
+    input.setAttribute("aria-describedby", "project-source-" + key);
+    input.addEventListener("input", () => { projectSettingsChanged(); previewProjectInstructions(); });
+    const footer = document.createElement("div"); footer.className = "branch-footer";
+    const source = document.createElement("span"); source.id = "project-source-" + key;
+    const reset = document.createElement("button"); reset.type = "button"; reset.className = "button link-button";
+    reset.dataset.resetPrompt = key; reset.textContent = "Use default";
+    reset.onclick = () => { input.value = ""; projectSettingsChanged(); previewProjectInstructions(); };
+    footer.append(source, reset);
+    branch.append(heading, help, input, footer);
+    $("#project-" + group + "-prompts").append(branch);
+  }
+}
 let chiefDefaultPrompt = "", chiefPreviewTemplate = "", projectSettingsTab = "instructions";
 let chiefRunPending = false, chiefRunRequest = null;
 let projectSettingsVersion = 0,
@@ -121,6 +152,7 @@ $("#project-settings-trigger").onclick = async () => {
     $("#project-worktree").checked = value.worktree_enabled;
     $("#project-preview-workspace").value = "checkout";
     projectPromptDefaults = value.prompt_defaults;
+    addPromptEditors(value.prompt_sections);
     for (const key of workflowPromptKeys) {
       const input = $("#project-prompt-" + key);
       input.value = value.prompt_overrides[key] ?? "";
@@ -211,7 +243,7 @@ function previewProjectInstructions() {
   projectPreviewTimer = setTimeout(async () => {
     try {
       const value = projectSettingsTab === "chief" ? {
-        prompt: chiefPreviewTemplate.replace(/{{(project|prompt)}}/g, (_, key) => key === "project" ? project : draft.chief_prompt),
+        prompt: (draft.prompt_overrides.chief_wrapper ?? projectPromptDefaults.chief_wrapper ?? chiefPreviewTemplate).replace(/{{\s*(project|prompt)\s*}}/g, (_, key) => key === "project" ? project : draft.chief_prompt),
         use_goal: false,
       } : await api(
         {
@@ -290,13 +322,13 @@ function updateWorkflowBranches() {
   const allowed = $("#project-worktree").checked;
   $("#project-preview-workspace option[value=worktree]").disabled = !allowed;
   if (!allowed) $("#project-preview-workspace").value = "checkout";
-  const active = chief ? [] : plan ? ["plan"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main"];
+  const active = chief ? ["chief_wrapper"] : plan ? ["plan", "layout"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main", "layout"];
   $("#project-preview-workspace").disabled = plan || chief || projectSettingsSaving || !projectSettingsOriginal;
   $("#project-preview-workspace-help").textContent = plan ? "Plan tasks use their own prompt without workspace or delivery instructions." : "Preview only. Each worker chooses its own workspace.";
   for (const key of workflowPromptKeys) {
     const branch = document.querySelector(`[data-branch="${key}"]`);
     branch.classList.toggle("active", active.includes(key));
-    branch.querySelector(".branch-state").textContent = active.includes(key) ? "In preview" : key === "worktree" ? (allowed ? "Available" : "Not allowed") : key === "checkout" ? "Available" : "Inactive";
+    branch.querySelector(".branch-state").textContent = active.includes(key) ? "In preview" : key === "worktree" ? (allowed ? "Available" : "Not allowed") : key === "checkout" ? "Available" : workflowPromptKeys.indexOf(key) >= 5 ? "When applicable" : "Inactive";
     const custom = !!$("#project-prompt-" + key).value.trim();
     $("#project-source-" + key).textContent = custom ? "Project override" : "Built-in default";
     branch.querySelector("[data-reset-prompt]").hidden = !custom;

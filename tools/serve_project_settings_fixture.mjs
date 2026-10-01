@@ -1,9 +1,12 @@
 // Isolated settings UI with deterministic API responses; no real project mutations.
 import {createServer} from 'node:http';
-import {readFileSync} from 'node:fs';
+import {readFileSync, readdirSync} from 'node:fs';
 const source = new URL('../src/issues/web/', import.meta.url);
 const index = readFileSync(new URL('index.html', source), 'utf8');
 const dialog = index.match(/<dialog\s+id="project-settings-dialog"[^]*?<\/dialog>/)[0];
+const prompts = new URL('../src/issues/prompts/', import.meta.url);
+const promptDefaults = Object.fromEntries(readdirSync(prompts).filter(name => name.endsWith('.md') && !['worker.md', 'chief.md'].includes(name)).map(name => [name.slice(0, -3), readFileSync(new URL(name, prompts), 'utf8').trimEnd()]));
+promptDefaults.chief_wrapper = 'Chief for {{project}}: {{prompt}}';
 const server = createServer((req, res) => {
   if (/^\/[\w-]+\.(css|js)$/.test(req.url)) {
     try {
@@ -25,7 +28,7 @@ const server = createServer((req, res) => {
       window.fixtureSettings = {version:1,prompt:'Fixture implementation',chief_prompt:'Fixture chief',
         chief_default_prompt:'Fixture chief',chief_preview_template:'Chief for {{project}}: {{prompt}}',chief_enabled:false,prs_enabled:false,worktree_enabled:true,
         drafts_enabled:true,plan_template:'plans/{number}.md',
-        prompt_defaults:{plan:'',worktree:'',checkout:'',prs:'',main:''},prompt_overrides:{}};
+        prompt_defaults:${JSON.stringify(promptDefaults)},prompt_sections:${JSON.stringify(Object.keys(promptDefaults).map(key => ({key,title:key,help:'Fixture prompt section'})))},prompt_overrides:{}};
       async function api(request) {
         if (request.action === 'project_settings') {
           if (window.failLoad) throw Error('Fixture load failed');
