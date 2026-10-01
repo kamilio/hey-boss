@@ -1268,8 +1268,9 @@ impl Store {
         super::commits::migrate(&db)?;
         steering::migrate(&db)?;
         assignments::migrate(&db)?;
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_pr_merged_history' AND type='index')", [], |r|r.get::<_,bool>(0))? {
-            db.execute_batch("CREATE INDEX issue_pr_merged_history ON issue_pull_requests(project_id,status,url,merged_at)")?;
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('issue_pr_merged_history','issue_pr_url') AND type='index'", [], |r|r.get::<_,i64>(0))? < 2 {
+            db.execute_batch("CREATE INDEX IF NOT EXISTS issue_pr_merged_history ON issue_pull_requests(project_id,status,url,merged_at);
+                CREATE INDEX IF NOT EXISTS issue_pr_url ON issue_pull_requests(url,project_id,issue_number)")?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
