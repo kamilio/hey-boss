@@ -98,6 +98,80 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn scalar_reads_in_a_mutation_use_one_round_trip_each() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE rpc_counter(id INTEGER PRIMARY KEY,value INTEGER);
+         WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<128)
+         INSERT INTO rpc_counter SELECT id,id*2 FROM ids;",
+        )
+        .unwrap();
+    let Backend::Remote(remote) = connection.backend else {
+        unreachable!()
+    };
+    let mut upstream = remote.stream.into_inner().unwrap();
+    let (client, server) = UnixStream::pair().unwrap();
+    let transport = std::thread::spawn(move || {
+        let mut server = BufReader::new(server);
+        let mut commands = 0;
+        while let Some(command) = wire::read::<Command>(&mut server).unwrap() {
+            commands += 1;
+            wire::write(upstream.get_mut(), &command).unwrap();
+            loop {
+                let reply = wire::read::<Reply>(&mut upstream).unwrap().unwrap();
+                wire::write(server.get_mut(), &reply).unwrap();
+                if !reply.more {
+                    break;
+                }
+            }
+        }
+        commands
+    });
+    let connection = Connection {
+        backend: Backend::Remote(Remote {
+            path: fixture.directory.join("issues.db"),
+            stream: RefCell::new(Some(BufReader::new(client))),
+            transaction: Cell::new(false),
+            last_id: Cell::new(0),
+        }),
+    };
+    let started = std::time::Instant::now();
+    let transaction =
+        Transaction::new_unchecked(&connection, TransactionBehavior::Immediate).unwrap();
+    let mut total = 0i64;
+    for id in 1..=128 {
+        total += transaction
+            .query_row("SELECT value FROM rpc_counter WHERE id=?1", [id], |row| {
+                row.get::<_, i64>("value")
+            })
+            .unwrap();
+    }
+    transaction
+        .execute("UPDATE rpc_counter SET value=?1 WHERE id=1", [total])
+        .unwrap();
+    transaction.commit().unwrap();
+    let elapsed = started.elapsed();
+    drop(connection);
+    let commands = transport.join().unwrap();
+    assert_eq!(
+        fixture
+            .connect()
+            .query_row("SELECT value FROM rpc_counter WHERE id=1", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        128 * 129
+    );
+    eprintln!("128 transactional scalar reads: {commands} RPCs, {elapsed:?} writer transaction");
+    assert_eq!(
+        commands,
+        128 + 3,
+        "Scalar reads must not add metadata round trips while holding the writer"
+    );
+}
+
+#[test]
 fn dependent_issue_requests_recover_on_the_same_service_connection() {
     use crate::issues::{Request, Store};
     use serde_json::json;
@@ -531,6 +605,19 @@ fn sqlite_types_returning_and_extended_errors_survive_transport() {
         })
         .unwrap();
     assert_eq!(values, ("héllo".into(), vec![0, 255], None, 3.5));
+    assert!(matches!(
+        connection.query_row("SELECT id FROM values_test WHERE 0", [], |_| Ok(())),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert!(matches!(
+        connection.query_row("SELECT id FROM values_test", [], |r| r.get::<_, i64>("missing")),
+        Err(rusqlite::Error::InvalidColumnName(name)) if name == "missing"
+    ));
+    assert!(
+        connection
+            .query_row("SELECT ?1", [], |r| r.get::<_, i64>(0))
+            .is_err()
+    );
     let error = connection
         .execute("INSERT INTO values_test(text) VALUES(?1)", ["héllo"])
         .unwrap_err();
