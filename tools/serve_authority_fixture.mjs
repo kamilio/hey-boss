@@ -32,7 +32,10 @@ const cli=(path,args)=>new Promise((resolve,reject)=>{
   const child=start(path,args); let output='';
   child.stdout.on('data',chunk=>output+=chunk);
   child.once('error',reject);
-  child.once('exit',(code,signal)=>code===0&&!signal?resolve(JSON.parse(output)):reject(Error(`CLI incomplete: code=${code}, signal=${signal}: ${output}`)));
+  child.once('exit',(code,signal)=>{
+    if(code!==0||signal){reject(Error(`CLI incomplete: code=${code}, signal=${signal}: ${output}`));return;}
+    try{resolve(JSON.parse(output));}catch(error){reject(error);}
+  });
 });
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function startSupervisor(){
@@ -101,7 +104,7 @@ try {
   chmodSync(join(bin,'ssh'),0o700);
   startSupervisor();
   for(let attempt=0;;attempt++) {
-    try {await cli(peer,['fleet','status']);break;}
+    try {await cli(peer,['fleet','status','--json']);break;}
     catch(error){if(attempt===100)throw error;await wait(100);}
   }
   const web=start(peer,['mm','--project','Fleet routing QA','--agent','human:fixture','--json','web','--port','59645','--no-discovery']);web.stdout.resume();
