@@ -8,6 +8,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+mod scaleft;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Process {
     pub pid: u32,
@@ -214,6 +217,10 @@ pub fn identity(pid: u32) -> Option<String> {
 }
 
 fn category(p: &Process) -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    if scaleft::helper(p) {
+        return Some(scaleft::CATEGORY);
+    }
     #[cfg(target_os = "linux")]
     if let Some(kind) = super::linux_harvest::category(p) {
         return Some(kind);
@@ -308,7 +315,7 @@ fn browser(p: &Process) -> bool {
 fn strict_cpu(p: &Process) -> bool {
     matches!(
         category(p),
-        Some("Poe test proxy" | "Temporary catbot test server")
+        Some("Poe test proxy" | "Temporary catbot test server" | "ScaleFT SSH helper")
     )
 }
 
@@ -329,6 +336,10 @@ fn quiet_since(old: &Process, fresh: &Process, strict: bool) -> bool {
 }
 
 fn minimum_age(p: &Process, config: &Config) -> u64 {
+    #[cfg(target_os = "macos")]
+    if scaleft::helper(p) {
+        return config.process_min_age_seconds.max(3600);
+    }
     if browser(p) {
         config.browser_min_age_seconds
     } else {
@@ -434,6 +445,10 @@ fn lsof(args: &[&str]) -> io::Result<String> {
 }
 #[cfg(not(target_os = "linux"))]
 fn disconnected(root: &Process, ids: &BTreeSet<u32>) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    if scaleft::helper(root) {
+        return scaleft::disconnected(root.pid);
+    }
     let list = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
     let network = lsof(&["-a", "-p", &list, "-i", "-F", "pftnT"])?;
     if network.lines().any(|s| s == "tIPv4" || s == "tIPv6") {
@@ -719,6 +734,10 @@ fn terminate(
     config: &Config,
     activity: &Option<String>,
 ) -> io::Result<usize> {
+    #[cfg(target_os = "macos")]
+    if scaleft::helper(root) {
+        return scaleft::terminate(root, config);
+    }
     if category(root) == Some("Cloudflare test browser") {
         return terminate_browser(root, ids, old, config, activity);
     }
@@ -778,13 +797,27 @@ pub fn harvest(
     let mut retained = BTreeSet::new();
     let mut items = Vec::new();
     let mut killed = 0;
-    for root in table.values() {
-        if config.aggressive && category(root) != Some("Cloudflare test browser") {
-            continue;
-        }
-        let Some(ids) = tree(root, table, uid, minimum_age(root, config)) else {
-            continue;
-        };
+    let candidates: Vec<_> = table
+        .values()
+        .filter(|root| {
+            !config.aggressive
+                || matches!(
+                    category(root),
+                    Some("Cloudflare test browser" | "ScaleFT SSH helper")
+                )
+        })
+        .filter_map(|root| tree(root, table, uid, minimum_age(root, config)).map(|ids| (root, ids)))
+        .collect();
+    #[cfg(target_os = "macos")]
+    let mut scaleft_inspections = scaleft::inspect(
+        &candidates
+            .iter()
+            .filter(|(root, _)| scaleft::helper(root))
+            .map(|(root, _)| root.pid)
+            .collect::<Vec<_>>(),
+        lsof,
+    );
+    for (root, ids) in candidates {
         let key = format!(
             "orphan:{}",
             ids.iter()
@@ -792,7 +825,18 @@ pub fn harvest(
                 .collect::<Vec<_>>()
                 .join("/")
         );
-        let inspection = disconnected(root, &ids).and_then(|idle| {
+        #[cfg(target_os = "macos")]
+        let connection = if scaleft::helper(root) {
+            scaleft_inspections
+                .remove(&root.pid)
+                .unwrap()
+                .map_err(io::Error::other)
+        } else {
+            disconnected(root, &ids)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let connection = disconnected(root, &ids);
+        let inspection = connection.and_then(|idle| {
             Ok((
                 idle,
                 if idle {
@@ -899,6 +943,49 @@ mod tests {
             identity: "501:100:10".into(),
             arguments: "workerd serve --control-fd=3 -".into(),
         }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scaleft_only_recognizes_old_childless_proxycommands() {
+        let mut p = worker();
+        p.executable = "/Applications/ScaleFT.app/Contents/MacOS/sft".into();
+        p.arguments = "/usr/local/bin/sft proxycommand devboxkjopek".into();
+        assert_eq!(category(&p), Some("ScaleFT SSH helper"));
+        assert!(strict_cpu(&p));
+        let config = Config {
+            process_min_age_seconds: 0,
+            ..Config::default()
+        };
+        assert_eq!(minimum_age(&p, &config), 3600);
+        let mut table = Table::from([(p.pid, p.clone())]);
+        assert!(tree(&p, &table, p.uid, 3600).is_some());
+        for args in [
+            "sft service",
+            "sft ssh devbox",
+            "sft proxycommand",
+            "sft proxycommand devbox extra",
+            "sft proxycommand --help",
+            "other proxycommand devbox",
+        ] {
+            let mut other = p.clone();
+            other.arguments = args.into();
+            assert_eq!(category(&other), None, "{args}");
+        }
+        let mut child = p.clone();
+        child.pid += 1;
+        child.parent = p.pid;
+        table.insert(child.pid, child);
+        assert!(tree(&p, &table, p.uid, 3600).is_none());
+        table.remove(&(p.pid + 1));
+        for (parent, uid, age) in [(42, p.uid, 7200), (1, p.uid + 1, 7200), (1, p.uid, 3599)] {
+            let mut other = p.clone();
+            other.parent = parent;
+            other.uid = uid;
+            other.age_seconds = age;
+            assert!(tree(&other, &table, p.uid, 3600).is_none());
+        }
+        p.executable = "/tmp/sft".into();
+        assert_eq!(category(&p), None);
     }
     #[test]
     fn only_known_orphans_without_unexpected_children_are_candidates() {
@@ -1341,6 +1428,10 @@ int main(int argc, char **argv) {
 }
 
 fn essential(p: &Process) -> bool {
+    #[cfg(target_os = "macos")]
+    if p.executable == scaleft::EXECUTABLE {
+        return true;
+    }
     if super::codex::is_codex(p) {
         return true;
     }
@@ -1430,12 +1521,15 @@ pub(super) fn aggressive_harvest(
     while pid > 1 && protected.insert(pid) {
         pid = table.get(&pid).map_or(0, |p| p.parent);
     }
-    // Wrangler browsers and their helpers are reserved for verified orphan cleanup,
-    // never age-only expiration (including connected and not-yet-observed families).
-    for p in table
-        .values()
-        .filter(|p| p.executable.contains("/.wrangler/chrome/"))
-    {
+    // Wrangler browsers and ScaleFT families bypass age-only expiration. Their
+    // orphan helpers must pass the transport and observation checks in harvest.
+    for p in table.values().filter(|p| {
+        #[cfg(target_os = "macos")]
+        if p.executable == scaleft::EXECUTABLE {
+            return true;
+        }
+        p.executable.contains("/.wrangler/chrome/")
+    }) {
         protected.extend(descendants(p.pid, table));
     }
     let mut selected = BTreeSet::new();

@@ -1037,6 +1037,10 @@ upstream connections are allowed only for the explicitly identified test fixture
 The harvester checks identity, activity and connections again before signalling
 and escalates from TERM to KILL only for the verified processes. Linux uses pidfds
 so a reused PID cannot redirect a signal to another process.
+On macOS, ScaleFT `sft proxycommand` orphans require closed stdin/stdout,
+detached stderr, no IP sockets, and a quiet observation window after at least
+one hour. Agent IPC may remain connected. Both cleanup modes preserve the
+ScaleFT service and active SSH transports; verified helpers receive SIGTERM only.
 Process checks continue at the configured interval while the worktree scan runs,
 so a large Git inventory cannot postpone harvesting for the entire disk scan.
 The maintenance lock remains held until both finish; process observations and
