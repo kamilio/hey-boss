@@ -735,7 +735,9 @@ impl Supervisor {
     fn channel(&self, host: &str) -> Result<()> {
         self.update(host, json!({"state":"connecting"}))?;
         let script = "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; command -v hey-boss >/dev/null 2>&1 || { echo 'Companion binary is missing: hey-boss not found on PATH' >&2; exit 127; }; hey-boss fleet agent --install && exec hey-boss fleet agent --stdio";
-        let mut child = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        crate::ssh::reuse_connection(&mut command, &self.ctx.state, host);
+        let mut child = command
             .args([
                 "-T",
                 "-o",
@@ -763,6 +765,30 @@ impl Supervisor {
         let _ = child.kill();
         let _ = child.wait();
         result
+    }
+    fn allocate_work(
+        &self,
+        db: &crate::database::Connection,
+        node: &str,
+        configured: &[Value],
+        observed: &[Value],
+    ) -> Result<()> {
+        let managed: BTreeSet<_> = configured.iter().filter_map(|w| w["id"].as_str()).collect();
+        let mut workers = configured.to_vec();
+        // Only live independent workers supply extra capacity. Managed intent
+        // remains authoritative even if a stale heartbeat still reports running.
+        workers.extend(
+            observed
+                .iter()
+                .filter(|w| {
+                    w["id"].as_str().is_some_and(|id| !managed.contains(id))
+                        && w["kind"] == "cli"
+                        && w["pid"].as_u64().is_some_and(|pid| pid > 0)
+                        && w["config"]["enabled"] == true
+                })
+                .cloned(),
+        );
+        replica::allocate(db, node, &workers)
     }
     fn channel_inner(&self, host: &str, child: &mut Child) -> Result<()> {
         let mut input = child.stdin.take().unwrap();
@@ -982,7 +1008,15 @@ impl Supervisor {
                                 .map(Vec::as_slice)
                                 .unwrap_or(&[]),
                         )?;
-                        replica::allocate(&db, node, workers.as_array().unwrap())?;
+                        self.allocate_work(
+                            &db,
+                            node,
+                            workers.as_array().unwrap(),
+                            message["workers"]
+                                .as_array()
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
+                        )?;
                         db.execute_batch("COMMIT; BEGIN")?;
                         let mut payload = match message["cursor"].as_i64() {
                             Some(cursor) => replica::incremental(&db, node, cursor)?,
@@ -1752,6 +1786,48 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_companion_gets_allocations_without_becoming_a_saved_worker() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        let yaml = "machines: {peer: {workers: []}}\n";
+        std::fs::write(&app.ctx.desired, yaml).unwrap();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Project',5);
+            INSERT INTO agents(id,metadata,last_seen) VALUES('test:creator','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,labels,version,created_by,created_at,updated_at,sort_order)
+            VALUES('project',1,'Ready','','open','[]',1,'test:creator',0,0,1),
+                  ('project',2,'Ready two','','open','[]',1,'test:creator',0,0,2),
+                  ('project',3,'Ready three','','open','[]',1,'test:creator',0,0,3);").unwrap();
+        let configured = app.configured("peer", &json!([])).unwrap();
+        let observed = vec![
+            json!({"id":"standalone","kind":"cli","pid":123,"config":{"enabled":true,"projects":["project"],"concurrency":1}}),
+        ];
+        app.allocate_work(&db, "peer", configured.as_array().unwrap(), &observed)
+            .unwrap();
+        let allocations = replica::rows(&db, "SELECT * FROM fleet_allocations", &[]).unwrap();
+        assert_eq!(allocations.len(), 2);
+        assert!(allocations.iter().all(|a| a["node"] == "peer"));
+        assert_eq!(app.configured("peer", &json!([])).unwrap(), json!([]));
+        assert_eq!(std::fs::read_to_string(&app.ctx.desired).unwrap(), yaml);
+
+        // Stale observations must not override an explicit pause/drain, and
+        // stopped standalone processes must not reserve more work.
+        db.execute("DELETE FROM fleet_allocations", []).unwrap();
+        let paused = vec![
+            json!({"id":"standalone","intent":"drain","config":{"enabled":false,"projects":["project"]}}),
+        ];
+        app.allocate_work(&db, "peer", &paused, &observed).unwrap();
+        let mut stopped = observed;
+        stopped[0]["pid"] = Value::Null;
+        app.allocate_work(&db, "peer", &[], &stopped).unwrap();
+        assert!(
+            replica::rows(&db, "SELECT * FROM fleet_allocations", &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn bounded_status_counts_all_conflicts_without_loading_history_or_mutating() {

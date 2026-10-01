@@ -491,6 +491,43 @@ mod tests {
     }
 
     #[test]
+    fn sync_inventory_keeps_registered_companions_without_saved_workers() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        fs::create_dir_all(ctx.home.join(".hey-boss")).unwrap();
+        fs::write(
+            ctx.home.join(".hey-boss/config.json"),
+            r#"{"ssh_hosts":["devbox","peer",{"host":"disabled","enabled":false}]}"#,
+        )
+        .unwrap();
+        let yaml = "machines: {local: {workers: []}, peer: {workers: [{id: saved, intent: pause, config: {}}]}}\n";
+        fs::write(&ctx.desired, yaml).unwrap();
+        let hosts = ctx.inventory().unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(
+            hosts.iter().find(|h| h["host"] == "devbox").unwrap()["workers"],
+            json!([])
+        );
+        assert_eq!(
+            hosts.iter().find(|h| h["host"] == "peer").unwrap()["workers"][0]["intent"],
+            "pause"
+        );
+        assert_eq!(fs::read_to_string(&ctx.desired).unwrap(), yaml);
+
+        // Connection inventory changes must take effect without restarting or
+        // rewriting the saved-worker document.
+        fs::write(
+            ctx.home.join(".hey-boss/config.json"),
+            r#"{"ssh_hosts":[]}"#,
+        )
+        .unwrap();
+        fs::write(ctx.state.join("companion-hosts"), "devbox\n").unwrap();
+        let hosts = ctx.inventory().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["host"], "peer");
+    }
+
+    #[test]
     fn structured_edit_preserves_other_settings_and_checks_revision() {
         let fixture = Fixture::new();
         let ctx = &fixture.ctx;

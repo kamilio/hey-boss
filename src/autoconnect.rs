@@ -230,7 +230,7 @@ fn host_key(host: &str) -> String {
     format!("{:016x}", hash.finish())
 }
 pub fn control_path(host: &str) -> Result<PathBuf, String> {
-    Ok(directory()?.join(format!("ssh-{}.sock", host_key(host))))
+    Ok(hey_boss::ssh::control_path(&directory()?, host))
 }
 pub fn connection_lock(host: &str) -> Result<std::fs::File, String> {
     lock(&format!("connection-{}.lock", host_key(host)))

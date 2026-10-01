@@ -21,6 +21,8 @@ pub mod mindmap;
 pub mod notices;
 pub mod routes;
 pub mod skill;
+#[doc(hidden)]
+pub mod ssh;
 pub mod syntax;
 #[cfg(test)]
 mod test_allocations;
