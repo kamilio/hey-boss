@@ -228,6 +228,7 @@ async def run(args):
                     before = measured.cpu_times()
                     latencies, first_bytes = Reservoir(args.sample_limit), Reservoir(args.sample_limit)
                     statuses, poll_latencies, poll_bytes, progress, calendar_windows, rotations = {}, [], [], [], [], []
+                    write_stalls = []
                     rss_peak = measured.memory_info().rss
                     started = time.perf_counter()
                     deadline = started + args.duration
@@ -317,7 +318,54 @@ async def run(args):
                             assert token in seen_tokens, "Proxy did not adopt rotated synthetic credentials"
                             rotations.append({"version":version, "adoption_ms":(time.perf_counter() - changed) * 1000})
 
-                    await asyncio.gather(*(worker() for _ in range(args.concurrency)), poller(), memory(), rotate_credentials())
+                    async def stall_writer():
+                        if not args.lock_every:
+                            return
+
+                        async def health_snapshot():
+                            async with session.get(root + "/logs/api/health") as response:
+                                return await response.json()
+
+                        while time.perf_counter() + args.lock_every + args.lock_seconds + 5 < deadline:
+                            await asyncio.sleep(args.lock_every)
+                            before_lock = await health_snapshot()
+                            # This is the benchmark's disposable database, never a user archive.
+                            with contextlib.closing(sqlite3.connect(directory / "requests.sqlite3", timeout=0, isolation_level=None)) as lock:
+                                acquire_deadline = time.perf_counter() + 5
+                                while True:
+                                    try:
+                                        lock.execute("BEGIN IMMEDIATE")
+                                        break
+                                    except sqlite3.OperationalError as error:
+                                        if "locked" not in str(error) or time.perf_counter() >= acquire_deadline:
+                                            raise
+                                        await asyncio.sleep(0.01)
+                                completed_before = len(latencies)
+                                try:
+                                    await asyncio.sleep(args.lock_seconds)
+                                    during = await health_snapshot()
+                                    completed = len(latencies) - completed_before
+                                    assert completed > 0, "Forwarding stopped while accounting was locked"
+                                    assert during["pending_events"] > 0, during
+                                    assert during["write_errors"] > before_lock["write_errors"], during
+                                    assert "locked" in (during["last_error"] or "").lower(), during
+                                finally:
+                                    lock.execute("ROLLBACK")
+                            released = time.perf_counter()
+                            while True:
+                                recovered = await health_snapshot()
+                                if recovered["committed_events"] >= during["enqueued_events"] and recovered["last_error"] is None:
+                                    break
+                                assert time.perf_counter() - released < 10, "Accounting did not recover after unlocking"
+                                await asyncio.sleep(0.02)
+                            stall = {"cycle":len(write_stalls) + 1, "locked_seconds":args.lock_seconds,
+                                     "streams_completed_while_locked":completed, "pending_at_release":during["pending_events"],
+                                     "recovery_ms":(time.perf_counter() - released) * 1000,
+                                     "write_errors":recovered["write_errors"] - before_lock["write_errors"]}
+                            write_stalls.append(stall)
+                            print(json.dumps({"write_stall":stall}), flush=True)
+
+                    await asyncio.gather(*(worker() for _ in range(args.concurrency)), poller(), memory(), rotate_credentials(), stall_writer())
                     elapsed = time.perf_counter() - started
                     under_load = measured.cpu_times()
                     drain_started = time.perf_counter()
@@ -334,7 +382,7 @@ async def run(args):
                     load_cpu = under_load.user + under_load.system - before.user - before.system
                     sample = {"repeat": repeat + 1, "binary":str(binary), "startup_ms": startup_ms, "requests": len(latencies),
                         "elapsed_seconds": elapsed, "requests_per_second": len(latencies) / elapsed, "cold_request_ms":cold_request_ms,
-                        "latency_samples": len(latencies.samples), "progress": progress, "calendar_windows":calendar_windows, "credential_rotations":rotations,
+                        "latency_samples": len(latencies.samples), "progress": progress, "calendar_windows":calendar_windows, "credential_rotations":rotations, "write_stalls":write_stalls,
                         "latency_ms": {"p50": percentile(latencies, 50), "p95": percentile(latencies, 95), "p99": percentile(latencies, 99)},
                         "first_byte_ms": {"p50": percentile(first_bytes, 50), "p95": percentile(first_bytes, 95), "p99": percentile(first_bytes, 99)},
                         "proxy_cpu_seconds": cpu, "proxy_cpu_us_per_request": cpu * 1e6 / len(latencies),
@@ -352,7 +400,10 @@ async def run(args):
                 if args.verify_accounting:
                     assert statuses == {200: len(latencies)}, statuses
                     assert not health.get("dropped_events") and not health.get("pending_events"), health
-                    assert not health.get("write_errors"), health
+                    assert health.get("write_errors", 0) == sum(stall["write_errors"] for stall in write_stalls), health
+                    assert not health.get("last_error"), health
+                    if args.lock_every:
+                        assert write_stalls, "No database write stall was exercised"
                     if not args.memory_only:
                         with sqlite3.connect(directory / "requests.sqlite3") as connection:
                             assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
@@ -442,7 +493,13 @@ if __name__ == "__main__":
     parser.add_argument("--poll-interval", type=float, default=5)
     parser.add_argument("--calendar-zone", help="Poll compact dashboard with local calendar boundaries in this IANA time zone")
     parser.add_argument("--rotate-every", type=float, default=0, help="Rotate synthetic Claude credential files every N seconds and verify adoption")
+    parser.add_argument("--lock-every", type=float, default=0, help="Pause between deliberate write locks of the disposable accounting database; zero disables")
+    parser.add_argument("--lock-seconds", type=float, default=2, help="Hold each synthetic database write lock for this many seconds")
     args = parser.parse_args()
+    if not math.isfinite(args.lock_every) or not math.isfinite(args.lock_seconds) or args.lock_every < 0 or args.lock_seconds < 1:
+        parser.error("lock-every must be nonnegative and lock-seconds must be at least one second; both must be finite")
+    if args.lock_every and (args.memory_only or args.load_during_init or args.startup_trials or 0 < args.rate < 1 or args.duration <= args.lock_every + args.lock_seconds + 5):
+        parser.error("write-lock checks require persistence, initialized history, rate >= 1 (or saturation), and enough duration for a complete lock/recovery cycle")
     if args.rotate_every and (not args.claude or args.rotate_every < 1 or 0 < args.rate < 1):
         parser.error("rotate-every requires Claude, at least one second and rate >= 1 (or saturation)")
     if args.calendar_zone:
