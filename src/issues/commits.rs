@@ -766,7 +766,12 @@ run_chained() {{
     target=\"$1\"
     shift
     if [ -n \"$target\" ] && [ -x \"$target\" ] && [ ! \"$target\" -ef \"$0\" ]; then
-        \"$target\" \"$@\"
+        # Helpers found with git --git-path must belong to this hook. Append a
+        # child-only override after inherited -c settings, using Git's quoting
+        # for paths with spaces/apostrophes; retain every other Git setting.
+        chain_dir=$(CDPATH= cd \"$(dirname \"$target\")\" && pwd) || exit $?
+        chain_config=$(git rev-parse --sq-quote \"core.hooksPath=$chain_dir\") || exit $?
+        GIT_CONFIG_PARAMETERS=\"${{GIT_CONFIG_PARAMETERS-}} $chain_config\" \"$target\" \"$@\"
         status=$?
         if [ $status -ne 0 ]; then
             exit $status
@@ -1284,6 +1289,159 @@ mod tests {
                         "repo:argument with spaces\n"
                     }
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn hooks_companion_lookup_preserves_config_input_and_rejections_in_worktrees() {
+        let fixture = HookFixture::new();
+        let root = fixture.0.canonicalize().unwrap();
+        let repo = root.join("repo with 'quotes'");
+        let worktree = root.join("linked worktree");
+        let managed = root.join("managed hooks");
+        let previous = root.join("previous 'hooks'");
+        let global = root.join("gitconfig");
+        let log = root.join("calls");
+        let input = root.join("push input");
+        std::fs::write(&input, "refs/heads/main abc refs/heads/main def\n").unwrap();
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&previous).unwrap();
+        provision_git_hooks(&managed).unwrap();
+        std::fs::write(
+            managed.join(".previous-global-hooks-path"),
+            previous.to_str().unwrap(),
+        )
+        .unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(cwd)
+                .env_remove("GIT_CONFIG_PARAMETERS")
+                .env("GIT_CONFIG_COUNT", "0")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            output.stdout
+        };
+        git(&repo, &["init", "--quiet"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Hook Test",
+                "-c",
+                "user.email=hook@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "config",
+                "--file",
+                global.to_str().unwrap(),
+                "core.hooksPath",
+                managed.to_str().unwrap(),
+            ],
+        );
+        let config_before = std::fs::read(&global).unwrap();
+        let wrapper = "#!/bin/sh\nhooks=$(git rev-parse --git-path hooks) || exit\nexec \"$hooks/check companion\" \"$@\"\n";
+        write_hook_atomically(&previous.join("pre-push"), wrapper).unwrap();
+        write_hook_atomically(
+            &previous.join("check companion"),
+            "#!/bin/sh\nprintf 'previous:%s:%s\\n' \"$1\" \"$2\" >> \"$HOOK_LOG\"\nexit \"$PREVIOUS_STATUS\"\n",
+        )
+        .unwrap();
+
+        for local in [".git/hooks", "custom 'hooks'"] {
+            // A local path relative to the checkout must also work in a linked worktree.
+            for checkout in [&repo, &worktree] {
+                let hooks = if local == ".git/hooks" {
+                    repo.join(local)
+                } else {
+                    checkout.join(local)
+                };
+                std::fs::create_dir_all(&hooks).unwrap();
+                write_hook_atomically(&hooks.join("pre-push"), wrapper).unwrap();
+                write_hook_atomically(
+                    &hooks.join("check companion"),
+                    "#!/bin/sh\n[ \"$(git config test.inherited)\" = \"value with 'quotes'\" ] || exit 91\n[ \"$(git config test.environment)\" = preserved ] || exit 92\nprintf 'repo:%s:%s\\n' \"$1\" \"$2\" >> \"$HOOK_LOG\"\ncat >> \"$HOOK_LOG\"\nexit \"$REPO_STATUS\"\n",
+                )
+                .unwrap();
+            }
+            if local != ".git/hooks" {
+                git(&repo, &["config", "core.hooksPath", local]);
+            }
+            for checkout in [&repo, &worktree] {
+                for source in ["global", "environment", "command"] {
+                    // A local hooksPath normally takes precedence over global configuration.
+                    if source == "global" && local != ".git/hooks" {
+                        continue;
+                    }
+                    for (repo_status, previous_status) in [(0, 0), (17, 0), (0, 23)] {
+                        std::fs::write(&log, "").unwrap();
+                        let mut command = Command::new("git");
+                        command
+                            .current_dir(checkout)
+                            .env_remove("GIT_CONFIG_PARAMETERS")
+                            .env("GIT_CONFIG_GLOBAL", &global)
+                            .env("GIT_CONFIG_NOSYSTEM", "1")
+                            .env("GIT_CONFIG_COUNT", "1")
+                            .env("GIT_CONFIG_KEY_0", "test.environment")
+                            .env("GIT_CONFIG_VALUE_0", "preserved")
+                            .env("HOOK_LOG", &log)
+                            .env("REPO_STATUS", repo_status.to_string())
+                            .env("PREVIOUS_STATUS", previous_status.to_string())
+                            .args(["-c", "test.inherited=value with 'quotes'"]);
+                        if source == "environment" {
+                            command
+                                .env("GIT_CONFIG_COUNT", "2")
+                                .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+                                .env("GIT_CONFIG_VALUE_1", &managed);
+                        } else if source == "command" {
+                            command.args(["-c", &format!("core.hooksPath={}", managed.display())]);
+                        }
+                        let output = command
+                            .args(["hook", "run", "--to-stdin"])
+                            .arg(&input)
+                            .args(["pre-push", "--", "remote with spaces", "url with 'quotes'"])
+                            .output()
+                            .unwrap();
+                        assert_eq!(
+                            output.status.code(),
+                            Some(if repo_status != 0 {
+                                repo_status
+                            } else {
+                                previous_status
+                            }),
+                            "{checkout:?}, {local}, {source}: {output:?}"
+                        );
+                        let mut expected = "repo:remote with spaces:url with 'quotes'\nrefs/heads/main abc refs/heads/main def\n".to_owned();
+                        if repo_status == 0 {
+                            expected.push_str("previous:remote with spaces:url with 'quotes'\n");
+                        }
+                        assert_eq!(std::fs::read_to_string(&log).unwrap(), expected);
+                        assert_eq!(std::fs::read(&global).unwrap(), config_before);
+                    }
+                }
             }
         }
     }
