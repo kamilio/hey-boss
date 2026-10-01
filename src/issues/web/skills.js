@@ -103,13 +103,26 @@ function diffFiles(baseCopy, compareCopy) {
   });
 }
 const shortHost = host => String(host || '').replace(/\.local$/i, '') || 'local';
+const escapeSkillHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function rolloutFeedback(data) {
+  const failures = (data.machines || []).filter(machine => machine.error);
+  const failed = !data.busy && (data.error || failures.length);
+  const message = data.error || data.message || (data.busy ? 'Updating your machines…' : '');
+  if (!message && !failed) return '';
+  return `<div class="skill-rollout-feedback ${failed ? 'has-error' : ''}" role="${failed ? 'alert' : 'status'}">
+    <p>${escapeSkillHtml(message)}</p>
+    ${!data.busy ? failures.map(machine => `<p><strong>${escapeSkillHtml(shortHost(machine.host))}:</strong> ${escapeSkillHtml(machine.error)}</p>`).join('') : ''}
+    ${failed ? '<button type="button" class="button small" data-refresh-inventory>Refresh versions</button>' : ''}
+  </div>`;
+}
 function machineCoverage(skill, machines) {
   const known = [...new Set((machines || []).map(m => typeof m === 'string' ? m : m?.host).filter(Boolean))];
   const present = [...new Set(skill?.machines || [])];
   const missing = known.filter(h => !present.includes(h));
   const onAllMachines = known.length > 1 && missing.length === 0 && present.length >= known.length;
   const inSync = (skill?.versions || []).length <= 1;
-  const allGreen = onAllMachines && inSync;
+  const attention = (machines || []).filter(m => m?.error || m?.state === 'attention').map(m => m.host);
+  const allGreen = onAllMachines && inSync && !attention.length;
   const tone = allGreen
     ? 'green'
     : (!inSync || (known.length > 1 && present.length <= 1) ? 'red' : 'orange');
@@ -120,17 +133,18 @@ function machineCoverage(skill, machines) {
         host: h,
         tone,
         isAll: false,
-        title: missing.length
+        title: attention.includes(h) ? `Could not verify ${h}; review the rollout results` : missing.length
           ? `On ${h} · missing on ${missing.map(shortHost).join(', ')}`
           : (!inSync ? `On ${h} · multiple versions across machines` : `Only on ${h}`)
       }));
-  return { known, present, missing, onAllMachines, inSync, allGreen, tone, tags };
+  return { known, present, missing, attention, onAllMachines, inSync, allGreen, tone, tags };
 }
-if(typeof module!=='undefined') module.exports={library,visibleSkills,unresolved,computeDiff,diffFiles,getMarkdownFiles,machineCoverage,shortHost};
+if(typeof module!=='undefined') module.exports={library,visibleSkills,unresolved,computeDiff,diffFiles,getMarkdownFiles,machineCoverage,shortHost,rolloutFeedback};
 if(typeof document!=='undefined') (()=>{
   const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), icon=HeyBossUI.icon;
   let data={machines:[],selected:[],choices:{}}, skills=[], selected=new Set(), choices={}, active='', filter='all', csrf='', dirty=false, pending=false, timer, previewDigest='', compareDigest='', maxWords=400;
   let activeFile='', editingMarkdown=false, editorDraft='', codeMirrorInstance=null, editorScriptPromise=null, deletePromptSkill='';
+  let actionError='';
   const labels={codex:'Codex',claude:'Claude',agents:'Shared agents',project:'Repository',library:'Saved library'};
   function renderMachineTags(skill, includeMissing=false){
     const cov = machineCoverage(skill, data.machines);
@@ -202,7 +216,8 @@ if(typeof document!=='undefined') (()=>{
     }
     cancelBtn?.focus({preventScroll:true});
   }
-  function fail(e){$('#skills-error').textContent=e.message;$('#skills-error').hidden=false;}
+  function renderFeedback(){document.querySelectorAll('[data-rollout-feedback]').forEach(el=>{el.innerHTML=rolloutFeedback({...data,busy:pending||data.busy,message:pending?'Sending request…':data.message,error:actionError});});}
+  function fail(e){actionError=e.message;$('#skills-error').textContent=e.message;$('#skills-error').hidden=false;renderFeedback();}
   function loadEditorBundle(){
     if(window.HeyBossArtifactEditor)return Promise.resolve();
     return editorScriptPromise ||= new Promise((resolve,reject)=>{
@@ -242,9 +257,10 @@ if(typeof document!=='undefined') (()=>{
     $('#skills-summary').innerHTML=[[global.length,'skills discovered'],[global.filter(s=>selected.has(s.name)).length,'selected to sync'],[global.filter(s=>needsAttention(s,data.machines)).length,'not on all machines'],[(data.machines||[]).filter(m=>m.scanned_at).length,'machines scanned']].map(([n,label])=>`<div><strong>${n}</strong><span>${label}</span></div>`).join('');
     const machines=data.machines||[], attention=machines.filter(m=>m.error).length;
     $('#machine-summary').textContent=busy?'Scanning or syncing…':`${machines.length} known${attention?` · ${attention} need attention`:''}`;
-    $('#skills-machines').innerHTML=machines.map(m=>`<article class="machine-card"><div>${icon('monitor')}<strong>${esc(m.hostname||m.host)}</strong><span class="skill-pill ${m.error?'amber':'green'}">${m.state==='synced'?'Synced':m.error?'Offline / cached':'Online'}</span></div><p>${esc(m.host==='local'?'This machine':m.host)} · ${(m.copies||[]).filter(c=>c.scope==='global').length} copies${m.scanned_at?` · ${esc(new Date(m.scanned_at*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}`:''}</p>${m.error?`<p class="machine-error">${esc(m.error)} · Last known copies are kept.</p>`:''}</article>`).join('')||'<p>No machine inventory yet. Scan to discover your skills.</p>';
+    $('#skills-machines').innerHTML=machines.map(m=>`<article class="machine-card"><div>${icon('monitor')}<strong>${esc(m.hostname||m.host)}</strong><span class="skill-pill ${m.error?'amber':'green'}">${m.error?'Needs attention':m.state==='synced'?'Synced':'Online'}</span></div><p>${esc(m.host==='local'?'This machine':m.host)} · ${(m.copies||[]).filter(c=>c.scope==='global').length} copies${m.scanned_at?` · ${esc(new Date(m.scanned_at*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}`:''}</p>${m.error?`<p class="machine-error">${esc(m.error)}</p>`:''}</article>`).join('')||'<p>No machine inventory yet. Scan to discover your skills.</p>';
     renderList();
     if(!editingMarkdown)renderDetail();
+    renderFeedback();
     const conflicts=unresolved(skills,selected,choices), count=global.filter(s=>selected.has(s.name)).length;
     $('#selection-summary').textContent=`${count} skill${count===1?'':'s'} selected${dirty?' · Unsaved changes':''}`;
     $('#skills-status').textContent=conflicts.length?`Pick a version to keep for ${conflicts.join(', ')} before distributing all.`:data.message||'Scan your machines to build the library.';
@@ -289,6 +305,7 @@ if(typeof document!=='undefined') (()=>{
           <button type="button" class="button small ${chosen?.digest===compareVersion.digest?'primary':''}" data-unify="${esc(compareVersion.digest)}" ${pending||data.busy?'disabled':''}>Keep Version ${compIdx} (${esc(compHosts)})</button>
         </div>
       </div>
+      <div data-rollout-feedback></div>
       ${changedFiles.map(file => `<div class="gh-diff-file">
         <div class="gh-diff-file-header">
           <span class="gh-diff-file-path">${icon('code')}<code>${esc(file.path)}</code> <small>(${esc(file.status)})</small></span>
@@ -335,7 +352,9 @@ if(typeof document!=='undefined') (()=>{
       <span class="agent-target ${hasAgent('claude')?'present':''}">${icon('spark')}Claude <small>${hasAgent('claude')?'found':'not found'}</small></span>
       ${(() => {
         const cov = machineCoverage(skill, data.machines);
-        return cov.allGreen
+        return cov.attention.length
+          ? '<span class="skill-pill amber">Rollout needs attention</span>'
+          : cov.allGreen
           ? '<span class="skill-pill green">Synced on all machines</span>'
           : !cov.inSync
             ? `<span class="skill-pill amber">${skill.versions.length} versions · Pick one to unify</span>`
@@ -348,12 +367,13 @@ if(typeof document!=='undefined') (()=>{
     <section class="skill-section">
       <div class="skill-section-title"><h3>Versions across machines <span>${skill.versions.length}</span></h3><span>${(() => {
         const cov = machineCoverage(skill, data.machines);
-        return !cov.inSync
+        return cov.attention.length ? 'Review the rollout results below' : !cov.inSync
           ? 'Pick one version to unify across all machines'
           : cov.missing.length
             ? `Missing on ${cov.missing.map(shortHost).join(', ')} · Distribute to install everywhere`
             : `In sync across all ${cov.known.length || 1} machines`;
       })()}</span></div>
+      <div data-rollout-feedback></div>
       ${skill.versions.length>1?'<p class="skill-conflict-note">This skill differs across machines. Review the GitHub diff below and pick the version you want to keep everywhere.</p>':''}
       <div class="skill-versions">${skill.versions.map((v,i)=>{
         const locations=skill.copies.filter(c=>c.digest===v.digest);
@@ -407,6 +427,7 @@ if(typeof document!=='undefined') (()=>{
         <p class="skill-source-path">${esc(preview.host)} · ${esc(preview.path)}</p>
       </div>`}
     </section>`;
+    renderFeedback();
     if(editingMarkdown){
       const host=$('#skill-codemirror-host'), ta=$('#skill-markdown-textarea');
       if(ta) ta.oninput=()=>{editorDraft=ta.value;};
@@ -434,6 +455,7 @@ if(typeof document!=='undefined') (()=>{
   };
   $('#skills-list').onchange=e=>{const name=e.target.dataset.select;if(name){e.target.checked?selected.add(name):selected.delete(name);changes();}};
   $('#skills-detail').onclick=async e=>{
+    if(e.target.closest('[data-refresh-inventory]')){await action('scan');return;}
     const skill=skills.find(s=>s.key===active);
     if(!skill)return;
     const choose=e.target.closest('[data-choose]'), unify=e.target.closest('[data-unify]'), preview=e.target.closest('[data-preview]'), line=e.target.closest('[data-line]');
@@ -519,7 +541,7 @@ if(typeof document!=='undefined') (()=>{
   $('#skills-detail').onchange=e=>{if(e.target.id==='skill-word-budget'){if(!e.target.reportValidity())return;maxWords=Number(e.target.value);dirty=true;$('#skills-reset').hidden=false;$('#selection-summary').textContent+=' · Unsaved policy';}};
   $('#skills-reset').onclick=()=>{dirty=false;previewDigest='';editingMarkdown=false;deletePromptSkill='';poll();};
   async function action(kind, extra={}){
-    if(pending||data.busy)return;pending=true;$('#skills-error').hidden=true;render();
+    if(pending||data.busy)return;pending=true;actionError='';$('#skills-error').hidden=true;render();
     try{
       const payload={action:kind,revision:data.revision,selected:[...selected],choices,max_words:maxWords,...extra};
       const value=await request(payload);

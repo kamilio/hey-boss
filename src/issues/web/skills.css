@@ -103,3 +103,4 @@
 
 .skill-source-path-inline { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
 .skill-source-path-inline code { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.skill-rollout-feedback{padding:12px 14px;margin:12px 0;border:1px solid var(--line);border-radius:8px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.skill-rollout-feedback p{margin:0 0 6px}.skill-rollout-feedback p:last-child{margin-bottom:0}.skill-rollout-feedback.has-error{border-color:var(--danger);color:var(--danger)}.skill-rollout-feedback .button{margin-top:6px}
