@@ -28,8 +28,18 @@ pub(crate) fn max_active_buckets(config: &Config) -> usize {
 }
 
 pub(crate) type SharedResult = Option<Result<Arc<Response>>>;
-pub(crate) type Inflight =
-    Arc<Mutex<HashMap<String, (watch::Receiver<SharedResult>, Arc<AtomicBool>, Arc<Mutex<Instant>>)>>>;
+pub(crate) type Inflight = Arc<
+    Mutex<
+        HashMap<
+            String,
+            (
+                watch::Receiver<SharedResult>,
+                Arc<AtomicBool>,
+                Arc<Mutex<Instant>>,
+            ),
+        >,
+    >,
+>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RateLimit {
@@ -189,7 +199,10 @@ impl Scheduler {
         let mut secondary_until = Instant::now();
         let mut active = Vec::<Active>::new();
         let prod = self.config.rest_url.host_str() == Some("api.github.com");
-        let max_active = self.config.queue_capacity.min(max_active_buckets(&self.config));
+        let max_active = self
+            .config
+            .queue_capacity
+            .min(max_active_buckets(&self.config));
         loop {
             self.metrics
                 .active
@@ -237,8 +250,9 @@ impl Scheduler {
             }
             let global = global_next.max(secondary_until);
             let next = {
-                let eligible =
-                    |job: &Job| ready(job, &budgets, global) <= now && !lane_busy(&active, job, prod);
+                let eligible = |job: &Job| {
+                    ready(job, &budgets, global) <= now && !lane_busy(&active, job, prod)
+                };
                 // Prefer interactive policy, but admit an eligible background job
                 // after at most three foreground dispatches in the same quota lane.
                 // A GraphQL/detail completion cannot reset core's fairness counter.
@@ -555,7 +569,8 @@ impl Scheduler {
                 } else {
                     secondary_until = secondary_until.max(quota_deadline(wait));
                 }
-                if job.attempts >= self.config.max_attempts || quota_deadline(wait) >= job.deadline()
+                if job.attempts >= self.config.max_attempts
+                    || quota_deadline(wait) >= job.deadline()
                 {
                     self.finish(
                         job,
