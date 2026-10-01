@@ -97,7 +97,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
             .spawn()
             .unwrap(),
     );
-    drop(fixture.connection());
+    let owner_pid = fixture.connection().owner_pid().unwrap();
     fixture.create("Sandbox read test");
     let path = fixture.root.join("issues.db").canonicalize().unwrap();
     let identity = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
@@ -123,7 +123,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
                 args.push("--json");
             }
             let command = fixture.command(&args);
-            for piped in [false, true] {
+            for transport in ["direct", "pipe", "redirect"] {
                 for denied in [false, true] {
                     let mut invocation = if denied {
                         let mut sandbox = Command::new("/usr/bin/sandbox-exec");
@@ -132,7 +132,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
                     } else {
                         Command::new("/usr/bin/env")
                     };
-                    if piped {
+                    if transport == "pipe" {
                         // Positional arguments preserve quoting; pipefail checks
                         // the CLI's status rather than the successful consumer.
                         invocation.args([
@@ -141,6 +141,13 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
                             "pipefail",
                             "-c",
                             "\"$@\" | cat",
+                            "--",
+                        ]);
+                    } else if transport == "redirect" {
+                        invocation.args([
+                            "/bin/bash",
+                            "-c",
+                            "\"$@\" > read-output; status=$?; cat read-output; exit \"$status\"",
                             "--",
                         ]);
                     }
@@ -161,7 +168,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
                     assert_eq!(
                         output.status.code(),
                         Some(if denied { 1 } else { 0 }),
-                        "{args:?}, piped={piped}, denied={denied}: {stdout}{stderr}"
+                        "{args:?}, transport={transport}, denied={denied}: {stdout}{stderr}"
                     );
                     if denied {
                         let message = if json {
@@ -203,6 +210,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
         !startup.exists(),
         "Denied clients must not try to start another service"
     );
+    assert_eq!(fixture.connection().owner_pid().unwrap(), owner_pid);
 }
 
 #[test]
