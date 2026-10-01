@@ -23,6 +23,9 @@ impl Traffic {
         // One atomic word keeps rollover and increment indivisible. A delayed
         // recording cannot overwrite a newer bucket after the ring wraps.
         let slot = &self.0[(second % 60) as usize];
+        // Rust 1.99 renamed this to try_update; retain the identical operation
+        // so existing Rust 1.98 installations can still build the proxy.
+        #[allow(deprecated)]
         let _ = slot.fetch_update(Relaxed, Relaxed, |value| {
             let recorded = value >> 32;
             if recorded > second {
