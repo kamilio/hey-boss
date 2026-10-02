@@ -634,16 +634,20 @@ pub(crate) fn remove(
     Ok((changed, list(db, &project.id, number)?))
 }
 
-pub(crate) fn list_by_project(
+pub(crate) fn list_for_issues(
     db: &Connection,
     project_id: &str,
+    numbers: &[i64],
 ) -> Result<std::collections::HashMap<i64, Vec<Value>>> {
+    if numbers.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
     migrate(db)?;
     let mut stmt = db.prepare(
-        "SELECT issue_number, sha, url, title, added_by, created_at, origin FROM issue_commits WHERE project_id=?1 ORDER BY created_at, sha",
+        "SELECT issue_number, sha, url, title, added_by, created_at, origin FROM json_each(?2) requested CROSS JOIN issue_commits WHERE project_id=?1 AND issue_number=requested.value ORDER BY issue_number, created_at, sha",
     )?;
     let mut map: std::collections::HashMap<i64, Vec<Value>> = std::collections::HashMap::new();
-    let rows = stmt.query_map([project_id], |r| {
+    let rows = stmt.query_map(params![project_id, serde_json::to_string(numbers)?], |r| {
         let num: i64 = r.get(0)?;
         let sha: String = r.get(1)?;
         let short_sha: String = sha.chars().take(7).collect();
