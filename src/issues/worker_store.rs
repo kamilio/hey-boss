@@ -3,6 +3,7 @@ use super::*;
 use crate::issues::worker::{Job, ProjectConfig, now};
 use crate::issues::worker_infrastructure;
 pub(super) const HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_issue_history ON worker_runs(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
+pub(super) const CONTROL_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_control_status ON worker_runs(id,stop_requested,claimed_at,state,reservation_expires);";
 // Delete only the range older than the hundredth-newest event. A missing
 // boundary is NULL, so short histories are left intact.
 const PRUNE_WORKER_EVENTS: &str = "DELETE FROM worker_events WHERE run_id=?1 AND id < (SELECT id FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 1 OFFSET 99)";
@@ -387,7 +388,7 @@ impl Store {
         Ok(())
     }
     pub(crate) fn worker_model_expired(&self, job: &Job) -> Result<bool> {
-        Ok(self.db.query_row("SELECT state='awaiting_model' AND claimed_at IS NULL AND reservation_expires<=?2 FROM worker_runs WHERE id=?1", params![job.id, now()], |row| row.get(0))?)
+        Ok(self.db.query_row("SELECT state='awaiting_model' AND claimed_at IS NULL AND reservation_expires<=?2 FROM worker_runs INDEXED BY worker_control_status WHERE id=?1", params![job.id, now()], |row| row.get(0))?)
     }
     /// Atomically reserve within this worker's capacity, leaving the issue unassigned.
     pub(crate) fn worker_reserve(
@@ -443,30 +444,37 @@ impl Store {
         Ok(())
     }
     pub(crate) fn worker_claim_expired(&self, job: &Job) -> Result<bool> {
-        Ok(self.db.query_row("SELECT state<>'awaiting_model' AND claimed_at IS NULL AND reservation_expires IS NOT NULL AND reservation_expires<=?2 FROM worker_runs WHERE id=?1",params![job.id,now()],|r|r.get(0))?)
+        Ok(self.db.query_row("SELECT state<>'awaiting_model' AND claimed_at IS NULL AND reservation_expires IS NOT NULL AND reservation_expires<=?2 FROM worker_runs INDEXED BY worker_control_status WHERE id=?1",params![job.id,now()],|r|r.get(0))?)
     }
     pub(crate) fn worker_cancelled(&self, job: &Job) -> Result<bool> {
         // Deadline checks have their own terminal states. Rechecking time here
         // can turn a deadline crossed between queries into a cancellation.
-        let (stop, claimed): (bool, Option<i64>) = self.db.query_row(
-            "SELECT stop_requested,claimed_at FROM worker_runs WHERE id=?1",
-            [&job.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        // SQLite otherwise prefers unique keys that require reading overflow
+        // pages past the embedded job/task body, even for these small fields.
+        let (stop, claimed, state, assignee, closed_by, deleted):
+            (bool, Option<i64>, String, Option<String>, Option<String>, bool) = self.db.query_row(
+            "SELECT r.stop_requested,r.claimed_at,i.state,i.assignee,i.closed_by,i.deleted_at IS NOT NULL
+             FROM worker_runs r INDEXED BY worker_control_status
+             CROSS JOIN issues i INDEXED BY issue_assignment_summary
+             WHERE r.id=?1 AND i.project_id=?2 AND i.number=?3",
+            params![job.id, job.project.id, job.number()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )?;
+        if stop || deleted {
+            return Ok(true);
+        }
+        if claimed.is_none() {
+            return Ok(state != "open"
+                || (assignee.is_some() && assignee.as_deref() != Some(&job.actor.id)));
+        }
+        if assignee.as_deref() == Some(&job.actor.id)
+            || (state == "closed" && closed_by.as_deref() == Some(&job.actor.id))
+        {
+            return Ok(false);
+        }
+        // Only an ownership handoff needs full requirements and event history.
         let issue = get_issue(&self.db, &job.project.id, job.number(), true)?;
-        let waiting = claimed.is_none();
-        Ok(stop
-            || issue.deleted_at.is_some()
-            || if waiting {
-                issue.state != "open"
-                    || (issue.assignee.is_some()
-                        && issue.assignee.as_deref() != Some(&job.actor.id))
-            } else {
-                issue.assignee.as_deref() != Some(&job.actor.id)
-                    && !(issue.state == "closed"
-                        && issue.closed_by.as_deref() == Some(&job.actor.id))
-                    && !own_pr_handoff(&self.db, job, &issue)?
-            })
+        Ok(!own_pr_handoff(&self.db, job, &issue)?)
     }
     pub(crate) fn worker_event(
         &mut self,
@@ -809,6 +817,122 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap()
+        }
+    }
+
+    #[test]
+    fn worker_ownership_poll_does_not_read_issue_or_job_body_pages() {
+        let mut f = HandoffFixture::new(false);
+        let path = f.root.join("issues.db");
+        // Exercise the upgrade from the previous assignment index as well.
+        f.store.db.execute_batch("DROP INDEX issue_assignment_summary; CREATE INDEX issue_assignment_summary ON issues(project_id,number,assignment_target,assignee);").unwrap();
+        f.store = Store::open(&path).unwrap();
+        let read_pages = |store: &Store, job: &Job| {
+            store
+                .db
+                .execute_batch("PRAGMA cache_size=-64; PRAGMA shrink_memory")
+                .unwrap();
+            let mut pages = 0;
+            let mut high = 0;
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        store.db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        1
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            assert!(!store.worker_model_expired(job).unwrap());
+            assert!(!store.worker_claim_expired(job).unwrap());
+            assert!(!store.worker_cancelled(job).unwrap());
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        store.db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        0
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            pages
+        };
+        let small = read_pages(&f.store, &f.job);
+        let body = "x".repeat(1024 * 1024);
+        f.store
+            .db
+            .execute("UPDATE issues SET body=?1", [&body])
+            .unwrap();
+        f.job.issue["body"] = json!(body);
+        f.store
+            .db
+            .execute(
+                "UPDATE worker_runs SET job=?1",
+                [serde_json::to_string(&f.job).unwrap()],
+            )
+            .unwrap();
+        let large = read_pages(&f.store, &f.job);
+        eprintln!(
+            "Worker control cache misses for small/1-MiB issue and job bodies: {small}/{large}"
+        );
+        assert!(
+            large <= small + 8,
+            "Polling read body overflow pages: {small} -> {large}"
+        );
+    }
+
+    #[test]
+    fn worker_ownership_poll_preserves_claim_and_closure_states() {
+        let f = HandoffFixture::new(false);
+        for (claimed, state, owner, closed_by, deleted, stopped, cancelled) in [
+            (false, "open", None, None, false, false, false),
+            (false, "open", Some("self"), None, false, false, false),
+            (false, "ready", Some("self"), None, false, false, true),
+            (false, "open", Some("boss"), None, false, false, true),
+            (true, "open", Some("self"), None, false, false, false),
+            (true, "ready", Some("self"), None, false, false, false),
+            (true, "open", None, None, true, false, true),
+            (true, "open", Some("self"), None, false, true, true),
+            (true, "closed", None, Some("self"), false, false, false),
+            (true, "closed", None, Some("boss"), false, false, true),
+        ] {
+            let actor = |name| match name {
+                Some("self") => Some(f.job.actor.id.as_str()),
+                Some("boss") => Some("human:boss"),
+                _ => None,
+            };
+            f.store
+                .db
+                .execute(
+                    "INSERT OR IGNORE INTO agents VALUES('human:boss','{}',0)",
+                    [],
+                )
+                .unwrap();
+            f.store
+                .db
+                .execute(
+                    "UPDATE issues SET state=?1,assignee=?2,closed_by=?3,deleted_at=?4",
+                    params![state, actor(owner), actor(closed_by), deleted.then_some(1)],
+                )
+                .unwrap();
+            f.store
+                .db
+                .execute(
+                    "UPDATE worker_runs SET claimed_at=?1,stop_requested=?2",
+                    params![claimed.then_some(1), stopped],
+                )
+                .unwrap();
+            assert_eq!(
+                f.store.worker_cancelled(&f.job).unwrap(),
+                cancelled,
+                "{claimed} {state} {owner:?} {closed_by:?} {deleted} {stopped}"
+            );
         }
     }
 

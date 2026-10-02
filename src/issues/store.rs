@@ -1230,9 +1230,10 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery')", [], |r| r.get::<_, i64>(0))? < 11 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery','worker_control_status')", [], |r| r.get::<_, i64>(0))? < 12 {
             db.execute_batch(mindmap::INDEXES)?;
             db.execute_batch(workers::HISTORY_INDEX)?;
+            db.execute_batch(workers::CONTROL_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
             db.execute_batch(registry::PROJECT_QUEUE_INDEX)?;
             db.execute_batch(registry::LEGACY_RUNTIME_INDEX)?;
