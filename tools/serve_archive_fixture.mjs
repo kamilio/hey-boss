@@ -71,19 +71,28 @@ try {
   db.prepare('INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES(?,?,?,?,?,?)').run('named:Archive QA',1,'human:boss','edited',old,'{}');
   const add=db.prepare('INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES(?,?,?,?,?,?)');
   for(let n=0;n<48;n++)add.run('named:Archive QA',1,'human:boss','edited',old+n+1,JSON.stringify({before:{title:'Earlier title '+n},after:{title:'Later title '+n}}));
+
+  const job={id:'archive-ui-run',project:{id:'named:Archive QA',name:'Archive QA'},issue:{number:2,title:'Closed archive conversation 2',body:'Saved job context'},comments:[],config:{cwd:root,prompt:'Saved prompt',enabled:false},actor:{id:'human:boss',kind:'human',session_id:null,machine:'fixture',host:'fixture',pid:null,process_start:null,cwd:root,source:'fixture',model:null},owner_pid:1,owner_start:'finished',machine:'fixture'};
+  db.prepare('INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,expanded_prompt,last_event) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(job.id,job.project.id,2,JSON.stringify(job),'human:boss','completed',1,'finished','fixture',old,old,old,'Saved expanded prompt','Archived worker event 28');
+  db.prepare('INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?,?,?,?,?)').run('archive-ui-worker','managed',JSON.stringify({name:'Archive fixture',directory:root,projects:[job.project.id],enabled:false}),1,old);
+  db.prepare('UPDATE worker_runs SET worker_id=? WHERE id=?').run('archive-ui-worker',job.id);
+  const workerEvent=db.prepare('INSERT INTO worker_events(run_id,created_at,text) VALUES(?,?,?)');
+  for(let n=1;n<=28;n++)workerEvent.run(job.id,old,'Archived worker event '+n);
   console.log(JSON.stringify({fixture_root:root,waiting_for_archive:true}));
   for(let n=0;;n++) {
     const archived=db.prepare('SELECT count(*) n FROM issues WHERE archive_key IS NOT NULL AND archive_cleanup=0').get().n;
-    if(archived===3)break;
+    const runArchived=db.prepare('SELECT archive_key IS NOT NULL AND archive_cleanup=0 done FROM worker_runs WHERE id=?').get(job.id).done;
+    if(archived===3&&runArchived)break;
     if(n>180)throw Error('Background archive did not finish');
     await new Promise(r=>setTimeout(r,1000));
   }
   if(db.prepare('SELECT count(*) n FROM comments WHERE issue_number<=3').get().n!==0)throw Error('Fixture history is still hot');
+  if(db.prepare('SELECT count(*) n FROM worker_events').get().n!==1)throw Error('Fixture logs are still hot');
   db.close();
   console.log('ARCHIVE READY: three cold issues and a recent hot control');
   store=new HubStore();store.setIssueProjects(boot.projects);
-  const headers={'Content-Type':'application/json',Authorization:'Bearer '+'synthetic-reopen-fixture'.repeat(2)};
-  app=createApp({store,hubToken:'synthetic-reopen-fixture'.repeat(2),origin:paired,secure:false});
+  const headers={'Content-Type':'application/json',Authorization:'Bearer '+'synthetic-archive-fixture'.repeat(2)};
+  app=createApp({store,hubToken:'synthetic-archive-fixture'.repeat(2),origin:paired,secure:false});
   app.get('/fixture-pairing',(_req,res)=>res.json({code:store.pairing()}));
   server=app.listen(52062,'127.0.0.1');
   async function relay() {
