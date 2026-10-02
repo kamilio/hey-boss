@@ -774,6 +774,70 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     ] {
         assert_eq!(issue(&peer, &args, 2)["error"]["code"], "invalid_input");
     }
+    // Ready followed by GitHub assignment uses the companion's authenticated
+    // tunnel, retaining the original actor and the source's dependency usability.
+    issue(&main, &["create", "--title", "Ready PR"], 0);
+    issue(&main, &["claim", "3"], 0);
+    issue(
+        &peer,
+        &[
+            "--supervisor",
+            "pr",
+            "add",
+            "3",
+            "https://github.com/example/repo/pull/3",
+            "--request-id",
+            "ready-pr",
+        ],
+        0,
+    );
+    let ready = issue(&peer, &["ready", "3", "--request-id", "ready-source"], 0);
+    assert_eq!(ready["issue"]["state"], "ready");
+    assert_eq!(ready["issue"]["assignee"], "human:boss");
+    let denied = peer
+        .command(&[
+            "issue",
+            "--project",
+            "Authority",
+            "--agent",
+            "codex:stranger",
+            "--json",
+            "assign",
+            "3",
+            "github",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(denied.status.code(), Some(4));
+    assert!(!String::from_utf8_lossy(&denied.stdout).contains("--force"));
+    let args = ["assign", "3", "github", "--request-id", "ready-watch"];
+    let watched = issue(&peer, &args, 0);
+    assert_eq!(watched["store"]["host"], "supervisor");
+    assert_eq!(watched["issue"]["state"], "ready");
+    assert_eq!(watched["issue"]["assignee"], "watcher:github");
+    assert_eq!(issue(&peer, &args, 0)["issue"], watched["issue"]);
+    assert_eq!(issue(&main, &["view", "3"], 0)["issue"], watched["issue"]);
+    assert_eq!(
+        main_db
+            .query_row(
+                "SELECT count(*) FROM events WHERE issue_number=3 AND action='assigned'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        peer_db
+            .query_row(
+                "SELECT count(*) FROM requests WHERE request_id='ready-watch'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+
     supervisor.terminate();
     assert_eq!(supervisor.0.try_wait().unwrap().unwrap().code(), Some(0));
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -800,6 +864,8 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         1,
     );
     assert_eq!(disconnected["error"]["code"], "fleet_unavailable");
+    let offline_assignment = issue(&peer, &["assign", "3", "github"], 1);
+    assert_eq!(offline_assignment["error"]["code"], "fleet_unavailable");
     assert!(
         disconnected["error"]["message"]
             .as_str()

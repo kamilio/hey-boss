@@ -67,6 +67,29 @@ fn assignment_handoff_needs_no_revision_and_preserves_ownership() {
 }
 
 #[test]
+fn ready_owner_can_handoff_to_github_without_reopening_or_force() {
+    let f = Fixture::new("ready-github");
+    f.value("issue", &["create", "--title", "PR work"]);
+    f.value("issue", &["claim", "1"]);
+    f.value(
+        "issue",
+        &["pr", "add", "1", "https://github.com/example/repo/pull/1"],
+    );
+    f.value("issue", &["ready", "1"]);
+    let rejected = f.run("issue", &["assign", "1", "github"], "session-b");
+    assert_eq!(rejected.status.code(), Some(4));
+    let error: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(!message.contains("--force"), "{message}");
+    assert!(message.contains("Ready handoff"), "{message}");
+    let args = ["assign", "1", "github", "--request-id", "ready-github"];
+    let handed = f.value("issue", &args);
+    assert_eq!(handed["issue"]["assignment"]["kind"], "github");
+    assert_eq!(handed["issue"]["state"], "ready");
+    assert_eq!(f.value("issue", &args)["issue"], handed["issue"]);
+}
+
+#[test]
 fn artifact_lifecycle_needs_no_revision() {
     let f = Fixture::new("artifacts");
     let created = f.value(

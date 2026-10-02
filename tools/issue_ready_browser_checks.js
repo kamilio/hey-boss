@@ -75,6 +75,13 @@ async page => {
   check(ready.assignee==='human:boss'&&ready.closed_at===null,'Ready assigns Boss without closing');
   check(ready.pull_requests[0].status==='unknown','Ready does not require or invent green CI');
   check((await page.locator('.issue-readiness').innerText()).includes('awaiting PR review'),'Ready status explains review handoff');
+  await page.locator('#issue-assignment').selectOption('github');
+  await page.waitForFunction(()=>model.detail?.issue.assignment?.kind==='github');
+  check((await view(1)).state==='ready','Watcher assignment preserves Ready');
+  check((await view(2)).state==='open','Watcher assignment preserves dependent usability');
+  check(await page.locator('#issue-assignment').inputValue()==='github','Watcher selection persists');
+  await page.reload();await page.locator('.state-pill.ready').waitFor();
+  check(await page.locator('#issue-assignment').inputValue()==='github','Watcher survives reload');
   for(const scheme of ['light','dark']){
     await page.emulateMedia({colorScheme:scheme,reducedMotion:'reduce'});
     for(const width of [1440,768,390,320]){
