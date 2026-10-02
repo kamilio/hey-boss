@@ -932,15 +932,47 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
         None
     };
     let mut writer = RowWriter::new(db);
+    // Canonical journals use integer sequences. Read only this batch's receipts
+    // and update the cache after each successful insert, including in-batch repeats.
+    // Retain SQLite's affinity semantics for older/noncanonical sequence values.
+    let mut saved = match changes
+        .iter()
+        .map(|change| change["seq"].as_i64())
+        .collect::<Option<Vec<_>>>()
+    {
+        Some(sequences) => {
+            let mut saved = BTreeMap::new();
+            if !sequences.is_empty() {
+                for row in rows(
+                    db,
+                    "SELECT r.seq,r.result FROM json_each(?2) requested CROSS JOIN fleet_receipts r WHERE r.node=?1 AND r.seq=requested.value",
+                    &[json!(node), json!(serde_json::to_string(&sequences)?)],
+                )? {
+                    saved.insert(
+                        row["seq"].as_i64().unwrap(),
+                        row["result"].as_str().unwrap().to_owned(),
+                    );
+                }
+            }
+            Some(saved)
+        }
+        None => None,
+    };
     let mut results = vec![];
     for change in changes {
-        let previous = rows(
-            db,
-            "SELECT result FROM fleet_receipts WHERE node=? AND seq=?",
-            &[json!(node), change["seq"].clone()],
-        )?;
-        let mut receipt = if let Some(r) = previous.first() {
-            serde_json::from_str(r["result"].as_str().unwrap())?
+        let previous = if let Some(saved) = &saved {
+            saved.get(&change["seq"].as_i64().unwrap()).cloned()
+        } else {
+            rows(
+                db,
+                "SELECT result FROM fleet_receipts WHERE node=? AND seq=?",
+                &[json!(node), change["seq"].clone()],
+            )?
+            .first()
+            .map(|row| row["result"].as_str().unwrap().to_owned())
+        };
+        let mut receipt = if let Some(previous) = previous {
+            serde_json::from_str(&previous)?
         } else {
             db.execute_batch("SAVEPOINT incoming")?;
             let result = match apply_change(&mut writer, node, change) {
@@ -956,15 +988,15 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
                     conflict(db, node, change, &e.to_string())?
                 }
             };
+            let encoded = result.to_string();
             execute(
                 db,
                 "INSERT INTO fleet_receipts VALUES(?,?,?)",
-                &[
-                    json!(node),
-                    change["seq"].clone(),
-                    json!(result.to_string()),
-                ],
+                &[json!(node), change["seq"].clone(), json!(encoded)],
             )?;
+            if let Some(saved) = &mut saved {
+                saved.insert(change["seq"].as_i64().unwrap(), encoded);
+            }
             result
         };
         if change["table_name"] == "issue_subtasks" {
@@ -4161,6 +4193,7 @@ mod tests {
     #[test]
     fn incoming_change_batch_reuses_schema_and_keeps_receipts_replayable() {
         let f = Fixture::new();
+        f.db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO fleet_receipts SELECT 'peer',10000+x,'{\"state\":\"applied\"}' FROM n").unwrap();
         let template = rows(&f.db, "SELECT * FROM agents WHERE id='human:fixture'", &[])
             .unwrap()
             .remove(0);
@@ -4174,9 +4207,13 @@ mod tests {
         let receipts = accept_changes(&db, "peer", &changes).unwrap();
         drop(db);
         let (commands, steps) = transport.join().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&f.path);
+        let replay = accept_changes(&db, "peer", &changes).unwrap();
+        drop(db);
+        let (replay_commands, replay_steps) = transport.join().unwrap();
         owner.stop();
         assert!(receipts.iter().all(|receipt| receipt["state"] == "applied"));
-        assert_eq!(accept_changes(&f.db, "peer", &changes).unwrap(), receipts);
+        assert_eq!(replay, receipts);
         assert_eq!(
             rows(
                 &f.db,
@@ -4184,7 +4221,7 @@ mod tests {
                 &[]
             )
             .unwrap()[0]["count"],
-            128
+            20128
         );
         assert_eq!(
             rows(
@@ -4196,7 +4233,97 @@ mod tests {
             128
         );
         eprintln!("128 incoming agent changes: {commands} RPCs, {steps} VM steps");
-        assert!(commands <= 128 * 6 + 3, "{commands} RPCs");
+        eprintln!("128 replayed receipts: {replay_commands} RPCs, {replay_steps} query VM steps");
+        assert!(commands <= 128 * 5 + 4, "{commands} RPCs");
+        assert!(replay_commands <= 3, "{replay_commands} replay RPCs");
+        assert!(
+            replay_steps <= 5000,
+            "Receipt lookup scanned unrelated history: {replay_steps} query VM steps"
+        );
+    }
+
+    #[test]
+    fn receipt_batches_preserve_duplicates_conflicts_sender_scope_and_rollback() {
+        let f = Fixture::new();
+        let template = rows(&f.db, "SELECT * FROM agents WHERE id='human:fixture'", &[])
+            .unwrap()
+            .remove(0);
+        let change = |seq: Value, id: &str, seen: i64| {
+            let mut row = template.clone();
+            row["id"] = json!(id);
+            row["last_seen"] = json!(seen);
+            json!({"seq":seq,"table_name":"agents","before_json":null,"after_json":row.to_string()})
+        };
+        f.db.execute_batch("INSERT INTO fleet_receipts VALUES('peer',2,'{\"state\":\"conflict\",\"reason\":\"Saved conflict\"}'),('other',1,'{\"state\":\"conflict\"}')").unwrap();
+        let batch = vec![
+            change(json!(1), "human:one", 10),
+            change(json!(1), "human:one", 20),
+            change(json!(2), "human:ignored", 30),
+            change(json!(3), "human:two", 40),
+        ];
+        let receipts = accept_changes(&f.db, "peer", &batch).unwrap();
+        assert_eq!(receipts[0], receipts[1]);
+        assert_eq!(receipts[0]["state"], "applied");
+        assert_eq!(
+            receipts[2],
+            json!({"state":"conflict","reason":"Saved conflict","seq":2})
+        );
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT last_seen FROM agents WHERE id='human:one'",
+                &[]
+            )
+            .unwrap()[0]["last_seen"],
+            10
+        );
+        assert!(
+            rows(&f.db, "SELECT * FROM agents WHERE id='human:ignored'", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(accept_changes(&f.db, "peer", &batch).unwrap(), receipts);
+
+        let first = change(json!(4), "human:rollback", 50);
+        let invalid = json!({"seq":5,"table_name":"agents","before_json":null,"after_json":"{"});
+        assert!(accept_changes(&f.db, "peer", &[first.clone(), invalid]).is_err());
+        assert!(
+            rows(&f.db, "SELECT * FROM agents WHERE id='human:rollback'", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            rows(
+                &f.db,
+                "SELECT * FROM fleet_receipts WHERE node='peer' AND seq=4",
+                &[]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            accept_changes(&f.db, "peer", &[first]).unwrap()[0]["state"],
+            "applied"
+        );
+
+        // SQLite's integer affinity historically accepts numeric strings and
+        // treats them as the same receipt key as an integer sequence.
+        let legacy = [
+            change(json!("6"), "human:legacy", 60),
+            change(json!(6), "human:legacy", 70),
+        ];
+        let receipts = accept_changes(&f.db, "peer", &legacy).unwrap();
+        assert_eq!(receipts[0]["seq"], "6");
+        assert_eq!(receipts[1]["seq"], 6);
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT last_seen FROM agents WHERE id='human:legacy'",
+                &[]
+            )
+            .unwrap()[0]["last_seen"],
+            60
+        );
     }
 
     #[test]
