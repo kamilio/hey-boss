@@ -123,17 +123,8 @@ impl Context {
             }),
             json!({}),
         )?;
-        let retry_db = self.db()?;
+        enrich_worker_retries(&self.db()?, &mut workers)?;
         for w in &mut workers {
-            let retry = replica::state_get(
-                &retry_db,
-                &format!("worker_retry:{}", w["id"].as_str().unwrap_or("")),
-                Value::Null,
-            )?;
-            if !retry.is_null() {
-                w["error"] = retry["error"].clone();
-                w["retry_at"] = retry["retry_at"].clone();
-            }
             if let Some(definition) = saved["workers"]
                 .as_array()
                 .into_iter()
@@ -293,6 +284,37 @@ impl Context {
         }
         Ok(hosts)
     }
+}
+
+fn enrich_worker_retries(db: &Connection, workers: &mut [Value]) -> Result<()> {
+    if workers.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<_> = workers
+        .iter()
+        .map(|worker| worker["id"].as_str().unwrap_or(""))
+        .collect();
+    // Heartbeats need only these worker keys, never the large machine snapshot
+    // or stale retry records belonging to workers outside this observation.
+    let rows = db.query_collect(
+        "SELECT selected.value,state.value FROM json_each(?1) selected
+         CROSS JOIN fleet_state state ON state.key='worker_retry:'||selected.value",
+        [serde_json::to_string(&ids)?],
+        |row| -> rusqlite::Result<_> { Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)) },
+    )?;
+    let mut retries = std::collections::HashMap::new();
+    for (id, saved) in rows {
+        retries.insert(id, serde_json::from_str::<Value>(&saved)?);
+    }
+    for worker in workers {
+        if let Some(retry) = retries.get(worker["id"].as_str().unwrap_or(""))
+            && !retry.is_null()
+        {
+            worker["error"] = retry["error"].clone();
+            worker["retry_at"] = retry["retry_at"].clone();
+        }
+    }
+    Ok(())
 }
 pub(super) struct Lock(File);
 impl Drop for Lock {
@@ -704,6 +726,61 @@ pub(super) fn published_source_build(source: &Path) -> Result<String> {
 pub(super) mod tests {
     use super::*;
     use std::io::BufReader;
+    #[test]
+    fn worker_retry_overlays_batch_selected_keys_and_preserve_missing_state() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let (root, ctx, store) = test_context();
+            let db = ctx.db().unwrap();
+            replica::ensure_metadata(&db).unwrap();
+            let mut workers = Vec::new();
+            let mut expected = Vec::new();
+            for index in 0..count {
+                let id = format!("worker-{index}");
+                let worker = json!({"id":id,"error":"existing","retry_at":42});
+                let mut enriched = worker.clone();
+                let retry = match index % 4 {
+                    0 => Some(json!({"error":"retry","retry_at":index})),
+                    1 => Some(Value::Null),
+                    2 => None,
+                    _ => Some(json!({"retry_at":index})),
+                };
+                if let Some(retry) = retry {
+                    replica::state_set(&db, &format!("worker_retry:{id}"), &retry).unwrap();
+                    if !retry.is_null() {
+                        enriched["error"] = retry["error"].clone();
+                        enriched["retry_at"] = retry["retry_at"].clone();
+                    }
+                }
+                workers.push(worker);
+                expected.push(enriched);
+            }
+            // Unselected or unrelated state must never be decoded by this read.
+            db.execute("INSERT INTO fleet_state(key,value) VALUES('worker_retry:other','invalid JSON'),('machines','invalid JSON')", []).unwrap();
+            drop(db);
+            drop(store);
+            let mut owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&ctx.path);
+            enrich_worker_retries(&db, &mut workers).unwrap();
+            assert_eq!(workers, expected);
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            let db = Connection::connect(&ctx.path).unwrap();
+            let mut selected = vec![json!({"id":"other"})];
+            assert!(enrich_worker_retries(&db, &mut selected).is_err());
+            drop(db);
+            let (db, transport) = crate::database::tests::measured_connection(&ctx.path);
+            enrich_worker_retries(&db, &mut []).unwrap();
+            drop(db);
+            assert_eq!(transport.join().unwrap(), (0, 0));
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!("{count} worker retry overlays: {commands} RPCs/{steps} steps");
+            measurements.push(commands);
+        }
+        assert_eq!(measurements, [1, 1], "Retry lookups grow with worker count");
+    }
+
     #[test]
     fn sqlite_lock_probe() {
         let Some(path) = std::env::var_os("HEY_BOSS_FLEET_LOCK_PROBE_DB") else {
