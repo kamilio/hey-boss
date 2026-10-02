@@ -463,7 +463,13 @@ fn worker_overview_for(
     } else {
         "0"
     };
-    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start,{upgrading} FROM issue_workers w WHERE (?1 IS NULL OR w.id IN (SELECT value FROM json_each(?1))) ORDER BY updated_at DESC,id LIMIT ?2"))?;
+    // Keep scoped lookups indexable even when most registrations are unrelated.
+    let scope = if ids.is_some() {
+        "WHERE w.id IN (SELECT value FROM json_each(?1))"
+    } else {
+        ""
+    };
+    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start,{upgrading} FROM issue_workers w {scope} ORDER BY updated_at DESC,id LIMIT ?2"))?;
     let rows = stmt
         .query_map(
             params![
@@ -1281,6 +1287,52 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scoped_worker_overview_skips_unrelated_registrations() {
+        let mut work = Vec::new();
+        for unrelated in [0, 1024, 8192] {
+            let root =
+                std::env::temp_dir().join(format!("hb-worker-scope-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let store = Store::open(&path).unwrap();
+            let config = serde_json::to_string(&Settings::default()).unwrap();
+            store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('wanted-a','managed',?1,1,1),('wanted-b','managed',?1,1,2)",[&config]).unwrap();
+            store.db.execute("WITH RECURSIVE n(x) AS (SELECT 1 WHERE ?1>0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO issue_workers(id,kind,config,version,updated_at) SELECT 'unrelated-'||x,'managed',?2,1,100+x FROM n",params![unrelated,config]).unwrap();
+            drop(store);
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            let tx = db.read_transaction().unwrap();
+            let selected = ["wanted-a".into(), "wanted-b".into(), "missing".into()].into();
+            let workers = worker_overview_for(&tx, Some(&selected)).unwrap();
+            assert_eq!(
+                workers
+                    .iter()
+                    .map(|w| w["id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["wanted-b", "wanted-a"]
+            );
+            assert!(
+                worker_overview_for(&tx, Some(&Default::default()))
+                    .unwrap()
+                    .is_empty()
+            );
+            tx.commit().unwrap();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            eprintln!(
+                "Scoped overview with {unrelated} unrelated workers: {commands} RPCs, {steps} query VM steps"
+            );
+            work.push(steps);
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert!(
+            work.iter().all(|steps| *steps < 3000),
+            "Scoped lookup scanned unrelated workers: {work:?}"
+        );
+    }
+
     #[test]
     fn worker_overview_reads_owner_matched_upgrade_state_in_one_batch() {
         let mut measurements = Vec::new();
