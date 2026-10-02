@@ -46,7 +46,10 @@ pub(crate) fn worker_event_tails(db: &HotConnection, runs: &[&str]) -> Result<Ev
         let archive = Archive::read(&archive_path(db)?)?;
         for (run, key) in keys {
             let value = archive.get("worker-events", &key)?;
-            let saved = value
+            if value["run"] != run {
+                return Err(unavailable("Archived worker events belong to another run"));
+            }
+            let saved = value["tail"]
                 .as_array()
                 .ok_or_else(|| unavailable("Invalid archived worker events"))?;
             let target = events.entry(run).or_default();
@@ -79,49 +82,156 @@ pub(crate) fn archive_runs(db: &HotConnection, now: i64) -> Result<usize> {
             "Archive maintenance cannot run inside a hot transaction",
         ));
     }
+    if cleanup_runs(db)? > 0 {
+        return Ok(1);
+    }
     let cutoff = now.saturating_sub(GRACE_MS);
     let snapshot = db.read_transaction()?;
-    let saved: Option<(String,String,String,i64,i64,Option<String>)> = snapshot.query_row(
-        "SELECT id,job,expanded_prompt,updated_at,finished_at,events_archive_key FROM worker_runs WHERE archive_key IS NULL AND finished_at<=?1 AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM worker_events e WHERE e.run_id=worker_runs.id AND e.created_at>?1) ORDER BY finished_at,id LIMIT 1", [cutoff],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))
+    let saved: Option<(String,String,String,i64,i64,Option<String>,Option<String>)> = snapshot.query_row(
+        "SELECT id,job,expanded_prompt,updated_at,finished_at,events_archive_key,archive_key FROM worker_runs WHERE archive_pending=1 AND finished_at IS NOT NULL AND finished_at<=?1 AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM worker_events e WHERE e.run_id=worker_runs.id AND e.created_at>?1) ORDER BY finished_at,id LIMIT 1", [cutoff],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))
     ).optional()?;
-    let Some((id, job, prompt, updated, finished, previous_events)) = saved else {
+    let Some((id, job, prompt, updated, finished, previous_events, previous_job)) = saved else {
         return Ok(0);
     };
-    let mut events = snapshot.query_collect("SELECT id,created_at,text FROM worker_events WHERE run_id=?1 ORDER BY id", [&id], |r| -> rusqlite::Result<_> { Ok(json!({"id":r.get::<_,i64>(0)?,"at":r.get::<_,i64>(1)?,"text":r.get::<_,String>(2)?})) })?;
-    snapshot.commit()?;
-    let last_id = events.last().and_then(|event| event["id"].as_i64());
-    let archive = Archive::open(&archive_path(db)?)?;
-    if let Some(previous) = &previous_events {
-        let old = archive.get("worker-events", previous)?;
-        let mut merged = std::collections::BTreeMap::new();
-        for event in old
-            .as_array()
-            .ok_or_else(|| unavailable("Invalid archived worker events"))?
-            .iter()
-            .chain(events.iter())
-        {
-            let id = event["id"]
-                .as_i64()
-                .ok_or_else(|| unavailable("Invalid archived worker event ID"))?;
-            merged.insert(id, event.clone());
-        }
-        events = merged.into_values().collect();
+    let last_id: Option<i64> = snapshot.query_row(
+        "SELECT max(id) FROM worker_events WHERE run_id=?1",
+        [&id],
+        |r| r.get(0),
+    )?;
+    if previous_events.is_some() || previous_job.is_some() {
+        Archive::read(&archive_path(db)?)?;
     }
-    let job_key = archive.put("worker-run", &json!({"job":job,"prompt":prompt}))?;
-    let events_key = archive.put("worker-events", &json!(events))?;
+    let archive = Archive::open(&archive_path(db)?)?;
+    let copy = archive.db.unchecked_transaction()?;
+    let mut header = match &previous_events {
+        Some(key) => archive.get("worker-events", key)?,
+        None => json!({"run":id,"parts":[],"tail":[],"last":null,"count":0}),
+    };
+    if header["run"] != id || !header["parts"].is_array() || !header["tail"].is_array() {
+        return Err(unavailable("Invalid worker event archive"));
+    }
+    let mut cursor = header["last"].as_i64().unwrap_or(0);
+    let mut part = Vec::new();
+    let mut bytes = 2;
+    loop {
+        let events=snapshot.query_collect("SELECT id,created_at,text FROM worker_events WHERE run_id=?1 AND id>?2 ORDER BY id LIMIT 16",params![id,cursor],|r|->rusqlite::Result<_>{Ok(json!({"id":r.get::<_,i64>(0)?,"at":r.get::<_,i64>(1)?,"text":r.get::<_,String>(2)?}))})?;
+        if events.is_empty() {
+            break;
+        }
+        for event in events {
+            let size = serde_json::to_vec(&event)?.len() + 1;
+            if !part.is_empty() && (bytes + size > 256 * 1024 || part.len() >= 256) {
+                save_part(&archive, &mut header, std::mem::take(&mut part))?;
+                bytes = 2;
+            }
+            cursor = event["id"].as_i64().unwrap();
+            bytes += size;
+            part.push(event);
+        }
+    }
+    if !part.is_empty() {
+        save_part(&archive, &mut header, part)?;
+    }
+    let job_key = match &previous_job {
+        Some(key) => key.clone(),
+        None => archive.put("worker-run", &json!({"job":job,"prompt":prompt}))?,
+    };
+    let events_key = archive.put("worker-events", &header)?;
+    copy.commit()?;
+    snapshot.commit()?;
+    archive.get("worker-events", &events_key)?;
     let original: Value = serde_json::from_str(&job)?;
     let compact = json!({"issue":{"number":original["issue"]["number"],"title":original["issue"]["title"]},"resume_session":original["resume_session"],"session_ref":original["session_ref"],"config":{"cwd":original["config"]["cwd"],"provider":original["config"]["provider"]}});
     let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute("UPDATE worker_runs SET job=?6,expanded_prompt='',archive_key=?7,events_archive_key=?8 WHERE id=?1 AND job=?2 AND expanded_prompt=?3 AND updated_at=?4 AND finished_at=?5 AND archive_key IS NULL AND (SELECT max(id) FROM worker_events WHERE run_id=?1) IS ?9 AND events_archive_key IS ?10", params![id,job,prompt,updated,finished,compact.to_string(),job_key,events_key,last_id,previous_events])?;
-    if changed > 0 {
-        // worker_events predates AUTOINCREMENT. Retain its last identity so
-        // SQLite cannot reuse an archived rowid after moving the global tail.
-        tx.execute(
-            "DELETE FROM worker_events WHERE run_id=?1 AND id<?2",
-            params![id, last_id],
-        )?;
-    }
+    let changed = tx.execute("UPDATE worker_runs SET job=?6,expanded_prompt='',archive_key=?7,events_archive_key=?8,archive_event_id=?12,archive_pending=0,archive_cleanup=1 WHERE id=?1 AND job=?2 AND expanded_prompt=?3 AND updated_at=?4 AND finished_at=?5 AND archive_key IS ?11 AND (SELECT max(id) FROM worker_events WHERE run_id=?1) IS ?9 AND events_archive_key IS ?10", params![id,job,prompt,updated,finished,compact.to_string(),job_key,events_key,last_id,previous_events,previous_job,header["last"].as_i64().unwrap_or(0)])?;
     tx.commit()?;
+    if changed > 0 {
+        cleanup_runs(db)?;
+    }
     Ok(changed)
+}
+
+fn save_part(archive: &Archive, header: &mut Value, events: Vec<Value>) -> Result<()> {
+    let key = archive.put("worker-event-part", &json!(events))?;
+    let first = events.first().unwrap()["id"].clone();
+    let last = events.last().unwrap()["id"].clone();
+    header["parts"]
+        .as_array_mut()
+        .ok_or_else(|| unavailable("Invalid worker archive parts"))?
+        .push(json!({"key":key,"first":first,"last":last,"count":events.len()}));
+    header["count"] = json!(
+        header["count"]
+            .as_u64()
+            .ok_or_else(|| unavailable("Invalid worker archive count"))?
+            + events.len() as u64
+    );
+    header["last"] = last;
+    let tail = header["tail"]
+        .as_array_mut()
+        .ok_or_else(|| unavailable("Invalid worker archive tail"))?;
+    tail.extend(events);
+    if tail.len() > 12 {
+        tail.drain(..tail.len() - 12);
+    }
+    Ok(())
+}
+
+fn cleanup_runs(db: &HotConnection) -> Result<usize> {
+    let saved:Option<(String,String,i64)>=db.query_row("SELECT id,events_archive_key,archive_event_id FROM worker_runs WHERE archive_cleanup=1 AND finished_at IS NOT NULL LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let Some((run, key, last)) = saved else {
+        return Ok(0);
+    };
+    let archive = Archive::read(&archive_path(db)?)?;
+    let header = archive.get("worker-events", &key)?;
+    if header["run"] != run || header["last"].as_i64().unwrap_or(0) != last {
+        return Err(unavailable("Worker archive boundary does not match"));
+    }
+    let rows=db.query_collect("SELECT id,created_at,text FROM worker_events WHERE run_id=?1 AND id<?2 ORDER BY id LIMIT 16",params![run,last],|r|->rusqlite::Result<_>{Ok(json!({"id":r.get::<_,i64>(0)?,"at":r.get::<_,i64>(1)?,"text":r.get::<_,String>(2)?}))})?;
+    let mut part_key = String::new();
+    let mut contents = Value::Null;
+    for row in &rows {
+        let id = row["id"].as_i64().unwrap();
+        let part = header["parts"]
+            .as_array()
+            .ok_or_else(|| unavailable("Invalid worker archive parts"))?
+            .iter()
+            .find(|part| {
+                part["first"].as_i64().is_some_and(|first| first <= id)
+                    && part["last"].as_i64().is_some_and(|last| id <= last)
+            })
+            .ok_or_else(|| unavailable("Archived worker event is missing"))?;
+        let next = part["key"]
+            .as_str()
+            .ok_or_else(|| unavailable("Invalid worker archive part key"))?;
+        if part_key != next {
+            contents = archive.get("worker-event-part", next)?;
+            part_key = next.into();
+        }
+        if !contents
+            .as_array()
+            .ok_or_else(|| unavailable("Invalid worker archive part"))?
+            .iter()
+            .any(|saved| saved == row)
+        {
+            return Err(unavailable(
+                "Worker event archive does not match its hot copy",
+            ));
+        }
+    }
+    let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    if !tx.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE id=?1 AND events_archive_key=?2 AND archive_event_id=?3 AND finished_at IS NOT NULL)",params![run,key,last],|r|r.get::<_,bool>(0))? { return Ok(0); }
+    let actual=tx.query_collect("SELECT id,created_at,text FROM worker_events WHERE run_id=?1 AND id<?2 ORDER BY id LIMIT 16",params![run,last],|r|->rusqlite::Result<_>{Ok(json!({"id":r.get::<_,i64>(0)?,"at":r.get::<_,i64>(1)?,"text":r.get::<_,String>(2)?}))})?;
+    if actual != rows {
+        return Ok(0);
+    }
+    let ids: Vec<_> = rows.iter().map(|row| row["id"].as_i64().unwrap()).collect();
+    let removed = tx.execute(
+        "DELETE FROM worker_events WHERE run_id=?1 AND id IN (SELECT value FROM json_each(?2))",
+        params![run, serde_json::to_string(&ids)?],
+    )?;
+    // The anchor preserves global rowid allocation for this pre-AUTOINCREMENT table.
+    tx.execute("UPDATE worker_runs SET archive_cleanup=0 WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM worker_events WHERE run_id=?1 AND id<?2)",params![run,last])?;
+    tx.commit()?;
+    Ok(removed)
 }
