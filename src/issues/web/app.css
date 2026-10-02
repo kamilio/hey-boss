@@ -1620,57 +1620,25 @@ dialog::backdrop {
   width: 16px;
   color: var(--muted);
 }
-.history-toggle {
-  background: none;
-  padding: 4px 0;
-  color: var(--muted);
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
+.issue-timeline { position: relative; min-width: 0; }
+.issue-timeline::before {
+  content: ""; position: absolute; left: 17px; top: 0; bottom: 0;
+  border-left: 2px solid var(--line); z-index: 0;
 }
-.history-toggle svg {
-  width: 14px;
-}
-.timeline {
-  margin: 0 0 22px 10px;
-  padding: 0 0 0 20px;
-  border-left: 1px solid var(--line);
-}
-.timeline-item {
-  position: relative;
-  margin-bottom: 16px;
-  font-size: 11px;
-  line-height: 1.65;
-  color: var(--muted);
-}
-.timeline-item:before {
-  content: "";
-  position: absolute;
-  left: -24px;
-  top: 5px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--faint);
-  border: 1px solid var(--bg);
-}
-.timeline-item strong {
-  color: var(--text);
-  font-weight: 550;
-}
-.timeline-item details {
-  margin-top: 6px;
-}
-.timeline-item pre {
-  white-space: pre-wrap;
-  max-height: 230px;
-  overflow: auto;
-  font-size: 10px;
-  padding: 10px;
-  background: var(--hover);
-  border-radius: 7px;
-}
+.issue-timeline > * { position: relative; }
+.issue-timeline > .comment-card { margin: 14px 0; }
+.issue-timeline > .history-more { margin: 0 0 14px; min-height: 40px; background: var(--surface); }
+.issue-activity { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.activity-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 50%; background: var(--surface); border: 1px solid var(--line); }
+.activity-icon svg { width: 16px; height: 16px; }
+.activity-content { min-width: 0; padding: 2px 0; overflow-wrap: anywhere; }
+.activity-content strong { color: var(--text); font-weight: 600; }
+.activity-content p { margin: 5px 0; }
+.activity-content pre { white-space: pre-wrap; max-height: 200px; overflow: auto; }
+.activity-time { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.activity-label { display: inline; padding: 2px 7px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--text); line-height: 2; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.activity-old { text-decoration: line-through; }
+.timeline-error { background: var(--surface); padding: 12px; }
 .comment-compose {
   margin-top: 26px;
 }

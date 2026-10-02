@@ -439,6 +439,11 @@ pub enum Operation {
         if_version: Option<i64>,
         if_child_version: Option<i64>,
     },
+    Timeline {
+        number: i64,
+        limit: u32,
+        before: Option<[i64; 3]>,
+    },
     History {
         number: i64,
         limit: u32,
@@ -610,6 +615,7 @@ impl Operation {
                 | Self::Allocation { .. }
                 | Self::Subtasks { .. }
                 | Self::History { .. }
+                | Self::Timeline { .. }
                 | Self::Comments { .. }
                 | Self::StatusHistory { .. }
                 | Self::StatusView { .. }
@@ -673,6 +679,7 @@ impl Operation {
             | Self::AddSubtask { number, .. }
             | Self::RemoveSubtask { number, .. }
             | Self::History { number, .. }
+            | Self::Timeline { number, .. }
             | Self::Comments { number, .. }
             | Self::Edit { number, .. }
             | Self::SetYolo { number, .. }
