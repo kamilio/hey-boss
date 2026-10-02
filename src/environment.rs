@@ -190,7 +190,27 @@ fn format(config: &Config) -> &str {
         .unwrap_or("openpgp")
 }
 fn api(endpoint: &str, fields: &[(&str, &str)], pages: bool) -> io::Result<Value> {
-    let mut c = Command::new("gh");
+    // launchd's normal PATH omits Homebrew and ~/.local/bin. Resolve the CLI
+    // without changing Git's environment or relying on an interactive shell.
+    use std::os::unix::fs::PermissionsExt;
+    let mut candidates: Vec<_> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|path| path.join("gh"))
+            .collect();
+    candidates.extend([
+        home()?.join(".local/bin/gh"),
+        "/opt/homebrew/bin/gh".into(),
+        "/usr/local/bin/gh".into(),
+    ]);
+    let gh = candidates
+        .into_iter()
+        .find(|path| {
+            fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .ok_or_else(|| {
+            fail("GitHub CLI (gh) is missing; install and authenticate it as the worker OS user")
+        })?;
+    let mut c = Command::new(gh);
     c.args(["api", "--hostname", "github.com", endpoint]);
     if pages {
         c.args(["--paginate", "--slurp"]);
