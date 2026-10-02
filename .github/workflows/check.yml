@@ -24,7 +24,7 @@ jobs:
       - run: node tools/test_local_http_crypto.cjs
       - run: node tools/test_native_artifact_launch.cjs
       - run: node tools/test_metadata_mutation.cjs
-      - run: node tools/test_fleet_view.js && node tools/test_assigned_agent.js && node --check src/issues/web/fleet.js
+      - run: node tools/test_actor_labels.cjs && node tools/test_fleet_view.js && node tools/test_assigned_agent.js && node --check src/issues/web/fleet.js
       - run: node tools/test_lookup_routes.cjs && node --check src/issues/web/routes.js
       - run: node tools/test_issue_pr_labels.cjs && node tools/test_issue_commit_controls.cjs && node tools/test_issue_special_tags.cjs && node --check src/issues/web/app.js
       - run: cargo fmt --check
