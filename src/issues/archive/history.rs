@@ -13,6 +13,8 @@ CREATE TABLE issue_history(archive_key TEXT NOT NULL,kind TEXT NOT NULL,id INTEG
 CREATE INDEX history_number ON issue_history(archive_key,kind,id);
 CREATE INDEX history_timeline ON issue_history(archive_key,kind,created_at DESC,id DESC);
 CREATE INDEX history_actions ON issue_history(archive_key,kind,action,id DESC);
+CREATE TABLE issue_origins(archive_key TEXT NOT NULL,kind TEXT NOT NULL,source_id INTEGER NOT NULL,origin TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER,PRIMARY KEY(archive_key,kind,source_id)) WITHOUT ROWID;
+CREATE UNIQUE INDEX issue_origin_local ON issue_origins(archive_key,kind,local_id) WHERE local_id IS NOT NULL;
 CREATE INDEX history_comment_resolution ON issue_history(archive_key,json_extract(json_extract(record,'$.data'),'$.comment_id'),created_at DESC,id DESC) WHERE kind='events' AND action IN ('comment_resolved','comment_unresolved');
 CREATE INDEX history_comment_models ON issue_history(archive_key,json_extract(json_extract(record,'$.data'),'$.comment_id'),id DESC) WHERE kind='events' AND action='commented';
 ";
@@ -135,7 +137,7 @@ fn copy_rows(
     Ok(())
 }
 
-fn save_row(
+pub(super) fn save_row(
     db: &Connection,
     key: &str,
     table: &str,
@@ -152,7 +154,22 @@ fn save_row(
     Ok(())
 }
 
-fn verify_copy(archive: &Archive, key: &str, project: &str, number: i64) -> Result<Value> {
+pub(super) fn verify_copy(
+    archive: &Archive,
+    key: &str,
+    project: &str,
+    number: i64,
+) -> Result<Value> {
+    verify_copy_as(archive, key, key, project, number)
+}
+
+pub(super) fn verify_copy_as(
+    archive: &Archive,
+    key: &str,
+    expected: &str,
+    project: &str,
+    number: i64,
+) -> Result<Value> {
     let root: Option<String> = archive
         .db
         .query_row(
@@ -171,7 +188,7 @@ fn verify_copy(archive: &Archive, key: &str, project: &str, number: i64) -> Resu
             digest_record(&mut digest, table, &row.get::<_, String>(0)?);
         }
     }
-    if format!("{:x}", digest.finalize()) != key {
+    if format!("{:x}", digest.finalize()) != expected {
         return Err(unavailable("Archived issue checksum does not match"));
     }
     Ok(serde_json::from_str(&root)?)
@@ -365,6 +382,7 @@ pub(crate) fn history_connection(
         return Err(unavailable("Invalid archive key"));
     }
     let archive = Archive::read(&archive_path(db)?)?;
+    mapped_history_ready(&archive, &key)?;
     if !archive.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM issue_copies WHERE key=?1 AND project_id=?2 AND number=?3)",
         params![key, project, number],
@@ -375,8 +393,8 @@ pub(crate) fn history_connection(
     let quoted: String = archive
         .db
         .query_row("SELECT quote(?1)", [project], |r| r.get(0))?;
-    archive.db.execute_batch(&format!("CREATE TEMP VIEW comments AS SELECT id,{quoted} AS project_id,{number} AS issue_number,author,json_extract(record,'$.body') AS body,created_at FROM issue_history WHERE archive_key='{key}' AND kind='comments' AND archive_record(record,record_hash) IS NOT NULL;
-        CREATE TEMP VIEW events AS SELECT id,{quoted} AS project_id,{number} AS issue_number,author AS actor,action,created_at,json_extract(record,'$.data') AS data FROM issue_history WHERE archive_key='{key}' AND kind='events' AND archive_record(record,record_hash) IS NOT NULL;
+    archive.db.execute_batch(&format!("CREATE TEMP VIEW comments AS SELECT coalesce(o.local_id,h.id) AS id,{quoted} AS project_id,{number} AS issue_number,h.author,json_extract(h.record,'$.body') AS body,h.created_at FROM issue_history h LEFT JOIN issue_origins o ON o.archive_key=h.archive_key AND o.kind=h.kind AND o.source_id=h.id WHERE h.archive_key='{key}' AND h.kind='comments' AND archive_record(h.record,h.record_hash) IS NOT NULL;
+        CREATE TEMP VIEW events AS SELECT coalesce(o.local_id,h.id) AS id,{quoted} AS project_id,{number} AS issue_number,h.author AS actor,h.action,h.created_at,CASE WHEN c.local_id IS NULL THEN json_extract(h.record,'$.data') ELSE json_set(json_extract(h.record,'$.data'),'$.comment_id',c.local_id) END AS data FROM issue_history h LEFT JOIN issue_origins o ON o.archive_key=h.archive_key AND o.kind=h.kind AND o.source_id=h.id LEFT JOIN issue_origins c ON c.archive_key=h.archive_key AND c.kind='comments' AND c.source_id=json_extract(json_extract(h.record,'$.data'),'$.comment_id') WHERE h.archive_key='{key}' AND h.kind='events' AND archive_record(h.record,h.record_hash) IS NOT NULL;
         CREATE TEMP VIEW issue_status_updates AS SELECT text_id AS id,{quoted} AS project_id,{number} AS issue_number,author,json_extract(record,'$.level') AS level,json_extract(record,'$.comment') AS comment,created_at FROM issue_history WHERE archive_key='{key}' AND kind='issue_status_updates' AND archive_record(record,record_hash) IS NOT NULL;
         CREATE TEMP TABLE agents(id TEXT PRIMARY KEY,metadata TEXT);
         INSERT INTO agents SELECT text_id,json_extract(archive_record(record,record_hash),'$.metadata') FROM issue_history WHERE archive_key='{key}' AND kind='agents';"))?;
@@ -399,12 +417,79 @@ pub(crate) fn history_connection(
     Ok(Some(HotConnection::from_archive(archive.db)))
 }
 
+fn mapped_history_ready(archive: &Archive, key: &str) -> Result<()> {
+    if archive.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_origins WHERE archive_key=?1 AND local_id IS NULL)",
+        [key],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Err(unavailable(
+            "Imported issue history identities are not ready",
+        ));
+    }
+    Ok(())
+}
+
+fn local_record(archive: &Archive, key: &str, table: &str, mut row: Value) -> Result<Value> {
+    if !matches!(table, "comments" | "events") {
+        return Ok(row);
+    }
+    let mapped: Option<Option<i64>> = archive
+        .db
+        .query_row(
+            "SELECT local_id FROM issue_origins WHERE archive_key=?1 AND kind=?2 AND source_id=?3",
+            params![key, table, row["id"].as_i64()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(mapped) = mapped {
+        row["id"] = json!(
+            mapped.ok_or_else(|| unavailable("Imported issue history identities are not ready"))?
+        );
+    }
+    if table == "events" {
+        let mut data: Value = serde_json::from_str(
+            row["data"]
+                .as_str()
+                .ok_or_else(|| unavailable("Invalid archived event data"))?,
+        )?;
+        if let Some(comment_id) = data["comment_id"].as_i64() {
+            let mapped:Option<Option<i64>>=archive.db.query_row("SELECT local_id FROM issue_origins WHERE archive_key=?1 AND kind='comments' AND source_id=?2",params![key,comment_id],|r|r.get(0)).optional()?;
+            if let Some(mapped) = mapped {
+                data["comment_id"] = json!(
+                    mapped.ok_or_else(|| unavailable("Imported comment identity is not ready"))?
+                );
+                row["data"] = json!(data.to_string());
+            }
+        }
+    }
+    Ok(row)
+}
+
+fn same_record(table: &str, expected: &Value, actual: &Value) -> bool {
+    expected.as_object().is_some_and(|fields| {
+        fields.iter().all(|(field, value)| {
+            if table == "events" && field == "data" {
+                let parse = |v: &Value| {
+                    v.as_str()
+                        .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                };
+                let expected = parse(value);
+                expected.is_some() && expected == parse(&actual[field])
+            } else {
+                actual.get(field) == Some(value)
+            }
+        })
+    })
+}
+
 pub(crate) fn cleanup_history(db: &HotConnection) -> Result<usize> {
     let target: Option<(String,i64,String)> = db.query_row("SELECT project_id,number,archive_key FROM issues WHERE archive_key IS NOT NULL AND archive_cleanup=1 AND archive_restoring=0 LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let Some((project, number, key)) = target else {
         return Ok(0);
     };
     let archive = Archive::read(&archive_path(db)?)?;
+    mapped_history_ready(&archive, &key)?;
     for (table, payload, extra, order) in [
         ("comments", "body", "", "ORDER BY id LIMIT 16"),
         (
@@ -442,13 +527,18 @@ pub(crate) fn cleanup_history(db: &HotConnection) -> Result<usize> {
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| row["id"].to_string());
-            let saved: Option<String> = archive.db.query_row("SELECT record FROM issue_history WHERE archive_key=?1 AND kind=?2 AND text_id=?3",params![key,table,id],|r|r.get(0)).optional()?;
-            if saved
+            let source:Option<i64>=archive.db.query_row("SELECT source_id FROM issue_origins WHERE archive_key=?1 AND kind=?2 AND local_id=?3",params![key,table,id],|r|r.get(0)).optional()?;
+            let id = source.map(|n| n.to_string()).unwrap_or(id);
+            let saved: Option<String> = archive.db.query_row("SELECT archive_record(record,record_hash) FROM issue_history WHERE archive_key=?1 AND kind=?2 AND text_id=?3",params![key,table,id],|r|r.get(0)).optional()?;
+            let saved = saved
                 .as_deref()
                 .map(serde_json::from_str::<Value>)
                 .transpose()?
+                .map(|row| local_record(&archive, &key, table, row))
+                .transpose()?;
+            if saved
                 .as_ref()
-                != Some(row)
+                .is_none_or(|saved| !same_record(table, saved, row))
             {
                 return Err(unavailable("Archive history does not match its hot copy"));
             }
@@ -490,6 +580,7 @@ pub(crate) fn restore_issue(
         ));
     }
     let archive = Archive::read(&archive_path(db)?)?;
+    mapped_history_ready(&archive, &key)?;
     let root = verify_copy(&archive, &key, project, number)?;
     db.execute("UPDATE issues SET archive_restoring=1 WHERE project_id=?1 AND number=?2 AND archive_key=?3",params![project,number,key])?;
     for table in ["agents", "comments", "events", "issue_status_updates"] {
@@ -503,7 +594,12 @@ pub(crate) fn restore_issue(
             let mut bytes = 0;
             if let Some(encoded) = pending.take() {
                 bytes += String::len(&encoded);
-                batch.push(serde_json::from_str::<Value>(&encoded)?);
+                batch.push(local_record(
+                    &archive,
+                    &key,
+                    table,
+                    serde_json::from_str::<Value>(&encoded)?,
+                )?);
             }
             while batch.len() < 16 {
                 let Some(row) = rows.next()? else {
@@ -515,7 +611,12 @@ pub(crate) fn restore_issue(
                     break;
                 }
                 bytes += encoded.len();
-                batch.push(serde_json::from_str::<Value>(&encoded)?);
+                batch.push(local_record(
+                    &archive,
+                    &key,
+                    table,
+                    serde_json::from_str::<Value>(&encoded)?,
+                )?);
             }
             if batch.is_empty() {
                 break;
@@ -559,11 +660,7 @@ fn restore_row(db: &HotConnection, table: &str, row: &Value) -> Result<()> {
         if table == "agents" {
             return Ok(());
         }
-        if row.as_object().is_none_or(|fields| {
-            fields
-                .iter()
-                .any(|(key, value)| existing.get(key) != Some(value))
-        }) {
+        if !same_record(table, row, &existing) {
             return Err(Error::new(
                 "archive_conflict",
                 "An archived history ID belongs to a different record",

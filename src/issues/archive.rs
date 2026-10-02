@@ -3,6 +3,7 @@
 mod runs;
 pub(crate) use runs::{archive_runs, worker_event_tails, worker_payload};
 mod history;
+pub(crate) mod transfer;
 pub(crate) use history::{
     archive_issue, cleanup_history, history_connection, issue_body, mutation_targets,
     restore_issue, search_bodies,

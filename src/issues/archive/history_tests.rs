@@ -394,3 +394,260 @@ fn recent_history_extends_the_grace_period_and_deleted_issues_remain_readable() 
         "Searchable archive body 🦀"
     );
 }
+
+#[test]
+fn archive_transfer_is_bounded_verified_and_resumes_at_record_boundaries() {
+    let source = Fixture::new();
+    source
+        .db
+        .execute(
+            "UPDATE issues SET body=?1 WHERE number=1",
+            ["日本語🦀\\\"\n".repeat(250_000)],
+        )
+        .unwrap();
+    source.archive();
+    let key: String = source
+        .db
+        .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let target = Fixture::new();
+    let mut incoming = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+    let mut cursor = Value::Null;
+    let mut pages = 0;
+    loop {
+        let page = transfer::export_page(&source.db, &key, "named:Archive", 1, &cursor).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() < 2 * 1024 * 1024);
+        pages += 1;
+        cursor = page["next"].clone();
+        if incoming.receive(&page).unwrap() {
+            break;
+        }
+    }
+    assert!(pages > 1);
+    let saved = Archive::read(&archive_path(&target.db).unwrap()).unwrap();
+    assert_eq!(
+        history::verify_copy(&saved, &key, "named:Archive", 1).unwrap()["body"],
+        "日本語🦀\\\"\n".repeat(250_000)
+    );
+    assert!(history::verify_copy(&saved, &key, "wrong-project", 1).is_err());
+}
+
+#[test]
+fn broken_archive_transfers_never_publish_a_copy_or_change_hot_history() {
+    let source = Fixture::new();
+    source.archive();
+    let key: String = source
+        .db
+        .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let page = transfer::export_page(&source.db, &key, "named:Archive", 1, &Value::Null).unwrap();
+    assert_eq!(page["done"], true);
+    for change in 0..7 {
+        let target = Fixture::new();
+        let mut damaged = page.clone();
+        match change {
+            0 => damaged["project"] = json!("another-project"),
+            1 => damaged["number"] = json!(2),
+            2 => damaged["chunks"][0]["data"] = json!("bm90LXRoZS1zYXZlZC1yb290"),
+            3 => damaged["chunks"].as_array_mut().unwrap().truncate(1),
+            4 => damaged["chunks"][0]["total"] = json!(MAX_OBJECT_BYTES + 1),
+            5 => damaged["chunks"][0]["offset"] = json!(1),
+            6 => damaged["cursor"] = json!({"kind":"events","id":"2","offset":0}),
+            _ => unreachable!(),
+        }
+        {
+            let mut incoming =
+                transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+            assert!(
+                incoming.receive(&damaged).is_err(),
+                "accepted damage {change}"
+            );
+        }
+        let archive = Archive::read(&archive_path(&target.db).unwrap()).unwrap();
+        assert_eq!(
+            archive
+                .db
+                .query_row("SELECT count(*) FROM issue_copies", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            archive
+                .db
+                .query_row("SELECT count(*) FROM issue_history", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            target
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(
+            target
+                .db
+                .query_row(
+                    "SELECT archive_key IS NULL FROM issues WHERE number=1",
+                    [],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
+    let target = Fixture::new();
+    for _ in 0..2 {
+        let mut incoming = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+        assert!(incoming.receive(&page).unwrap());
+        assert!(incoming.receive(&page).unwrap());
+    }
+    let archive = Archive::read(&archive_path(&target.db).unwrap()).unwrap();
+    assert_eq!(
+        archive
+            .db
+            .query_row("SELECT count(*) FROM issue_copies", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn imported_archives_preserve_local_history_ids_and_resolved_comment_links() {
+    let source = Fixture::new();
+    source
+        .db
+        .execute("UPDATE fleet_meta SET node='controller' WHERE id=1", [])
+        .unwrap();
+    source.archive();
+    let key: String = source
+        .db
+        .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut target = Fixture::new();
+    target.db.execute_batch("UPDATE fleet_meta SET node='companion',role='agent' WHERE id=1;
+        UPDATE comments SET id=id+100;
+        UPDATE events SET id=id+200,data=CASE WHEN json_type(data,'$.comment_id')='integer' THEN json_set(data,'$.comment_id',json_extract(data,'$.comment_id')+100) ELSE data END;
+        INSERT INTO fleet_row_ids SELECT 'controller','comments',id-100,id FROM comments;
+        INSERT INTO fleet_row_ids SELECT 'controller','events',id-200,id FROM events;").unwrap();
+    let operations = [
+        json!({"action":"view","number":1}),
+        json!({"action":"history","number":1,"limit":100,"offset":0}),
+        json!({"action":"timeline","number":1,"limit":100}),
+    ];
+    let before: Vec<_> = operations
+        .iter()
+        .map(|op| target.read(op.clone()))
+        .collect();
+    let mut incoming = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+    let page = transfer::export_page(&source.db, &key, "named:Archive", 1, &Value::Null).unwrap();
+    assert!(incoming.receive(&page).unwrap());
+    drop(incoming);
+    transfer::map_local_history(&target.db, &key, "named:Archive", 1).unwrap();
+    transfer::map_local_history(&target.db, &key, "named:Archive", 1).unwrap();
+    target.db.execute("UPDATE issues SET archive_key=?1,archived_comments=2,archive_cleanup=1,body='' WHERE number=1",[&key]).unwrap();
+    while cleanup_history(&target.db).unwrap() != 0 {}
+    assert_eq!(
+        operations
+            .iter()
+            .map(|op| target.read(op.clone()))
+            .collect::<Vec<_>>(),
+        before
+    );
+    restore_issue(&target.db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .map(|op| target.read(op.clone()))
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        target
+            .db
+            .query_row(
+                "SELECT group_concat(id) FROM (SELECT id FROM comments ORDER BY id)",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "101,102"
+    );
+}
+
+#[test]
+fn imported_history_reserves_unused_ids_before_new_local_comments() {
+    let source = Fixture::new();
+    source
+        .db
+        .execute("UPDATE fleet_meta SET node='controller' WHERE id=1", [])
+        .unwrap();
+    source.archive();
+    let key: String = source
+        .db
+        .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut target = Fixture::new();
+    target.db.execute_batch("UPDATE fleet_meta SET node='companion',role='agent' WHERE id=1; UPDATE comments SET issue_number=2; UPDATE events SET issue_number=2;").unwrap();
+    let mut incoming = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+    assert!(
+        incoming
+            .receive(
+                &transfer::export_page(&source.db, &key, "named:Archive", 1, &Value::Null).unwrap()
+            )
+            .unwrap()
+    );
+    drop(incoming);
+    transfer::map_local_history(&target.db, &key, "named:Archive", 1).unwrap();
+    target.db.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Archive',2,'human:boss','New local comment',103)",[]).unwrap();
+    let new_id = target.db.last_insert_rowid();
+    assert!(new_id > 4);
+    transfer::map_local_history(&target.db, &key, "named:Archive", 1).unwrap();
+    target.db.execute("UPDATE issues SET archive_key=?1,archived_comments=2,archive_cleanup=1,body='' WHERE number=1",[&key]).unwrap();
+    let archived = target.read(json!({"action":"view","number":1}));
+    assert_eq!(archived["comments"][0]["id"], 3);
+    assert_eq!(archived["comments"][0]["resolved"], true);
+    restore_issue(&target.db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+    assert_eq!(
+        target
+            .db
+            .query_row("SELECT body FROM comments WHERE id=?1", [new_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+        "New local comment"
+    );
+    assert_eq!(
+        target
+            .db
+            .query_row(
+                "SELECT count(*) FROM comments WHERE issue_number=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        target
+            .db
+            .query_row(
+                "SELECT count(*) FROM comments WHERE issue_number=2",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        3
+    );
+}
