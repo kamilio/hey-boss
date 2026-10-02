@@ -30,7 +30,8 @@ for await (const line of createInterface({input:process.stdin})) {
     assert(!turn, 'The active turn should be steered, not replaced');
     phase = existsSync('github-launches.txt') ? Number(readFileSync('github-launches.txt','utf8')) + 1 : 1;
     writeFileSync('github-launches.txt', String(phase));
-    assert(params.input[0].text.includes('hey-boss issue pr list 1'));
+    assert(params.input[0].text.startsWith('Claim and implement `hey-boss issue view 1`.'));
+    assert(!params.input[0].text.includes('hey-boss issue pr list 1'));
     const initial = status();
     assert(initial.event);
     assert.equal(initial.monitoring,true);
