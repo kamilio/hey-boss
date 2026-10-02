@@ -183,7 +183,7 @@ if (typeof document !== 'undefined') (() => {
     if(last)render(last);
   }
   const link = (entry) => base+'/session#'+new URLSearchParams({project:entry.run.project_id,host:entry.machine.host,run:entry.run.id});
-  const runLabel = run => HeyBossUI.actorLabel(run.session_id ? 'codex:'+run.session_id : run.actor_id || 'agent:unknown', run.model);
+  const runLabel = run => HeyBossUI.actorLabel(run.actor_id || (run.session_id ? 'codex:'+run.session_id : 'agent:unknown'), run.model);
   const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
   function card(entry, history=false) {
     const {run,machine}=entry;
@@ -624,7 +624,7 @@ if (typeof document !== 'undefined') (() => {
       const summary=element('summary','',({'Result':'Tool result','Thinking':'Thinking','exec_command':'Run a command','functions.exec':'Use tools','functions.apply_patch':'Edit files','apply_patch':'Edit files','write_stdin':'Check a command','Search':'Search the web'})[item.label]||'Tool activity');
       const pre=element('pre','',item.label+'\n\n'+item.text);pre.tabIndex=0;row.append(summary,pre);
     }else{
-      const label=element('div','message-author',item.role==='user'?'You':'Codex');const body=element('div','message-body');
+      const label=element('div','message-author',item.role==='user'?'You':item.label||runLabel(selected?.run||{}));const body=element('div','message-body');
       if(item.html&&item.role==='assistant')body.innerHTML=item.html;else body.textContent=item.text;
       row.append(label,body);
     }
@@ -781,7 +781,7 @@ if (typeof document !== 'undefined') (() => {
   $('worker-search').value=workerSearch;if(workerSearch)workerFilter='all';
   $('worker-search').oninput=event=>{workerSearch=event.target.value;if(last)renderWorkerBoard(last);};
   function workerEditButtons(){for(const input of $('worker-form').querySelectorAll('input,textarea,select'))input.disabled=workerEditBusy;$('worker-editor-preview').disabled=workerEditBusy;$('worker-editor-save').disabled=workerEditBusy||!workerEditPreview;$('worker-editor-cancel').disabled=workerEditBusy;}
-  const editFields=['name','slots','intent','projects','directory','directories'];
+  const editFields=['name','provider','slots','intent','projects','directory','directories'];
   let workerEditOriginal='';
   const editFingerprint=()=>JSON.stringify(editFields.map(field=>$('worker-'+field).value));
   async function openWorkerEditor(host,id){
@@ -795,7 +795,7 @@ if (typeof document !== 'undefined') (() => {
       workerEdit={host,id,worker};$('worker-scope').open=!!last?.machines?.find(m=>m.host===host)?.configuration_error?.includes(id);workerEditRevision=data.revision;workerEditPreview=undefined;
       $('worker-editor-title').textContent='Edit '+workerLabel(worker);
       $('worker-editor-context').textContent=host+' · '+id;
-      $('worker-name').value=worker.config?.name||'Worker';$('worker-slots').value=worker.config?.concurrency||1;$('worker-intent').value=worker.intent;
+      $('worker-name').value=worker.config?.name||'Worker';$('worker-provider').value=worker.config?.provider||'codex';$('worker-slots').value=worker.config?.concurrency||1;$('worker-intent').value=worker.intent;
       $('worker-projects').value=(worker.config?.projects||[]).join('\n');$('worker-directory').value=worker.config?.directory||'';$('worker-directories').value=Object.entries(worker.config?.directories||{}).map(([p,d])=>p+' = '+d).join('\n');
       workerEditOriginal=editFingerprint();$('worker-editor-status').textContent='Other settings are preserved. Structured edits may reformat the YAML file.';$('worker-editor-changes').replaceChildren();$('worker-editor').showModal();
     }catch(error){fail(error);}finally{workerEditBusy=false;workerEditButtons();}
@@ -806,12 +806,12 @@ if (typeof document !== 'undefined') (() => {
   function workerUpdate(){
     const directories={};
     for(const line of $('worker-directories').value.split('\n').map(s=>s.trim()).filter(Boolean)){const at=line.indexOf('=');if(at<1||!line.slice(at+1).trim())throw Error('Use project ID = /absolute/path for each per-project path.');const project=line.slice(0,at).trim();if(Object.hasOwn(directories,project))throw Error('Only one path is allowed per project.');directories[project]=line.slice(at+1).trim();}
-    return {host:workerEdit.host,id:workerEdit.id,intent:$('worker-intent').value,config:{name:$('worker-name').value.trim(),concurrency:Number($('worker-slots').value),projects:$('worker-projects').value.split('\n').map(s=>s.trim()).filter(Boolean),directory:$('worker-directory').value.trim(),directories}};
+    return {host:workerEdit.host,id:workerEdit.id,intent:$('worker-intent').value,config:{provider:$('worker-provider').value,name:$('worker-name').value.trim(),concurrency:Number($('worker-slots').value),projects:$('worker-projects').value.split('\n').map(s=>s.trim()).filter(Boolean),directory:$('worker-directory').value.trim(),directories}};
   }
   $('worker-form').onsubmit=async event=>{
     event.preventDefault();if(workerEditBusy)return;workerEditBusy=true;workerEditButtons();
     try{const update=workerUpdate();const data=await configRequest({worker_update:update,revision:workerEditRevision,save:false});workerEditPreview=update;
-      const before=workerEdit.worker;const changes=[];for(const [key,label] of [['name','Name'],['concurrency','Agent slots'],['projects','Projects'],['directory','Working directory'],['directories','Per-project paths']]){const defaults={name:'Worker',concurrency:1,projects:[],directory:'',directories:{}};const old=before.config?.[key]??defaults[key];if(JSON.stringify(old)!==JSON.stringify(update.config[key]))changes.push(label+': '+(typeof old==='object'?JSON.stringify(old):old||'Automatic')+' → '+(typeof update.config[key]==='object'?JSON.stringify(update.config[key]):update.config[key]||'Automatic'));}if(before.intent!==update.intent)changes.unshift('Pickup mode: '+before.intent+' → '+update.intent);
+      const before=workerEdit.worker;const changes=[];for(const [key,label] of [['name','Name'],['provider','Agent'],['concurrency','Agent slots'],['projects','Projects'],['directory','Working directory'],['directories','Per-project paths']]){const defaults={provider:'codex',name:'Worker',concurrency:1,projects:[],directory:'',directories:{}};const old=before.config?.[key]??defaults[key];if(JSON.stringify(old)!==JSON.stringify(update.config[key]))changes.push(label+': '+(typeof old==='object'?JSON.stringify(old):old||'Automatic')+' → '+(typeof update.config[key]==='object'?JSON.stringify(update.config[key]):update.config[key]||'Automatic'));}if(before.intent!==update.intent)changes.unshift('Pickup mode: '+before.intent+' → '+update.intent);
       $('worker-editor-changes').replaceChildren(...changes.map(text=>element('li','',text)));$('worker-editor-status').textContent=changes.length?(update.intent==='stop'&&before.intent!=='stop'?'Saving will stop this worker and its current agents.':'Ready to save to fleet.yaml. Machines will apply these settings automatically.'):'No changes to save.';if(!changes.length)workerEditPreview=undefined;$('worker-editor-changes').scrollIntoView({block:'nearest'});
     }catch(error){workerEditPreview=undefined;$('worker-editor-status').textContent=error.message;}finally{workerEditBusy=false;workerEditButtons();}
   };
