@@ -110,6 +110,29 @@ pub(crate) fn pause_before_writer(
     entered: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
 ) -> (Connection, std::thread::JoinHandle<()>) {
+    pause_before_command(path, entered, release, |command| {
+        matches!(command, Command::Batch { sql } if sql == "BEGIN IMMEDIATE")
+    })
+}
+
+/// Hold a real service read at a deterministic point inside its transaction.
+pub(crate) fn pause_before_query(
+    path: &Path,
+    sql: &'static str,
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+) -> (Connection, std::thread::JoinHandle<()>) {
+    pause_before_command(path, entered, release, move |command| {
+        matches!(command, Command::Query { sql: query, .. } if query == sql)
+    })
+}
+
+fn pause_before_command(
+    path: &Path,
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+    should_pause: impl Fn(&Command) -> bool + Send + 'static,
+) -> (Connection, std::thread::JoinHandle<()>) {
     let Backend::Remote(remote) = Connection::connect(path).unwrap().backend else {
         unreachable!()
     };
@@ -119,7 +142,7 @@ pub(crate) fn pause_before_writer(
         let mut server = BufReader::new(server);
         let mut paused = false;
         while let Some(command) = wire::read::<Command>(&mut server).unwrap() {
-            if !paused && matches!(&command, Command::Batch { sql } if sql == "BEGIN IMMEDIATE") {
+            if !paused && should_pause(&command) {
                 entered.send(()).unwrap();
                 release.recv().unwrap();
                 paused = true;
