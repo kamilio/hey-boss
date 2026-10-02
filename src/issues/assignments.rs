@@ -840,6 +840,94 @@ pub(super) fn release_claim(
 mod tests {
     use super::*;
     #[test]
+    fn unchanged_watcher_lifecycle_batches_reads() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let mut f = Fixture::new();
+            f.assign("github").unwrap();
+            f.store.db.execute("WITH RECURSIVE n(id) AS (VALUES(2) UNION ALL SELECT id+1 FROM n WHERE id<?1)
+                INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,created_at,updated_at,version,labels,sort_order,assignment_target)
+                SELECT 'named:test',id,'Task '||id,'','open','watcher:github','human:test',0,0,1,'[]',id,'github' FROM n", [count]).unwrap();
+            f.store.db.execute_batch("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                SELECT project_id,number,'https://github.com/o/r/pull/'||number,'human:test',0 FROM issues WHERE number>1;
+                INSERT INTO issue_github_watches SELECT project_id,number,json_object('prs',json_object('https://github.com/o/r/pull/'||number,json_object())) FROM issues WHERE number%2=0;").unwrap();
+            let path = f.root.join("issues.db");
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            let mut reader = Store::open(&path).unwrap();
+            reader.replace_connection_for_test(db);
+            reader
+                .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+                .unwrap();
+            drop(reader);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM issues WHERE assignment_target='github'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                count
+            );
+            eprintln!("{count} unchanged watchers: {commands} RPCs, {steps} query steps");
+            measurements.push(commands);
+        }
+        assert!(
+            measurements.iter().all(|count| *count <= 8),
+            "Lifecycle reads grew per watcher: {measurements:?}"
+        );
+    }
+
+    #[test]
+    fn watcher_lifecycle_keeps_identical_issue_and_pr_keys_scoped_to_projects() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.store.db.execute_batch("INSERT INTO projects(id,name,next_number,hidden_at) VALUES('named:Other','Other',2,NULL),('named:Hidden','Hidden',2,1);
+            INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,created_at,updated_at,version,labels,sort_order,assignment_target)
+            SELECT id,1,'Task','','open','watcher:github','human:test',0,0,1,'[]',1,'github' FROM projects WHERE id IN ('named:Other','named:Hidden');
+            INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,status)
+            VALUES('named:Other',1,'https://github.com/o/r/pull/1','human:test',0,'closed');").unwrap();
+        f.store
+            .reconcile_github_assignments(f.request.actor.as_ref().unwrap())
+            .unwrap();
+        let assignments: Vec<_> = f
+            .store
+            .db
+            .prepare("SELECT project_id,assignment_target,assignee FROM issues ORDER BY project_id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            assignments,
+            vec![
+                (
+                    "named:Hidden".into(),
+                    Some("github".into()),
+                    Some("watcher:github".into())
+                ),
+                ("named:Other".into(), None, Some("human:boss".into())),
+                (
+                    "named:test".into(),
+                    Some("github".into()),
+                    Some("watcher:github".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn assignment_metadata_does_not_read_large_issue_body_pages() {
         let f = Fixture::new();
         let db = &f.store.db;
