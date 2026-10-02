@@ -140,3 +140,18 @@ assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','large',1),/betw
 assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','retired',1),/no longer/);
 assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','missing',1),/no longer/);
 console.log('Project worker agent limit checks passed');
+
+const {workerLimitState,configurationProblems}=require('../src/issues/web/fleet.js');
+const limitWorker={id:'limit-worker',pid:123,active:0,config:{concurrency:3},desired_concurrency:2};
+assert.deepEqual(workerLimitState(limitWorker,{state:'connected',heartbeat:now/1000},now),{limit:2,applied:3,status:'Pending',note:'Waiting for this worker to apply the new limit.'});
+assert.equal(workerLimitState({...limitWorker,config:{concurrency:2}},machine,now).status,'');
+assert.equal(workerLimitState({...limitWorker,active:3,config:{concurrency:2}},machine,now).status,'Finishing');
+assert.equal(workerLimitState(limitWorker,{state:'disconnected'},now).status,'Queued');
+assert.equal(workerLimitState(limitWorker,{...machine,configuration_error:'Checkout failed'},now).status,'Blocked');
+const checkoutProblem={configuration_error:'github.com/acme/atlas: Git clone failed. Check repository access and Git authentication on this machine.',projects:{'github.com/acme/atlas':{git:'git@github.com:acme/atlas.git',path:'~/Workspace/atlas'}}};
+assert.equal(configurationProblems(checkoutProblem)[0].project,'github.com/acme/atlas');
+assert.equal(configurationProblems(checkoutProblem)[0].summary,'Couldn’t clone repository');
+assert.equal(configurationProblems({...checkoutProblem,configuration_error:'Database unavailable'})[0].project,null);
+console.log('Pending limits and actionable checkout errors passed');
+
+assert.equal(configurationProblems({...checkoutProblem,configuration_error:'github.com/acme/atlas: Git clone timed out; check connection'}).length,1,'Semicolons inside one diagnostic do not create unrelated error rows');
