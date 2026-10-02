@@ -121,7 +121,7 @@ class Destination:
         saved = self.call(args, body)["issue"]
         number = saved["number"]
         for comment in source["comments"]:
-            self.call(["comment", str(number), "--body", "-", "--request-id",
+            self.call(["comment", str(number), "--allow-long-comment", "--body", "-", "--request-id",
                        key + ":comment:" + str(comment["id"])], comment_body(comment))
         if source["state"] == "closed":
             self.call(["close", str(number), "--request-id", key + ":close"])

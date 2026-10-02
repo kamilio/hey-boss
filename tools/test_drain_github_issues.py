@@ -199,6 +199,32 @@ class DestinationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "comments differ"):
                 self.dest.verify(source, number, body)
 
+    def test_long_archived_comments_preserve_exact_content_on_retry(self):
+        source = snapshot()
+        source["comments"] = [
+            dict(source["comments"][0], id=100, body="café ☕ " * 100),
+            dict(source["comments"][0], id=101,
+                 body="## Investigation\n\n- First finding\n- Second finding\n\n```rust\nOk(())\n```"),
+        ]
+        number, body = self.dest.copy(source)
+        self.dest.verify(source, number, body)
+        self.assertEqual(self.dest.copy(source), (number, body))
+        comments = self.dest.call(["view", str(number)])["comments"]
+        self.assertEqual([comment["body"] for comment in comments],
+                         [drain.comment_body(comment) for comment in source["comments"]])
+
+    def test_new_agent_comments_still_require_explicit_override(self):
+        number = self.dest.call(["create", "--title", "Comment limits", "--body", "Test"])["issue"]["number"]
+        for actor in (drain.IMPORT_AGENT, "codex:regression"):
+            for body in ("x" * 301, "one\ntwo\nthree"):
+                with self.subTest(actor=actor, body=body):
+                    with self.assertRaisesRegex(RuntimeError, "comment_too_long"):
+                        self.dest.call(["comment", str(number), "--agent", actor, "--body", "-"], body)
+        self.assertEqual(self.dest.call(["view", str(number)])["comments"], [])
+        self.dest.call(["comment", str(number), "--agent", "codex:regression", "--body", "-"],
+                       "x" * 149 + "\n" + "y" * 150)
+        self.assertEqual(len(self.dest.call(["view", str(number)])["comments"]), 1)
+
     def test_changed_source_conflicts_without_duplicate(self):
         source = snapshot()
         self.dest.copy(source)
