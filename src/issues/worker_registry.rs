@@ -316,42 +316,71 @@ impl Store {
         &self,
         worker_id: Option<&str>,
     ) -> Result<Vec<(String, String, String, String)>> {
-        let mut stmt = self.db.prepare("SELECT id,config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start)")?;
-        let settings = stmt
-            .query_map([worker_id], |r| {
+        let tx = self.db.read_transaction()?;
+        let scope = if worker_id.is_some() {
+            "w.id=?1"
+        } else {
+            "?1 IS NULL AND w.kind='managed'"
+        };
+        let settings = tx.query_collect(
+            &format!("SELECT id,config FROM issue_workers w WHERE {scope} AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start)"),
+            [worker_id], |r| -> rusqlite::Result<_> {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut projects_stmt = self.db.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL ORDER BY p.id")?;
-        let projects = projects_stmt
-            .query_map([], |r| {
-                Ok(Project {
+            })?;
+        if settings.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        // Standalone workers may use every enabled project. Fleet workers see
+        // only this machine's non-revoking assignments, read in one snapshot.
+        let projects = tx.query_collect(
+            "SELECT p.id,p.name,s.chief_prompt,CASE WHEN m.role='standalone' THEN NULL ELSE a.worker_id END
+             FROM projects p JOIN project_settings s ON s.project_id=p.id
+             CROSS JOIN fleet_meta m ON m.id=1
+             LEFT JOIN fleet_chief_ownership a ON a.project_id=p.id
+             WHERE s.chief_enabled=1 AND p.hidden_at IS NULL
+             AND (m.role='standalone' OR a.node=m.node AND a.revoking=0)
+             ORDER BY p.id", [], |r| -> rusqlite::Result<_> {
+                Ok((Project {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+                },r.get::<_,Option<String>>(2)?.unwrap_or_else(|| super::super::chief::DEFAULT_PROMPT.into()),r.get::<_,Option<String>>(3)?))
+            })?;
         let mut result = Vec::new();
+        let mut directories: HashMap<&String, String> = HashMap::new();
         for (worker_id, text) in settings {
             let config: Settings = serde_json::from_str(&text)?;
-            for project in &projects {
-                if !crate::chief_ownership::allowed(&self.db, &project.id, &worker_id)? {
+            for (project, prompt, assigned) in &projects {
+                if assigned
+                    .as_ref()
+                    .is_some_and(|assigned| *assigned != worker_id)
+                {
                     continue;
                 }
                 if !config.projects.is_empty() && !config.projects.contains(&project.id) {
                     continue;
                 }
-                let cwd = checkout(&self.db, &config, project)?;
+                let cwd = if config.directories.contains_key(&project.id)
+                    || !config.directory.is_empty()
+                {
+                    checkout(&tx, &config, project)?
+                } else {
+                    // Inferred directories depend on the project; explicit
+                    // per-worker paths (including empty overrides) stay separate.
+                    match directories.entry(&project.id) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(directory(&tx, project)?).clone()
+                        }
+                    }
+                };
                 if cwd.is_empty() {
                     continue;
                 }
-                let prompt = project_settings(&self.db, project)?["chief_prompt"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned();
-                result.push((project.id.clone(), cwd, prompt, worker_id.clone()));
+                result.push((project.id.clone(), cwd, prompt.clone(), worker_id.clone()));
             }
         }
+        tx.commit()?;
         Ok(result)
     }
 }
@@ -1311,6 +1340,155 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chief_preflight_batches_shared_prompts_and_ownership() {
+        let mut measurements = Vec::new();
+        for (count, inferred) in [(16, false), (128, false), (16, true), (128, true)] {
+            let root =
+                std::env::temp_dir().join(format!("hb-chief-preflight-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY,owner_pid INTEGER,owner_start TEXT);").unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO agents VALUES('creator',?1,0)",
+                    [json!({"cwd":root}).to_string()],
+                )
+                .unwrap();
+            for n in 0..10 {
+                let project = format!("named:Project-{n}");
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO projects(id,name,next_number,hidden_at) VALUES(?1,?1,1,?2)",
+                        params![project, if n == 9 { Some(1) } else { None }],
+                    )
+                    .unwrap();
+                store.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,chief_enabled,chief_prompt) VALUES(?1,'',0,1,?2,?3)",params![project,n!=8,if n%2==0 {Some(format!("Custom {n}"))} else {None}]).unwrap();
+                if n < 7 {
+                    store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES(?1,1,'Task','','open','creator',0,0,1,'[]')",[&project]).unwrap();
+                }
+            }
+            let config = Settings {
+                enabled: true,
+                directory: if inferred {
+                    String::new()
+                } else {
+                    root.to_string_lossy().into()
+                },
+                ..Settings::default()
+            };
+            for index in 0..count {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)",params![format!("worker-{index}"),serde_json::to_string(&config).unwrap()]).unwrap();
+            }
+            store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('cli','cli',?1,1,0),('disabled','managed',json_set(?1,'$.enabled',json('false')),1,0)",[serde_json::to_string(&config).unwrap()]).unwrap();
+            store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at,owner_pid,owner_start) VALUES('draining','managed',?1,1,0,123,'owner')",[serde_json::to_string(&config).unwrap()]).unwrap();
+            store
+                .db
+                .execute_batch("INSERT INTO issue_worker_runtime VALUES('draining',123,'owner')")
+                .unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            let started = std::time::Instant::now();
+            let candidates = store.chief_candidates(None).unwrap();
+            let elapsed = started.elapsed();
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            assert_eq!(
+                candidates.len(),
+                count as usize * if inferred { 7 } else { 8 }
+            );
+            for (project, cwd, prompt, worker) in candidates {
+                assert!(worker.starts_with("worker-"));
+                assert_eq!(cwd, root.to_string_lossy());
+                let n = project
+                    .strip_prefix("named:Project-")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert!(n < if inferred { 7 } else { 8 });
+                assert_eq!(
+                    prompt,
+                    if n % 2 == 0 {
+                        format!("Custom {n}")
+                    } else {
+                        super::super::super::chief::DEFAULT_PROMPT.into()
+                    }
+                );
+            }
+            if inferred {
+                let moved = root.join("moved");
+                fs::create_dir(&moved).unwrap();
+                let store = Store::open(&path).unwrap();
+                store
+                    .db
+                    .execute(
+                        "UPDATE agents SET metadata=?1 WHERE id='creator'",
+                        [json!({"cwd":moved}).to_string()],
+                    )
+                    .unwrap();
+                let refreshed = store.chief_candidates(Some("worker-0")).unwrap();
+                assert_eq!(refreshed.len(), 7);
+                assert!(
+                    refreshed
+                        .iter()
+                        .all(|(_, cwd, _, _)| *cwd == moved.to_string_lossy()),
+                    "Checkout discovery leaked across preflight snapshots"
+                );
+                let mapped = moved.join("mapped");
+                fs::create_dir(&mapped).unwrap();
+                let overrides = Settings {
+                    enabled: true,
+                    directory: moved.to_string_lossy().into(),
+                    directories: [
+                        ("named:Project-0".into(), String::new()),
+                        ("named:Project-1".into(), mapped.to_string_lossy().into()),
+                    ]
+                    .into(),
+                    ..Settings::default()
+                };
+                store
+                    .db
+                    .execute(
+                        "UPDATE issue_workers SET config=?1 WHERE id='worker-0'",
+                        [serde_json::to_string(&overrides).unwrap()],
+                    )
+                    .unwrap();
+                let overridden = store.chief_candidates(Some("worker-0")).unwrap();
+                assert_eq!(overridden.len(), 7);
+                for (project, cwd, _, _) in overridden {
+                    assert_ne!(
+                        project, "named:Project-0",
+                        "An empty project override must win over the global directory"
+                    );
+                    assert_eq!(
+                        cwd,
+                        if project == "named:Project-1" {
+                            mapped.to_string_lossy()
+                        } else {
+                            moved.to_string_lossy()
+                        }
+                    );
+                }
+            }
+            fs::remove_dir_all(root).unwrap();
+            eprintln!(
+                "Chief preflight, {count} workers / 8 projects, inferred={inferred}: {commands} RPCs, {steps} query VM steps, {elapsed:?}"
+            );
+            measurements.push((commands, if inferred { 24 } else { 6 }));
+        }
+        assert!(
+            measurements
+                .iter()
+                .all(|(commands, limit)| commands <= limit),
+            "Chief candidates repeat settings or ownership reads: {measurements:?}"
+        );
+    }
+
     #[test]
     fn fleet_activity_reads_are_batched_across_selected_workers() {
         let mut measurements = Vec::new();
