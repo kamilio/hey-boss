@@ -1163,12 +1163,9 @@ fn github_events_start_fresh_but_retries_of_delivered_work_can_resume() {
             .iter()
             .find(|v| v["method"] == "turn/start")
             .unwrap();
-        assert!(
-            turn["params"]["input"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("hey-boss issue pr list 1")
-        );
+        let text = turn["params"]["input"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Claim and implement `hey-boss issue view 1`."));
+        assert!(!text.contains("hey-boss issue pr list 1"));
     }
 }
 
