@@ -469,7 +469,7 @@ fn bootstrap_script() -> String {
     // Only the staged guard runs here. The installer builds release artifacts
     // after taking its lock and validating provenance and generation ordering.
     format!(
-        "{REFRESH_BUILD_INPUTS}; cargo build --quiet --locked --profile dev --bin hey-boss --manifest-path \"$upgrade_stage/Cargo.toml\"; cp \"$CARGO_TARGET_DIR/debug/hey-boss\" \"$upgrade_stage/guard\""
+        "{REFRESH_BUILD_INPUTS}; nice -n 10 cargo build --quiet --locked --profile dev --bin hey-boss --manifest-path \"$upgrade_stage/Cargo.toml\"; cp \"$CARGO_TARGET_DIR/debug/hey-boss\" \"$upgrade_stage/guard\""
     )
 }
 
@@ -553,7 +553,10 @@ fn build(snapshot: &Path, target: &Path) -> io::Result<PathBuf> {
         std::env::var("PATH").unwrap_or_default()
     );
     output(
-        Command::new("cargo")
+        // Compilers share the host with interactive database/UI services.
+        // Lower only this child tree's CPU priority, not installer/service work.
+        Command::new("nice")
+            .args(["-n", "10", "cargo"])
             .args([
                 "build",
                 "--quiet",
@@ -958,12 +961,19 @@ mod tests {
                  [[package]]\nname='hey-gh'\nversion='0.1.0'\n",
             )
             .unwrap();
-            fs::write(root.join("build.rs"), "fn main(){println!(\"cargo:rerun-if-changed=src\");let stamp=std::fs::read_to_string(\"src/stamp\").unwrap();println!(\"cargo:rustc-env=STAMP={stamp}\");}").unwrap();
+            fs::write(root.join("build.rs"), "fn main(){println!(\"cargo:rerun-if-changed=src\");let stamp=std::fs::read_to_string(\"src/stamp\").unwrap();println!(\"cargo:rustc-env=STAMP={stamp}\");let priority=std::process::Command::new(\"ps\").args([\"-o\",\"ni=\",\"-p\",&std::process::id().to_string()]).output().unwrap();assert!(priority.status.success());std::fs::write(\"build-priority\",priority.stdout).unwrap();}").unwrap();
             fs::write(
                 root.join("src/main.rs"),
                 "fn main(){assert_eq!(hey_harvester::stamp(),env!(\"STAMP\"));assert_eq!(hey_gh::stamp(),env!(\"STAMP\"));println!(\"hey-boss 0.1.0 (build {})\",env!(\"STAMP\"));}",
             )
             .unwrap();
+            let build_priority = || {
+                fs::read_to_string(root.join("build-priority"))
+                    .unwrap()
+                    .trim()
+                    .parse::<i32>()
+                    .unwrap()
+            };
             fs::write(root.join("src/stamp"), stamp).unwrap();
             for package in ["hey-harvester", "hey-gh"] {
                 let dir = root.join("packages").join(package);
@@ -1004,6 +1014,10 @@ mod tests {
                     .env("CARGO_TARGET_DIR", &bootstrap),
             )
             .unwrap();
+            assert!(
+                build_priority() >= 10,
+                "Remote bootstrap compiler ran at foreground priority"
+            );
             assert_eq!(
                 installed_id(&root.join("guard")).as_deref(),
                 Some(stamp),
@@ -1020,6 +1034,10 @@ mod tests {
                 );
             }
             let binary = build(&root, &target).unwrap();
+            assert!(
+                build_priority() >= 10,
+                "Release compiler ran at foreground priority"
+            );
             for package in ["hey-harvester", "hey-gh"] {
                 let bytes =
                     output(&mut Command::new(target.join("release").join(package))).unwrap();
