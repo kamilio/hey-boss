@@ -1230,7 +1230,7 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_comment_resolution','issue_attempt_recovery')", [], |r| r.get::<_, i64>(0))? < 10 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery')", [], |r| r.get::<_, i64>(0))? < 11 {
             db.execute_batch(mindmap::INDEXES)?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
@@ -3234,6 +3234,55 @@ mod contention_tests {
         assert_eq!(found[&2][0]["origin"]["host"], "other-issue");
         eprintln!("PR origins: {commands} RPCs, {steps} steps, {elapsed:?}");
         assert!(steps < 1000, "Unrelated history added query work: {steps}");
+    }
+
+    #[test]
+    fn pull_request_origins_seek_by_url_in_large_issue_histories() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-pr-origin-urls-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("DROP INDEX IF EXISTS issue_pr_origin_url;
+            CREATE INDEX IF NOT EXISTS issue_pr_origin ON events(project_id,issue_number,id DESC) WHERE action='pr_attached';
+            INSERT INTO projects(id,name,next_number) VALUES('named:Origins','Origins',3),('named:Other','Other',2);
+            INSERT INTO agents VALUES('creator','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            VALUES('named:Origins',1,'One','','open','creator',0,0,1,'[]',1),('named:Origins',2,'Two','','open','creator',0,0,1,'[]',2),('named:Other',1,'Other','','open','creator',0,0,1,'[]',1);
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<300)
+            INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+            SELECT 'named:Origins',1,'https://github.com/o/r/pull/'||id,'creator',id FROM n;
+            INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at) VALUES
+            ('named:Origins',2,'https://github.com/o/r/pull/1','creator',1),
+            ('named:Other',1,'https://github.com/o/r/pull/1','creator',1);
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+            SELECT project_id,issue_number,'creator','pr_attached',created_at,json_object('url',url,'origin',json_object('host',project_id||':'||issue_number||':'||created_at))
+            FROM issue_pull_requests WHERE created_at<>2;
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES
+            ('named:Origins',1,'creator','pr_attached',0,'{\"url\":\"https://github.com/o/r/pull/1\",\"origin\":{\"host\":\"latest-id\"}}'),
+            ('named:Origins',1,'creator','pr_attached',999,'{\"url\":\"https://github.com/o/r/pull/1\",\"origin\":\"invalid\"}'),
+            ('named:Origins',1,'creator','pr_attached',999,'{}');").unwrap();
+        drop(store);
+        // Exercise additive migration over the old index and incomplete origins.
+        let store = Store::open(&path).unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&path);
+        let found = registry::pull_requests_for_issues(&db, "named:Origins", &[1, 2]).unwrap();
+        let other = registry::pull_requests_for_issues(&db, "named:Other", &[1]).unwrap();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(found[&1].len(), 300);
+        assert_eq!(found[&1][0]["origin"]["host"], "latest-id");
+        assert!(found[&1][1].get("origin").is_none());
+        assert_eq!(found[&1][299]["origin"]["host"], "named:Origins:1:300");
+        assert_eq!(found[&2][0]["origin"]["host"], "named:Origins:2:1");
+        assert_eq!(other[&1][0]["origin"]["host"], "named:Other:1:1");
+        eprintln!("300 PR origins: {commands} RPCs, {steps} query steps");
+        assert!(steps < 30_000, "PR origins scanned other URLs: {steps}");
     }
 
     #[test]
