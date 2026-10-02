@@ -83,7 +83,10 @@ impl Store {
     }
 
     pub(crate) fn record_pr_author(&mut self, url: &str, id: i64) -> Result<()> {
-        if id > 0 {
+        if id > 0 && self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE url=?1 AND author_id IS NOT ?2)",
+            params![url,id], |row| row.get::<_,bool>(0),
+        )? {
             self.db.execute(
                 "UPDATE issue_pull_requests SET author_id=?2 WHERE url=?1 AND author_id IS NOT ?2",
                 params![url, id],
@@ -113,7 +116,20 @@ impl Store {
         checked_at: i64,
         error: Option<&str>,
     ) -> Result<()> {
-        self.db.execute("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE url=?1 AND status<>'merged' AND (checked_at IS NULL OR checked_at<=?3)", params![url,status,checked_at,error])?;
+        // Cached/stale observations must not queue behind an unrelated writer.
+        // Keep the same predicate on the update to recheck concurrent changes.
+        const CHANGED: &str =
+            "url=?1 AND status<>'merged' AND (checked_at IS NULL OR checked_at<=?3)
+            AND (status IS NOT coalesce(?2,status)
+                OR checked_at IS NOT CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END
+                OR error IS NOT ?4)";
+        if self.db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE {CHANGED})"),
+            params![url, status, checked_at, error],
+            |row| row.get::<_, bool>(0),
+        )? {
+            self.db.execute(&format!("UPDATE issue_pull_requests SET status=coalesce(?2,status),checked_at=CASE WHEN ?2 IS NULL THEN checked_at ELSE ?3 END,error=?4 WHERE {CHANGED}"), params![url,status,checked_at,error])?;
+        }
         Ok(())
     }
 
@@ -126,7 +142,14 @@ impl Store {
     ) -> Result<()> {
         // Keep terminal status immutable, but allow historical merges to acquire
         // their GitHub timestamp. Stale metadata never overwrites a newer read.
-        self.db.execute("UPDATE issue_pull_requests SET pr_title=?2,checked_at=max(coalesce(checked_at,0),?4),merged_at=coalesce(merged_at,CAST(strftime('%s',?3) AS INTEGER)*1000) WHERE url=?1 AND status='merged' AND (checked_at IS NULL OR checked_at<=?4) AND (pr_title IS NOT ?2 OR (merged_at IS NULL AND strftime('%s',?3) IS NOT NULL))",params![url,title,merged_at,checked_at])?;
+        const CHANGED: &str = "url=?1 AND status='merged' AND (checked_at IS NULL OR checked_at<=?4) AND (pr_title IS NOT ?2 OR (merged_at IS NULL AND strftime('%s',?3) IS NOT NULL))";
+        if self.db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE {CHANGED})"),
+            params![url, title, merged_at, checked_at],
+            |row| row.get::<_, bool>(0),
+        )? {
+            self.db.execute(&format!("UPDATE issue_pull_requests SET pr_title=?2,checked_at=max(coalesce(checked_at,0),?4),merged_at=coalesce(merged_at,CAST(strftime('%s',?3) AS INTEGER)*1000) WHERE {CHANGED}"),params![url,title,merged_at,checked_at])?;
+        }
         Ok(())
     }
 
@@ -524,6 +547,87 @@ mod tests {
             .unwrap();
         (store, actor, root)
     }
+    #[test]
+    fn unchanged_and_stale_pr_metadata_do_not_wait_for_a_writer() {
+        let (mut store, _, root) = fixture();
+        let url = "https://github.com/o/r/pull/1";
+        let merged = "https://github.com/o/r/pull/2";
+        let missing = "https://github.com/o/r/pull/999";
+        store
+            .record_pr_status(url, Some("open"), 200, None)
+            .unwrap();
+        store
+            .record_pr_status(merged, Some("merged"), 200, None)
+            .unwrap();
+        store
+            .record_pr_merge_details(merged, "Done", Some("2026-10-01T00:00:00Z"), 200)
+            .unwrap();
+        store
+            .db
+            .busy_timeout(std::time::Duration::from_millis(25))
+            .unwrap();
+        let mut writer = Connection::open(root.join("issues.db")).unwrap();
+        let lock = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let results = [
+            ("known author", store.record_pr_author(url, 42)),
+            ("missing author", store.record_pr_author(missing, 42)),
+            (
+                "unchanged status",
+                store.record_pr_status(url, Some("open"), 200, None),
+            ),
+            (
+                "stale status",
+                store.record_pr_status(url, Some("closed"), 100, None),
+            ),
+            (
+                "stale error",
+                store.record_pr_status(url, None, 100, Some("Old error")),
+            ),
+            (
+                "unchanged error",
+                store.record_pr_status(url, None, 300, None),
+            ),
+            (
+                "terminal status",
+                store.record_pr_status(merged, Some("open"), 300, None),
+            ),
+            (
+                "missing status",
+                store.record_pr_status(missing, Some("open"), 300, None),
+            ),
+            (
+                "known merge details",
+                store.record_pr_merge_details(merged, "Done", Some("2026-10-01T00:00:00Z"), 300),
+            ),
+            (
+                "stale merge details",
+                store.record_pr_merge_details(merged, "Old title", None, 100),
+            ),
+            (
+                "nonmerged details",
+                store.record_pr_merge_details(url, "Not merged", None, 300),
+            ),
+        ];
+        drop(lock);
+        // Real changes still update every attachment and preserve validation times.
+        store.record_pr_author(url, 77).unwrap();
+        store
+            .record_pr_status(url, None, 300, Some("Unavailable"))
+            .unwrap();
+        assert_eq!(store.db.query_row("SELECT count(*) FROM issue_pull_requests WHERE url=?1 AND author_id=77 AND checked_at=200 AND error='Unavailable'", [url], |r| r.get::<_,i64>(0)).unwrap(), 5);
+        store
+            .record_pr_status(url, Some("closed"), 400, None)
+            .unwrap();
+        assert_eq!(store.db.query_row("SELECT count(*) FROM issue_pull_requests WHERE url=?1 AND status='closed' AND checked_at=400 AND error IS NULL", [url], |r| r.get::<_,i64>(0)).unwrap(), 5);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+        for (case, result) in results {
+            assert!(result.is_ok(), "{case} waited for the writer: {result:?}");
+        }
+    }
+
     #[test]
     fn unchanged_watcher_open_status_does_not_wait_for_a_writer() {
         let (mut store, _, root) = fixture();
