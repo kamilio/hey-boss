@@ -127,127 +127,170 @@ pub(super) fn current_row(db: &Connection, table: &str, row: &Value) -> Result<V
     .unwrap_or(Value::Null))
 }
 pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
-    let k = keys(table)?;
-    let mut row = row.clone();
-    if table == "issues" {
-        let m = row
-            .as_object_mut()
-            .ok_or_else(|| invalid("Invalid issue row"))?;
-        let manual = i64::from(m["state"] == "blocked");
-        m.entry("manual_blocked").or_insert(json!(manual));
-        m.entry("blockers").or_insert(json!("[]"));
-        for column in ["assignment_target", "github_ack_event", "attempt_hold"] {
-            if !m.contains_key(column) {
-                let target: Option<Option<String>> = db
+    RowWriter::new(db).put(table, row)
+}
+
+// Batch callers keep this writer inside their transaction. The next batch
+// reloads schema metadata, including any migrations committed in between.
+struct RowWriter<'a> {
+    db: &'a Connection,
+    plans: BTreeMap<String, RowPlan>,
+}
+impl<'a> RowWriter<'a> {
+    fn new(db: &'a Connection) -> Self {
+        Self {
+            db,
+            plans: BTreeMap::new(),
+        }
+    }
+    fn put(&mut self, table: &str, row: &Value) -> Result<()> {
+        keys(table)?;
+        let db = self.db;
+        let mut row = row.clone();
+        if table == "issues" {
+            let m = row
+                .as_object_mut()
+                .ok_or_else(|| invalid("Invalid issue row"))?;
+            let manual = i64::from(m["state"] == "blocked");
+            m.entry("manual_blocked").or_insert(json!(manual));
+            m.entry("blockers").or_insert(json!("[]"));
+            for column in ["assignment_target", "github_ack_event", "attempt_hold"] {
+                if !m.contains_key(column) {
+                    let target: Option<Option<String>> = db
+                        .query_row(
+                            &format!(
+                                "SELECT {column} FROM issues WHERE project_id=?1 AND number=?2"
+                            ),
+                            rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    m.insert(column.into(), json!(target.flatten()));
+                }
+            }
+            // Older peers cannot express these fields. Preserve local values when
+            // merging their rows; only an explicit modern value may change them.
+            // Full modern rows take no extra database read.
+            if !m.contains_key("draft") || !m.contains_key("plan") {
+                let existing: Option<(i64, Option<String>)> = db
                     .query_row(
-                        &format!("SELECT {column} FROM issues WHERE project_id=?1 AND number=?2"),
+                        "SELECT draft,plan FROM issues WHERE project_id=?1 AND number=?2",
+                        rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let (draft, plan) = existing.unwrap_or((0, None));
+                m.entry("draft").or_insert(json!(draft));
+                m.entry("plan").or_insert(json!(plan));
+            }
+            if m.get("origin").is_none_or(Value::is_null) {
+                let existing: Option<Option<String>> = db
+                    .query_row(
+                        "SELECT origin FROM issues WHERE project_id=?1 AND number=?2",
                         rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
                         |r| r.get(0),
                     )
                     .optional()?;
-                m.insert(column.into(), json!(target.flatten()));
+                m.insert("origin".into(), json!(existing.flatten()));
             }
         }
-        // Older peers cannot express these fields. Preserve local values when
-        // merging their rows; only an explicit modern value may change them.
-        // Full modern rows take no extra database read.
-        if !m.contains_key("draft") || !m.contains_key("plan") {
-            let existing: Option<(i64, Option<String>)> = db
-                .query_row(
-                    "SELECT draft,plan FROM issues WHERE project_id=?1 AND number=?2",
-                    rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            let (draft, plan) = existing.unwrap_or((0, None));
-            m.entry("draft").or_insert(json!(draft));
-            m.entry("plan").or_insert(json!(plan));
+        if table == "project_settings" {
+            let m = row
+                .as_object_mut()
+                .ok_or_else(|| invalid("Invalid settings row"))?;
+            // Retained only for older peers; sibling scheduling is no longer supported.
+            m.insert("subtask_scheduling".into(), json!("explicit"));
         }
-        if m.get("origin").is_none_or(Value::is_null) {
-            let existing: Option<Option<String>> = db
-                .query_row(
-                    "SELECT origin FROM issues WHERE project_id=?1 AND number=?2",
-                    rusqlite::params![m["project_id"].as_str(), m["number"].as_i64()],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            m.insert("origin".into(), json!(existing.flatten()));
+        let defaults: &[(&str, Value)] = match table {
+            "project_settings" => &[
+                ("drafts_enabled", json!(1)),
+                ("plan_template", json!("plans/{timestamp}-{number}.md")),
+                ("worktree_enabled", json!(0)),
+                ("prompt_overrides", json!("{}")),
+                ("chief_enabled", json!(0)),
+                ("chief_prompt", Value::Null),
+            ],
+            "issue_pull_requests" => &[
+                ("purpose", json!("unspecified")),
+                ("status", json!("unknown")),
+                ("checked_at", Value::Null),
+                ("error", Value::Null),
+                ("merged_at", Value::Null),
+                ("pr_title", Value::Null),
+                ("author_id", Value::Null),
+            ],
+            "global_settings" => &[
+                ("auto_close_merged_prs", json!(1)),
+                ("github_user_id", Value::Null),
+            ],
+            _ => &[],
+        };
+        // Only old capture triggers omit additive fields. Read their existing
+        // values once, preserving explicit nulls and avoiding reads for modern rows.
+        if defaults.iter().any(|(column, _)| row.get(column).is_none()) {
+            let existing = current_row(db, table, &row)?;
+            let m = row
+                .as_object_mut()
+                .ok_or_else(|| invalid("Invalid settings or PR row"))?;
+            for (column, default) in defaults {
+                m.entry(*column)
+                    .or_insert_with(|| existing.get(column).unwrap_or(default).clone());
+            }
         }
-    }
-    if table == "project_settings" {
-        let m = row
-            .as_object_mut()
-            .ok_or_else(|| invalid("Invalid settings row"))?;
-        // Retained only for older peers; sibling scheduling is no longer supported.
-        m.insert("subtask_scheduling".into(), json!("explicit"));
-    }
-    let defaults: &[(&str, Value)] = match table {
-        "project_settings" => &[
-            ("drafts_enabled", json!(1)),
-            ("plan_template", json!("plans/{timestamp}-{number}.md")),
-            ("worktree_enabled", json!(0)),
-            ("prompt_overrides", json!("{}")),
-            ("chief_enabled", json!(0)),
-            ("chief_prompt", Value::Null),
-        ],
-        "issue_pull_requests" => &[
-            ("purpose", json!("unspecified")),
-            ("status", json!("unknown")),
-            ("checked_at", Value::Null),
-            ("error", Value::Null),
-            ("merged_at", Value::Null),
-            ("pr_title", Value::Null),
-            ("author_id", Value::Null),
-        ],
-        "global_settings" => &[
-            ("auto_close_merged_prs", json!(1)),
-            ("github_user_id", Value::Null),
-        ],
-        _ => &[],
-    };
-    // Only old capture triggers omit additive fields. Read their existing
-    // values once, preserving explicit nulls and avoiding reads for modern rows.
-    if defaults.iter().any(|(column, _)| row.get(column).is_none()) {
-        let existing = current_row(db, table, &row)?;
-        let m = row
-            .as_object_mut()
-            .ok_or_else(|| invalid("Invalid settings or PR row"))?;
-        for (column, default) in defaults {
-            m.entry(*column)
-                .or_insert_with(|| existing.get(column).unwrap_or(default).clone());
+        if !self.plans.contains_key(table) {
+            self.plans
+                .insert(table.to_owned(), RowPlan::load(db, table)?);
         }
+        let plan = &self.plans[table];
+        let object = row
+            .as_object()
+            .ok_or_else(|| invalid("Invalid fleet row"))?;
+        if plan.columns.iter().any(|c| !object.contains_key(c))
+            || object.len() != plan.columns.len()
+        {
+            return Err(invalid(&format!("Schema mismatch for {table}")));
+        }
+        execute(
+            db,
+            &plan.sql,
+            &plan
+                .columns
+                .iter()
+                .map(|c| row[c].clone())
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(())
     }
-    let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
-        .iter()
-        .map(|r| r["name"].as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-    let object = row
-        .as_object()
-        .ok_or_else(|| invalid("Invalid fleet row"))?;
-    if columns.iter().any(|c| !object.contains_key(c)) || object.len() != columns.len() {
-        return Err(invalid(&format!("Schema mismatch for {table}")));
-    }
-    let names = columns
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let updates = columns
-        .iter()
-        .filter(|c| !k.contains(&c.as_str()))
-        .map(|c| format!("\"{c}\"=excluded.\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let placeholders = vec!["?"; columns.len()].join(",");
-    execute(
-        db,
-        &format!(
+}
+struct RowPlan {
+    columns: Vec<String>,
+    sql: String,
+}
+impl RowPlan {
+    fn load(db: &Connection, table: &str) -> Result<Self> {
+        let k = keys(table)?;
+        let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let names = columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let updates = columns
+            .iter()
+            .filter(|c| !k.contains(&c.as_str()))
+            .map(|c| format!("\"{c}\"=excluded.\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let placeholders = vec!["?"; columns.len()].join(",");
+        let sql = format!(
             "INSERT INTO {table}({names}) VALUES({placeholders}) ON CONFLICT({}) DO UPDATE SET {updates}",
             k.join(",")
-        ),
-        &columns.iter().map(|c| row[c].clone()).collect::<Vec<_>>(),
-    )?;
-    Ok(())
+        );
+        Ok(Self { columns, sql })
+    }
 }
 pub(super) fn ensure_metadata(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS fleet_ranges(node TEXT NOT NULL,project_id TEXT NOT NULL,first_number INTEGER NOT NULL,last_number INTEGER NOT NULL,PRIMARY KEY(node,project_id)); CREATE TABLE IF NOT EXISTS fleet_number_reservations(node TEXT NOT NULL,project_id TEXT NOT NULL,first_number INTEGER NOT NULL,last_number INTEGER NOT NULL,PRIMARY KEY(node,project_id,first_number)); CREATE TABLE IF NOT EXISTS fleet_signals(id TEXT PRIMARY KEY,host TEXT NOT NULL,worker TEXT NOT NULL,signal TEXT NOT NULL,state TEXT NOT NULL,result TEXT,created_at REAL NOT NULL); CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
@@ -519,7 +562,8 @@ fn row_json(change: &Value, field: &str) -> Result<Value> {
         None => Value::Null,
     })
 }
-fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
+fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Result<Value> {
+    let db = writer.db;
     let table = change["table_name"]
         .as_str()
         .ok_or_else(|| invalid("Invalid replicated table"))?;
@@ -587,7 +631,7 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                 ));
             }
         }
-        put_row(db, table, &after)?;
+        writer.put(table, &after)?;
     } else if append(table) {
         if !before.is_null() || after.is_null() {
             return Err(invalid("Append-only history cannot be rewritten"));
@@ -665,7 +709,7 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
         )?;
     } else if table == "agents" {
         if !after.is_null() {
-            put_row(db, table, &after)?;
+            writer.put(table, &after)?;
         }
     } else if table == "issues" {
         let owner = if after.is_null() {
@@ -684,7 +728,7 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                 if !old.is_null() || !(allocated || legacy) {
                     return Err(invalid("Offline issue number is not exclusively allocated"));
                 }
-                put_row(db, table, &after)?;
+                writer.put(table, &after)?;
                 execute(
                     db,
                     "UPDATE projects SET next_number=max(next_number,?) WHERE id=?",
@@ -832,7 +876,7 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
                     .unwrap()
                     .max(after["updated_at"].as_i64().unwrap())
             );
-            put_row(db, table, &merged)?;
+            writer.put(table, &merged)?;
         }
     } else {
         if !before.is_null() && old != before && old != after {
@@ -845,7 +889,7 @@ fn apply_change(db: &Connection, node: &str, change: &Value) -> Result<Value> {
             let (clause, values) = key_where(table, &before)?;
             execute(db, &format!("DELETE FROM {table} WHERE {clause}"), &values)?;
         } else {
-            put_row(db, table, &after)?;
+            writer.put(table, &after)?;
         }
     }
     if table == "issue_subtasks" {
@@ -869,6 +913,7 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
     } else {
         None
     };
+    let mut writer = RowWriter::new(db);
     let mut results = vec![];
     for change in changes {
         let previous = rows(
@@ -880,7 +925,7 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
             serde_json::from_str(r["result"].as_str().unwrap())?
         } else {
             db.execute_batch("SAVEPOINT incoming")?;
-            let result = match apply_change(db, node, change) {
+            let result = match apply_change(&mut writer, node, change) {
                 Ok(r) => {
                     db.execute_batch("RELEASE incoming")?;
                     r
@@ -1203,12 +1248,13 @@ fn pending_key(table: &str, row: &Value) -> Result<String> {
 type Pending = BTreeMap<String, Option<BTreeSet<String>>>;
 
 fn apply_row(
-    db: &Connection,
+    writer: &mut RowWriter<'_>,
     pending: &Pending,
     table: &str,
     row: &Value,
     origin: &str,
 ) -> Result<()> {
+    let db = writer.db;
     if table == "issue_subtasks" {
         return Ok(());
     }
@@ -1246,7 +1292,7 @@ fn apply_row(
                 row["next_number"] = old["next_number"].clone();
             }
         }
-        put_row(db, table, &row)?;
+        writer.put(table, &row)?;
     }
     Ok(())
 }
@@ -1262,11 +1308,12 @@ fn graph_key(row: &Value) -> Result<(String, i64)> {
     ))
 }
 fn apply_graph(
-    db: &Connection,
+    writer: &mut RowWriter<'_>,
     pending: &Pending,
     payload: &Value,
     acknowledged: BTreeMap<(String, i64), Value>,
 ) -> Result<()> {
+    let db = writer.db;
     let mut desired = BTreeMap::new();
     for r in rows(db, "SELECT * FROM fleet_deferred_subtasks", &[])? {
         desired.insert(
@@ -1342,7 +1389,7 @@ fn apply_graph(
         let result = if row.is_null() {
             Ok(())
         } else {
-            put_row(db, "issue_subtasks", &row)
+            writer.put("issue_subtasks", &row)
         };
         match result {
             Ok(()) => {
@@ -1375,6 +1422,7 @@ pub(super) fn apply_pull(
     } else {
         None
     };
+    let mut writer = RowWriter::new(db);
     let cursor = payload["cursor"]
         .as_i64()
         .filter(|cursor| *cursor >= 0)
@@ -1484,7 +1532,7 @@ pub(super) fn apply_pull(
         for row in payload["tables"][*table].as_array().into_iter().flatten() {
             if append(table) {
                 apply_row(
-                    db,
+                    &mut writer,
                     &pending,
                     table,
                     &row["row"],
@@ -1493,7 +1541,7 @@ pub(super) fn apply_pull(
                         .ok_or_else(|| invalid("Missing history origin"))?,
                 )?;
             } else {
-                apply_row(db, &pending, table, row, "")?;
+                apply_row(&mut writer, &pending, table, row, "")?;
             }
         }
     }
@@ -1532,7 +1580,7 @@ pub(super) fn apply_pull(
         if append(table) {
             if let Some(item) = change.get("append") {
                 apply_row(
-                    db,
+                    &mut writer,
                     &pending,
                     table,
                     &item["row"],
@@ -1544,7 +1592,7 @@ pub(super) fn apply_pull(
         } else {
             let after = row_json(change, "after_json")?;
             if !after.is_null() {
-                apply_row(db, &pending, table, &after, "")?;
+                apply_row(&mut writer, &pending, table, &after, "")?;
             } else {
                 let row = row_json(change, "before_json")?;
                 if table != "issue_subtasks" && !pending.contains_key(&pending_key(table, &row)?) {
@@ -1554,7 +1602,7 @@ pub(super) fn apply_pull(
             }
         }
     }
-    apply_graph(db, &pending, payload, acknowledged)?;
+    apply_graph(&mut writer, &pending, payload, acknowledged)?;
     if payload["tables"]["issues"].is_array()
         || payload["changes"].as_array().is_some_and(|changes| {
             changes
@@ -3889,6 +3937,140 @@ mod tests {
             )
             .unwrap()[0]["subtask_scheduling"],
             "explicit"
+        );
+    }
+
+    #[test]
+    fn incoming_change_batch_reuses_schema_and_keeps_receipts_replayable() {
+        let f = Fixture::new();
+        let template = rows(&f.db, "SELECT * FROM agents WHERE id='human:fixture'", &[])
+            .unwrap()
+            .remove(0);
+        let changes: Vec<_> = (1..=128).map(|number| {
+            let mut row = template.clone();
+            row["id"] = json!(format!("human:peer{number}"));
+            json!({"seq":number,"table_name":"agents","before_json":null,"after_json":row.to_string()})
+        }).collect();
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&f.path);
+        let receipts = accept_changes(&db, "peer", &changes).unwrap();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        assert!(receipts.iter().all(|receipt| receipt["state"] == "applied"));
+        assert_eq!(accept_changes(&f.db, "peer", &changes).unwrap(), receipts);
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT count(*) count FROM fleet_receipts WHERE node='peer'",
+                &[]
+            )
+            .unwrap()[0]["count"],
+            128
+        );
+        assert_eq!(
+            rows(
+                &f.db,
+                "SELECT count(*) count FROM agents WHERE id LIKE 'human:peer%'",
+                &[]
+            )
+            .unwrap()[0]["count"],
+            128
+        );
+        eprintln!("128 incoming agent changes: {commands} RPCs, {steps} VM steps");
+        assert!(commands <= 128 * 8 + 4, "{commands} RPCs");
+    }
+
+    #[test]
+    fn replication_batches_read_table_schema_once() {
+        let mut measurements = Vec::new();
+        for incremental in [false, true] {
+            for count in [16, 128] {
+                let f = Fixture::new();
+                install_capture(&f.db, "agent", "peer").unwrap();
+                f.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES('named:Native fleet',1,'https://github.com/o/r/pull/0','human:fixture',123,'fix')", []).unwrap();
+                f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+                let template = rows(&f.db, "SELECT * FROM issue_pull_requests", &[])
+                    .unwrap()
+                    .remove(0);
+                let records: Vec<_> = (0..count)
+                    .map(|number| {
+                        let mut row = template.clone();
+                        row["url"] = json!(format!("https://github.com/o/r/pull/{number}"));
+                        row["pr_title"] = json!(format!("Change {number}"));
+                        row
+                    })
+                    .collect();
+                let mut payload = json!({"cursor":count,"allocations":[],"ranges":[]});
+                if incremental {
+                    payload["changes"] = json!(records.iter().enumerate().map(|(index,row)| json!({"seq":index+1,"table_name":"issue_pull_requests","before_json":null,"after_json":row.to_string()})).collect::<Vec<_>>());
+                } else {
+                    payload["tables"] = json!({"issue_pull_requests":records});
+                }
+                let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+                let (db, transport) = crate::database::tests::measured_connection(&f.path);
+                apply_pull(&db, "peer", &payload, &[]).unwrap();
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                owner.stop();
+                eprintln!(
+                    "{count} PRs, incremental={incremental}: {commands} RPCs, {steps} VM steps"
+                );
+                measurements.push((count, commands));
+                for row in records {
+                    assert_eq!(
+                        current_row(&f.db, "issue_pull_requests", &row).unwrap(),
+                        row
+                    );
+                }
+                assert_eq!(state_get(&f.db, "cursor", json!(0)).unwrap(), count);
+                assert!(
+                    rows(&f.db, "SELECT * FROM fleet_outbox", &[])
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+        for (count, commands) in measurements {
+            assert!(commands <= count + 40, "{count} rows: {commands} RPCs");
+        }
+    }
+
+    #[test]
+    fn replicated_schema_changes_are_checked_again_for_each_batch() {
+        let f = Fixture::new();
+        install_capture(&f.db, "agent", "peer").unwrap();
+        f.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at) VALUES('named:Native fleet',1,'https://github.com/o/r/pull/1','human:fixture',123)", []).unwrap();
+        f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+        let mut row = rows(&f.db, "SELECT * FROM issue_pull_requests", &[])
+            .unwrap()
+            .remove(0);
+        let payload = |cursor, row: &Value| json!({"cursor":cursor,"allocations":[],"ranges":[],"tables":{"issue_pull_requests":[row]}});
+        apply_pull(&f.db, "peer", &payload(1, &row), &[]).unwrap();
+        f.db.execute_batch("ALTER TABLE issue_pull_requests ADD COLUMN future_field TEXT")
+            .unwrap();
+        assert!(
+            apply_pull(&f.db, "peer", &payload(2, &row), &[])
+                .unwrap_err()
+                .to_string()
+                .contains("Schema mismatch")
+        );
+        assert_eq!(state_get(&f.db, "cursor", json!(0)).unwrap(), 1);
+        row["future_field"] = json!("New schema");
+        apply_pull(&f.db, "peer", &payload(2, &row), &[]).unwrap();
+        let mut invalid = row.clone();
+        invalid["unknown_field"] = Value::Null;
+        let invalid_batch = json!({"cursor":3,"allocations":[],"ranges":[],"tables":{"issue_pull_requests":[row,invalid]}});
+        assert!(
+            apply_pull(&f.db, "peer", &invalid_batch, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("Schema mismatch")
+        );
+        assert_eq!(state_get(&f.db, "cursor", json!(0)).unwrap(), 2);
+        assert_eq!(
+            current_row(&f.db, "issue_pull_requests", &row).unwrap(),
+            row
         );
     }
 
