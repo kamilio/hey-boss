@@ -659,9 +659,19 @@ The database path is resolved in this order:
 5. Linux: `$XDG_DATA_HOME/hey-boss/issues.db`, or `~/.local/share/hey-boss/issues.db`.
 
 It is separate from notification history and lives outside the checkout, so
-removing a worktree does not remove its issues. Back up using SQLite's backup
-facilities, or copy the database only while all writers are stopped and its WAL
-has been checkpointed. Do not share a WAL database over a network filesystem.
+removing a worktree does not remove its issues.
+
+After five inactive days, closed or deleted issues move their bodies and history
+to a sibling archive: `issues.db.archive.db`. Completed worker payloads, logs,
+and old retry receipts also move there. Compact references stay in the main
+store. Recent activity, active workers, and reservations postpone issue archival;
+existing lists, search, history, and restore keep working. Freed main-database
+pages are reused without a blocking live compaction.
+
+Backups must include both databases. The fleet backup operation copies the hot
+snapshot first, then its immutable archive. For manual SQLite backups, preserve
+that order and the archive filename. Raw copies require all writers stopped and
+both WALs checkpointed. Do not share a WAL database over a network filesystem.
 
 For agents on several machines, choose one host as the authority:
 
