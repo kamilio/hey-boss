@@ -39,7 +39,7 @@ pub fn project(cwd: &Path, machine: &str) -> Result<Project> {
     let directory = cwd
         .to_str()
         .ok_or_else(|| Error::invalid("Project path must be UTF-8"))?;
-    if let Some(git) = crate::agents::git_info(directory) {
+    if let Some(git) = crate::agents::git_repository_info(directory) {
         return Ok(project_from_git(&git, machine));
     }
     Ok(Project {
