@@ -1924,11 +1924,7 @@ fn matches(labels: &Value, wanted: &BTreeSet<String>) -> Result<bool> {
 }
 /// The lease bridges worker startup and its manual claim; heartbeats carry the
 /// absolute deadline, so retries never extend the same attempt indefinitely.
-pub(super) fn refresh_allocation_deadlines(
-    db: &Connection,
-    node: &str,
-    workers: &[Value],
-) -> Result<()> {
+fn observed_deadlines(workers: &[Value]) -> Vec<(&str, i64, i64)> {
     let mut deadlines = BTreeMap::new();
     for run in workers
         .iter()
@@ -1944,11 +1940,40 @@ pub(super) fn refresh_allocation_deadlines(
             deadlines.insert((project, number), expires);
         }
     }
+    deadlines
+        .into_iter()
+        .map(|((project, number), expires)| (project, number, expires))
+        .collect()
+}
+
+pub(super) fn allocation_deadlines_changed(
+    db: &Connection,
+    node: &str,
+    workers: &[Value],
+) -> Result<bool> {
+    let deadlines = observed_deadlines(workers);
+    if deadlines.is_empty() {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM json_each(?1) requested CROSS JOIN fleet_allocations a
+         CROSS JOIN fleet_allocation_deadlines d
+         WHERE a.project_id=json_extract(requested.value,'$[0]')
+           AND a.issue_number=json_extract(requested.value,'$[1]') AND a.node=?2
+           AND d.project_id=a.project_id AND d.issue_number=a.issue_number
+           AND d.expires_at<>json_extract(requested.value,'$[2]'))",
+        rusqlite::params![serde_json::to_string(&deadlines)?, node],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn refresh_allocation_deadlines(
+    db: &Connection,
+    node: &str,
+    workers: &[Value],
+) -> Result<()> {
+    let deadlines = observed_deadlines(workers);
     if !deadlines.is_empty() {
-        let deadlines: Vec<_> = deadlines
-            .into_iter()
-            .map(|((project, number), expires)| (project, number, expires))
-            .collect();
         execute(
             db,
             "UPDATE fleet_allocation_deadlines AS d
@@ -2024,18 +2049,14 @@ pub(super) fn reserve_numbers(
     Ok(range)
 }
 
-pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result<()> {
-    let tx = if db.is_autocommit() {
-        Some(db.unchecked_transaction()?)
-    } else {
-        None
-    };
-    refresh_allocation_deadlines(db, node, workers)?;
-    execute(
-        db,
-        "DELETE FROM fleet_allocations WHERE (project_id,issue_number) IN (SELECT d.project_id,d.issue_number FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.expires_at<=? AND i.assignee IS NULL)",
-        &[json!((super::context::now() * 1000.0) as i64)],
-    )?;
+#[derive(Default)]
+struct AllocationPlan {
+    ranges: Vec<(String, i64)>,
+    tasks: Vec<(String, i64)>,
+}
+
+fn plan_allocations(db: &Connection, node: &str, workers: &[Value]) -> Result<AllocationPlan> {
+    let mut plan = AllocationPlan::default();
     let mut pools: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     for worker in workers {
         let config = &worker["config"];
@@ -2086,23 +2107,8 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
             true
         };
         if replenish {
-            let first = row["next_number"].as_i64().unwrap();
-            execute(
-                db,
-                "UPDATE projects SET next_number=next_number+100 WHERE id=?",
-                &[json!(project)],
-            )?;
-            let values = [json!(node), json!(project), json!(first), json!(first + 99)];
-            execute(
-                db,
-                "INSERT INTO fleet_ranges VALUES(?,?,?,?) ON CONFLICT(node,project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number",
-                &values,
-            )?;
-            execute(
-                db,
-                "INSERT INTO fleet_number_reservations VALUES(?,?,?,?)",
-                &values,
-            )?;
+            plan.ranges
+                .push((project.clone(), row["next_number"].as_i64().unwrap()));
         }
         // Start from allocation keys; readiness checks must inspect this
         // machine's small supplied pool rather than every project issue.
@@ -2156,11 +2162,7 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
             for c in &candidates {
                 let number = c["number"].as_i64().unwrap();
                 if needed > 0 && !used.contains(&number) && matches(&c["labels"], filter)? {
-                    execute(
-                        db,
-                        "INSERT INTO fleet_allocations VALUES(?,?,?)",
-                        &[json!(project), json!(number), json!(node)],
-                    )?;
+                    plan.tasks.push((project.clone(), number));
                     used.insert(number);
                     supplied.push(c.clone());
                     needed -= 1;
@@ -2185,15 +2187,75 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
                     .keys()
                     .any(|f| matches(&c["labels"], f).unwrap_or(false))
             {
-                execute(
-                    db,
-                    "INSERT INTO fleet_allocations VALUES(?,?,?)",
-                    &[json!(project), json!(number), json!(node)],
-                )?;
+                plan.tasks.push((project.clone(), number));
                 used.insert(number);
                 needed -= 1;
             }
         }
+    }
+    Ok(plan)
+}
+
+/// A preflight only decides whether to acquire the writer. Planning is repeated
+/// under that lock before applying any ranges or task reservations.
+pub(super) fn allocation_pending(db: &Connection, node: &str, workers: &[Value]) -> Result<bool> {
+    if allocation_deadlines_changed(db, node, workers)?
+        || db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fleet_allocation_deadlines d
+             JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number
+             WHERE d.expires_at<=?1 AND i.assignee IS NULL)",
+            [(super::context::now() * 1000.0) as i64],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(true);
+    }
+    let plan = plan_allocations(db, node, workers)?;
+    Ok(!plan.ranges.is_empty() || !plan.tasks.is_empty())
+}
+
+pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result<()> {
+    let tx = if db.is_autocommit() {
+        let snapshot = db.read_transaction()?;
+        let pending = allocation_pending(&snapshot, node, workers)?;
+        snapshot.commit()?;
+        if !pending {
+            return Ok(());
+        }
+        Some(crate::database::Transaction::new_unchecked(
+            db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
+    refresh_allocation_deadlines(db, node, workers)?;
+    execute(
+        db,
+        "DELETE FROM fleet_allocations WHERE (project_id,issue_number) IN (SELECT d.project_id,d.issue_number FROM fleet_allocation_deadlines d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number WHERE d.expires_at<=? AND i.assignee IS NULL)",
+        &[json!((super::context::now() * 1000.0) as i64)],
+    )?;
+    let plan = plan_allocations(db, node, workers)?;
+    for (project, first) in plan.ranges {
+        execute(
+            db,
+            "UPDATE projects SET next_number=next_number+100 WHERE id=?",
+            &[json!(project)],
+        )?;
+        let values = [json!(node), json!(project), json!(first), json!(first + 99)];
+        execute(db, "INSERT INTO fleet_ranges VALUES(?,?,?,?) ON CONFLICT(node,project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number", &values)?;
+        execute(
+            db,
+            "INSERT INTO fleet_number_reservations VALUES(?,?,?,?)",
+            &values,
+        )?;
+    }
+    for (project, number) in plan.tasks {
+        execute(
+            db,
+            "INSERT INTO fleet_allocations VALUES(?,?,?)",
+            &[json!(project), json!(number), json!(node)],
+        )?;
     }
     if let Some(tx) = tx {
         tx.commit()?;
@@ -5930,6 +5992,43 @@ mod tests {
     }
 
     #[test]
+    fn allocation_rechecks_preflight_and_idle_polls_do_not_acquire_writer() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let f = Fixture::new();
+        f.capture();
+        let workers = vec![json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"enabled":true}})];
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let (entered, waiting) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let (db, transport) = crate::database::tests::pause_before_writer(&f.path, entered, resume);
+        let queued_workers = workers.clone();
+        let allocation = std::thread::spawn(move || allocate(&db, "peer", &queued_workers).map_err(|e| e.to_string()));
+        waiting.recv_timeout(Duration::from_secs(2)).expect("Allocation did not reach the writer");
+        let writer = Connection::connect(&f.path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;
+            UPDATE projects SET next_number=50 WHERE id='named:Native fleet';
+            UPDATE issues SET draft=1 WHERE project_id='named:Native fleet' AND number=1;
+            COMMIT;").unwrap();
+        release.send(()).unwrap();
+        allocation.join().unwrap().unwrap();
+        transport.join().unwrap();
+        assert_eq!(writer.query_row("SELECT next_number FROM projects WHERE id='named:Native fleet'", [], |r| r.get::<_, i64>(0)).unwrap(), 150);
+        assert_eq!(writer.query_row("SELECT first_number FROM fleet_ranges WHERE node='peer'", [], |r| r.get::<_, i64>(0)).unwrap(), 50);
+        assert_eq!(writer.query_row("SELECT count(*) FROM fleet_allocations", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let reader = Connection::connect(&f.path).unwrap();
+        let (send, receive) = mpsc::channel();
+        let poll = std::thread::spawn(move || send.send(allocate(&reader, "peer", &workers).map_err(|e| e.to_string())).unwrap());
+        let progress = receive.recv_timeout(Duration::from_secs(1));
+        writer.execute_batch("ROLLBACK").unwrap();
+        poll.join().unwrap();
+        drop(writer);
+        owner.stop();
+        progress.expect("Idle allocation poll waited for writer").unwrap();
+    }
+
+    #[test]
     fn unclaimed_allocations_expire_and_another_machine_can_pick_up() {
         let f = Fixture::new();
         f.capture();
@@ -5974,6 +6073,7 @@ mod tests {
                 json!({"project_id":"named:Native fleet","number":1,"reservation_expires":2001}),
             );
             let workers = [json!({"runs":runs})];
+            assert!(allocation_deadlines_changed(&f.db, "peer", &workers).unwrap());
             let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
             let (db, transport) = crate::database::tests::measured_connection(&f.path);
             db.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -5982,6 +6082,7 @@ mod tests {
             drop(db);
             let (commands, _) = transport.join().unwrap();
             owner.stop();
+            assert!(!allocation_deadlines_changed(&f.db, "peer", &workers).unwrap());
             let changed: i64 =
                 f.db.query_row("SELECT count(*) FROM deadline_updates", [], |r| r.get(0))
                     .unwrap();

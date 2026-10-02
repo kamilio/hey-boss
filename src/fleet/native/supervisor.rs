@@ -773,6 +773,9 @@ impl Supervisor {
         configured: &[Value],
         observed: &[Value],
     ) -> Result<()> {
+        replica::allocate(db, node, &Self::allocation_workers(configured, observed))
+    }
+    fn allocation_workers(configured: &[Value], observed: &[Value]) -> Vec<Value> {
         let managed: BTreeSet<_> = configured.iter().filter_map(|w| w["id"].as_str()).collect();
         let mut workers = configured.to_vec();
         // Only live independent workers supply extra capacity. Managed intent
@@ -788,7 +791,7 @@ impl Supervisor {
                 })
                 .cloned(),
         );
-        replica::allocate(db, node, &workers)
+        workers
     }
     fn heartbeat_pull(
         &self,
@@ -798,35 +801,38 @@ impl Supervisor {
         workers: &Value,
         message: &Value,
     ) -> Result<(Value, Vec<Value>, Vec<Value>)> {
-        let write = crate::database::Transaction::new_unchecked(
-            db,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        let receipts = replica::accept_changes(
-            &write,
-            node,
-            message["changes"]
-                .as_array()
-                .ok_or_else(|| invalid("Missing companion journal"))?,
-        )?;
-        replica::refresh_allocation_deadlines(
-            &write,
-            node,
-            message["workers"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-        self.allocate_work(
-            &write,
-            node,
-            workers.as_array().unwrap(),
-            message["workers"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-        write.commit()?;
+        let changes = message["changes"]
+            .as_array()
+            .ok_or_else(|| invalid("Missing companion journal"))?;
+        let observed = message["workers"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let configured = workers.as_array().unwrap();
+        let pending = !changes.is_empty() || {
+            let snapshot = db.read_transaction()?;
+            let pending = replica::allocation_deadlines_changed(&snapshot, node, observed)?
+                || replica::allocation_pending(
+                    &snapshot,
+                    node,
+                    &Self::allocation_workers(configured, observed),
+                )?;
+            snapshot.commit()?;
+            pending
+        };
+        let receipts = if pending {
+            let write = crate::database::Transaction::new_unchecked(
+                db,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let receipts = replica::accept_changes(&write, node, changes)?;
+            replica::refresh_allocation_deadlines(&write, node, observed)?;
+            self.allocate_work(&write, node, configured, observed)?;
+            write.commit()?;
+            receipts
+        } else {
+            Vec::new()
+        };
         // A separate read transaction uses the owner reader connection. Combining
         // COMMIT and BEGIN in one Batch retains the writer lease during the pull.
         let read = db.read_transaction()?;
@@ -2044,6 +2050,44 @@ mod tests {
     }
 
     #[test]
+    fn idle_heartbeat_with_a_full_pool_does_not_wait_for_another_writer() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Project',4);
+            INSERT INTO agents(id,metadata,last_seen) VALUES('creator','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,labels,version,created_by,created_at,updated_at,sort_order)
+            VALUES('project',1,'First','','open','[]',1,'creator',0,0,1),
+                  ('project',2,'Second','','open','[]',1,'creator',0,0,2),
+                  ('project',3,'Third','','open','[]',1,'creator',0,0,3);").unwrap();
+        replica::install_capture(&db, "controller", &app.ctx.node).unwrap();
+        let workers = json!([{"id":"worker","config":{"projects":["project"],"concurrency":1,"enabled":true}}]);
+        app.allocate_work(&db, "peer", workers.as_array().unwrap(), &[]).unwrap();
+        let before = replica::rows(&db, "SELECT * FROM fleet_allocations ORDER BY issue_number", &[]).unwrap();
+        assert_eq!(before.len(), 2);
+        drop(db);
+        let mut owner = crate::database::Owner::start(&app.ctx.path).unwrap().unwrap();
+        let writer = crate::database::Connection::connect(&app.ctx.path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let reader = crate::database::Connection::connect(&app.ctx.path).unwrap();
+        let (send, receive) = mpsc::channel();
+        let heartbeat = std::thread::spawn(move || {
+            let result = app.heartbeat_pull(&reader, "peer", "peer", &workers, &json!({"changes":[],"workers":[]}))
+                .map_err(|error| error.to_string());
+            send.send(result).unwrap();
+        });
+        let progress = receive.recv_timeout(Duration::from_secs(1));
+        writer.execute_batch("ROLLBACK").unwrap();
+        heartbeat.join().unwrap();
+        assert_eq!(replica::rows(&writer, "SELECT * FROM fleet_allocations ORDER BY issue_number", &[]).unwrap(), before);
+        drop(writer);
+        owner.stop();
+        let (payload, receipts, signals) = progress.expect("Idle heartbeat queued behind the writer").unwrap();
+        assert_eq!(payload["tables"]["issues"].as_array().unwrap().len(), 3);
+        assert!(receipts.is_empty());
+        assert!(signals.is_empty());
+    }
+
+    #[test]
     fn heartbeat_pull_snapshot_releases_writer_and_keeps_a_coherent_read() {
         let (_directory, app) = test_supervisor();
         let db = app.ctx.db().unwrap();
@@ -2058,7 +2102,8 @@ mod tests {
             &path, "SELECT * FROM fleet_allocations", entered, resume,
         );
         let pull = std::thread::spawn(move || {
-            app.heartbeat_pull(&db, "peer", "peer-node", &json!([]), &json!({"changes":[],"workers":[]}))
+            let workers = json!([{"config":{"projects":["project"],"concurrency":1,"enabled":true}}]);
+            app.heartbeat_pull(&db, "peer", "peer-node", &workers, &json!({"changes":[],"workers":[]}))
                 .map_err(|error| error.to_string())
         });
         reading.recv_timeout(Duration::from_secs(3)).expect("Pull did not reach its snapshot");
@@ -2066,7 +2111,7 @@ mod tests {
         let writer_path = path.clone();
         let writer = std::thread::spawn(move || {
             let db = crate::database::Connection::connect(&writer_path).unwrap();
-            let result = db.execute("UPDATE projects SET next_number=2 WHERE id='project'", [])
+            let result = db.execute("UPDATE projects SET next_number=102 WHERE id='project'", [])
                 .map_err(|error| error.to_string());
             committed.send(result.clone()).unwrap();
             result
@@ -2079,10 +2124,10 @@ mod tests {
         transport.join().unwrap();
         assert_eq!(write_result.unwrap(), 1);
         let db = crate::database::Connection::connect(&path).unwrap();
-        assert_eq!(db.query_row("SELECT next_number FROM projects WHERE id='project'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(db.query_row("SELECT next_number FROM projects WHERE id='project'", [], |r| r.get::<_, i64>(0)).unwrap(), 102);
         drop(db);
         owner.stop();
-        assert_eq!(payload["tables"]["projects"][0]["next_number"], 1);
+        assert_eq!(payload["tables"]["projects"][0]["next_number"], 101);
         assert!(receipts.is_empty());
         assert!(signals.is_empty());
         wrote_during_snapshot.expect("Outbound snapshot retained the shared writer").unwrap();
