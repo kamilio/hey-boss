@@ -1,0 +1,40 @@
+# Derived from tiny_http 0.12.0. Keep upstream HTTP behavior; fix connection
+# dispatch so queued keep-alive clients reserve idle worker capacity.
+[package]
+name = "hey-boss-http"
+version = "0.1.0"
+authors = ["pierre.krieger1708@gmail.com",
+           "Corey Farwell <coreyf@rwell.org>"]
+description = "Local tiny_http fork with keep-alive connection dispatch fixes"
+documentation = "https://tiny-http.github.io/tiny-http/tiny_http/index.html"
+keywords = ["http", "server", "web"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kamilio/hey-boss"
+edition = "2018"
+
+[lib]
+name = "tiny_http"
+
+[features]
+default = []
+ssl = ["ssl-openssl"]
+ssl-openssl = ["openssl", "zeroize"]
+ssl-rustls = ["rustls", "rustls-pemfile", "zeroize"]
+
+[dependencies]
+ascii = "1.0"
+chunked_transfer = "1"
+log = "0.4.4"
+httpdate = "1.0.2"
+
+openssl = { version = "0.10", optional = true }
+rustls = { version = "0.20", optional = true }
+rustls-pemfile = { version = "0.2.1", optional = true }
+zeroize = { version = "1", optional = true }
+
+[dev-dependencies]
+rustc-serialize = "0.3"
+
+[package.metadata.docs.rs]
+# Enable just one SSL implementation
+features = ["ssl-openssl"]

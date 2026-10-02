@@ -22,6 +22,7 @@ const INPUTS: &[&str] = &[
     "skills/hey-boss",
     "packages/hey-gh",
     "packages/hey-harvester",
+    "packages/hey-boss-http",
     "tools/upgrade_hey_boss.py",
     "tools/drain_github_issues.py",
     "hey_boss_daemon.swift",
@@ -37,6 +38,7 @@ const PAYLOAD: &[&str] = &[
     "skills/hey-boss",
     "packages/hey-gh",
     "packages/hey-harvester",
+    "packages/hey-boss-http",
     "tools/upgrade_hey_boss.py",
     "tools/drain_github_issues.py",
     "hey_boss_daemon.swift",
@@ -51,7 +53,7 @@ const UPSTREAM: &str = "https://github.com/kamilio/hey-boss.git";
 const MANIFEST: &str = ".hey-boss-source.json";
 // Archives can have older mtimes than artifacts from another snapshot in the
 // shared Cargo target. Refresh every packaged source, including companion crates.
-const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; if test -f \"$upgrade_stage/packages/hey-harvester/build.rs\"; then touch \"$upgrade_stage/packages/hey-harvester/build.rs\"; fi; find \"$upgrade_stage/src\" \"$upgrade_stage/packages/hey-harvester/src\" \"$upgrade_stage/packages/hey-gh/src\" -type f -exec touch {} +";
+const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; if test -f \"$upgrade_stage/packages/hey-harvester/build.rs\"; then touch \"$upgrade_stage/packages/hey-harvester/build.rs\"; fi; for source in src packages/hey-harvester/src packages/hey-gh/src packages/hey-boss-http/src; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
 
 #[derive(Args)]
 pub struct Options {
@@ -321,6 +323,7 @@ fn snapshot_at(
                 "skills/hey-boss",
                 "packages/hey-gh",
                 "packages/hey-harvester",
+                "packages/hey-boss-http",
                 "tools/upgrade_hey_boss.py",
                 "tools/drain_github_issues.py",
                 "hey_boss_daemon.swift",
@@ -1182,6 +1185,7 @@ mod tests {
                 "skills/hey-boss",
                 "packages/hey-gh",
                 "packages/hey-harvester",
+                "packages/hey-boss-http",
                 "assets",
                 "tests",
             ]
