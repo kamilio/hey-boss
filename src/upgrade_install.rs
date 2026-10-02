@@ -46,13 +46,19 @@ fn restart_hey_gh_daemon() {
         .args(["-KILL", "-f", "hey-gh serve"])
         .status();
 }
-fn restart_desktop() -> io::Result<()> {
+fn refresh_fleet_controller(binary: &Path, registration: &Path) -> io::Result<()> {
+    if registration.try_exists()? {
+        output(Command::new(binary).args(["fleet", "setup"]))?;
+    }
+    Ok(())
+}
+fn restart_desktop(binary: &Path) -> io::Result<()> {
     restart_hey_gh_daemon();
     let uid = unsafe { libc::getuid() };
-    let _ = Command::new("/bin/launchctl")
-        .args(["kickstart", "-k"])
-        .arg(format!("gui/{uid}/local.hey-boss-fleet-controller"))
-        .status();
+    refresh_fleet_controller(
+        binary,
+        &home()?.join("Library/LaunchAgents/local.hey-boss-fleet-controller.plist"),
+    )?;
     output(
         Command::new("/bin/launchctl")
             .args(["kickstart", "-k"])
@@ -280,7 +286,7 @@ fn publish_to(
                 return Err(e);
             }
             replaced_app = true;
-            restart_desktop()?;
+            restart_desktop(binary)?;
             let mut healthy = false;
             for _ in 0..10 {
                 if output(Command::new(binary).args(["overview", "--json"])).is_ok() {
@@ -333,7 +339,7 @@ fn publish_to(
             let app = app.as_ref().unwrap();
             fs::remove_dir_all(app)?;
             fs::rename(app_backup.as_ref().unwrap(), app)?;
-            let _ = restart_desktop();
+            let _ = restart_desktop(binary);
         } else if companion && replaced_binary {
             let _ = restart_companion();
         }
@@ -392,6 +398,29 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[test]
+    fn controller_refresh_requires_an_existing_registration_and_propagates_failure() {
+        let temp = Temp::new().unwrap();
+        let binary = temp.0.join("installed/hey-boss");
+        let registration = temp.0.join("controller.plist");
+        // A desktop installation without fleet setup must not start a controller.
+        refresh_fleet_controller(&binary, &registration).unwrap();
+        fs::write(&registration, "existing managed registration").unwrap();
+        script(&binary, "echo controller-reload-failed >&2; exit 17");
+        assert!(
+            refresh_fleet_controller(&binary, &registration)
+                .unwrap_err()
+                .to_string()
+                .contains("controller-reload-failed")
+        );
+        // Use the newly installed CLI's setup path so launchd reads its current
+        // definition; kickstart alone keeps launchd's old cached ProcessType.
+        script(
+            &binary,
+            "test \"$#\" = 2 && test \"$1\" = fleet && test \"$2\" = setup",
+        );
+        refresh_fleet_controller(&binary, &registration).unwrap();
     }
     fn receipt() -> Receipt {
         Receipt {
