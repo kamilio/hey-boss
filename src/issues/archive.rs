@@ -2,6 +2,13 @@
 
 mod runs;
 pub(crate) use runs::{archive_runs, worker_event_tails, worker_payload};
+mod history;
+pub(crate) use history::{
+    archive_issue, cleanup_history, history_connection, issue_body, mutation_targets,
+    restore_issue, search_bodies,
+};
+#[cfg(test)]
+mod history_tests;
 
 use super::{Error, Result, Store};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
@@ -61,6 +68,7 @@ impl Archive {
             archive.db.pragma_update(None, "journal_mode", "WAL")?;
         }
         archive.db.pragma_update(None, "synchronous", "FULL")?;
+        history::initialize(&archive.db)?;
         Ok(archive)
     }
 
@@ -91,6 +99,23 @@ impl Archive {
             mode | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         db.busy_timeout(Duration::from_millis(250))?;
+        db.create_scalar_function(
+            "archive_record",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |context| {
+                let record: String = context.get(0)?;
+                let expected: String = context.get(1)?;
+                if format!("{:x}", Sha256::digest(record.as_bytes())) != expected {
+                    return Err(rusqlite::Error::UserFunctionError(Box::new(
+                        std::io::Error::other("Archived history checksum does not match"),
+                    )));
+                }
+                Ok(record)
+            },
+        )?;
         Ok(Self { db })
     }
 
@@ -157,7 +182,11 @@ fn object_key(kind: &str, bytes: &[u8]) -> String {
 fn archive_path(db: &crate::database::Connection) -> Result<std::path::PathBuf> {
     db.path()
         .filter(|path| !path.is_empty())
-        .map(|path| Path::new(path).with_extension("archive.db"))
+        .map(|path| {
+            let mut name = std::ffi::OsString::from(path);
+            name.push(".archive.db");
+            name.into()
+        })
         .ok_or_else(|| unavailable("Archival requires a persistent database"))
 }
 
@@ -234,7 +263,7 @@ mod tests {
             Self(root)
         }
         fn path(&self) -> std::path::PathBuf {
-            self.0.join("issues.archive.db")
+            self.0.join("issues.db.archive.db")
         }
     }
     impl Drop for Fixture {
@@ -503,6 +532,7 @@ mod tests {
             INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_count,retry_allowed,expanded_prompt) VALUES
             ('old','p',1,'{\"issue\":{\"title\":\"Task\",\"number\":1,\"body\":\"Full context\"},\"resume_session\":\"session\",\"config\":{\"cwd\":\"/work\",\"prompt\":\"Original instructions\"}}','a','failed',1,'start','local',1,100,100,3,0,'Expanded prompt');
             INSERT INTO worker_events(id,run_id,created_at,text) VALUES(10,'old',10,'First'),(20,'old',20,'Second'),(30,'old',100,'Third');").unwrap();
+        db.execute("UPDATE worker_runs SET job=json_set(job,'$.config.provider','pi','$.session_ref',json('{\"provider\":\"pi\",\"id\":\"saved-session\"}'))",[]).unwrap();
         let job: String = db
             .query_row("SELECT job FROM worker_runs", [], |r| r.get(0))
             .unwrap();
@@ -520,6 +550,11 @@ mod tests {
         .unwrap();
         assert_eq!(compact["issue"]["title"], "Task");
         assert_eq!(compact["config"]["cwd"], "/work");
+        assert_eq!(compact["config"]["provider"], "pi");
+        assert_eq!(
+            compact["session_ref"],
+            json!({"provider":"pi","id":"saved-session"})
+        );
         assert_eq!(compact["resume_session"], "session");
         assert!(compact["issue"]["body"].is_null());
         assert_eq!(

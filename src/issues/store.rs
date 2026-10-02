@@ -132,6 +132,11 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("requests", "archive_key", "TEXT"),
     ("worker_runs", "archive_key", "TEXT"),
     ("worker_runs", "events_archive_key", "TEXT"),
+    ("issues", "archive_key", "TEXT"),
+    ("issues", "archived_comments", "INTEGER NOT NULL DEFAULT 0"),
+    ("issues", "archive_restoring", "INTEGER NOT NULL DEFAULT 0"),
+    ("issues", "archive_cleanup", "INTEGER NOT NULL DEFAULT 0"),
+    ("issues", "archive_touched_at", "INTEGER NOT NULL DEFAULT 0"),
     (
         "issues",
         "attempt_hold",
@@ -297,10 +302,12 @@ fn comment_page(
     mut bytes: usize,
 ) -> Result<Value> {
     let total: i64 = db.query_row(
-        "SELECT count(*) FROM comments WHERE project_id=?1 AND issue_number=?2",
+        "SELECT CASE WHEN archive_key IS NOT NULL THEN archived_comments ELSE (SELECT count(*) FROM comments WHERE project_id=?1 AND issue_number=?2) END FROM issues WHERE project_id=?1 AND number=?2",
         params![project.id, number],
         |r| r.get(0),
     )?;
+    let cold = super::archive::history_connection(db, &project.id, number)?;
+    let db = cold.as_ref().unwrap_or(db);
     let order = match sort {
         super::CommentSort::Newest => "DESC",
         super::CommentSort::Oldest => "ASC",
@@ -340,11 +347,11 @@ fn comment_page(
         json!({"ok":true,"project":project,"number":number,"comments":comments,"comment_count":total,"sort":sort,"next_offset":if next < total as u64 { Some(next) } else { None }}),
     )
 }
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers,attempt_hold";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers,attempt_hold,archive_key";
 
 // Keep list/registry reads off issue records whose bodies can span hundreds of
 // overflow pages. All persisted summary fields fit in this covering index.
-const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold,assignment_target)";
+const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold,assignment_target,archive_key,archived_comments)";
 
 fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
     let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
@@ -365,16 +372,18 @@ fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
     } else {
         "?4=0"
     };
-    format!("SELECT {summary_columns},(SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) AS comment_count FROM issues WHERE project_id=?1
+    format!("SELECT {summary_columns},CASE WHEN archive_key IS NOT NULL THEN archived_comments ELSE (SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) END AS comment_count FROM issues WHERE project_id=?1
         AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2 OR (?2='active' AND state IN ('open','ready','blocked')))))
         AND {owner_filter} AND {unassigned_filter}
-        AND (?5 IS NULL OR instr(lower(title),lower(?5))>0{body_search})
+        AND (?5 IS NULL OR instr(lower(title),lower(?5))>0{body_search} OR number IN (SELECT value FROM json_each(?9)))
         AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
         ORDER BY sort_order,number LIMIT ?7 OFFSET ?8")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Issue {
+    #[serde(skip)]
+    archive_key: Option<String>,
     number: i64,
     title: String,
     body: String,
@@ -407,6 +416,7 @@ struct Issue {
 fn row_issue(row: &crate::database::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
+        archive_key: row.get("archive_key")?,
         attempt_hold: row
             .get::<_, Option<String>>("attempt_hold")?
             .map(|s| serde_json::from_str(&s))
@@ -473,14 +483,18 @@ fn get_issue(db: &Connection, project: &str, number: i64, deleted: bool) -> Resu
             row_issue,
         )
         .optional()?;
-    issue
+    let mut issue = issue
         .filter(|i| deleted || i.deleted_at.is_none())
         .ok_or_else(|| {
             Error::new(
                 "not_found",
                 format!("Issue #{number} was not found in {project}"),
             )
-        })
+        })?;
+    if let Some(key) = &issue.archive_key {
+        issue.body = super::archive::issue_body(db, project, number, key)?;
+    }
+    Ok(issue)
 }
 fn body(value: &str, nonempty: bool) -> Result<()> {
     if value.len() > BODY_LIMIT || (nonempty && value.trim().is_empty()) {
@@ -1228,6 +1242,9 @@ impl Store {
                 }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_archive_candidates ON worker_runs(finished_at,id) WHERE archive_key IS NULL AND finished_at IS NOT NULL")?;
+                tx.execute_batch("CREATE INDEX IF NOT EXISTS issue_archive_cleanup ON issues(project_id,number) WHERE archive_cleanup=1 AND archive_restoring=0;
+                    CREATE INDEX IF NOT EXISTS issue_archive_candidates ON issues(max(updated_at,coalesce(closed_at,0),coalesce(deleted_at,0),archive_touched_at),project_id,number) WHERE archive_key IS NULL AND (state='closed' OR deleted_at IS NOT NULL);
+                    CREATE TRIGGER IF NOT EXISTS issue_archive_mutation_guard BEFORE UPDATE ON issues WHEN OLD.archive_key IS NOT NULL AND NEW.archive_key IS OLD.archive_key AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.version IS NOT OLD.version OR NEW.deleted_at IS NOT OLD.deleted_at) BEGIN SELECT RAISE(ABORT,'Restore archived issue before changing it'); END;")?;
                 tx.commit()?;
                 Ok(())
             };
@@ -1298,7 +1315,7 @@ impl Store {
             tx.execute_batch(include_str!("subtask-readiness.sql"))?;
             tx.commit()?;
         }
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0 AND instr(sql,'assignment_target')>0)", [], |r| r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0 AND instr(sql,'assignment_target')>0 AND instr(sql,'archived_comments')>0)", [], |r| r.get::<_,bool>(0))? {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch("DROP INDEX IF EXISTS issue_list_summary")?;
             tx.execute_batch(SUMMARY_INDEX)?;
@@ -1620,6 +1637,10 @@ impl Store {
         {
             return self.finish_replay(r, response);
         }
+        let archive_targets = super::archive::mutation_targets(&r.operation);
+        for number in &archive_targets {
+            super::archive::restore_issue(&self.db, &detected.id, *number, super::worker::now())?;
+        }
         let register = !matches!(
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
@@ -1727,6 +1748,13 @@ impl Store {
             // Replayed deletions may touch disk; the saved receipt needs no writer.
             drop(tx);
             return self.finish_replay(r, response);
+        }
+        if !archive_targets.is_empty() && tx.query_row("SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1 AND number IN (SELECT value FROM json_each(?2)) AND archive_key IS NOT NULL)",params![project.id,serde_json::to_string(&archive_targets)?],|row|row.get::<_,bool>(0))? {
+            // Archival may have won between preflight and BEGIN IMMEDIATE.
+            // No mutation has run yet, so release the lease and restore safely.
+            drop(tx);
+            if Instant::now() >= deadline { return Err(Error::conflict("Issue storage changed during the request; retry the same operation")); }
+            return self.execute_once(r, deadline, supervisor_unowned);
         }
         // A duplicate may finish while Git is being inspected. Its durable
         // receipt takes precedence even if those files disappeared meanwhile.
@@ -1924,6 +1952,8 @@ impl Store {
                 } else {
                     assignee.as_deref()
                 };
+                let archived_matches =
+                    super::archive::search_bodies(&tx, &project.id, state, search.as_deref())?;
                 let mut found = tx.query_collect::<_, _, rusqlite::Error>(
                     &list_query(search.is_some(), owner, *unassigned),
                     params![
@@ -1934,7 +1964,8 @@ impl Store {
                         search,
                         serde_json::to_string(labels)?,
                         if *all { -1_i64 } else { i64::from(*limit) + 1 },
-                        if *all { 0 } else { *offset }
+                        if *all { 0 } else { *offset },
+                        serde_json::to_string(&archived_matches)?
                     ],
                     |row| Ok((row_issue(row)?, row.get::<_, i64>("comment_count")?)),
                 )?;
@@ -2118,7 +2149,9 @@ impl Store {
                 offset,
             } => {
                 get_issue(&tx, &project.id, *number, true)?;
-                let mut stmt = tx.prepare("SELECT id,actor,action,created_at,data FROM events WHERE project_id=?1 AND issue_number=?2 ORDER BY id LIMIT ?3 OFFSET ?4")?;
+                let cold = super::archive::history_connection(&tx, &project.id, *number)?;
+                let history = cold.as_ref().unwrap_or(&tx);
+                let mut stmt = history.prepare("SELECT id,actor,action,created_at,data FROM events WHERE project_id=?1 AND issue_number=?2 ORDER BY id LIMIT ?3 OFFSET ?4")?;
                 let rows = stmt
                     .query_map(params![project.id, number, limit + 1, offset], |row| {
                         let data: String = row.get(4)?;
@@ -3665,7 +3698,8 @@ mod contention_tests {
                                 Option::<String>::None,
                                 "[]",
                                 -1,
-                                0
+                                0,
+                                "[]"
                             ],
                             |r| {
                                 assert_eq!(r.get::<_, String>(2)?, "");
@@ -3741,7 +3775,8 @@ mod contention_tests {
                     Option::<String>::None,
                     "[]",
                     50,
-                    0
+                    0,
+                    "[]"
                 ],
                 |r| r.get::<_, String>(3),
             )

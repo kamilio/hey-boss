@@ -23,6 +23,8 @@ pub(super) fn page(
     before: Option<[i64; 3]>,
 ) -> Result<Value> {
     get_issue(db, &project.id, number, true)?;
+    let cold = crate::issues::archive::history_connection(db, &project.id, number)?;
+    let db = cold.as_ref().unwrap_or(db);
     let [at, kind, id] = before.unwrap_or([i64::MAX; 3]);
     let mut stmt = db.prepare(QUERY)?;
     // Select keys first: neither sorting nor pagination reads hidden bodies.
