@@ -647,6 +647,11 @@ fn row_json(change: &Value, field: &str) -> Result<Value> {
         None => Value::Null,
     })
 }
+fn strip_issue_archive_fields(row: &mut Value) {
+    if let Some(row) = row.as_object_mut() {
+        row.retain(|field, _| !field.starts_with("archive_") && field != "archived_comments");
+    }
+}
 fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Result<Value> {
     let db = writer.db;
     let table = change["table_name"]
@@ -665,11 +670,7 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
             ));
         }
         for row in [&mut before, &mut after] {
-            if let Some(row) = row.as_object_mut() {
-                row.retain(|field, _| {
-                    !field.starts_with("archive_") && field != "archived_comments"
-                });
-            }
+            strip_issue_archive_fields(row);
         }
     }
     let key = if after.is_null() { &before } else { &after };
@@ -823,7 +824,12 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
         if before.is_null() {
             let allocated=!rows(db,"SELECT 1 FROM fleet_number_reservations WHERE node=? AND project_id=? AND ? BETWEEN first_number AND last_number",&[json!(node),after["project_id"].clone(),after["number"].clone()])?.is_empty();
             let legacy=change["bootstrap"]==true && rows(db,"SELECT 1 FROM fleet_number_reservations WHERE node<>? AND project_id=? AND ? BETWEEN first_number AND last_number",&[json!(node),after["project_id"].clone(),after["number"].clone()])?.is_empty();
-            if old != after {
+            // Compare the same logical fields on both sides. Archive bookkeeping
+            // belongs to the supervisor and must neither cause a collision nor
+            // be overwritten by an otherwise identical bootstrap row.
+            let mut logical_old = old.clone();
+            strip_issue_archive_fields(&mut logical_old);
+            if logical_old != after {
                 if !old.is_null() || !(allocated || legacy) {
                     return Err(invalid("Offline issue number is not exclusively allocated"));
                 }
@@ -3931,6 +3937,127 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[test]
+    fn bootstrap_identical_issue_preserves_archive_progress_and_reconnect_edits() {
+        for legacy in [false, true] {
+            let main = Fixture::new();
+            main.capture();
+            main.db.execute_batch("UPDATE issues SET archive_touched_at=123; INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'peer');").unwrap();
+            let key = json!({"project_id":"named:Native fleet","number":1});
+            let canonical = current_row(&main.db, "issues", &key).unwrap();
+            let mut incoming = canonical.clone();
+            if legacy {
+                incoming.as_object_mut().unwrap().retain(|field, _| {
+                    !field.starts_with("archive_") && field != "archived_comments"
+                });
+            } else {
+                incoming["archive_touched_at"] = json!(456);
+            }
+            let history = rows(&main.db, "SELECT * FROM events", &[]).unwrap()[0].clone();
+            let changes = vec![
+                json!({"seq":1,"table_name":"issues","bootstrap":true,"after_json":incoming.to_string()}),
+                json!({"seq":2,"table_name":"events","bootstrap":true,"after_json":history.to_string()}),
+            ];
+            let receipts = accept_changes(&main.db, "peer", &changes).unwrap();
+            assert!(
+                receipts.iter().all(|r| r["state"] == "applied"),
+                "{receipts:?}"
+            );
+            assert_eq!(
+                accept_changes(&main.db, "peer", &changes).unwrap(),
+                receipts
+            );
+            assert_eq!(current_row(&main.db, "issues", &key).unwrap(), canonical);
+            assert_eq!(
+                rows(&main.db, "SELECT * FROM events", &[]).unwrap().len(),
+                1
+            );
+
+            let mut edited = incoming.clone();
+            edited["body"] = json!("Completed independently while disconnected");
+            edited["version"] = json!(2);
+            let edit = json!({"seq":3,"table_name":"issues","before_json":incoming.to_string(),"after_json":edited.to_string()});
+            assert_eq!(
+                accept_changes(&main.db, "peer", &[edit]).unwrap()[0]["state"],
+                "applied"
+            );
+            let saved = current_row(&main.db, "issues", &key).unwrap();
+            assert_eq!(saved["body"], edited["body"]);
+            assert_eq!(saved["archive_touched_at"], 123);
+        }
+    }
+
+    #[test]
+    fn bootstrap_still_rejects_real_collisions_and_their_history() {
+        for field in ["title", "body", "created_by", "origin"] {
+            let main = Fixture::new();
+            main.capture();
+            let key = json!({"project_id":"named:Native fleet","number":1});
+            let canonical = current_row(&main.db, "issues", &key).unwrap();
+            let mut incoming = canonical.clone();
+            incoming[field] = json!("Different legacy issue");
+            let mut history = rows(&main.db, "SELECT * FROM events", &[]).unwrap()[0].clone();
+            history["data"] = json!("{\"attempted\":true}");
+            let changes = vec![
+                json!({"seq":1,"table_name":"issues","bootstrap":true,"after_json":incoming.to_string()}),
+                json!({"seq":2,"table_name":"events","bootstrap":true,"after_json":history.to_string()}),
+            ];
+            let receipts = accept_changes(&main.db, "peer", &changes).unwrap();
+            assert_eq!(
+                receipts[0]["reason"], "Offline issue number is not exclusively allocated",
+                "{field}"
+            );
+            assert_eq!(
+                receipts[1]["reason"],
+                "Legacy history belongs to an issue-number collision; retained for review"
+            );
+            assert_eq!(current_row(&main.db, "issues", &key).unwrap(), canonical);
+            assert_eq!(
+                rows(&main.db, "SELECT * FROM events", &[]).unwrap().len(),
+                1
+            );
+            assert_eq!(
+                rows(&main.db, "SELECT * FROM fleet_conflicts", &[])
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_does_not_bypass_number_reservations_or_edit_ownership() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("INSERT INTO fleet_number_reservations VALUES('other','named:Native fleet',2,100); INSERT INTO fleet_number_reservations VALUES('peer','named:Native fleet',101,200); INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'other');").unwrap();
+        let original = rows(&main.db, "SELECT * FROM issues", &[]).unwrap()[0].clone();
+        for (seq, number, bootstrap, expected) in [
+            (1, 2, true, "conflict"),
+            (2, 201, false, "conflict"),
+            (3, 101, false, "applied"),
+            (4, 201, true, "applied"),
+        ] {
+            let mut incoming = original.clone();
+            incoming["number"] = json!(number);
+            let change = json!({"seq":seq,"table_name":"issues","bootstrap":bootstrap,"after_json":incoming.to_string()});
+            assert_eq!(
+                accept_changes(&main.db, "peer", &[change]).unwrap()[0]["state"],
+                expected
+            );
+        }
+        let mut edited = original.clone();
+        edited["body"] = json!("Unauthorized edit");
+        let change = json!({"seq":5,"table_name":"issues","before_json":original.to_string(),"after_json":edited.to_string()});
+        assert_eq!(
+            accept_changes(&main.db, "peer", &[change]).unwrap()[0]["reason"],
+            "Issue allocation was revoked or belongs to another machine"
+        );
+        assert_eq!(
+            current_row(&main.db, "issues", &original).unwrap(),
+            original
+        );
     }
 
     #[test]
