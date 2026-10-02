@@ -94,17 +94,42 @@ pub(super) fn reconcile_issue(
 }
 
 fn pending_reconciliations(db: &Connection) -> Result<Vec<(String, i64)>> {
-    let tasks = db.prepare("SELECT i.project_id,i.number FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.assignment_target='github' AND i.state<>'closed' AND i.deleted_at IS NULL AND p.hidden_at IS NULL")?
-        .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let tasks = db.prepare("SELECT i.project_id,i.number,w.status FROM issues i JOIN projects p ON p.id=i.project_id LEFT JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number WHERE i.assignment_target='github' AND i.state<>'closed' AND i.deleted_at IS NULL AND p.hidden_at IS NULL")?
+        .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if tasks.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Lifecycle checks need only the linked URLs and states. Batch those keys
+    // without loading attachment provenance or querying each task separately.
+    let keys: Vec<_> = tasks
+        .iter()
+        .map(|(project, number, _)| (project, number))
+        .collect();
+    let mut links = std::collections::BTreeMap::<(String, i64), Vec<Value>>::new();
+    let mut query = db.prepare("SELECT pr.project_id,pr.issue_number,pr.url,pr.status FROM json_each(?1) requested CROSS JOIN issue_pull_requests pr WHERE pr.project_id=json_extract(requested.value,'$[0]') AND pr.issue_number=json_extract(requested.value,'$[1]')")?;
+    for row in query.query_map([serde_json::to_string(&keys)?], |r| {
+        Ok((
+            (r.get::<_, String>(0)?, r.get::<_, i64>(1)?),
+            json!({"url":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?}),
+        ))
+    })? {
+        let (key, link) = row?;
+        links.entry(key).or_default().push(link);
+    }
     tasks
         .into_iter()
-        .filter_map(|(project, number)| {
+        .filter_map(|(project, number, saved)| {
             let needs_update = (|| -> Result<bool> {
-                let links = registry::pull_requests(db, &project, number)?;
+                let links = links.remove(&(project.clone(), number)).unwrap_or_default();
                 if !has_open_pr(&links) {
                     return Ok(true);
                 }
-                let (_, status) = saved(db, &project, number)?;
+                let status = normalize_status(
+                    saved
+                        .map(|s| serde_json::from_str(&s))
+                        .transpose()?
+                        .unwrap_or(json!({"prs":{}})),
+                );
                 Ok(linked_status(status.clone(), &links, false) != status)
             })();
             match needs_update {
