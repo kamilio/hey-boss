@@ -14,7 +14,7 @@ createServer(async (req,res) => {
     const file = ['/agents','/workers','/agents/session'].includes(path) ? 'fleet.html' : path.slice(1);
     if (!/^[a-z-]+\.(html|js|css|png|json)$/.test(file)) throw Error('Not found');
     let body = await readFile(new URL(file,root));
-    if (file === 'fleet.html') body = body.toString().replace('<!--app-shell-->',(await readFile(new URL('app-shell.html',root),'utf8')).replace('<!--workers-current-->',' aria-current="page"').replace('<!--mindmap-current-->',''));
+    if (file === 'fleet.html') body = body.toString().replace('<!--app-shell-->',(await readFile(new URL('app-shell.html',root),'utf8')).replace('<!--workers-current-->',' aria-current="page"').replace(/<!--[^]*?-->/g,''));
     if (file === 'routes.js') body = body.toString().replace('/* ROUTE_DEFINITIONS */ []',await readFile(new URL('routes.json',root),'utf8'));
     res.setHeader('Content-Type',file.endsWith('.html')?'text/html':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'image/png');res.end(body);
   } catch {res.writeHead(404);res.end();}

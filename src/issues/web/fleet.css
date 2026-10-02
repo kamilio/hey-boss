@@ -162,10 +162,6 @@
   .page-footer { margin-bottom:70px }.agent-card-bottom { font-size:11px }
 }
 @media(prefers-reduced-motion:reduce) { .agent-card { transition:none }.agent-card:hover { transform:none } }
-@media(max-width:560px) {
-  .navigation-inner { padding-inline:12px; gap:0; justify-content:space-between }
-  .navigation-inner>a { flex:1; min-width:0; flex-direction:column; gap:5px; padding-inline:3px; font-size:11px; white-space:nowrap }
-}
 
 /* Workers: summary first, compact machine groups, details on demand. */
 .worker-views {display:flex;gap:26px;border-bottom:1px solid var(--line);margin-bottom:22px}
