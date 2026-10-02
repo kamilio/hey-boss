@@ -269,6 +269,8 @@ pub enum Operation {
         id: String,
     },
     ConfigureGlobal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quiet_hours: Option<crate::quiet_hours::QuietHours>,
         boss_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_close_merged_prs: Option<bool>,

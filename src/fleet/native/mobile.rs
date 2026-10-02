@@ -153,6 +153,19 @@ impl Mobile {
         .is_empty())
     }
     fn sync(&self) -> Result<()> {
+        let saved: Option<String> = self.ctx.db()?.query_row(
+            "SELECT quiet_hours FROM global_settings WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let quiet: crate::quiet_hours::QuietHours = saved
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        self.call(
+            "/api/bridge/quiet-hours",
+            Some(&serde_json::to_value(quiet)?),
+        )?;
         let registry = self.rpc(
             json!({"action":"projects","include_hidden":true}),
             None,

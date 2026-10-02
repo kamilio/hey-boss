@@ -423,6 +423,11 @@ and PR behavior. The stable assignee remains `human:boss`. The CLI equivalents a
 `--host HOST` to address a remote issue store. Settings are stored in SQLite,
 with version checks and request IDs for safe retries.
 
+Quiet hours in **Settings** silence Mac popups and phone pushes daily, initially
+22:00–07:00. Change the times and time zone, or turn the schedule off. Requests
+stay in the inbox; muted notifications are not replayed in the morning. The
+schedule syncs to connected devices and the phone relay.
+
 ## Chief
 
 Enable a project's **Chief** in Project settings or with `hey-boss worker run --chief`.

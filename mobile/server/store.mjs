@@ -1,3 +1,4 @@
+import {quietHoursActive,validQuietHours} from './quiet-hours.mjs';
 import {DatabaseSync} from 'node:sqlite';
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 export const hash = value => createHash('sha256').update(value).digest('hex');
@@ -96,9 +97,12 @@ export class HubStore{
  });}
  device(secret){return this.db.prepare('SELECT * FROM devices WHERE secret=?').get(hash(secret));}
  enqueue(body,now=Date.now()){
+  if(this.routing(now).quietHoursActive||this.get(body.id).quietHoursMuted===true)return;
   const data=JSON.stringify(body),eligible=this.preferences().mode==='automatic'?now+30000:now;
   this.db.prepare('INSERT INTO outbox(device,body,retry) SELECT id,?,? FROM devices WHERE subscription IS NOT NULL').run(data,eligible);
  }
+ quietHours(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='quiet_hours'").get();return row?JSON.parse(row.value):null;}
+ setQuietHours(value){if(!validQuietHours(value))throw new HubError(400,'Invalid quiet hours schedule');this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('quiet_hours',?)").run(JSON.stringify(value));}
  preferences(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='notification_preferences'").get();return row?JSON.parse(row.value):{mode:'automatic',awayAfterSeconds:600};}
  setPreferences(value){if(!['automatic','always','off'].includes(value.mode)||![60,120,300,600,900].includes(value.awayAfterSeconds))throw new HubError(400,'Choose an away delay of 1, 2, 5, 10 or 15 minutes');this.db.prepare("INSERT OR REPLACE INTO metadata VALUES('notification_preferences',?)").run(JSON.stringify({mode:value.mode,awayAfterSeconds:value.awayAfterSeconds}));return this.preferences();}
  presence(value,now=Date.now()){
@@ -115,7 +119,8 @@ export class HubStore{
   const reliable=presence?.idleReliable===true&&!stale;
   const confirmed=reliable&&presence.awaySince!=null&&presence.seenAt-presence.awaySince>=60000;
   const state=!presence?'unknown':stale?'offline':presence.unavailable?'locked':confirmed?'away':reliable&&presence.awaySince!=null?'confirming':'active';
-  return {...preferences,macState:state,macIdleSeconds:reliable?presence.idleSeconds+Math.max(0,age)/1000:null,notifyPhone:preferences.mode==='always'||preferences.mode==='automatic'&&['away','locked','offline'].includes(state)};
+  const quiet_hours=this.quietHours(),muted=quietHoursActive(quiet_hours,now);
+  return {...preferences,quiet_hours,quietHoursActive:muted,macState:state,macIdleSeconds:reliable?presence.idleSeconds+Math.max(0,age)/1000:null,notifyPhone:!muted&&(preferences.mode==='always'||preferences.mode==='automatic'&&['away','locked','offline'].includes(state))};
  }
  issueProjects(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='issue_projects'").get();return row?JSON.parse(row.value):[];}
  setIssueProjects(projects){

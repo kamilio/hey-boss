@@ -224,6 +224,7 @@ impl<'a> RowWriter<'a> {
             ],
             "global_settings" => &[
                 ("auto_close_merged_prs", json!(1)),
+                ("quiet_hours", Value::Null),
                 ("github_user_id", Value::Null),
             ],
             _ => &[],
@@ -4353,6 +4354,24 @@ mod tests {
             assert_eq!(pr["added_by"], "human:fixture");
             assert_eq!(pr["created_at"], 123);
         }
+    }
+
+    #[test]
+    fn quiet_hours_survive_fleet_snapshots_and_legacy_rows() {
+        let main = Fixture::new();
+        main.capture();
+        let quiet = serde_json::to_string(&crate::quiet_hours::QuietHours {
+            enabled: true, start: "21:30".into(), end: "08:15".into(), time_zone: "America/Chicago".into(),
+        }).unwrap();
+        main.db.execute("UPDATE global_settings SET quiet_hours=?", [&quiet]).unwrap();
+        let agent = Fixture::new();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(&agent.db, "agent", &snapshot(&main.db, "agent").unwrap(), &[]).unwrap();
+        let mut settings = rows(&agent.db, "SELECT * FROM global_settings", &[]).unwrap().remove(0);
+        assert_eq!(settings["quiet_hours"], quiet);
+        settings.as_object_mut().unwrap().remove("quiet_hours");
+        put_row(&agent.db, "global_settings", &settings).unwrap();
+        assert_eq!(rows(&agent.db, "SELECT quiet_hours FROM global_settings", &[]).unwrap()[0]["quiet_hours"], quiet);
     }
 
     #[test]

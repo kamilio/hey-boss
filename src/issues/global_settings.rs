@@ -13,27 +13,39 @@ CREATE TABLE global_settings_requests(actor TEXT NOT NULL,request_id TEXT NOT NU
 // Database callers need stored settings only. Skill discovery touches the
 // filesystem and belongs to explicit settings responses, not issue transactions.
 pub(super) fn read(db: &Connection) -> Result<Value> {
-    let (name, version, auto_close): (String, i64, bool) = db.query_row(
-        "SELECT boss_name,version,auto_close_merged_prs FROM global_settings WHERE id=1",
+    let (name, version, auto_close, quiet): (String, i64, bool, Option<String>) = db.query_row(
+        "SELECT boss_name,version,auto_close_merged_prs,quiet_hours FROM global_settings WHERE id=1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
+    let quiet: crate::quiet_hours::QuietHours = quiet
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or_default();
     Ok(
-        json!({"ok":true,"scope":"global","boss_name":name,"auto_close_merged_prs":auto_close,"version":version,"boss":{"id":"human:boss","name":name,"version":version}}),
+        json!({"ok":true,"scope":"global","quiet_hours":quiet,"boss_name":name,"auto_close_merged_prs":auto_close,"version":version,"boss":{"id":"human:boss","name":name,"version":version}}),
     )
 }
 
 pub(super) fn configure(db: &Connection, name: &str, expected: Option<i64>) -> Result<Value> {
-    configure_settings(db, Some(name), None, expected)
+    configure_settings(db, Some(name), None, None, expected)
 }
 
 fn configure_settings(
     db: &Connection,
     name: Option<&str>,
     auto_close: Option<bool>,
+    quiet: Option<&crate::quiet_hours::QuietHours>,
     expected: Option<i64>,
 ) -> Result<Value> {
+    if let Some(quiet) = quiet {
+        quiet.validate()?;
+    }
     let current = read(db)?;
+    let quiet = quiet
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| current["quiet_hours"].clone());
     let name = name.unwrap_or_else(|| current["boss_name"].as_str().unwrap());
     let auto_close =
         auto_close.unwrap_or_else(|| current["auto_close_merged_prs"].as_bool().unwrap());
@@ -45,11 +57,13 @@ fn configure_settings(
             "Global settings changed elsewhere; reload before saving",
         ));
     }
-    let changed = current["boss_name"] != name || current["auto_close_merged_prs"] != auto_close;
+    let changed = current["boss_name"] != name
+        || current["auto_close_merged_prs"] != auto_close
+        || current["quiet_hours"] != quiet;
     if changed {
         db.execute(
-            "UPDATE global_settings SET boss_name=?1,auto_close_merged_prs=?2,version=version+1 WHERE id=1",
-            params![name,auto_close],
+            "UPDATE global_settings SET boss_name=?1,auto_close_merged_prs=?2,quiet_hours=?3,version=version+1 WHERE id=1",
+            params![name,auto_close,serde_json::to_string(&quiet)?],
         )?;
     }
     let mut result = read(db)?;
@@ -86,6 +100,7 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
     let mut result = match &request.operation {
         Operation::GlobalSettings => read(db)?,
         Operation::ConfigureGlobal {
+            quiet_hours,
             boss_name,
             auto_close_merged_prs,
             selected_skills,
@@ -105,6 +120,7 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
                 db,
                 boss_name.as_deref(),
                 *auto_close_merged_prs,
+                quiet_hours.as_ref(),
                 *if_version,
             )?
         }
@@ -125,6 +141,55 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quiet_hours_validate_and_survive_partial_settings_updates() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-quiet-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let mut store = crate::issues::Store::open(&root.join("issues.db")).unwrap();
+        let actor = crate::issues::identity::resolve(Some("human:boss"), "test", &root).unwrap();
+        let mut run = |operation: Value| {
+            store.execute(&Request {
+                version: 1,
+                project: crate::issues::Project {
+                    id: "named:Quiet".into(),
+                    name: "Quiet".into(),
+                },
+                project_override: None,
+                actor: Some(actor.clone()),
+                operation: serde_json::from_value(operation).unwrap(),
+                request_id: None,
+            })
+        };
+        let initial = run(json!({"action":"global_settings"})).unwrap();
+        assert_eq!(initial["quiet_hours"]["enabled"], true);
+        assert_eq!(initial["quiet_hours"]["start"], "22:00");
+        let schedule =
+            json!({"enabled":true,"start":"21:30","end":"08:15","time_zone":"America/Chicago"});
+        let saved = run(json!({"action":"configure_global","quiet_hours":schedule,"if_version":1}))
+            .unwrap();
+        assert_eq!(saved["quiet_hours"], schedule);
+        assert_eq!(saved["version"], 2);
+        assert!(
+            run(json!({"action":"configure_global","quiet_hours":schedule,"if_version":1}))
+                .is_err()
+        );
+        let renamed = run(json!({"action":"configure_global","boss_name":"Human"})).unwrap();
+        assert_eq!(renamed["quiet_hours"], schedule);
+        for (field, value) in [
+            ("start", "24:00"),
+            ("end", "21:30"),
+            ("time_zone", "../etc/passwd"),
+        ] {
+            let mut invalid = schedule.clone();
+            invalid[field] = json!(value);
+            assert!(run(json!({"action":"configure_global","quiet_hours":invalid})).is_err());
+        }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn ordinary_issue_operations_do_not_scan_skill_files() {
         let root = std::env::temp_dir().join(format!(

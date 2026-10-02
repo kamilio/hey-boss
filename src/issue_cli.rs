@@ -69,6 +69,7 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
             sync_skills,
             if_version,
         } => Operation::ConfigureGlobal {
+            quiet_hours: None,
             boss_name: boss_name.clone(),
             auto_close_merged_prs: *auto_close_merged_prs,
             selected_skills: selected_skills.clone(),

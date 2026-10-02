@@ -230,6 +230,20 @@
           </p>
           <label class="workflow-toggle"><input type="checkbox" id="global-auto-close-prs" /><span>Close tasks when their fix PRs merge</span></label>
           <p class="field-help">Closes a task after every attached fix PR is merged. PR statuses keep updating when this is off.</p>
+          <section class="quiet-hours-settings" aria-labelledby="quiet-hours-title">
+            <label class="workflow-toggle"><input type="checkbox" id="global-quiet-enabled" /><span id="quiet-hours-title">Quiet hours</span></label>
+            <p class="field-help" id="quiet-hours-help">Silence Mac popups and phone pushes. Requests stay in your inbox, with no catch-up notifications.</p>
+            <fieldset id="global-quiet-fields" aria-describedby="quiet-hours-help">
+              <div class="quiet-hours-times">
+                <label class="field-label">From<input class="text-input" type="time" id="global-quiet-start" required /></label>
+                <span aria-hidden="true">–</span>
+                <label class="field-label">Until<input class="text-input" type="time" id="global-quiet-end" required /></label>
+              </div>
+              <label class="field-label" for="global-quiet-zone">Time zone</label>
+              <select class="text-input" id="global-quiet-zone" required></select>
+            </fieldset>
+            <p class="field-help" id="global-quiet-summary" role="status"></p>
+          </section>
           <a class="button skill-manager-link" href="/skills">Open skill manager →</a>
           <p
             id="global-settings-error"
