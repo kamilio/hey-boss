@@ -299,7 +299,13 @@ fn installation_lock(store: &Store) -> io::Result<std::fs::File> {
                     && started.elapsed() < Duration::from_secs(300) =>
             {
                 if !waiting {
-                    eprintln!("Waiting for running maintenance to finish before installation…");
+                    // An updater can outlive the supervisor reading this pipe.
+                    // Losing progress output must not interrupt publication.
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr(),
+                        "Waiting for running maintenance to finish before installation…\n"
+                            .as_bytes(),
+                    );
                     waiting = true;
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -687,6 +693,65 @@ fn schedule(store: &Store, enable: bool, interval: u64) -> io::Result<()> {
 mod schedule_tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn installation_wait_survives_closed_progress_pipe() {
+        const CHILD_STATE: &str = "HEY_HARVESTER_INSTALL_WAIT_TEST";
+        if let Some(root) = std::env::var_os(CHILD_STATE) {
+            let store = Store::new(PathBuf::from(root)).unwrap();
+            std::fs::write(store.directory.join("started"), "").unwrap();
+            let _lock = installation_lock(&store).unwrap();
+            std::fs::write(store.directory.join("acquired"), "").unwrap();
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "harvester-install-wait-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Store::new(root.clone()).unwrap();
+        let lock = store.lock().unwrap();
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::schedule_tests::installation_wait_survives_closed_progress_pipe",
+                "--nocapture",
+            ])
+            .env(CHILD_STATE, &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                writer,
+            )))
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !root.join("started").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let prematurely_acquired = root.join("acquired").exists();
+        drop(lock);
+        let status = child.wait().unwrap();
+        let acquired = root.join("acquired").exists();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            !prematurely_acquired,
+            "The existing maintenance lock must be respected"
+        );
+        assert!(
+            status.success(),
+            "Closed supervisor progress pipe interrupted installation: {status}"
+        );
+        assert!(
+            acquired,
+            "Installation must continue once maintenance releases its lock"
+        );
+    }
 
     #[test]
     fn unchanged_plist_refreshes_cached_code_identity_and_reports_registration_failures() {
