@@ -175,62 +175,46 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
         }
     }
     if table == "project_settings" {
-        let existing = current_row(db, table, &row)?;
         let m = row
             .as_object_mut()
             .ok_or_else(|| invalid("Invalid settings row"))?;
         // Retained only for older peers; sibling scheduling is no longer supported.
         m.insert("subtask_scheduling".into(), json!("explicit"));
-        // Old capture triggers omit additive fields. An omitted value is not
-        // an instruction to reset a setting already known by this replica.
-        for (column, default) in [
+    }
+    let defaults: &[(&str, Value)] = match table {
+        "project_settings" => &[
             ("drafts_enabled", json!(1)),
             ("plan_template", json!("plans/{timestamp}-{number}.md")),
             ("worktree_enabled", json!(0)),
             ("prompt_overrides", json!("{}")),
             ("chief_enabled", json!(0)),
             ("chief_prompt", Value::Null),
-        ] {
-            m.entry(column)
-                .or_insert_with(|| existing.get(column).cloned().unwrap_or(default));
-        }
-    }
-    if table == "issue_pull_requests" && row.get("purpose").is_none() {
-        // Older peers cannot classify links; omitted metadata must not
-        // reset a purpose already known by this replica.
+        ],
+        "issue_pull_requests" => &[
+            ("purpose", json!("unspecified")),
+            ("status", json!("unknown")),
+            ("checked_at", Value::Null),
+            ("error", Value::Null),
+            ("merged_at", Value::Null),
+            ("pr_title", Value::Null),
+            ("author_id", Value::Null),
+        ],
+        "global_settings" => &[
+            ("auto_close_merged_prs", json!(1)),
+            ("github_user_id", Value::Null),
+        ],
+        _ => &[],
+    };
+    // Only old capture triggers omit additive fields. Read their existing
+    // values once, preserving explicit nulls and avoiding reads for modern rows.
+    if defaults.iter().any(|(column, _)| row.get(column).is_none()) {
         let existing = current_row(db, table, &row)?;
-        row.as_object_mut()
-            .ok_or_else(|| invalid("Invalid PR row"))?
-            .insert(
-                "purpose".into(),
-                existing
-                    .get("purpose")
-                    .cloned()
-                    .unwrap_or(json!("unspecified")),
-            );
-    }
-    if matches!(table, "issue_pull_requests" | "global_settings") {
-        let existing = current_row(db, table, &row)?;
-        let defaults = if table == "issue_pull_requests" {
-            vec![
-                ("status", json!("unknown")),
-                ("checked_at", Value::Null),
-                ("error", Value::Null),
-                ("merged_at", Value::Null),
-                ("pr_title", Value::Null),
-                ("author_id", Value::Null),
-            ]
-        } else {
-            vec![
-                ("auto_close_merged_prs", json!(1)),
-                ("github_user_id", Value::Null),
-            ]
-        };
+        let m = row
+            .as_object_mut()
+            .ok_or_else(|| invalid("Invalid settings or PR row"))?;
         for (column, default) in defaults {
-            row.as_object_mut()
-                .ok_or_else(|| invalid("Invalid settings or PR row"))?
-                .entry(column)
-                .or_insert_with(|| existing.get(column).cloned().unwrap_or(default));
+            m.entry(*column)
+                .or_insert_with(|| existing.get(column).unwrap_or(default).clone());
         }
     }
     let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
@@ -3906,6 +3890,76 @@ mod tests {
             .unwrap()[0]["subtask_scheduling"],
             "explicit"
         );
+    }
+
+    #[test]
+    fn modern_replication_rows_do_not_read_compatibility_values() {
+        let f = Fixture::new();
+        f.db.execute_batch("INSERT INTO project_settings(project_id,prompt,version,chief_prompt) VALUES('named:Native fleet','Work',1,'Old');
+            INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,error) VALUES('named:Native fleet',1,'https://github.com/o/r/pull/1','human:fixture',123,'fix','Old');
+            UPDATE global_settings SET github_user_id=42;").unwrap();
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let mut measurements = Vec::new();
+        for (table, nullable) in [
+            ("project_settings", "chief_prompt"),
+            ("issue_pull_requests", "error"),
+            ("global_settings", "github_user_id"),
+        ] {
+            let mut row = rows(&f.db, &format!("SELECT * FROM {table}"), &[])
+                .unwrap()
+                .remove(0);
+            row[nullable] = Value::Null;
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for _ in 0..128 {
+                put_row(&db, table, &row).unwrap();
+            }
+            db.execute_batch("COMMIT").unwrap();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            eprintln!("128 {table} writes: {commands} RPCs, {steps} VM steps");
+            measurements.push((table, commands));
+            assert_eq!(current_row(&f.db, table, &row).unwrap(), row);
+        }
+        owner.stop();
+        for (table, commands) in measurements {
+            // Schema metadata + query and the write per row, plus BEGIN/COMMIT.
+            assert!(commands <= 128 * 3 + 2, "{table}: {commands} RPCs");
+        }
+    }
+
+    #[test]
+    fn legacy_pr_compatibility_uses_one_read_and_preserves_explicit_nulls() {
+        let f = Fixture::new();
+        f.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status,checked_at,error,pr_title,author_id) VALUES('named:Native fleet',1,'https://github.com/o/r/pull/1','human:fixture',123,'fix','open',456,'Old error','Title',42)", []).unwrap();
+        let mut expected = rows(&f.db, "SELECT * FROM issue_pull_requests", &[])
+            .unwrap()
+            .remove(0);
+        expected["error"] = Value::Null;
+        let mut legacy = expected.clone();
+        for column in [
+            "purpose",
+            "status",
+            "checked_at",
+            "merged_at",
+            "pr_title",
+            "author_id",
+        ] {
+            legacy.as_object_mut().unwrap().remove(column);
+        }
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&f.path);
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        put_row(&db, "issue_pull_requests", &legacy).unwrap();
+        db.execute_batch("COMMIT").unwrap();
+        drop(db);
+        let (commands, _) = transport.join().unwrap();
+        owner.stop();
+        assert_eq!(
+            current_row(&f.db, "issue_pull_requests", &legacy).unwrap(),
+            expected
+        );
+        assert!(commands <= 7, "Legacy PR write: {commands} RPCs");
     }
 
     #[test]
