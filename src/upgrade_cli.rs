@@ -938,6 +938,9 @@ mod tests {
     fn archived_snapshots_rebuild_companion_libraries_and_executables() {
         let temp = Temp::new().unwrap();
         let target = temp.0.join("target");
+        // nice applies an adjustment; CI can start above normal priority.
+        let parent_priority = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        let expected_priority = (parent_priority + 10).min(19);
         let old = SystemTime::now() - std::time::Duration::from_secs(3600);
         for (name, stamp) in [
             ("first", "1111111111111111"),
@@ -1015,8 +1018,9 @@ mod tests {
             )
             .unwrap();
             assert!(
-                build_priority() >= 10,
-                "Remote bootstrap compiler ran at foreground priority"
+                build_priority() >= expected_priority,
+                "Bootstrap priority {} should be at least {expected_priority} (parent {parent_priority})",
+                build_priority()
             );
             assert_eq!(
                 installed_id(&root.join("guard")).as_deref(),
@@ -1035,8 +1039,9 @@ mod tests {
             }
             let binary = build(&root, &target).unwrap();
             assert!(
-                build_priority() >= 10,
-                "Release compiler ran at foreground priority"
+                build_priority() >= expected_priority,
+                "Release priority {} should be at least {expected_priority} (parent {parent_priority})",
+                build_priority()
             );
             for package in ["hey-harvester", "hey-gh"] {
                 let bytes =
@@ -1053,6 +1058,10 @@ mod tests {
                 "The new archived snapshot must not reuse the earlier stamp"
             );
         }
+        assert_eq!(
+            unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) },
+            parent_priority
+        );
     }
     #[test]
     fn source_identity_matches_compiler_identity() {
