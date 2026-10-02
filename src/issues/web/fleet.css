@@ -278,7 +278,7 @@
 .activity-organizers {font-size:11px;color:var(--muted);margin-top:6px}
 .activity-machine-heading:focus-visible,.activity-worker-summary:focus-visible,.activity-task:focus-visible {outline:2px solid var(--accent);outline-offset:2px}
 .worker-scope-group {margin-left:20px;border-bottom:1px solid var(--line)}
-.worker-scope-heading {display:grid;grid-template-columns:minmax(180px,1fr) 85px 150px minmax(0,1.6fr);align-items:center;gap:16px;position:relative;list-style:none;cursor:pointer;padding:17px 12px 17px 20px}
+.worker-scope-heading {display:grid;grid-template-columns:minmax(150px,1fr) 150px 120px minmax(0,1.6fr);align-items:center;gap:16px;position:relative;list-style:none;cursor:pointer;padding:17px 12px 17px 20px}
 .worker-scope-heading::-webkit-details-marker {display:none}
 .worker-scope-heading::before {content:'›';position:absolute;left:0;color:var(--muted);font-size:18px;line-height:1}
 .worker-scope-group[open]>.worker-scope-heading::before {transform:rotate(90deg)}
@@ -295,7 +295,7 @@
 .worker-scope {border-top:1px solid var(--line);padding-top:10px}.worker-scope summary {font-size:12px;cursor:pointer;min-height:36px;display:list-item;padding-top:5px}.worker-scope-fields {display:grid;gap:16px;padding-top:12px}
 #worker-editor-changes {scroll-margin-block:20px 120px}
 @media(max-width:900px){
- .worker-scope-heading {grid-template-columns:minmax(160px,1fr) 75px 130px;gap:8px 12px}.scope-current-task {grid-column:1/-1}
+ .worker-scope-heading {grid-template-columns:minmax(120px,1fr) 150px 100px;gap:8px 12px}.scope-current-task {grid-column:1/-1}
  .activity-columns,.activity-worker-summary {grid-template-columns:minmax(120px,1fr) 95px 55px minmax(0,2fr);gap:10px}
  .activity-task {grid-template-columns:80px minmax(0,1fr) 65px 55px 12px;gap:10px}
 }
@@ -307,7 +307,6 @@
  #worker-search {width:100%;font-size:16px;min-height:40px}.workers-page .worker-filter {min-height:40px;font-size:11px;padding:7px 9px}
  .activity-machine-heading {gap:8px;flex-wrap:wrap;padding:9px 0}.activity-machine-heading h2 {font-size:13px}.activity-machine-usage {font-size:10px}.activity-machine-heading .machine-connection {font-size:9px}
  .activity-columns {display:none}.activity-worker {margin-left:10px}.activity-worker-summary {grid-template-columns:minmax(0,1fr) auto 66px;gap:6px 9px;padding:10px 4px 10px 0;min-height:34px}
- .activity-worker-slots[data-running=true]::after {content:' slots';font-size:9px;color:var(--muted)}
  .activity-worker-name strong {font-size:12px}.activity-worker-name {gap:7px}.activity-worker-summary .worker-state {font-size:10px}.activity-worker-slots {font-size:11px}
  .activity-worker-current {grid-column:1/-1;margin-left:17px;gap:3px}.activity-current-title {font-size:11px}.activity-current-note {font-size:10px}
  .activity-worker:not(:has(.activity-current-title)) .activity-worker-current {display:none}
@@ -317,9 +316,13 @@
  .activity-task-copy strong {font-size:12px}.activity-inactive {padding-left:27px}.activity-worker-footer {font-size:10px}
 }
 
-/* Machine capacity and checkouts stay close to the workers they configure. */
-.machine-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:16px 20px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--input) }
-.worker-machine>.machine-controls { border:1px solid var(--line); border-radius:12px; margin:12px 0 18px }
+/* Agent capacity belongs to a project worker; machines only own checkouts. */
+.machine-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:8px 20px }
+.worker-machine>.machine-controls { margin:8px 0 }
+.capacity-controls { display:inline-flex; flex-direction:column; align-items:center; gap:3px; vertical-align:middle }
+.capacity-caption { color:var(--muted); font-size:10px; font-weight:400; white-space:nowrap }
+.activity-columns,.activity-worker-summary { grid-template-columns:minmax(130px,1fr) 110px 150px minmax(0,2fr) }
+.worker-column-labels,.worker-record-summary { grid-template-columns:minmax(130px,1fr) 120px 150px 70px }
 .worker-stepper { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surface) }
 .worker-step { border:0; background:transparent; color:var(--accent); width:40px; height:40px; font-family:inherit; font-size:24px; line-height:1; cursor:pointer }
 .worker-step:hover { background:var(--accent-soft) }
@@ -338,3 +341,11 @@
 #machine-editor-status { font-size:13px; line-height:1.6; overflow-wrap:anywhere }
 #machine-form [hidden] { display:none!important }
 @media(max-width:600px){.machine-controls{padding:12px}.worker-machine>.machine-controls{padding:10px}.machine-draining{flex-basis:100%}.machine-project{gap:10px}.worker-step{width:44px;height:44px}}
+@media(max-width:680px){
+ .activity-worker-summary,.worker-record-summary {grid-template-columns:minmax(0,1fr) auto;gap:8px}
+ .activity-worker-summary>.capacity-controls,.worker-record-summary>.capacity-controls {grid-column:1;align-items:flex-start}
+ .activity-worker-current {grid-column:1/-1}
+ .settings-scope>.worker-scope-heading h3 {grid-column:1/-1}
+ .worker-scope-heading>.capacity-controls {align-items:flex-start}
+ .activity-worker-slots {grid-column:1/-1}
+}

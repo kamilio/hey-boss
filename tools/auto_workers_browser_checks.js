@@ -12,12 +12,12 @@ async page => {
   check(await page.locator('.activity-worker:visible').count()===0,'Project groups start collapsed, hiding repeated worker rows');
   const shared=page.getByRole('heading',{name:'ashby-mcp + hey-gh + hey-proxy',exact:true});
   check(await shared.count()===1,'The shared project combination appears once');
-  check((await shared.locator('..').innerText()).includes('3 workers'),'The shared combination contains all three workers');
-  await page.locator('[data-host="local"] .worker-scope-heading').first().click();
+  check((await shared.locator('..').innerText()).includes('Agent limit: 9'),'The shared combination totals the agent limits of all three workers');
+  await page.locator('[data-host="local"] .worker-scope-heading h3').first().click();
   check(await page.locator('.activity-worker[open]').count()===0,'Workers begin as compact rows with details collapsed');
-  check((await page.locator('.activity-machine-usage').allTextContents()).join('|')==='2 occupied · 10 available|1 occupied · 0 available · 1 paused|Last known activity','Shared-worker capacity is counted once');
+  check((await page.locator('.activity-machine-usage').allTextContents()).join('|')==='2 agents running · 10 available|1 agents running · 0 available · 1 paused|Last known activity','Shared-worker capacity is counted once');
   check(await page.locator('[data-worker="poe-code"] .activity-current-note').isVisible(),'Brief agent activity is visible in the worker row');
-  check((await page.locator('.worker-scope-heading').first().boundingBox()).y<400,'Groups appear near the top of the page');
+  check(await page.locator('.worker-scope-heading').first().evaluate(el=>{const r=el.getBoundingClientRect();return r.height>0&&r.top>=0&&r.bottom<=innerHeight;}),'Project controls are visible without scrolling');
   check((await page.locator('[data-worker="paused"] .worker-state').textContent())==='Finishing work','Paused worker with an active agent is finishing work');
   await page.locator('[data-worker="poe-code"]>summary').click();
   check(await page.locator('.activity-task:visible').count()===2,'Expanding a worker reveals its task list');
@@ -26,7 +26,7 @@ async page => {
   await page.waitForTimeout(3300);
   check(await page.locator('.activity-task').first().evaluate(el=>document.activeElement===el),'Refresh preserves expanded details and keyboard focus');
   await page.locator('[data-worker="poe-code"]>summary').click();
-  await page.locator('[data-host="local"] .worker-scope-heading').first().click();
+  await page.locator('[data-host="local"] .worker-scope-heading h3').first().click();
   await page.waitForTimeout(3300);
   check(await page.locator('.activity-worker:visible').count()===0,'Collapsed project groups stay collapsed across refresh');
   await page.locator('[data-host="local"]>.activity-machine-heading').click();
@@ -49,7 +49,7 @@ async page => {
   }
   await page.locator('#worker-config-view').click();
   check(await page.locator('.settings-scope').count()===4,'Settings uses the same project-combination grouping');
-  await page.locator('[data-host="local"] .worker-scope-heading').first().click();
+  await page.locator('[data-host="local"] .worker-scope-heading h3').first().click();
   check(await page.locator('.stopped-workers').count()===1,'Stopped definitions are grouped in management');
   check(!await page.locator('.stopped-workers').evaluate(el=>el.open),'Stopped group begins collapsed');
   await page.locator('[data-filter="stopped"]').click();
@@ -64,7 +64,7 @@ async page => {
   check((await busyShared.locator('.activity-current-note').allTextContents()).every(s=>s==='Working · task details unavailable'),'Worker rows also report occupied slots without task details');
   await page.setViewportSize({width:1440,height:1050});
   await page.goto('http://127.0.0.1:59648/workers#view=configuration',{waitUntil:'domcontentloaded'});
-  await page.locator('.worker-scope-heading').click();
+  await page.locator('.worker-scope-heading h3').click();
   await page.locator('[data-edit-worker="tools"]').click();
   await page.locator('#worker-editor').waitFor({state:'visible'});
   await page.locator('#worker-slots').fill('0');

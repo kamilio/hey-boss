@@ -477,12 +477,20 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
             let id = update["id"]
                 .as_str()
                 .ok_or_else(|| invalid("Missing worker ID"))?;
-            let project_ids: Vec<_> = machine["projects"]
-                .as_object()
-                .into_iter()
-                .flat_map(|p| p.keys())
-                .cloned()
-                .collect();
+            let project_ids: Vec<_> = if let Some(project) = update.get("project") {
+                let project = project
+                    .as_str()
+                    .filter(|id| machine["projects"].get(*id).is_some())
+                    .ok_or_else(|| invalid("Project is no longer configured on this machine"))?;
+                vec![project.to_owned()]
+            } else {
+                machine["projects"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|p| p.keys())
+                    .cloned()
+                    .collect()
+            };
             let workers = machine["workers"].as_array_mut().unwrap();
             if workers.iter().any(|w| w["id"] == id) {
                 return Err(invalid("Worker ID already exists"));
@@ -601,6 +609,19 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn adding_a_worker_to_one_project_does_not_include_other_machine_projects() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        fs::write(&ctx.desired, "machines: {local: {workers: [], projects: {github.com/acme/atlas: {git: 'https://github.com/acme/atlas.git', path: '~/Workspace/atlas'}, github.com/acme/tools: {git: 'https://github.com/acme/tools.git', path: '~/Workspace/tools'}}}}\n").unwrap();
+        let first = request(ctx, &json!({})).unwrap();
+        let saved = request(ctx, &json!({"machine_update":{"host":"local","action":"add","id":"atlas-worker","project":"github.com/acme/atlas","concurrency":5},"revision":first["revision"],"save":true})).unwrap();
+        let config = &saved["document"]["machines"]["local"]["workers"][0]["config"];
+        assert_eq!(config["projects"], json!(["github.com/acme/atlas"]));
+        assert_eq!(config["concurrency"], 5);
+        assert!(request(ctx, &json!({"machine_update":{"host":"local","action":"add","id":"missing","project":"github.com/acme/missing"},"revision":saved["revision"],"save":true})).is_err());
+    }
 
     #[test]
     fn machine_controls_add_drain_and_remember_project_paths() {

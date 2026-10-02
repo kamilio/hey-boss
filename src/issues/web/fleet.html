@@ -68,7 +68,7 @@
         <p id="machine-editor-description"></p>
         <div class="worker-form-grid">
           <label id="machine-template-field" class="full">Copy settings from<select id="machine-template"></select></label>
-          <label id="machine-slots-field" class="full">Agent slots<input id="machine-slots" type="number" min="1" max="1024" value="1"></label>
+          <label id="machine-slots-field" class="full">Agent limit<input id="machine-slots" type="number" min="1" max="1024" value="1"></label>
           <label id="machine-worker-field" class="full">Worker<select id="machine-worker"></select></label>
           <label id="machine-git-field" class="full">Git repository<input id="machine-git" placeholder="git@github.com:team/my-project.git" autocomplete="off"></label>
           <label id="machine-workspace-field" class="full">Workspace folder<input id="machine-workspace" placeholder="~/Workspace" autocomplete="off"><small>Remembered for this machine.</small></label>
@@ -84,7 +84,7 @@
         <div class="worker-form-grid">
           <label class="full">Name<input id="worker-name" required maxlength="128"></label>
           <label>Agent<select id="worker-provider"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="pi">Pi</option></select><small>Applies to the next issue. Current agents keep their session.</small></label>
-          <label>Agent slots<input id="worker-slots" type="number" min="1" max="1024" required></label>
+          <label>Agent limit<input id="worker-slots" type="number" min="1" max="1024" required></label>
           <label class="full">Pickup mode<select id="worker-intent"><option value="running">Running — pick up tasks</option><option value="pause">Paused — finish current tasks</option><option value="drain">Drain — finish tasks, then stop</option><option value="stop">Stopped — stop current tasks</option></select></label>
           <details id="worker-scope" class="worker-scope full"><summary>Projects &amp; checkout paths</summary><div class="worker-scope-fields">
           <label class="full">Projects<textarea id="worker-projects" rows="3" placeholder="One project ID per line; empty means all projects"></textarea></label>
