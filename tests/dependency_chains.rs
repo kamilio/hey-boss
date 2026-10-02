@@ -146,8 +146,22 @@ fn atomic_then_chain_creates_entire_sequence_and_unblocks_step_by_step_on_ready_
     assert_eq!(f.view(3)["state"], "blocked");
     assert_eq!(f.pickup_ready(), vec![2]);
 
-    // Claiming Step 2 provides Step 1's PR in dependency_context and stacked-PR instructions.
+    // Fetching Step 2 provides prerequisite context on demand.
+    let fetched2 = f.view(2);
+    let prerequisite = &fetched2["dependency_context"][0];
+    assert_eq!(prerequisite["number"], 1);
+    assert_eq!(prerequisite["state"], "ready");
+    assert_eq!(
+        prerequisite["pull_requests"][0]["url"],
+        "https://github.com/example/repo/pull/101"
+    );
+
+    // Claiming retains structured context and generic stacked-PR guidance.
     let claim2 = f.run(json!({"action": "claim", "number": 2, "force": false}));
+    assert_eq!(
+        claim2["issue"]["dependency_context"],
+        fetched2["dependency_context"]
+    );
     assert_eq!(claim2["issue"]["blocker_links"][0]["number"], 1);
     assert_eq!(claim2["issue"]["blocker_links"][0]["state"], "ready");
     assert_eq!(claim2["issue"]["blocker_links"][0]["satisfied"], true);
@@ -159,8 +173,8 @@ fn atomic_then_chain_creates_entire_sequence_and_unblocks_step_by_step_on_ready_
     assert_eq!(claim2["issue"]["blocking"][0]["unblocks_on_release"], true);
     let instructions = claim2["instructions"].as_str().unwrap();
     assert!(
-        instructions.contains("https://github.com/example/repo/pull/101"),
-        "Expected prerequisite PR URL in instructions: {instructions}"
+        !instructions.contains("https://github.com/example/repo/pull/101"),
+        "Prerequisite PR context should be fetched, not injected into instructions: {instructions}"
     );
     assert!(
         instructions.contains("dependency branch as your branch start and PR base"),
