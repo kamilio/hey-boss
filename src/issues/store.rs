@@ -2375,9 +2375,7 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut observations = Vec::with_capacity(projects.len());
         for (project, activity) in projects {
             if super::identity::is_home_project(project)
                 || super::identity::is_temporary_project(&project.id)
@@ -2387,8 +2385,25 @@ impl Store {
             }
             identifier(&project.id, "project ID", 8192)?;
             identifier(&project.name, "project name", 1024)?;
-            let project = project_names::canonical(&tx, project.clone())?;
-            let at = (*activity).clamp(0, now);
+            observations.push((project.clone(), (*activity).clamp(0, now)));
+        }
+        if observations.is_empty() {
+            return Ok(());
+        }
+        let pending = {
+            let snapshot = self.db.read_transaction()?;
+            project_names::pending_discoveries(&snapshot, &observations)?
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (project, at) in pending {
+            // Another poll may have registered this name after the snapshot.
+            // Resolve it under the writer; the update also rechecks activity.
+            let project = project_names::canonical(&tx, project)?;
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?4)
                 ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)
                 WHERE excluded.activity_at>projects.activity_at",params![project.id,project.name,now,at])?;
@@ -3087,6 +3102,143 @@ CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TE
 #[cfg(test)]
 mod contention_tests {
     use super::*;
+
+    #[test]
+    fn discovery_rechecks_names_and_activity_after_its_read_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-discovery-race-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let mut store = Store::open(&path).unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (db, transport) = crate::database::tests::pause_before_writer(&path, entered, released);
+        store.replace_connection_for_test(db);
+        let observing = std::thread::spawn(move || {
+            let observations = [
+                ("github.com/example/first", "Shared", 100),
+                ("github.com/example/second", "shared", 200),
+                ("named:Future", "Future", i64::MAX),
+                ("named:Negative", "Negative", -100),
+            ]
+            .map(|(id, name, at)| {
+                (
+                    Project {
+                        id: id.into(),
+                        name: name.into(),
+                    },
+                    at,
+                )
+            });
+            store.discover_projects(&observations).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let db = Connection::connect(&path).unwrap();
+        db.execute("INSERT INTO projects(id,name,next_number,activity_at,hidden_at) VALUES('named:Winner','SHARED',1,300,42)", []).unwrap();
+        release.send(()).unwrap();
+        observing.join().unwrap();
+        transport.join().unwrap();
+        let mut query = db
+            .prepare("SELECT id,activity_at,hidden_at FROM projects ORDER BY id")
+            .unwrap();
+        let projects = query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(projects.len(), 3);
+        assert_eq!(projects[0].0, "named:Future");
+        assert!((1..i64::MAX).contains(&projects[0].1));
+        assert_eq!(projects[1], ("named:Negative".into(), 0, None));
+        assert_eq!(projects[2], ("named:Winner".into(), 300, Some(42)));
+        drop(query);
+        drop(db);
+        owner.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unchanged_discovery_batches_aliases_without_waiting_for_the_writer() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-idle-discovery-{}",
+                super::super::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store
+                .db
+                .execute_batch(&format!(
+                    "
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO projects(id,name,next_number,activity_at,hidden_at)
+                SELECT 'named:Project '||id,'Project '||id,1,100,42 FROM n;
+            "
+                ))
+                .unwrap();
+            let observations: Vec<_> = (1..=count)
+                .map(|n| {
+                    (
+                        Project {
+                            id: format!("github.com/example/project-{n}"),
+                            name: format!("project {n}"),
+                        },
+                        100,
+                    )
+                })
+                .collect();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.replace_connection_for_test(db);
+            store.discover_projects(&observations).unwrap();
+            store.replace_connection_for_test(Connection::connect(&path).unwrap());
+            let (commands, steps) = transport.join().unwrap();
+            let writer = Connection::connect(&path).unwrap();
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let (send, receive) = std::sync::mpsc::channel();
+            let discovering = std::thread::spawn(move || {
+                let result = store.discover_projects(&observations);
+                send.send(result).unwrap();
+                store
+            });
+            let without_writer = receive.recv_timeout(Duration::from_secs(1));
+            writer.execute_batch("ROLLBACK").unwrap();
+            let store = discovering.join().unwrap();
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM projects WHERE activity_at=100 AND hidden_at=42",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                count
+            );
+            drop(store);
+            drop(writer);
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!("{count} unchanged observations: {commands} RPCs/{steps} steps");
+            measurements.push((count, commands, without_writer));
+        }
+        for (count, commands, without_writer) in measurements {
+            assert!(
+                without_writer.is_ok_and(|r| r.is_ok()),
+                "Unchanged discovery waited for the writer"
+            );
+            assert!(commands < 15, "{count} observations used {commands} RPCs");
+        }
+    }
 
     #[test]
     fn comment_resolution_lookup_skips_hidden_history() {
