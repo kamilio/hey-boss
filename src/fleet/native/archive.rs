@@ -64,6 +64,46 @@ fn scope(row: &Value) -> issues::Result<(&str, i64)> {
     ))
 }
 
+/// Recheck preparation under the hot writer: a local edit or archival may have
+/// committed while the immutable copy was being fetched. Retry outside the
+/// transaction rather than hiding unsent history or abandoning a cold body.
+pub(super) fn validate_pull(db: &Connection, payload: &Value) -> issues::Result<()> {
+    let targets = issue_rows(payload)?
+        .iter()
+        .map(|row| {
+            let (project, number) = scope(row)?;
+            Ok(json!([project, number, row["archive_key"].is_string()]))
+        })
+        .collect::<issues::Result<Vec<_>>>()?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let changed: bool = db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM json_each(?1) requested
+            LEFT JOIN issues i ON i.project_id=json_extract(requested.value,'$[0]')
+                AND i.number=json_extract(requested.value,'$[1]')
+            WHERE (NOT json_extract(requested.value,'$[2]') AND i.archive_key IS NOT NULL)
+                OR (json_extract(requested.value,'$[2]') AND EXISTS(
+                    SELECT 1 FROM fleet_outbox o
+                    WHERE o.table_name IN ('issues','comments','events','issue_status_updates')
+                        AND json_extract(coalesce(o.after_json,o.before_json),'$.project_id')=json_extract(requested.value,'$[0]')
+                        AND coalesce(json_extract(coalesce(o.after_json,o.before_json),'$.number'),
+                            json_extract(coalesce(o.after_json,o.before_json),'$.issue_number'))=json_extract(requested.value,'$[1]')
+                ))
+        )",
+        [serde_json::to_string(&targets)?],
+        |r| r.get(0),
+    )?;
+    if changed {
+        return Err(issues::Error::new(
+            "archive_retry",
+            "Issue history changed during archive preparation; prepare the pull again",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_pull(
     db: &Connection,
     payload: &Value,
