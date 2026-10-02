@@ -2174,10 +2174,15 @@ impl Store {
         }
         if let Some(issues) = result["issues"].as_array_mut() {
             let mut commits_by_issue = super::commits::list_by_project(&tx, &project.id)?;
+            let numbers: Vec<_> = issues
+                .iter()
+                .filter_map(|issue| issue["number"].as_i64())
+                .collect();
+            let mut prs_by_issue = registry::pull_requests_for_issues(&tx, &project.id, &numbers)?;
             for issue in issues {
                 if let Some(number) = issue["number"].as_i64() {
                     issue["pull_requests"] =
-                        json!(registry::pull_requests(&tx, &project.id, number)?);
+                        json!(prs_by_issue.remove(&number).unwrap_or_default());
                     issue["commits"] = json!(commits_by_issue.remove(&number).unwrap_or_default());
                     if issue["assignee"] == "human:boss" {
                         issue["assignee_name"] = settings["boss_name"].clone();
@@ -2984,6 +2989,73 @@ CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TE
 #[cfg(test)]
 mod contention_tests {
     use super::*;
+
+    #[test]
+    fn issue_lists_batch_pull_request_metadata_without_losing_origins_or_order() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-list-prs-{}",
+                super::super::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch(&format!(
+                "INSERT INTO projects(id,name,next_number) VALUES('named:List PRs','List PRs',1000);
+                 INSERT INTO agents VALUES('creator','{{}}',0);
+                 WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                 INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                 SELECT 'named:List PRs',id,'Task '||id,'Body','open','creator',0,0,1,'[]',id FROM n;
+                 INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                 SELECT project_id,number,'https://github.com/o/r/pull/1','creator',20 FROM issues WHERE number%2=0;
+                 INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                 SELECT project_id,number,'https://github.com/o/r/pull/2','creator',10 FROM issues WHERE number%2=0;
+                 INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                 SELECT project_id,number,'creator','pr_attached',1,json_object('url','https://github.com/o/r/pull/1','origin',json_object('host','first')) FROM issues WHERE number%2=0;
+                 INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                 SELECT project_id,number,'creator','pr_attached',2,json_object('url','https://github.com/o/r/pull/1','origin',json_object('host','newest')) FROM issues WHERE number%2=0;
+                 INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                 SELECT project_id,number,'creator','pr_attached',3,json_object('url','https://github.com/o/r/pull/1','origin','invalid') FROM issues WHERE number%2=0;"
+            )).unwrap();
+            let request: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:List PRs","name":"List PRs"},"actor":null,
+                "operation":{"action":"list","state":"open","mine":false,"unassigned":false,"labels":[],"search":null,"limit":50,"offset":0,"all":true}})).unwrap();
+            let expected = store.execute(&request).unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.replace_connection_for_test(db);
+            let started = Instant::now();
+            let actual = store.execute(&request).unwrap();
+            let elapsed = started.elapsed();
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!(
+                "{count} listed issues: {commands} RPCs, {steps} query VM steps in {elapsed:?}"
+            );
+            assert_eq!(actual, expected);
+            assert_eq!(actual["issues"].as_array().unwrap().len(), count);
+            assert!(actual["next_offset"].is_null());
+            for issue in actual["issues"].as_array().unwrap() {
+                let prs = issue["pull_requests"].as_array().unwrap();
+                if issue["number"].as_i64().unwrap() % 2 == 0 {
+                    assert_eq!(prs.len(), 2);
+                    assert_eq!(prs[0]["url"], "https://github.com/o/r/pull/2");
+                    assert_eq!(prs[1]["origin"]["host"], "newest");
+                    assert!(prs[0].get("origin").is_none());
+                } else {
+                    assert!(prs.is_empty());
+                }
+            }
+            measurements.push((count, commands));
+        }
+        for (count, commands) in measurements {
+            assert!(
+                commands < 80,
+                "{count} listed issues used {commands} owner RPCs"
+            );
+        }
+    }
 
     #[test]
     fn ordinary_lists_read_metadata_without_loading_issue_bodies() {
