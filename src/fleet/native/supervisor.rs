@@ -842,10 +842,7 @@ impl Supervisor {
         };
         for (change, receipt) in message["changes"].as_array().unwrap().iter().zip(&receipts) {
             if receipt["state"] == "conflict"
-                && !matches!(
-                    change["table_name"].as_str(),
-                    Some("comments" | "events")
-                )
+                && !matches!(change["table_name"].as_str(), Some("comments" | "events"))
             {
                 let table = change["table_name"].as_str().unwrap();
                 let row: Value = serde_json::from_str(
@@ -1110,13 +1107,8 @@ impl Supervisor {
                             workers.as_array_mut().unwrap().push(definition(discovered));
                         }
                     }
-                    let (payload, receipts, signals) = self.heartbeat_pull(
-                        &self.ctx.db()?,
-                        host,
-                        node,
-                        &workers,
-                        &message,
-                    )?;
+                    let (payload, receipts, signals) =
+                        self.heartbeat_pull(&self.ctx.db()?, host, node, &workers, &message)?;
                     pull::send_pull(
                         &mut *input.lock().unwrap(),
                         payload,
@@ -2061,27 +2053,52 @@ mod tests {
                   ('project',3,'Third','','open','[]',1,'creator',0,0,3);").unwrap();
         replica::install_capture(&db, "controller", &app.ctx.node).unwrap();
         let workers = json!([{"id":"worker","config":{"projects":["project"],"concurrency":1,"enabled":true}}]);
-        app.allocate_work(&db, "peer", workers.as_array().unwrap(), &[]).unwrap();
-        let before = replica::rows(&db, "SELECT * FROM fleet_allocations ORDER BY issue_number", &[]).unwrap();
+        app.allocate_work(&db, "peer", workers.as_array().unwrap(), &[])
+            .unwrap();
+        let before = replica::rows(
+            &db,
+            "SELECT * FROM fleet_allocations ORDER BY issue_number",
+            &[],
+        )
+        .unwrap();
         assert_eq!(before.len(), 2);
         drop(db);
-        let mut owner = crate::database::Owner::start(&app.ctx.path).unwrap().unwrap();
+        let mut owner = crate::database::Owner::start(&app.ctx.path)
+            .unwrap()
+            .unwrap();
         let writer = crate::database::Connection::connect(&app.ctx.path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let reader = crate::database::Connection::connect(&app.ctx.path).unwrap();
         let (send, receive) = mpsc::channel();
         let heartbeat = std::thread::spawn(move || {
-            let result = app.heartbeat_pull(&reader, "peer", "peer", &workers, &json!({"changes":[],"workers":[]}))
+            let result = app
+                .heartbeat_pull(
+                    &reader,
+                    "peer",
+                    "peer",
+                    &workers,
+                    &json!({"changes":[],"workers":[]}),
+                )
                 .map_err(|error| error.to_string());
             send.send(result).unwrap();
         });
         let progress = receive.recv_timeout(Duration::from_secs(1));
         writer.execute_batch("ROLLBACK").unwrap();
         heartbeat.join().unwrap();
-        assert_eq!(replica::rows(&writer, "SELECT * FROM fleet_allocations ORDER BY issue_number", &[]).unwrap(), before);
+        assert_eq!(
+            replica::rows(
+                &writer,
+                "SELECT * FROM fleet_allocations ORDER BY issue_number",
+                &[]
+            )
+            .unwrap(),
+            before
+        );
         drop(writer);
         owner.stop();
-        let (payload, receipts, signals) = progress.expect("Idle heartbeat queued behind the writer").unwrap();
+        let (payload, receipts, signals) = progress
+            .expect("Idle heartbeat queued behind the writer")
+            .unwrap();
         assert_eq!(payload["tables"]["issues"].as_array().unwrap().len(), 3);
         assert!(receipts.is_empty());
         assert!(signals.is_empty());
@@ -2091,27 +2108,43 @@ mod tests {
     fn heartbeat_pull_snapshot_releases_writer_and_keeps_a_coherent_read() {
         let (_directory, app) = test_supervisor();
         let db = app.ctx.db().unwrap();
-        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Before',1)").unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Before',1)")
+            .unwrap();
         replica::install_capture(&db, "controller", &app.ctx.node).unwrap();
         drop(db);
-        let mut owner = crate::database::Owner::start(&app.ctx.path).unwrap().unwrap();
+        let mut owner = crate::database::Owner::start(&app.ctx.path)
+            .unwrap()
+            .unwrap();
         let path = app.ctx.path.clone();
         let (entered, reading) = mpsc::channel();
         let (release, resume) = mpsc::channel();
         let (db, transport) = crate::database::tests::pause_before_query(
-            &path, "SELECT * FROM fleet_allocations", entered, resume,
+            &path,
+            "SELECT * FROM fleet_allocations",
+            entered,
+            resume,
         );
         let pull = std::thread::spawn(move || {
-            let workers = json!([{"config":{"projects":["project"],"concurrency":1,"enabled":true}}]);
-            app.heartbeat_pull(&db, "peer", "peer-node", &workers, &json!({"changes":[],"workers":[]}))
-                .map_err(|error| error.to_string())
+            let workers =
+                json!([{"config":{"projects":["project"],"concurrency":1,"enabled":true}}]);
+            app.heartbeat_pull(
+                &db,
+                "peer",
+                "peer-node",
+                &workers,
+                &json!({"changes":[],"workers":[]}),
+            )
+            .map_err(|error| error.to_string())
         });
-        reading.recv_timeout(Duration::from_secs(3)).expect("Pull did not reach its snapshot");
+        reading
+            .recv_timeout(Duration::from_secs(3))
+            .expect("Pull did not reach its snapshot");
         let (committed, progress) = mpsc::channel();
         let writer_path = path.clone();
         let writer = std::thread::spawn(move || {
             let db = crate::database::Connection::connect(&writer_path).unwrap();
-            let result = db.execute("UPDATE projects SET next_number=102 WHERE id='project'", [])
+            let result = db
+                .execute("UPDATE projects SET next_number=102 WHERE id='project'", [])
                 .map_err(|error| error.to_string());
             committed.send(result.clone()).unwrap();
             result
@@ -2124,13 +2157,23 @@ mod tests {
         transport.join().unwrap();
         assert_eq!(write_result.unwrap(), 1);
         let db = crate::database::Connection::connect(&path).unwrap();
-        assert_eq!(db.query_row("SELECT next_number FROM projects WHERE id='project'", [], |r| r.get::<_, i64>(0)).unwrap(), 102);
+        assert_eq!(
+            db.query_row(
+                "SELECT next_number FROM projects WHERE id='project'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            102
+        );
         drop(db);
         owner.stop();
         assert_eq!(payload["tables"]["projects"][0]["next_number"], 101);
         assert!(receipts.is_empty());
         assert!(signals.is_empty());
-        wrote_during_snapshot.expect("Outbound snapshot retained the shared writer").unwrap();
+        wrote_during_snapshot
+            .expect("Outbound snapshot retained the shared writer")
+            .unwrap();
     }
 
     #[test]

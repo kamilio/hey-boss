@@ -83,7 +83,9 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
         supervisor: false,
         json: options.json,
         request_id: options.request_id.clone(),
-        action: Action::GlobalSettings { operation },
+        action: Action::GlobalSettings {
+            operation: Box::new(operation),
+        },
     })
 }
 
@@ -207,7 +209,7 @@ enum Action {
         state: String,
     },
     #[command(skip)]
-    GlobalSettings { operation: Operation },
+    GlobalSettings { operation: Box<Operation> },
     /// Shared and conditional project prompts, worktree choices, and PR behavior.
     Settings {
         #[command(subcommand)]
@@ -842,7 +844,7 @@ impl Options {
                 },
                 CommitAction::List { number } => Operation::Commits { number: *number },
             },
-            Action::GlobalSettings { operation } => operation.clone(),
+            Action::GlobalSettings { operation } => operation.as_ref().clone(),
             Action::Settings { command } => match command {
                 SettingsAction::Show => Operation::ProjectSettings,
                 SettingsAction::Set {

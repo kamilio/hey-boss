@@ -2267,7 +2267,11 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
             &[json!(project)],
         )?;
         let values = [json!(node), json!(project), json!(first), json!(first + 99)];
-        execute(db, "INSERT INTO fleet_ranges VALUES(?,?,?,?) ON CONFLICT(node,project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number", &values)?;
+        execute(
+            db,
+            "INSERT INTO fleet_ranges VALUES(?,?,?,?) ON CONFLICT(node,project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number",
+            &values,
+        )?;
         execute(
             db,
             "INSERT INTO fleet_number_reservations VALUES(?,?,?,?)",
@@ -4662,7 +4666,7 @@ mod tests {
                 let (db, transport) = crate::database::tests::measured_connection(&f.path);
                 if incoming {
                     assert_eq!(
-                        accept_changes(&db, "peer", &[change.clone()]).unwrap()[0]["state"],
+                        accept_changes(&db, "peer", std::slice::from_ref(&change)).unwrap()[0]["state"],
                         "applied"
                     );
                 } else {
@@ -6115,35 +6119,74 @@ mod tests {
         use std::time::Duration;
         let f = Fixture::new();
         f.capture();
-        let workers = vec![json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"enabled":true}})];
+        let workers = vec![
+            json!({"config":{"projects":["named:Native fleet"],"concurrency":1,"enabled":true}}),
+        ];
         let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
         let (entered, waiting) = mpsc::channel();
         let (release, resume) = mpsc::channel();
         let (db, transport) = crate::database::tests::pause_before_writer(&f.path, entered, resume);
         let queued_workers = workers.clone();
-        let allocation = std::thread::spawn(move || allocate(&db, "peer", &queued_workers).map_err(|e| e.to_string()));
-        waiting.recv_timeout(Duration::from_secs(2)).expect("Allocation did not reach the writer");
+        let allocation = std::thread::spawn(move || {
+            allocate(&db, "peer", &queued_workers).map_err(|e| e.to_string())
+        });
+        waiting
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Allocation did not reach the writer");
         let writer = Connection::connect(&f.path).unwrap();
-        writer.execute_batch("BEGIN IMMEDIATE;
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE;
             UPDATE projects SET next_number=50 WHERE id='named:Native fleet';
             UPDATE issues SET draft=1 WHERE project_id='named:Native fleet' AND number=1;
-            COMMIT;").unwrap();
+            COMMIT;",
+            )
+            .unwrap();
         release.send(()).unwrap();
         allocation.join().unwrap().unwrap();
         transport.join().unwrap();
-        assert_eq!(writer.query_row("SELECT next_number FROM projects WHERE id='named:Native fleet'", [], |r| r.get::<_, i64>(0)).unwrap(), 150);
-        assert_eq!(writer.query_row("SELECT first_number FROM fleet_ranges WHERE node='peer'", [], |r| r.get::<_, i64>(0)).unwrap(), 50);
-        assert_eq!(writer.query_row("SELECT count(*) FROM fleet_allocations", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            writer
+                .query_row(
+                    "SELECT next_number FROM projects WHERE id='named:Native fleet'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            150
+        );
+        assert_eq!(
+            writer
+                .query_row(
+                    "SELECT first_number FROM fleet_ranges WHERE node='peer'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            50
+        );
+        assert_eq!(
+            writer
+                .query_row("SELECT count(*) FROM fleet_allocations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let reader = Connection::connect(&f.path).unwrap();
         let (send, receive) = mpsc::channel();
-        let poll = std::thread::spawn(move || send.send(allocate(&reader, "peer", &workers).map_err(|e| e.to_string())).unwrap());
+        let poll = std::thread::spawn(move || {
+            send.send(allocate(&reader, "peer", &workers).map_err(|e| e.to_string()))
+                .unwrap()
+        });
         let progress = receive.recv_timeout(Duration::from_secs(1));
         writer.execute_batch("ROLLBACK").unwrap();
         poll.join().unwrap();
         drop(writer);
         owner.stop();
-        progress.expect("Idle allocation poll waited for writer").unwrap();
+        progress
+            .expect("Idle allocation poll waited for writer")
+            .unwrap();
     }
 
     #[test]

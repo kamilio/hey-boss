@@ -110,9 +110,12 @@ pub(crate) fn pause_before_writer(
     entered: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
 ) -> (Connection, std::thread::JoinHandle<()>) {
-    pause_before_command(path, entered, release, |command| {
-        matches!(command, Command::Batch { sql } if sql == "BEGIN IMMEDIATE")
-    })
+    pause_before_command(
+        path,
+        entered,
+        release,
+        |command| matches!(command, Command::Batch { sql } if sql == "BEGIN IMMEDIATE"),
+    )
 }
 
 /// Hold a real service read at a deterministic point inside its transaction.
@@ -122,9 +125,12 @@ pub(crate) fn pause_before_query(
     entered: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
 ) -> (Connection, std::thread::JoinHandle<()>) {
-    pause_before_command(path, entered, release, move |command| {
-        matches!(command, Command::Query { sql: query, .. } if query == sql)
-    })
+    pause_before_command(
+        path,
+        entered,
+        release,
+        move |command| matches!(command, Command::Query { sql: query, .. } if query == sql),
+    )
 }
 
 fn pause_before_command(
