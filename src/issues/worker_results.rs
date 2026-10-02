@@ -13,6 +13,8 @@ pub(super) struct Saved {
     pub job: Job,
     pub state: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<i64>,
 }
 
 fn directory(database: &Path) -> PathBuf {
@@ -47,6 +49,16 @@ fn read(path: &Path) -> Result<Option<Saved>> {
 }
 
 pub(super) fn save(database: &Path, job: &Job, state: &str, summary: &str) -> Result<Saved> {
+    save_with_retry(database, job, state, summary, None)
+}
+
+pub(super) fn save_with_retry(
+    database: &Path,
+    job: &Job,
+    state: &str,
+    summary: &str,
+    retry_at: Option<i64>,
+) -> Result<Saved> {
     let directory = directory(database);
     match DirBuilder::new().mode(0o700).create(&directory) {
         Ok(()) => {}
@@ -66,6 +78,7 @@ pub(super) fn save(database: &Path, job: &Job, state: &str, summary: &str) -> Re
             job: job.clone(),
             state: state.into(),
             summary: summary.chars().take(16_000).collect(),
+            retry_at,
         };
         let temporary = directory.join(format!(".pending-{}", super::worker::random_id()?));
         let result = (|| -> Result<Saved> {

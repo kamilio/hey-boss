@@ -166,8 +166,14 @@ fn run_inner(o: &Options) -> Result<()> {
     let machine = issues::identity::machine()?;
     if matches!(o.action, None | Some(Action::Run)) {
         for directory in std::iter::once(&cwd).chain(o.directory.iter().skip(1)) {
-            hey_boss::environment::check_worker(directory)
-                .map_err(|e| Error::new("environment_check_failed", e.to_string()))?;
+            if let Err(error) = hey_boss::environment::check_worker(directory)
+                && hey_boss::environment::retry_at(&error).is_none()
+            {
+                return Err(Error::new("environment_check_failed", error.to_string()));
+            }
+            // A quota cooldown must not prevent pool registration. Every job
+            // still performs preflight before launching an agent, records the
+            // shared deadline, and releases its reservation while waiting.
         }
     }
     let base = issues::identity::project(&cwd, &machine)?;

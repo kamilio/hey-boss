@@ -130,7 +130,14 @@ temporary repository. Use `-C PATH` to check a checkout's effective configuratio
 and `--json` for structured output. Repository overrides are reported and left
 intact. Workers check their own inherited environment before starting Git work;
 successful GitHub checks are reused within that process for five minutes, while
-local signing is tested for every task. Explicit checks always query GitHub.
+local signing is tested for every task. Explicit checks bypass the success cache.
+
+GitHub quota failures share a durable cooldown across preflight checks using the
+same credentials and host. Workers report the failing response's reset or retry
+time, release the slot and claim, and resume pickup automatically. Without valid
+retry metadata, the shared delay grows from one to five minutes. A cooldown also
+allows pool registration; each task must still pass identity and signing checks
+before its agent starts. Explicit checks respect an active cooldown too.
 
 Run `hey-boss fleet setup --source /path/to/hey-boss` once on the supervisor machine
 to manage the existing SSH machine inventory automatically. The supervisor

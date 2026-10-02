@@ -1087,9 +1087,12 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
             return;
         }
     };
+    let mut retry_at = None;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::environment::check_worker(Path::new(&job.config.cwd))
-            .map_err(|e| Error::new("infrastructure_blocked", e.to_string()))?;
+        crate::environment::check_worker(Path::new(&job.config.cwd)).map_err(|e| {
+            retry_at = crate::environment::retry_at(&e);
+            Error::new("infrastructure_blocked", e.to_string())
+        })?;
         if job.config.provider == crate::agent_runtime::Provider::Codex {
             run_codex(path, &mut store, &mut job, &stop)
         } else {
@@ -1116,7 +1119,7 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
                 .into(),
         ),
     };
-    if let Err(e) = finish_job(path, &mut store, &job, &state, &summary) {
+    if let Err(e) = finish_job_with_retry(path, &mut store, &job, &state, &summary, retry_at) {
         crate::worker_tui::diagnostics::report(format_args!(
             "Worker {} could not finalize: {e}",
             job.id
@@ -1131,7 +1134,18 @@ pub(super) fn finish_job(
     state: &str,
     summary: &str,
 ) -> Result<()> {
-    let saved = super::worker_results::save(path, job, state, summary)?;
+    finish_job_with_retry(path, store, job, state, summary, None)
+}
+
+fn finish_job_with_retry(
+    path: &Path,
+    store: &mut Store,
+    job: &Job,
+    state: &str,
+    summary: &str,
+    retry_at: Option<i64>,
+) -> Result<()> {
+    let saved = super::worker_results::save_with_retry(path, job, state, summary, retry_at)?;
     let mut reconnect = false;
     for attempt in 0..2 {
         let result = retry_database_busy(|| {
@@ -1140,7 +1154,12 @@ pub(super) fn finish_job(
                 reconnect = false;
             }
             if store.worker_attempt_held(job)? {
-                return store.worker_finish(&saved.job, &saved.state, &saved.summary);
+                return store.worker_finish_with_retry(
+                    &saved.job,
+                    &saved.state,
+                    &saved.summary,
+                    saved.retry_at,
+                );
             }
             let child = store.worker_process_identity(&job.id)?;
             if let Some((Some(pid), Some(start))) = child {
@@ -1156,7 +1175,7 @@ pub(super) fn finish_job(
             // before writing anything. On a fresh connection this reconciles a
             // lost COMMIT reply: committed results are returned without replay,
             // and disconnected, rolled-back transactions can safely finish.
-            store.worker_finish(&saved.job, &saved.state, &saved.summary)
+            store.worker_finish_with_retry(&saved.job, &saved.state, &saved.summary, saved.retry_at)
         });
         match result {
             Err(error)
