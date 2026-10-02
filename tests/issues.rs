@@ -1468,6 +1468,72 @@ fn retries_are_deduplicated_even_after_later_changes() {
 }
 
 #[test]
+fn project_identity_does_not_read_branch_state() {
+    let f = Fixture::new();
+    git(&f.cwd, &["init", "-q"]);
+    git(&f.cwd, &["commit", "--allow-empty", "-qm", "initial"]);
+    git(
+        &f.cwd,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/identity.git",
+        ],
+    );
+    let created = f.create();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(real_git.status.success());
+    let bin = f.root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let shim = bin.join("git");
+    fs::write(
+        &shim,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_GIT_CALLS\"\nexec \"$TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let calls = f.root.join("git-calls");
+    let mut counts = Vec::new();
+    for detached in [false, true] {
+        if detached {
+            git(&f.cwd, &["checkout", "--detach", "-q"]);
+        }
+        fs::write(&calls, "").unwrap();
+        let result = success(
+            f.cmd("session-a", &["list"])
+                .env("PATH", &path)
+                .env(
+                    "TEST_REAL_GIT",
+                    String::from_utf8_lossy(&real_git.stdout).trim(),
+                )
+                .env("TEST_GIT_CALLS", &calls)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(result["project"], created["project"]);
+        assert_eq!(result["issues"][0]["number"], 1);
+        let commands = fs::read_to_string(&calls).unwrap();
+        counts.push((detached, commands));
+    }
+    for (detached, commands) in counts {
+        assert_eq!(
+            commands.lines().count(),
+            2,
+            "detached={detached}: project identity requested unnecessary Git data: {commands}"
+        );
+        assert!(!commands.contains("symbolic-ref") && !commands.contains("--short"));
+    }
+}
+
+#[test]
 fn project_identity_groups_worktrees_and_normalizes_origins() {
     let f = Fixture::new();
     git(&f.cwd, &["init", "-q"]);

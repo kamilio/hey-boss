@@ -80,6 +80,16 @@ fn normalize_origin(origin: &str) -> Option<String> {
     Some(format!("{host}/{path}"))
 }
 pub fn git_info(cwd: &str) -> Option<GitInfo> {
+    let mut info = git_repository_info(cwd)?;
+    info.branch = git_output(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).or_else(|| {
+        git_output(cwd, &["rev-parse", "--short", "HEAD"])
+            .map(|revision| format!("Detached · {revision}"))
+    });
+    Some(info)
+}
+
+/// Repository identity does not require the branch/revision used by agent views.
+pub fn git_repository_info(cwd: &str) -> Option<GitInfo> {
     let locations = git_output(
         cwd,
         &[
@@ -109,15 +119,11 @@ pub fn git_info(cwd: &str) -> Option<GitInfo> {
         .unwrap_or_else(|| worktree.clone());
     let origin = git_output(cwd, &["config", "--get", "remote.origin.url"])
         .and_then(|url| normalize_origin(&url));
-    let branch = git_output(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).or_else(|| {
-        git_output(cwd, &["rev-parse", "--short", "HEAD"])
-            .map(|revision| format!("Detached · {revision}"))
-    });
     Some(GitInfo {
         repository_root: root,
         common_dir: common_dir.clone(),
         worktree,
-        branch,
+        branch: None,
         repository_id: origin.clone().unwrap_or(common_dir),
         origin,
     })
@@ -1797,6 +1803,16 @@ mod tests {
         assert_eq!(primary.repository_root, linked.repository_root);
         assert_ne!(primary.worktree, linked.worktree);
         assert_eq!(linked.branch.as_deref(), Some("feature"));
+        git(&["checkout", "--detach", "HEAD"]);
+        let detached = git_info(repository.to_str().unwrap()).unwrap();
+        assert_eq!(detached.repository_id, primary.repository_id);
+        assert!(
+            detached
+                .branch
+                .as_deref()
+                .unwrap()
+                .starts_with("Detached · ")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
