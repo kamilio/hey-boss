@@ -21,7 +21,7 @@ pub(super) fn links_changed(
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    let (metadata_ready, summary_ready) = db.query_row("SELECT count(*)=4,EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_assignment_summary' AND type='index' AND instr(sql,'assignee')>0) FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_github_destinations','github_fetch_status')",[],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,bool>(1)?)))?;
+    let (metadata_ready, summary_ready) = db.query_row("SELECT count(*)=4,EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_assignment_summary' AND type='index' AND instr(sql,'closed_by')>0) FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_github_destinations','github_fetch_status')",[],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,bool>(1)?)))?;
     if !metadata_ready {
         db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_watches(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,status TEXT NOT NULL CHECK(json_valid(status)),PRIMARY KEY(project_id,issue_number),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)); CREATE INDEX IF NOT EXISTS issue_github_destinations ON issues(project_id,number) WHERE assignment_target='github';")?;
         fetch::migrate(db)?;
@@ -30,10 +30,10 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_signals(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,url TEXT NOT NULL,head TEXT NOT NULL,signal TEXT NOT NULL,PRIMARY KEY(project_id,issue_number,url,head,signal),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)) WITHOUT ROWID;")?;
     }
     if !summary_ready {
-        // Assignee is after body in issue records; cover it so the actor join
-        // never walks large body overflow chains just to read an assignment.
+        // Ownership fields follow body in issue records. Cover both actor
+        // metadata and worker polls without reading body overflow chains.
         let tx = db.unchecked_transaction()?;
-        tx.execute_batch("DROP INDEX IF EXISTS issue_assignment_summary; CREATE INDEX issue_assignment_summary ON issues(project_id,number,assignment_target,assignee)")?;
+        tx.execute_batch("DROP INDEX IF EXISTS issue_assignment_summary; CREATE INDEX issue_assignment_summary ON issues(project_id,number,assignment_target,assignee,state,deleted_at,closed_by)")?;
         tx.commit()?;
     }
     Ok(())
