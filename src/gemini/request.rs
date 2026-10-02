@@ -676,7 +676,7 @@ pub fn convert_request(
             "reasoning" => {
                 // Reasoning from another provider (a thread that switched routes,
                 // e.g. an overwrite moved from OpenAI to Gemini) is opaque here and
-                // carries no Gemini signatures; drop it. Our own carriers stay strict.
+                // carries no Gemini signatures; drop it.
                 let Some(carrier) = item
                     .get("encrypted_content")
                     .and_then(Value::as_str)
@@ -685,7 +685,18 @@ pub fn convert_request(
                     index += 1;
                     continue;
                 };
-                let replay = codec.open(&model, carrier)?;
+                let replay = match codec.open(&model, carrier) {
+                    Ok(replay) => replay,
+                    Err(error) if error.is::<super::replay::AuthenticationError>() => {
+                        // A route or key change makes old reasoning unreadable.
+                        // Discard only the opaque item; the following visible
+                        // messages/calls/results take the normal imported-history
+                        // path. Never reuse unauthenticated native parts/signatures.
+                        index += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let expected = replay["items"]
                     .as_array()
                     .ok_or_else(|| anyhow!("Invalid replay items"))?;
