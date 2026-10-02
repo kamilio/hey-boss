@@ -62,7 +62,11 @@ impl Context {
     pub fn db(&self) -> Result<Connection> {
         let db = Store::open_connection(&self.path)?;
         db.busy_timeout(Duration::from_secs(10))?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+        // Owner sessions already enforce foreign keys and FULL durability.
+        // Sending their setup as a Batch would queue every read for the writer.
+        if !crate::database::remote_enabled() {
+            db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+        }
         Ok(db)
     }
     pub fn actor(&self) -> Result<Actor> {
@@ -757,6 +761,77 @@ pub(super) mod tests {
             stop: Arc::new(AtomicBool::new(false)),
         };
         (root, ctx, store)
+    }
+    #[test]
+    fn fleet_connection_reads_do_not_wait_for_shared_writer() {
+        const ENV: &str = "HEY_BOSS_FLEET_SERVICE_CONNECTION_AUDIT";
+        if std::env::var_os(ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "fleet::native::context::tests::fleet_connection_reads_do_not_wait_for_shared_writer", "--nocapture"])
+                .env(ENV, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (root, ctx, store) = test_context();
+        replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
+        drop(store);
+        let mut owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
+        crate::database::use_service();
+        let writer = Connection::connect(&ctx.path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = (|| -> Result<_> {
+                let db = ctx.db()?;
+                replica::ensure_metadata(&db)?;
+                Ok((
+                    db.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?,
+                    db.query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))?,
+                ))
+            })()
+            .map_err(|error| error.to_string());
+            send.send(result).unwrap();
+        });
+        let read = receive.recv_timeout(Duration::from_secs(2));
+        writer.execute_batch("ROLLBACK").unwrap();
+        reader.join().unwrap();
+        drop(writer);
+        owner.stop();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            read.expect("Fleet connection setup waited behind a writer")
+                .unwrap(),
+            (1, 2)
+        );
+    }
+    #[test]
+    fn direct_fleet_connections_preserve_foreign_keys_and_full_durability() {
+        let (root, ctx, store) = test_context();
+        let db = ctx.db().unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        db.execute_batch("CREATE TABLE connection_parent(id INTEGER PRIMARY KEY); CREATE TABLE connection_child(parent INTEGER REFERENCES connection_parent(id))").unwrap();
+        assert!(
+            db.execute("INSERT INTO connection_child VALUES(99)", [])
+                .is_err()
+        );
+        drop(db);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn direct_fleet_connections_reject_database_name_aliases() {
