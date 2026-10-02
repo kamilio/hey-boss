@@ -31,7 +31,7 @@ for (const state of ['open', 'blocked', 'ready', 'closed', 'draft', 'deleted']) 
       HeyBossStatus:{card:empty}, HeyBossOrigin:{creator:empty},
       IssueSubtasks:{parent:empty,card:empty,rendered:fail('subtasks')},
       HeyBossAttachments:{mount:fail('attachments')}, HeyBossArtifacts:{mount:fail('artifacts')},
-      persistDrafts:true, storage:{get:empty}, draftKey:empty, submitComment(){}, loadHistory(){},
+      persistDrafts:true, storage:{get:empty}, draftKey:empty, submitComment(){}, loadIssueTimeline(){},
       openTransfer(){checks++;},
     });
     vm.runInContext(fs.readFileSync('src/issues/web/blockers.js', 'utf8'), context);
