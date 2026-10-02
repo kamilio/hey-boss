@@ -8,7 +8,7 @@ use super::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     os::unix::process::CommandExt,
@@ -22,6 +22,8 @@ use std::{
 pub(super) struct Checkout {
     pub git: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reuse_existing: bool,
 }
 pub(super) fn default_workspace() -> String {
     "~/Workspace".into()
@@ -110,6 +112,14 @@ fn clone_failure(stderr: &str) -> &'static str {
         "Git clone failed in the background service. Check the repository URL, checkout path, and access on this machine."
     }
 }
+fn https_fallback(git: &str, stderr: &str) -> Option<String> {
+    if !(git.starts_with("git@github.com:") || git.starts_with("ssh://git@github.com/"))
+        || !stderr.contains("Permission denied (publickey)")
+    {
+        return None;
+    }
+    Some(format!("https://{}.git", identity(git).ok()?))
+}
 fn clone_repository(git: &str, target: &Path) -> Result<()> {
     if !target.exists() {
         let parent = target
@@ -118,79 +128,177 @@ fn clone_repository(git: &str, target: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
         let staging = parent.join(format!(".hey-boss-clone-{}", context::id()?));
         let result = (|| -> Result<()> {
-            let mut command = Command::new("git");
-            command
-                .args([
-                    "-c",
-                    "credential.interactive=false",
-                    "clone",
-                    "--quiet",
-                    "--",
-                    git,
-                ])
-                .arg(&staging)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env(
-                    "GIT_SSH_COMMAND",
-                    "ssh -o BatchMode=yes -o ConnectTimeout=15",
-                )
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() < 0 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
-            }
-            let mut child = command.spawn()?;
-            let mut stderr = child.stderr.take().unwrap();
-            let errors = std::thread::spawn(move || {
-                let mut kept = Vec::new();
-                let mut buffer = [0; 4096];
-                while let Ok(n) = stderr.read(&mut buffer) {
-                    if n == 0 {
-                        break;
-                    }
-                    let count = n.min(8192usize.saturating_sub(kept.len()));
-                    kept.extend_from_slice(&buffer[..count]);
-                }
-                String::from_utf8_lossy(&kept).into_owned()
-            });
-            let start = Instant::now();
+            let mut clone_url = git.to_owned();
             loop {
-                if let Some(status) = child.try_wait()? {
-                    if !status.success() {
-                        return Err(invalid(clone_failure(&errors.join().unwrap_or_default())));
-                    }
-                    break;
+                let mut command = Command::new("git");
+                command
+                    .args([
+                        "-c",
+                        "credential.interactive=false",
+                        "clone",
+                        "--quiet",
+                        "--",
+                        &clone_url,
+                    ])
+                    .arg(&staging)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .env(
+                        "GIT_SSH_COMMAND",
+                        "ssh -o BatchMode=yes -o ConnectTimeout=15",
+                    )
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped());
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            Err(std::io::Error::last_os_error())
+                        } else {
+                            Ok(())
+                        }
+                    });
                 }
-                if start.elapsed() > Duration::from_secs(60) {
-                    unsafe {
-                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                let mut child = command.spawn()?;
+                let mut stderr = child.stderr.take().unwrap();
+                let errors = std::thread::spawn(move || {
+                    let mut kept = Vec::new();
+                    let mut buffer = [0; 4096];
+                    while let Ok(n) = stderr.read(&mut buffer) {
+                        if n == 0 {
+                            break;
+                        }
+                        let count = n.min(8192usize.saturating_sub(kept.len()));
+                        kept.extend_from_slice(&buffer[..count]);
                     }
-                    let _ = child.wait();
-                    return Err(invalid(
-                        "Git clone timed out; check this machine’s connection and repository access.",
-                    ));
+                    String::from_utf8_lossy(&kept).into_owned()
+                });
+                let start = Instant::now();
+                loop {
+                    if let Some(status) = child.try_wait()? {
+                        let stderr = errors.join().unwrap_or_default();
+                        if !status.success() {
+                            if let Some(url) = https_fallback(&clone_url, &stderr) {
+                                let _ = fs::remove_dir_all(&staging);
+                                clone_url = url;
+                                break;
+                            }
+                            return Err(invalid(clone_failure(&stderr)));
+                        }
+                        if target.exists() {
+                            return Err(invalid(
+                                "Checkout path appeared during cloning; existing files were preserved",
+                            ));
+                        }
+                        fs::rename(&staging, target)?;
+                        return Ok(());
+                    }
+                    if start.elapsed() > Duration::from_secs(15 * 60) {
+                        unsafe {
+                            libc::kill(-(child.id() as i32), libc::SIGKILL);
+                        }
+                        let _ = child.wait();
+                        let _ = errors.join();
+                        return Err(invalid(
+                            "Git clone timed out; check this machine’s connection and repository access.",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-                std::thread::sleep(Duration::from_millis(100));
             }
-            if target.exists() {
-                return Err(invalid(
-                    "Checkout path appeared during cloning; existing files were preserved",
-                ));
-            }
-            fs::rename(&staging, target)?;
-            Ok(())
         })();
         let _ = fs::remove_dir_all(&staging);
         result?;
     }
     Ok(())
+}
+fn matching_checkout(path: &Path, project: &str) -> bool {
+    // Cheap existence check avoids starting Git for missing candidates.
+    path.join(".git").exists()
+        && crate::agents::git_repository_info(&path.to_string_lossy()).is_some_and(|info| {
+            info.origin.as_deref() == Some(project)
+                && Path::new(&info.repository_root).canonicalize().ok() == path.canonicalize().ok()
+        })
+}
+fn resolve_path(
+    ctx: &Context,
+    project: &str,
+    spec: &Checkout,
+    workers: &Value,
+    receipt: &Value,
+) -> Result<PathBuf> {
+    let target = expand(&ctx.home, &spec.path)?;
+    if !spec.reuse_existing {
+        return Ok(target);
+    }
+    if let Some(path) = receipt["path"].as_str().map(PathBuf::from)
+        && matching_checkout(&path, project)
+    {
+        return Ok(path);
+    }
+    // Never bypass an occupied target, including a wrong repository or plain files.
+    if target.exists() {
+        return Ok(target);
+    }
+    let name = project.rsplit('/').next().unwrap();
+    let mut candidates = BTreeSet::from([
+        ctx.home.join(name),
+        ctx.home.join("Workspace").join(name),
+        ctx.home.join("projects").join(name),
+    ]);
+    for worker in workers.as_array().into_iter().flatten() {
+        let config = &worker["config"];
+        if let Some(path) = config["directories"][project].as_str() {
+            candidates.insert(expand(&ctx.home, path)?);
+        }
+        if config["projects"]
+            .as_array()
+            .is_some_and(|ids| ids.len() == 1 && ids[0] == project)
+            && let Some(path) = config["directory"].as_str().filter(|p| !p.is_empty())
+        {
+            candidates.insert(expand(&ctx.home, path)?);
+        }
+    }
+    let matches: BTreeSet<_> = candidates
+        .into_iter()
+        .filter(|p| matching_checkout(p, project))
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
+    match matches.len() {
+        0 => Ok(target),
+        1 => Ok(matches.into_iter().next().unwrap()),
+        _ => Err(invalid(
+            "Multiple matching checkouts found; choose a checkout path in Edit checkout",
+        )),
+    }
+}
+
+pub(super) fn resolved(ctx: &Context) -> Result<Value> {
+    let receipts = ctx.read_json(&ctx.state.join("project-checkouts.json"), json!({}))?;
+    Ok(json!(
+        receipts
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, r)| r["error"].is_null() && r["path"].is_string())
+            .map(|(id, r)| (id, json!({"key":r["key"],"path":r["path"]})))
+            .collect::<BTreeMap<_, _>>()
+    ))
+}
+
+fn checkout_key(id: &str, spec: &Checkout) -> String {
+    context::hash(&json!({"id":id,"checkout":spec}))
+}
+
+pub(super) fn project_status(projects: &Value, resolved: &Value) -> Value {
+    let mut projects = projects.clone();
+    for (id, value) in projects.as_object_mut().into_iter().flatten() {
+        if let Ok(spec) = serde_json::from_value::<Checkout>(value.clone())
+            && resolved[id]["key"] == checkout_key(id, &spec)
+        {
+            value["resolved_path"] = resolved[id]["path"].clone();
+        }
+    }
+    projects
 }
 fn checkout(home: &Path, project: &str, spec: &Checkout) -> Result<PathBuf> {
     let target = expand(home, &spec.path)?;
@@ -255,8 +363,13 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
         if identity(&spec.git)? != id {
             return Err(invalid("Project ID does not match Git repository"));
         }
-        let path = expand(&ctx.home, &spec.path)?;
-        let key = context::hash(&json!({"id":id,"git":spec.git,"path":path}));
+        let key = checkout_key(&id, &spec);
+        let prior = if receipts[&id]["key"] == key {
+            receipts[&id].clone()
+        } else {
+            json!({})
+        };
+        let path = resolve_path(ctx, &id, &spec, workers, &prior)?;
         if receipts[&id]["key"] != key
             || !path.join(".git").exists()
             || receipts[&id]["error"].is_string()
@@ -271,7 +384,12 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
                         .unwrap_or("Checkout will retry shortly"),
                 ));
             }
-            if let Err(error) = checkout(&ctx.home, &id, &spec) {
+            let chosen = Checkout {
+                git: spec.git.clone(),
+                path: path.to_string_lossy().into_owned(),
+                reuse_existing: false,
+            };
+            if let Err(error) = checkout(&ctx.home, &id, &chosen) {
                 let error = format!("{id}: {error}");
                 receipts[&id] = json!({"key":key,"error":error,"retry_at":context::now()+30.0,"retry_request":receipts[&id]["retry_request"]});
                 ctx.atomic_json(&receipt_path, &receipts)?;
@@ -282,7 +400,8 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
                 name: id.rsplit('/').next().unwrap().into(),
             };
             crate::issues::Store::open(&ctx.path)?.notification_project(&detected, None)?;
-            receipts[&id] = json!({"key":key,"retry_request":receipts[&id]["retry_request"]});
+            receipts[&id] =
+                json!({"key":key,"path":path,"retry_request":receipts[&id]["retry_request"]});
         }
         paths.insert(id, path);
     }
@@ -317,6 +436,179 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_checkout_reuses_matching_home_repo_and_explicit_paths_stay_separate() {
+        let (root, ctx, store) = super::super::context::tests::test_context();
+        let existing = root.join("right");
+        fs::create_dir_all(&existing).unwrap();
+        git(&existing, &["init", "--quiet"]);
+        git(
+            &existing,
+            &["remote", "add", "origin", "git@github.com:acme/right.git"],
+        );
+        fs::write(existing.join("keep.txt"), "local work").unwrap();
+        let spec = Checkout {
+            git: "https://github.com/acme/right.git".into(),
+            path: "~/projects/right".into(),
+            reuse_existing: true,
+        };
+        assert_eq!(
+            resolve_path(&ctx, "github.com/acme/right", &spec, &json!([]), &json!({})).unwrap(),
+            existing.canonicalize().unwrap()
+        );
+        let explicit = Checkout {
+            reuse_existing: false,
+            ..spec
+        };
+        assert_eq!(
+            resolve_path(
+                &ctx,
+                "github.com/acme/right",
+                &explicit,
+                &json!([]),
+                &json!({})
+            )
+            .unwrap(),
+            root.join("projects/right")
+        );
+        git(
+            &existing,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/other/right.git",
+            ],
+        );
+        let automatic = Checkout {
+            reuse_existing: true,
+            ..explicit
+        };
+        assert_eq!(
+            resolve_path(
+                &ctx,
+                "github.com/acme/right",
+                &automatic,
+                &json!([]),
+                &json!({})
+            )
+            .unwrap(),
+            root.join("projects/right")
+        );
+        assert_eq!(
+            fs::read_to_string(existing.join("keep.txt")).unwrap(),
+            "local work"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn automatic_checkout_remembers_resolution_and_rejects_ambiguous_clones() {
+        let (root, ctx, store) = super::super::context::tests::test_context();
+        for path in [root.join("right"), root.join("Workspace/right")] {
+            fs::create_dir_all(&path).unwrap();
+            git(&path, &["init", "--quiet"]);
+            git(
+                &path,
+                &["remote", "add", "origin", "git@github.com:acme/right.git"],
+            );
+        }
+        let spec = Checkout {
+            git: "https://github.com/acme/right.git".into(),
+            path: "~/projects/right".into(),
+            reuse_existing: true,
+        };
+        assert!(
+            resolve_path(&ctx, "github.com/acme/right", &spec, &json!([]), &json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("Multiple")
+        );
+        let remembered = root.join("right").canonicalize().unwrap();
+        assert_eq!(
+            resolve_path(
+                &ctx,
+                "github.com/acme/right",
+                &spec,
+                &json!([]),
+                &json!({"path": remembered})
+            )
+            .unwrap(),
+            remembered
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn github_ssh_auth_failure_can_retry_same_repository_over_https() {
+        assert_eq!(
+            https_fallback(
+                "git@github.com:poe-internal/poe2.git",
+                "Permission denied (publickey)."
+            ),
+            Some("https://github.com/poe-internal/poe2.git".into())
+        );
+        assert_eq!(
+            https_fallback(
+                "ssh://git@github.com/poe-internal/poe2.git",
+                "Permission denied (publickey)."
+            ),
+            Some("https://github.com/poe-internal/poe2.git".into())
+        );
+        assert_eq!(
+            https_fallback(
+                "git@private.example:acme/repo.git",
+                "Permission denied (publickey)."
+            ),
+            None
+        );
+        assert_eq!(
+            https_fallback(
+                "git@github.com:acme/repo.git",
+                "Host key verification failed"
+            ),
+            None
+        );
+        assert_eq!(
+            https_fallback(
+                "https://github.com/acme/repo.git",
+                "Permission denied (publickey)."
+            ),
+            None
+        );
+    }
+    #[test]
+    fn resolved_checkout_status_is_scoped_to_the_current_saved_settings() {
+        let (root, ctx, store) = super::super::context::tests::test_context();
+        let target = root.join("right");
+        fs::create_dir_all(&target).unwrap();
+        git(&target, &["init", "--quiet"]);
+        git(
+            &target,
+            &["remote", "add", "origin", "git@github.com:acme/right.git"],
+        );
+        let mut projects = json!({"github.com/acme/right":{"git":"https://github.com/acme/right.git","path":"~/projects/right","reuse_existing":true}});
+        let workers =
+            json!([{ "config": {"projects":["github.com/acme/right"]}, "intent":"pause" }]);
+        let prepared = prepare(&ctx, &projects, &workers).unwrap();
+        let path = target.canonicalize().unwrap();
+        assert_eq!(
+            prepared[0]["config"]["directories"]["github.com/acme/right"],
+            json!(path)
+        );
+        assert!(!root.join("projects/right").exists());
+        let receipt = resolved(&ctx).unwrap();
+        assert_eq!(
+            project_status(&projects, &receipt)["github.com/acme/right"]["resolved_path"],
+            json!(path)
+        );
+        projects["github.com/acme/right"]["path"] = json!("~/other/right");
+        assert!(
+            project_status(&projects, &receipt)["github.com/acme/right"]["resolved_path"].is_null()
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
     fn git(path: &Path, args: &[&str]) {
         assert!(
             Command::new("git")
@@ -356,6 +648,7 @@ mod tests {
         let spec = Checkout {
             git: "git@github.com:acme/right.git".into(),
             path: target.to_str().unwrap().into(),
+            reuse_existing: false,
         };
         assert!(checkout(&root, "github.com/acme/right", &spec).is_ok());
         assert!(checkout(&root, "github.com/acme/wrong", &spec).is_err());
@@ -365,6 +658,7 @@ mod tests {
         let spec = Checkout {
             git: spec.git,
             path: plain.to_str().unwrap().into(),
+            reuse_existing: false,
         };
         assert!(checkout(&root, "github.com/acme/right", &spec).is_err());
         assert_eq!(fs::read_to_string(plain.join("keep")).unwrap(), "data");

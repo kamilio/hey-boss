@@ -273,7 +273,15 @@ impl Supervisor {
                     &desired["workers"],
                     &desired["projects"]
                 ));
-                machine["projects"] = desired.get("projects").cloned().unwrap_or(json!({}));
+                let checkouts = if host == "local" {
+                    super::projects::resolved(&self.ctx)?
+                } else {
+                    self.machine(host)["project_checkouts"].clone()
+                };
+                machine["projects"] = super::projects::project_status(
+                    &desired.get("projects").cloned().unwrap_or(json!({})),
+                    &checkouts,
+                );
                 machine["workspace"] = desired
                     .get("workspace")
                     .cloned()
@@ -1234,6 +1242,9 @@ impl Supervisor {
                     }
                 }
                 Some("ack") => {
+                    if let Some(checkouts) = message.get("project_checkouts") {
+                        self.update(host, json!({"project_checkouts":checkouts}))?;
+                    }
                     if let Some(ack) = message.get("signal") {
                         replica::execute(
                             &self.ctx.db()?,
