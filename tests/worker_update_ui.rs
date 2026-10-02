@@ -8,6 +8,9 @@ fn infrastructure_holds_have_readable_history_at_terminal_sizes() {
         ("Approval service unavailable", "approval service"),
         ("Database service unavailable", "database service"),
         ("Model proxy unavailable", "model proxy"),
+        ("GitHub quota exhausted", "GitHub quota"),
+        ("GitHub authentication failed", "GitHub authentication"),
+        ("Worker environment check failed", "Git signing"),
     ] {
         let mut app = Dashboard {
             history: true,

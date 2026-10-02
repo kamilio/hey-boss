@@ -50,10 +50,15 @@ function chiefState(entry, now = Date.now()) {
   return 'Waiting · ' + (minutes ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left` : 'Due now');
 }
 function infrastructureLabel(run) {
-  return ['Database service unavailable', 'Model proxy unavailable'].find(label => (run.summary || '').startsWith(label)) || 'Approval service unavailable';
+  return ['GitHub quota exhausted', 'GitHub authentication failed', 'GitHub permission denied', 'GitHub request failed', 'Worker environment check failed', 'Database service unavailable', 'Model proxy unavailable', 'Approval service unavailable'].find(label => (run.summary || '').startsWith(label)) || 'Infrastructure unavailable';
 }
 function infrastructureGuidance(run) {
   const label = infrastructureLabel(run);
+  if (label === 'GitHub quota exhausted') {
+    const retry = run.retry_at != null ? 'Automatic retry at ' + new Date(run.retry_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZoneName:'short'}) + '.' : 'The attempt has ended; its saved session is retained.';
+    return 'GitHub quota exhausted. ' + retry + ' Its slot and claim are released; saved work is retained.';
+  }
+  if (label.startsWith('GitHub ') || label === 'Worker environment check failed' || label === 'Infrastructure unavailable') return run.summary || 'This attempt ended because a required service was unavailable. Its saved session is retained.';
   const service = label === 'Database service unavailable' ? 'database service' : label === 'Model proxy unavailable' ? 'model proxy' : 'approval service';
   return 'The ' + service + ' failed during this attempt. ' + (run.retry_at != null ? 'The saved session will retry automatically.' : 'The attempt has ended; its saved session is retained.') + (service === 'database service' ? ' Read the current issue state before repeating any uncertain write.' : '');
 }
@@ -746,7 +751,7 @@ if (typeof document !== 'undefined') (() => {
       if(initial||earlier){olderCursor=data.older_cursor||0;$('load-earlier').hidden=!data.has_earlier;}
       if(earlier)scrollTo(0,oldScroll+document.documentElement.scrollHeight-oldHeight);
       $('conversation-empty').hidden=seen.size>0;
-      $('conversation-empty').textContent=data.availability==='waiting'?(selected.run.finished_at!=null?'Saved history is unavailable on this device.':'The agent is getting started. Its saved conversation will appear here.'):'No messages yet. This page will update as the agent works.';
+      $('conversation-empty').textContent=selected.run.state==='infrastructure_blocked'&&infrastructureLabel(selected.run)==='GitHub quota exhausted'&&!selected.run.session_id?'No agent started during this attempt.':data.availability==='waiting'?(selected.run.finished_at!=null?'Saved history is unavailable on this device.':'The agent is getting started. Its saved conversation will appear here.'):'No messages yet. This page will update as the agent works.';
       if(!earlier&&follow&&entries.length){$('conversation-end').scrollIntoView({behavior:'instant',block:'end'});}
       $('jump-live').hidden=follow||!seen.size;
       if(data.has_more&&!earlier&&!route().has('at'))setTimeout(()=>loadConversation(),0);
