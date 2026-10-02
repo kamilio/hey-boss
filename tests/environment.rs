@@ -302,9 +302,22 @@ fn service_path_finds_github_cli_without_changing_worker_environment() {
     let f = Fixture::new();
     fs::create_dir_all(f.root.join(".local/bin")).unwrap();
     fs::rename(f.root.join("bin/gh"), f.root.join(".local/bin/gh")).unwrap();
+    // Linux runners also install gh in /usr/bin. Keep real Git/signing tools,
+    // but exclude every system gh so this specifically exercises the fallback.
+    let service_bin = f.root.join("service-bin");
+    fs::create_dir(&service_bin).unwrap();
+    for tool in ["git", "ssh-keygen", "ssh-add", "hostname", "sh"] {
+        let found = std::process::Command::new("which")
+            .arg(tool)
+            .output()
+            .unwrap();
+        assert!(found.status.success());
+        let path = String::from_utf8(found.stdout).unwrap();
+        std::os::unix::fs::symlink(path.trim(), service_bin.join(tool)).unwrap();
+    }
     let result = f
         .command(env!("CARGO_BIN_EXE_hey-boss"))
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("PATH", service_bin)
         .args(["environment", "setup", "--json"])
         .output()
         .unwrap();
