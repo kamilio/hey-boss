@@ -209,7 +209,7 @@ pub(crate) fn protect_database_paths<P: AsRef<Path>>(
             && reserved.contains(&parent.join(name))
         {
             return Err(Error::invalid(format!(
-                "Auxiliary file {} must not replace the active issue database, archive or sidecars",
+                "Auxiliary file {} must not alias or replace the active issue database, archive or sidecars",
                 path.display()
             )));
         }
