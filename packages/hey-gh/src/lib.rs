@@ -2,6 +2,7 @@
 pub mod api;
 mod api_client;
 mod client;
+pub mod comments;
 mod dashboard;
 mod discovery_fallback;
 mod entity;
