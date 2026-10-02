@@ -1727,6 +1727,9 @@ fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
     assert_eq!(issue["issue"]["draft"], false);
     assert_eq!(issue["issue"]["title"], "Final title");
     assert_eq!(issue["issue"]["body"], "Final body");
+    let fetched = w.ok(json!({"action":"view","number":1}));
+    assert_eq!(fetched["issue"]["plan"], plan);
+    assert_eq!(fetched["issue"]["body"], "Final body");
     assert_ne!(
         w.action(
             &w.project,
@@ -1885,9 +1888,7 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
         "handoff",
         "github",
         "subtask",
-        "dependencies",
         "resume",
-        "plan_document",
         "steering",
         "dependency_update",
         "prompt_update",
@@ -1897,6 +1898,16 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
         assert!(settings["prompt_defaults"][key].is_string(), "{key}");
         assert!(
             settings["prompt_sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|section| section["key"] == key)
+        );
+    }
+    for key in ["dependencies", "plan_document"] {
+        assert!(settings["prompt_defaults"].get(key).is_none());
+        assert!(
+            !settings["prompt_sections"]
                 .as_array()
                 .unwrap()
                 .iter()

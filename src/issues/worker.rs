@@ -1395,21 +1395,13 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
             "delivery",
             section(if config.prs_enabled { "prs" } else { "main" }, !artifact),
         ),
-        (
-            "plan_document",
-            section("plan_document", job.issue["plan"]["path"].is_string()),
-        ),
+        // Empty legacy layout slots: these details come from fetching the task.
+        ("plan_document", String::new()),
         (
             "subtask",
             section("subtask", job.issue["subtask_context"].is_object()),
         ),
-        (
-            "dependencies",
-            section(
-                "dependencies",
-                dependencies.is_some_and(|deps| !deps.is_empty()),
-            ),
-        ),
+        ("dependencies", String::new()),
         (
             "github",
             section("github", job.issue.get("github_status").is_some()),
@@ -2672,7 +2664,7 @@ mod tests {
                 assert!(text.contains("Claim and plan"), "{text}");
                 assert!(text.contains("hey-boss artifact create"), "{text}");
                 assert!(text.contains("--issue 7"));
-                assert!(text.contains("Plan document: /tmp/task-notes.md"));
+                assert!(!text.contains("/tmp/task-notes.md"));
                 assert!(!text.contains("Commit your changes"));
                 assert!(!text.contains("pull request"));
                 assert!(!text.contains("dedicated Git worktree"));
@@ -2707,14 +2699,50 @@ mod tests {
         assert!(text.contains("hey-gh pr view"), "{text}");
     }
     #[test]
+    fn task_details_are_fetched_instead_of_injected_into_prompts() {
+        let mut task = issue();
+        task["plan"] = json!({"path":"/tmp/task-plan.md"});
+        task["dependency_context"] =
+            json!([{"number":3,"title":"Dependency detail","state":"ready","pull_requests":[]}]);
+        for layout in [
+            None,
+            Some("{{task}}\n\n{{dependencies}}\n\n{{plan_document}}".to_owned()),
+        ] {
+            let config: ProjectConfig = serde_json::from_value(json!({
+                "prompt":"Task {{number}}.",
+                "prompt_overrides":{
+                    "layout":layout,
+                    "dependencies":"Old prerequisite instructions: {{dependencies}}",
+                    "plan_document":"Old plan instructions: {{plan_path}}"
+                }
+            }))
+            .unwrap();
+            let text = preview(&config, &project(), task.clone()).0;
+            assert!(!text.contains("Dependency detail"), "{text}");
+            assert!(!text.contains("task-plan.md"), "{text}");
+            assert!(!text.contains("Old prerequisite"), "{text}");
+            assert!(!text.contains("Old plan"), "{text}");
+            assert!(!text.contains("{{dependencies}}"), "{text}");
+            assert!(!text.contains("{{plan_document}}"), "{text}");
+        }
+        for key in ["dependencies", "plan_document"] {
+            assert!(prompt_defaults().get(key).is_none());
+            assert!(
+                !prompt_sections()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["key"] == key)
+            );
+        }
+    }
+    #[test]
     fn contextual_prompts_are_overridable_with_single_pass_variables() {
         let config: ProjectConfig = serde_json::from_value(json!({
             "prs_enabled":true,
             "prompt_overrides":{
                 "handoff":"Handoff {{number}}: {{project_arg}}",
-                "github":"Inspect {{title}} with tools.",
-                "dependencies":"Requires:\n{{dependencies}}",
-                "plan_document":"Notes: {{plan_path}}"
+                "github":"Inspect {{title}} with tools."
             }
         }))
         .unwrap();
@@ -2731,11 +2759,7 @@ mod tests {
             text.contains("Inspect Literal {{body}} with tools."),
             "{text}"
         );
-        assert!(
-            text.contains("Requires:\n#3 Dependency {{number}} [ready]"),
-            "{text}"
-        );
-        assert!(text.contains("Notes: /tmp/{{number}}.md"), "{text}");
+
         assert!(!text.contains("Dependencies unblock at Ready"), "{text}");
         assert!(!text.contains("Plan document:"), "{text}");
     }
