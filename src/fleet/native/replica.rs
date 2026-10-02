@@ -53,17 +53,9 @@ pub(super) fn execute(db: &Connection, sql: &str, values: &[Value]) -> Result<us
     Ok(db.execute(sql, params_from_iter(args(values)))?)
 }
 pub(super) fn rows(db: &Connection, sql: &str, values: &[Value]) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare(sql)?;
-    let columns = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-    let mut cursor = stmt.query(params_from_iter(args(values)))?;
-    let mut result = vec![];
-    while let Some(row) = cursor.next()? {
+    db.query_collect(sql, params_from_iter(args(values)), |row| {
         let mut value = serde_json::Map::new();
-        for (index, name) in columns.iter().enumerate() {
+        for index in 0..row.column_count() {
             let item = match row.get_ref(index)? {
                 ValueRef::Null => Value::Null,
                 ValueRef::Integer(n) => json!(n),
@@ -71,11 +63,10 @@ pub(super) fn rows(db: &Connection, sql: &str, values: &[Value]) -> Result<Vec<V
                 ValueRef::Text(s) => json!(std::str::from_utf8(s)?),
                 ValueRef::Blob(_) => return Err(invalid("Unexpected blob in fleet row")),
             };
-            value.insert(name.clone(), item);
+            value.insert(row.column_name(index)?.to_owned(), item);
         }
-        result.push(Value::Object(value));
-    }
-    Ok(result)
+        Ok(Value::Object(value))
+    })
 }
 pub(super) fn state_get(db: &Connection, key: &str, default: Value) -> Result<Value> {
     let saved: Option<String> = db
@@ -3941,6 +3932,68 @@ mod tests {
     }
 
     #[test]
+    fn replicated_row_reads_do_not_fetch_metadata_separately() {
+        let f = Fixture::new();
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&f.path);
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for number in 0..128 {
+            let result = rows(
+                &db,
+                "SELECT ?1 number,'first' label,NULL absent UNION ALL SELECT ?1+1,'second',NULL",
+                &[json!(number)],
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                vec![
+                    json!({"number":number,"label":"first","absent":null}),
+                    json!({"number":number+1,"label":"second","absent":null})
+                ]
+            );
+        }
+        db.execute_batch("COMMIT").unwrap();
+        drop(db);
+        let (commands, _) = transport.join().unwrap();
+        owner.stop();
+        eprintln!("128 transactional multirow reads: {commands} RPCs");
+        assert!(commands <= 130, "{commands} RPCs");
+    }
+
+    #[test]
+    fn replicated_row_reads_preserve_types_errors_and_changed_columns() {
+        let f = Fixture::new();
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let remote = Connection::connect(&f.path).unwrap();
+        for db in [&f.db, &remote] {
+            db.execute_batch("DROP TABLE IF EXISTS row_read_test; CREATE TABLE row_read_test(number INTEGER,label TEXT,amount REAL,absent TEXT); INSERT INTO row_read_test VALUES(7,'Label',1.5,NULL)").unwrap();
+            let mut expected = json!({"number":7,"label":"Label","amount":1.5,"absent":null});
+            assert_eq!(
+                rows(db, "SELECT * FROM row_read_test", &[]).unwrap(),
+                vec![expected.clone()]
+            );
+            assert!(
+                rows(db, "SELECT * FROM row_read_test WHERE 0", &[])
+                    .unwrap()
+                    .is_empty()
+            );
+            db.execute_batch("ALTER TABLE row_read_test ADD COLUMN added TEXT DEFAULT 'new'")
+                .unwrap();
+            expected["added"] = json!("new");
+            assert_eq!(
+                rows(db, "SELECT * FROM row_read_test", &[]).unwrap(),
+                vec![expected]
+            );
+            assert!(rows(db, "SELECT * FROM nonexistent_table", &[]).is_err());
+            let error = rows(db, "SELECT x'ff' AS unsupported", &[]).unwrap_err();
+            assert_eq!(error.to_string(), "Unexpected blob in fleet row");
+            assert!(is_conflict(error.as_ref()));
+        }
+        drop(remote);
+        owner.stop();
+    }
+
+    #[test]
     fn incoming_change_batch_reuses_schema_and_keeps_receipts_replayable() {
         let f = Fixture::new();
         let template = rows(&f.db, "SELECT * FROM agents WHERE id='human:fixture'", &[])
@@ -3978,7 +4031,7 @@ mod tests {
             128
         );
         eprintln!("128 incoming agent changes: {commands} RPCs, {steps} VM steps");
-        assert!(commands <= 128 * 8 + 4, "{commands} RPCs");
+        assert!(commands <= 128 * 6 + 3, "{commands} RPCs");
     }
 
     #[test]
@@ -4105,8 +4158,8 @@ mod tests {
         }
         owner.stop();
         for (table, commands) in measurements {
-            // Schema metadata + query and the write per row, plus BEGIN/COMMIT.
-            assert!(commands <= 128 * 3 + 2, "{table}: {commands} RPCs");
+            // Schema query and the write per row, plus BEGIN/COMMIT.
+            assert!(commands <= 128 * 2 + 2, "{table}: {commands} RPCs");
         }
     }
 
@@ -4141,7 +4194,7 @@ mod tests {
             current_row(&f.db, "issue_pull_requests", &legacy).unwrap(),
             expected
         );
-        assert!(commands <= 7, "Legacy PR write: {commands} RPCs");
+        assert!(commands <= 5, "Legacy PR write: {commands} RPCs");
     }
 
     #[test]
