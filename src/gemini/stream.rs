@@ -1,4 +1,4 @@
-use super::response::output_items;
+use super::response::output_item;
 use super::{ConvertedRequest, ReasoningCodec, convert_response};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -12,7 +12,8 @@ pub struct ResponseStream {
     sequence: u64,
     started: bool,
     ended: bool,
-    active: Option<usize>,
+    output_count: usize,
+    active: Option<(usize, usize)>,
     done_items: Vec<usize>,
     partial_calls: super::partial::PartialCalls,
     summary_open: bool,
@@ -29,6 +30,7 @@ impl ResponseStream {
             sequence: 0,
             started: false,
             ended: false,
+            output_count: 0,
             active: None,
             done_items: Vec::new(),
             partial_calls: Default::default(),
@@ -57,15 +59,12 @@ impl ResponseStream {
         events
     }
     fn close_active(&mut self, events: &mut Vec<Value>) -> Result<()> {
-        if let Some(index) = self.active.take() {
-            let parts = self.native["candidates"][0]["content"]["parts"]
-                .as_array()
-                .unwrap();
-            let items = output_items(parts, &self.request, &self.id)?;
-            let item = items
-                .get(index - 1)
-                .ok_or_else(|| anyhow!("Invalid active stream item"))?
-                .clone();
+        if let Some((index, part_index)) = self.active.take() {
+            let part = self.native["candidates"][0]["content"]["parts"]
+                .get(part_index)
+                .ok_or_else(|| anyhow!("Invalid active stream item"))?;
+            let item = output_item(part, index, &self.request, &self.id)?
+                .ok_or_else(|| anyhow!("Invalid active stream item"))?;
             let mut event = self.item_event(index);
             event["text"] = item["content"][0]["text"].clone();
             events.push(self.emit("response.output_text.done", event));
@@ -201,10 +200,17 @@ impl ResponseStream {
                                 let parts = self.native["candidates"][0]["content"]["parts"]
                                     .as_array()
                                     .unwrap();
-                                let items = output_items(parts, &self.request, &self.id)?;
-                                let index = items.len();
-                                self.active = Some(index);
-                                let mut item = items.last().unwrap().clone();
+                                let part_index = parts.len() - 1;
+                                let index = self.output_count + 1;
+                                let mut item = output_item(
+                                    &parts[part_index],
+                                    index,
+                                    &self.request,
+                                    &self.id,
+                                )?
+                                .ok_or_else(|| anyhow!("Invalid active stream item"))?;
+                                self.output_count = index;
+                                self.active = Some((index, part_index));
                                 item["status"] = json!("in_progress");
                                 item["content"] = json!([]);
                                 events.push(self.emit(
@@ -216,7 +222,7 @@ impl ResponseStream {
                                     json!({"type":"output_text","text":"","annotations":[]});
                                 events.push(self.emit("response.content_part.added", event));
                             }
-                            let index = self.active.unwrap();
+                            let (index, _) = self.active.unwrap();
                             let mut event = self.item_event(index);
                             event["delta"] = json!(text);
                             events.push(self.emit("response.output_text.delta", event));
@@ -224,9 +230,11 @@ impl ResponseStream {
                             let parts = self.native["candidates"][0]["content"]["parts"]
                                 .as_array()
                                 .unwrap();
-                            let items = output_items(parts, &self.request, &self.id)?;
-                            let index = items.len();
-                            let item = items.last().unwrap().clone();
+                            let index = self.output_count + 1;
+                            let item =
+                                output_item(parts.last().unwrap(), index, &self.request, &self.id)?
+                                    .ok_or_else(|| anyhow!("Invalid stream item"))?;
+                            self.output_count = index;
                             let mut initial = item.clone();
                             initial["status"] = json!("in_progress");
                             if item["type"] == "function_call" {

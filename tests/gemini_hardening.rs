@@ -267,3 +267,328 @@ fn interrupted_partial_calls_retain_the_exact_native_trace() {
     );
     assert_eq!(failed["response"]["output"], json!([]));
 }
+
+#[test]
+fn incremental_projection_preserves_indices_across_mixed_signed_parts_and_calls() {
+    let raw_request = json!({
+        "model": "gemini/gemini-2.5-pro",
+        "input": "Execute mixed turn",
+        "tools": [
+            {
+                "type": "tool_search",
+                "execution": "client",
+                "description": "Search deferred tools",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            },
+            {
+                "type": "function",
+                "name": "check_file",
+                "strict": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "type": "namespace",
+                "name": "editor",
+                "tools": [{
+                    "type": "custom",
+                    "name": "patch",
+                    "description": "Apply patch"
+                }]
+            },
+            {
+                "type": "function",
+                "name": "deferred_tool",
+                "defer_loading": true,
+                "parameters": {"type": "object"}
+            }
+        ]
+    });
+    let converted = convert_request(&raw_request, &config(), &codec()).unwrap();
+    let search_native = converted
+        .tools
+        .iter()
+        .find(|(_, t)| t.name == "tool_search")
+        .unwrap()
+        .0
+        .clone();
+    let fn_native = converted
+        .tools
+        .iter()
+        .find(|(_, t)| t.name == "check_file")
+        .unwrap()
+        .0
+        .clone();
+    let custom_native = converted
+        .tools
+        .iter()
+        .find(|(_, t)| t.custom && t.name == "patch")
+        .unwrap()
+        .0
+        .clone();
+
+    let stream_chunks = vec![
+        chunk(json!([{"text": ""}])),
+        chunk(json!([{"text": "α"}])),
+        chunk(json!([{"text": "β"}])),
+        chunk(json!([{"thoughtSignature": "sig-text-1"}])),
+        chunk(json!([{"text": "", "thoughtSignature": "sig-empty-carrier"}])),
+        chunk(json!([{"text": "γδ", "thoughtSignature": "sig-text-2"}])),
+        chunk(json!([{"text": "ε"}])),
+        chunk(json!([{"text": "plan-step", "thought": true, "thoughtSignature": "sig-thought"}])),
+        chunk(json!([{"text": "ζ", "thoughtSignature": "sig-text-3"}])),
+        chunk(json!([{
+            "functionCall": {"name": search_native, "args": {"query": "deferred"}, "id": "search-1"}
+        }])),
+        chunk(json!([{"thoughtSignature": "sig-search"}])),
+        chunk(json!([{
+            "functionCall": {
+                "name": fn_native,
+                "id": "fn-1",
+                "willContinue": true,
+                "partialArgs": [{"jsonPath": "$.path", "stringValue": "src/", "willContinue": true}]
+            }
+        }])),
+        chunk(json!([{
+            "functionCall": {
+                "id": "fn-1",
+                "willContinue": false,
+                "partialArgs": [{"jsonPath": "$.path", "stringValue": "main.rs", "willContinue": false}]
+            },
+            "thoughtSignature": "sig-fn"
+        }])),
+        chunk(json!([{
+            "functionCall": {"name": custom_native, "args": {"input": "patch-body"}, "id": "custom-1"},
+            "thoughtSignature": "sig-custom"
+        }])),
+        chunk(json!([{"inlineData": {"mimeType": "image/png", "data": "AA=="}}])),
+        chunk(json!([{"thoughtSignature": "sig-inline"}])),
+        json!({"candidates": [{"finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 20, "candidatesTokenCount": 10, "thoughtsTokenCount": 5, "totalTokenCount": 35}}),
+    ];
+
+    let mut stream = ResponseStream::new(converted.clone(), "mixed");
+    let mut events = Vec::new();
+    for c in &stream_chunks {
+        events.extend(stream.feed(c).unwrap());
+    }
+    events.extend(stream.finish(&codec()).unwrap());
+
+    for (seq, event) in events.iter().enumerate() {
+        assert_eq!(event["sequence_number"], seq);
+    }
+
+    let added_indices: Vec<usize> = events
+        .iter()
+        .filter(|e| e["type"] == "response.output_item.added")
+        .map(|e| e["output_index"].as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(added_indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let done_indices: Vec<usize> = events
+        .iter()
+        .filter(|e| e["type"] == "response.output_item.done")
+        .map(|e| e["output_index"].as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(done_indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let final_response = &events.last().unwrap()["response"];
+    let unary = convert_response(&final_response["gemini"], &converted, &codec(), "mixed").unwrap();
+    assert_eq!(final_response["output"].as_array().unwrap().len(), 9);
+    assert_eq!(
+        final_response["output"].as_array().unwrap()[1..],
+        unary["output"].as_array().unwrap()[1..]
+    );
+    assert_eq!(final_response["output"][1]["content"][0]["text"], "αβ");
+    assert_eq!(final_response["output"][2]["content"][0]["text"], "γδ");
+    assert_eq!(final_response["output"][3]["content"][0]["text"], "ε");
+    assert_eq!(final_response["output"][4]["content"][0]["text"], "ζ");
+    assert_eq!(final_response["output"][5]["type"], "tool_search_call");
+    assert_eq!(final_response["output"][6]["type"], "function_call");
+    assert_eq!(
+        final_response["output"][6]["arguments"],
+        "{\"path\":\"src/main.rs\"}"
+    );
+    assert_eq!(final_response["output"][7]["type"], "custom_tool_call");
+    assert_eq!(final_response["output"][7]["input"], "patch-body");
+    assert_eq!(
+        final_response["output"][8]["content"][0]["part"]["thoughtSignature"],
+        "sig-inline"
+    );
+
+    let mut replay_input: Vec<Value> = events
+        .iter()
+        .filter(|e| e["type"] == "response.output_item.done")
+        .map(|e| e["item"].clone())
+        .collect();
+    replay_input.extend([
+        json!({"type": "tool_search_output", "execution": "client", "call_id": "search-1", "status": "completed", "tools": []}),
+        json!({"type": "function_call_output", "call_id": "fn-1", "output": "ok"}),
+        json!({"type": "custom_tool_call_output", "call_id": "custom-1", "output": "applied"}),
+    ]);
+    let mut replay_req = raw_request;
+    replay_req["input"] = json!(replay_input);
+    let replayed = convert_request(&replay_req, &config(), &codec()).unwrap();
+    let expected_native_parts =
+        final_response["gemini"]["candidates"][0]["content"]["parts"].clone();
+    assert_eq!(replayed.body["contents"][0]["parts"], expected_native_parts);
+}
+
+#[test]
+fn detached_signature_must_not_leave_stale_native_projection() {
+    let codec = codec();
+    let req = convert_request(
+        &json!({"model":"gemini/gemini-2.5-pro","input":"Check final projection"}),
+        &config(),
+        &codec,
+    )
+    .unwrap();
+    let mut stream = ResponseStream::new(req.clone(), "projection");
+    stream.feed(&chunk(json!([{}]))).unwrap();
+    stream
+        .feed(&json!({"candidates":[{"content":{"parts":[{"thoughtSignature":"detached"}]},"finishReason":"STOP"}]}))
+        .unwrap();
+
+    // The empty part becomes a signature-only carrier. Rejecting this stream
+    // is acceptable; a successful response must match the final native parts
+    // and remain replayable, rather than completing a stale visible item.
+    if let Ok(events) = stream.finish(&codec) {
+        let response = &events.last().unwrap()["response"];
+        let unary = convert_response(&response["gemini"], &req, &codec, "projection").unwrap();
+        assert_eq!(
+            &response["output"].as_array().unwrap()[1..],
+            &unary["output"].as_array().unwrap()[1..]
+        );
+        let replay: Vec<Value> = events
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.done")
+            .map(|event| event["item"].clone())
+            .collect();
+        convert_request(
+            &json!({"model":"gemini/gemini-2.5-pro","input":replay}),
+            &config(),
+            &codec,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "offline release benchmark; run with --release --ignored --nocapture"]
+fn benchmark_stream_many_signed_parts_and_tool_calls() {
+    let tools: Vec<Value> = (0..16)
+        .map(|i| {
+            json!({
+                "type": "function",
+                "name": format!("tool_{i}"),
+                "strict": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["path", "line", "content"],
+                    "additionalProperties": false
+                }
+            })
+        })
+        .collect();
+    let req = convert_request(
+        &json!({"model": "gemini/gemini-2.5-pro", "input": "benchmark", "tools": tools}),
+        &config(),
+        &codec(),
+    )
+    .unwrap();
+    let tool_names: Vec<String> = req.tools.keys().cloned().collect();
+    let codec = codec();
+    let payload = "x".repeat(256);
+
+    for count in [128usize, 256, 512, 1024] {
+        let signed_text_chunks: Vec<Value> = (0..count)
+            .map(|i| {
+                chunk(json!([{
+                    "text": format!("segment-{i}-{payload}"),
+                    "thoughtSignature": format!("sig-text-{i}")
+                }]))
+            })
+            .collect();
+        let tool_call_chunks: Vec<Value> = (0..count)
+            .map(|i| {
+                let name = &tool_names[i % tool_names.len()];
+                chunk(json!([{
+                    "functionCall": {
+                        "name": name,
+                        "id": format!("call-{i}"),
+                        "args": {
+                            "path": format!("src/module_{i}.rs"),
+                            "line": i,
+                            "content": payload
+                        }
+                    },
+                    "thoughtSignature": format!("sig-call-{i}")
+                }]))
+            })
+            .collect();
+        let stop = json!({"candidates": [{"finishReason": "STOP"}]});
+
+        let iterations = 5u32;
+        let mut text_feed_total = std::time::Duration::ZERO;
+        let mut text_total = std::time::Duration::ZERO;
+        for _ in 0..iterations {
+            let mut stream = ResponseStream::new(req.clone(), "bench-text");
+            let start = std::time::Instant::now();
+            for c in &signed_text_chunks {
+                stream.feed(c).unwrap();
+            }
+            stream.feed(&stop).unwrap();
+            text_feed_total += start.elapsed();
+            let events = stream.finish(&codec).unwrap();
+            text_total += start.elapsed();
+            assert_eq!(
+                events.last().unwrap()["response"]["output"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                count + 1
+            );
+        }
+
+        let mut tool_feed_total = std::time::Duration::ZERO;
+        let mut tool_total = std::time::Duration::ZERO;
+        for _ in 0..iterations {
+            let mut stream = ResponseStream::new(req.clone(), "bench-tool");
+            let start = std::time::Instant::now();
+            for c in &tool_call_chunks {
+                stream.feed(c).unwrap();
+            }
+            stream.feed(&stop).unwrap();
+            tool_feed_total += start.elapsed();
+            let events = stream.finish(&codec).unwrap();
+            tool_total += start.elapsed();
+            assert_eq!(
+                events.last().unwrap()["response"]["output"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                count + 1
+            );
+        }
+
+        eprintln!(
+            "count={count:4} | signed_text feed={:?} total={:?} | tool_calls feed={:?} total={:?}",
+            text_feed_total / iterations,
+            text_total / iterations,
+            tool_feed_total / iterations,
+            tool_total / iterations,
+        );
+    }
+}
