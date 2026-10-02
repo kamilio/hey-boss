@@ -431,6 +431,51 @@ fn markdown_import_is_atomic_replayable_and_hosts_referenced_files() {
 }
 
 #[test]
+fn import_deduplicates_matching_names_and_bytes_and_preserves_link_suffixes() {
+    let f = Fixture::new("import-deduplication");
+    let mut s = f.store();
+    let created = call(
+        &mut s,
+        json!({"action":"artifact","operation":{"command":"import",
+        "operation":{"command":"create","title":"Files","body":"[a](a.csv#one) [b](b.csv?download=1) [c](c.csv) [d](d.csv)"},
+        "files":[
+            {"destination":"a.csv#one","name":"data.csv","data":"YQ=="},
+            {"destination":"b.csv?download=1","name":"data.csv","data":"YQ=="},
+            {"destination":"c.csv","name":"other.csv","data":"YQ=="},
+            {"destination":"d.csv","name":"data.csv","data":"Yg=="}
+        ]}}),
+    );
+    let listed = files(
+        &mut s,
+        json!({"command":"list","target":{"kind":"artifact","id":created["artifact"]["id"]}}),
+    );
+    let entries = listed["attachments"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        std::fs::read_dir(f.0.join("issues.attachments"))
+            .unwrap()
+            .count(),
+        3
+    );
+    let body = created["artifact"]["body"].as_str().unwrap();
+    let shared = entries
+        .iter()
+        .find(|a| {
+            a["name"] == "data.csv"
+                && files(&mut s, json!({"command":"download","id":a["id"]}))["data"] == "YQ=="
+        })
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    assert!(body.contains(&format!("[a](/attachments/{shared}#one)")));
+    assert!(body.contains(&format!("[b](/attachments/{shared}?download=1)")));
+    for entry in entries {
+        assert!(body.contains(entry["id"].as_str().unwrap()));
+        files(&mut s, json!({"command":"download","id":entry["id"]}));
+    }
+}
+
+#[test]
 fn failed_import_rolls_back_document_metadata_and_disk_files() {
     let f = Fixture::new("markdown-rollback");
     let mut s = f.store();
