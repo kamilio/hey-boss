@@ -736,3 +736,32 @@ A broader source search located `../ashby-mcp/github_scrape_pull_requests.py`, a
 The original source search did not establish exact legacy-script parity: `../poe-tooling` contains native TypeScript compiler queue tooling, not a GitHub PR-fetching script. Related review queries under `../poe2/scripts/review-enforcer` were inspected; their thread root comments, author type, reviews, and review-request timeline data are covered. No other project's files were changed.
 
 The user subsequently supplied the intended standalone behavior: account-wide open PR status, gh-style commands, and a cursor feed with first-class closures/merges. That behavior replaces the unavailable-script prerequisite; SOURCE_AUDIT.md remains a historical source comparison.
+
+### Durable local service
+
+`hey-gh service start` installs a per-user launchd job on macOS or systemd user
+service on Linux, then waits for authenticated local API health. It uses the
+existing `gh` login, default cache and localhost:8787. The service survives the
+requesting worker's exit and retries daemon exits, including clean shutdowns.
+On Linux, a user service manager must be available; enable lingering with
+`loginctl enable-linger USER` when the service must also survive logout.
+
+`hey-gh service status` reports API health and whether the service is registered
+and active. A healthy external listener is reused; the service stands by until
+that listener exits. An occupied but unhealthy port is never killed. Concurrent
+starts share an installation lock, and daemon startup binds the port and locks
+the cache before authenticating or starting background watches.
+
+`hey-gh service restart` reloads only the managed job and its owned child. Use
+`hey-gh logs` plus `journalctl --user -u hey-gh.service` on Linux or
+`launchctl print gui/$(id -u)/local.hey-gh` on macOS for recovery. Missing service
+management and unhealthy startup return errors with recovery steps. Credential
+environment values are never written to service definitions; authenticate `gh`
+as the same OS user. Location overrides (`GH_CONFIG_DIR`, `XDG_CONFIG_HOME`,
+`XDG_CACHE_HOME`) are retained. A normal start never replaces a running daemon;
+explicit restart applies changes to the managed service environment.
+
+Package upgrades install/reload the service on companions and update the command
+card. Supervisors retain their existing PR monitor ownership unless a service was
+explicitly installed. Custom `serve --listen/--cache/--hostname` instances remain
+separately owned; the service command manages only the default local instance.

@@ -31,20 +31,32 @@ fn desktop_app() -> io::Result<Option<PathBuf>> {
     }
     Ok(Some(app.to_owned()))
 }
-fn restart_hey_gh_daemon() {
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-TERM", "-f", "hey-gh serve"])
-        .status();
+fn restart_companion_processes() {
     let _ = Command::new("/usr/bin/pkill")
         .args(["-TERM", "-f", "hey-boss fleet companion"])
         .status();
     let _ = Command::new("/usr/bin/pkill")
         .args(["-TERM", "-f", "hey-boss issue web"])
         .status();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-KILL", "-f", "hey-gh serve"])
-        .status();
+}
+
+fn refresh_shared_api(binary: &Path, companion: bool, home: &Path) -> io::Result<()> {
+    let api = binary.with_file_name("hey-gh");
+    output(Command::new(&api).arg("install"))?;
+    // Companions need a machine owner. Preserve the supervisor's existing PR
+    // monitor ownership unless a user has explicitly installed the service.
+    let registration = if cfg!(target_os = "macos") {
+        home.join("Library/LaunchAgents/local.hey-gh.plist")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("systemd/user/hey-gh.service")
+    };
+    if companion || registration.try_exists()? {
+        output(Command::new(&api).args(["service", "restart"]))?;
+    }
+    Ok(())
 }
 fn refresh_fleet_controller(binary: &Path, registration: &Path) -> io::Result<()> {
     if registration.try_exists()? {
@@ -53,7 +65,7 @@ fn refresh_fleet_controller(binary: &Path, registration: &Path) -> io::Result<()
     Ok(())
 }
 fn restart_desktop(binary: &Path) -> io::Result<()> {
-    restart_hey_gh_daemon();
+    restart_companion_processes();
     refresh_fleet_controller(
         binary,
         &home()?.join("Library/LaunchAgents/local.hey-boss-fleet-controller.plist"),
@@ -98,7 +110,7 @@ fn reload_desktop_registration(launchctl: &Path, registration: &Path) -> io::Res
     )))
 }
 fn restart_companion() -> io::Result<()> {
-    restart_hey_gh_daemon();
+    restart_companion_processes();
     if cfg!(target_os = "macos") {
         output(
             Command::new("/bin/launchctl")
@@ -351,6 +363,9 @@ fn publish_to(
         if let Some(harvester) = harvester {
             refresh_harvester(harvester)?;
         }
+        if companion || app.is_some() {
+            refresh_shared_api(binary, companion, &home()?)?;
+        }
         // The durable receipt is the last publication step. Failed installations
         // leave the previous generation authoritative.
         write_json(&state.join("upgrade-receipt.json"), receipt)
@@ -398,6 +413,24 @@ fn publish_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_api_upgrade_only_restarts_managed_owners() {
+        let temp = Temp::new().unwrap();
+        let binary = temp.0.join("hey-boss");
+        let calls = temp.0.join("calls");
+        script(
+            &binary.with_file_name("hey-gh"),
+            &format!("echo \"$*\" >> '{}'", calls.display()),
+        );
+        refresh_shared_api(&binary, false, &temp.0).unwrap();
+        assert_eq!(fs::read_to_string(&calls).unwrap(), "install\n");
+        fs::write(&calls, "").unwrap();
+        refresh_shared_api(&binary, true, &temp.0).unwrap();
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap(),
+            "install\nservice restart\n"
+        );
+    }
     #[test]
     fn desktop_bundle_replacement_reloads_registration_and_propagates_bootstrap_errors() {
         for failure in ["none", "temporary", "permanent"] {
