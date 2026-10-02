@@ -280,6 +280,8 @@ impl Drop for DiskChange {
     }
 }
 pub(crate) fn delete_file(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    tests::before_delete();
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -420,6 +422,14 @@ mod tests {
 
     thread_local! {
         static WRITE_PAUSE: std::cell::RefCell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+        static DELETE_PAUSE: std::cell::RefCell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_delete() {
+        if let Some((entered, release)) = DELETE_PAUSE.with(|pause| pause.borrow_mut().take()) {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
     }
 
     pub(super) fn before_write() -> Result<()> {
@@ -436,6 +446,98 @@ mod tests {
         serde_json::from_value(json!({"version":1,"project":{"id":"named:Files","name":"Files"},
             "actor":{"id":"human:boss","kind":"human","machine":"test","host":"test","cwd":"/tmp","source":"test"},
             "operation":operation,"request_id":"upload-once"})).unwrap()
+    }
+
+    #[test]
+    fn raced_deletion_receipts_release_the_writer_before_file_cleanup() {
+        for artifact in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-delete-replay-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            let mut create =
+                request(json!({"action":"create","title":"Issue","body":"","labels":[]}));
+            create.request_id = None;
+            store.execute(&create).unwrap();
+            let create = if artifact {
+                json!({"action":"artifact","operation":{"command":"import","operation":{"command":"create","title":"Files","body":"[a](a.csv) [b](b.csv)"},"files":[{"destination":"a.csv","name":"a.csv","data":"YQ=="},{"destination":"b.csv","name":"b.csv","data":"Yg=="}]}})
+            } else {
+                json!({"action":"attachment","operation":{"command":"upload","target":{"kind":"issue","id":"1"},"name":"a.csv","data":"YQ=="}})
+            };
+            let mut create = request(create);
+            create.request_id = None;
+            let created = store.execute(&create).unwrap();
+            let deletion = if artifact {
+                json!({"action":"artifact","operation":{"command":"delete","id":created["artifact"]["id"],"if_version":1}})
+            } else {
+                json!({"action":"attachment","operation":{"command":"remove","id":created["attachment"]["id"]}})
+            };
+            let mut deletion = request(deletion);
+            deletion.request_id = Some("delete-once".into());
+            let competing = deletion.clone();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (enter_writer, writer_paused) = mpsc::channel();
+            let (release_writer, resume_writer) = mpsc::channel();
+            let (connection, transport) =
+                crate::database::tests::pause_before_writer(&path, enter_writer, resume_writer);
+            store.replace_connection_for_test(connection);
+            let (enter_cleanup, cleanup_paused) = mpsc::channel();
+            let (release_cleanup, resume_cleanup) = mpsc::channel();
+            let replaying = std::thread::spawn(move || {
+                DELETE_PAUSE
+                    .with(|pause| *pause.borrow_mut() = Some((enter_cleanup, resume_cleanup)));
+                store.execute(&deletion)
+            });
+            writer_paused.recv_timeout(Duration::from_secs(5)).unwrap();
+            let mut other = Store::open(&path).unwrap();
+            other.replace_connection_for_test(Connection::connect(&path).unwrap());
+            let expected = other.execute(&competing).unwrap();
+            release_writer.send(()).unwrap();
+            cleanup_paused.recv_timeout(Duration::from_secs(5)).unwrap();
+            let writer = Connection::connect(&path).unwrap();
+            let (written, completed) = mpsc::channel();
+            let editing = std::thread::spawn(move || {
+                let result = writer.execute(
+                    "UPDATE projects SET activity_at=activity_at+1 WHERE id='named:Files'",
+                    [],
+                );
+                written.send(result.is_ok()).unwrap();
+                result
+            });
+            let available = completed.recv_timeout(Duration::from_secs(3)).ok() == Some(true);
+            release_cleanup.send(()).unwrap();
+            assert_eq!(replaying.join().unwrap().unwrap(), expected);
+            editing.join().unwrap().unwrap();
+            transport.join().unwrap();
+            let inspecting = Connection::connect(&path).unwrap();
+            let receipts: i64 = inspecting
+                .query_row(
+                    "SELECT count(*) FROM requests WHERE request_id='delete-once'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let files: i64 = inspecting
+                .query_row("SELECT count(*) FROM file_attachments", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!((receipts, files), (1, 0));
+            assert_eq!(
+                fs::read_dir(root.join("issues.attachments"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            drop(inspecting);
+            drop(other);
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            assert!(
+                available,
+                "Replayed deletion held the writer during cleanup (artifact={artifact})"
+            );
+        }
     }
 
     #[test]

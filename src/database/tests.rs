@@ -104,6 +104,49 @@ impl Drop for Fixture {
     }
 }
 
+/// Pause the first writer acquisition after real read requests have completed.
+pub(crate) fn pause_before_writer(
+    path: &Path,
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+) -> (Connection, std::thread::JoinHandle<()>) {
+    let Backend::Remote(remote) = Connection::connect(path).unwrap().backend else {
+        unreachable!()
+    };
+    let mut upstream = remote.stream.into_inner().unwrap();
+    let (client, server) = UnixStream::pair().unwrap();
+    let transport = std::thread::spawn(move || {
+        let mut server = BufReader::new(server);
+        let mut paused = false;
+        while let Some(command) = wire::read::<Command>(&mut server).unwrap() {
+            if !paused && matches!(&command, Command::Batch { sql } if sql == "BEGIN IMMEDIATE") {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+                paused = true;
+            }
+            wire::write(upstream.get_mut(), &command).unwrap();
+            loop {
+                let reply = wire::read::<Reply>(&mut upstream).unwrap().unwrap();
+                wire::write(server.get_mut(), &reply).unwrap();
+                if !reply.more {
+                    break;
+                }
+            }
+        }
+    });
+    (
+        Connection {
+            backend: Backend::Remote(Remote {
+                path: path.to_owned(),
+                stream: RefCell::new(Some(BufReader::new(client))),
+                transaction: Cell::new(false),
+                last_id: Cell::new(0),
+            }),
+        },
+        transport,
+    )
+}
+
 /// Count real service round trips and SQL work, excluding the connection handshake.
 pub(crate) fn measured_connection(
     path: &Path,
