@@ -14,6 +14,10 @@ macro_rules! prompts {
             pub dependencies: Option<String>,
             #[serde(skip_serializing)]
             pub plan_document: Option<String>,
+            #[serde(skip_serializing)]
+            pub subtask: Option<String>,
+            #[serde(skip_serializing)]
+            pub github: Option<String>,
             // Accept legacy saved settings, but never apply or expose Chief wrappers.
             #[serde(skip_serializing)]
             pub chief_wrapper: Option<String>,
@@ -38,16 +42,14 @@ macro_rules! prompts {
 }
 
 prompts! {
-    (layout, DEFAULT_LAYOUT_PROMPT, "Prompt sequence", "Arrange or omit {{task}}, {{subtask}}, {{github}}, {{workspace}}, {{delivery}}, {{handoff}}, {{resume}}. Empty sections disappear. Task selects Implementation or Plan; workspace and delivery follow the workflow settings."),
+    (layout, DEFAULT_LAYOUT_PROMPT, "Prompt sequence", "Arrange or omit {{task}}, {{workspace}}, {{delivery}}, {{handoff}}, {{resume}}. Empty sections disappear. Task selects Implementation or Plan; workspace and delivery follow the workflow settings."),
     (plan, DEFAULT_PLAN_PROMPT, "Planning", ""),
     (worktree, DEFAULT_WORKTREE_PROMPT, "Dedicated worktree", ""),
     (checkout, DEFAULT_CHECKOUT_PROMPT, "Existing checkout", ""),
     (prs, DEFAULT_PRS_PROMPT, "Pull request", ""),
     (main, DEFAULT_MAIN_PROMPT, "Push to main", ""),
     (handoff, DEFAULT_HANDOFF_PROMPT, "Ready handoff", "PR tasks that unblock dependencies before merge."),
-    (subtask, DEFAULT_SUBTASK_PROMPT, "Subtask context", "Subtasks. Variables: {{subtask_position}}, {{subtask_total}}, {{parent_number}}, {{parent_title}}, {{parent_state}}, {{previous_subtask}}, {{next_subtask}}."),
     (resume, DEFAULT_RESUME_PROMPT, "Resume", "Resumed tasks."),
-    (github, DEFAULT_GITHUB_PROMPT, "GitHub status", "Tasks with GitHub status, and live GitHub updates."),
     (steering, DEFAULT_STEERING_PROMPT, "New instructions", "Live instructions. Variables: {{scope}}, {{instruction}}."),
     (dependency_update, DEFAULT_DEPENDENCY_UPDATE_PROMPT, "Dependency updates", "Live dependency changes. Variable: {{instruction}}."),
     (prompt_update, DEFAULT_PROMPT_UPDATE_PROMPT, "Prompt updates", "Changed project instructions. Variable: {{instructions}}."),

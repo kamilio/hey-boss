@@ -78,7 +78,7 @@ fn reorder_preserves_claims_and_only_explicit_dependencies_constrain_siblings() 
 }
 
 #[test]
-fn worker_preview_includes_parent_previous_and_next_with_read_commands() {
+fn subtasks_use_normal_prompts_and_fetch_parent_siblings_and_dependencies() {
     let mut f = Fixture::new("prompt");
     f.create(None);
     for _ in 0..3 {
@@ -87,14 +87,17 @@ fn worker_preview_includes_parent_previous_and_next_with_read_commands() {
     f.close(2);
     let preview = f.run(json!({"action":"worker_preview","number":3,"config":{"cwd":"/tmp"}}));
     let prompt = preview["prompt"].as_str().unwrap();
-    assert!(prompt.contains("Subtask 2 of 3"), "{prompt}");
-    assert!(prompt.contains("Parent: #1 Feature"), "{prompt}");
-    assert!(prompt.contains("Previous: #2 Step [closed]"), "{prompt}");
-    assert!(prompt.contains("Next: #4 Step [open]"), "{prompt}");
-    assert!(
-        prompt.contains("hey-boss issue view 1 --project"),
-        "{prompt}"
-    );
+    assert!(prompt.contains("hey-boss issue view 3"), "{prompt}");
+    assert!(!prompt.contains("Subtask 2 of 3"), "{prompt}");
+    assert!(!prompt.contains("Parent: #1 Feature"), "{prompt}");
+    f.run(json!({"action":"set_blockers","number":3,"blockers":[2],"force":false}));
+    let fetched = f.view(3);
+    assert_eq!(fetched["subtask_context"]["position"], 2);
+    assert_eq!(fetched["subtask_context"]["total"], 3);
+    assert_eq!(fetched["subtask_context"]["parent"]["number"], 1);
+    assert_eq!(fetched["subtask_context"]["previous"]["number"], 2);
+    assert_eq!(fetched["subtask_context"]["next"]["number"], 4);
+    assert_eq!(fetched["dependency_context"][0]["number"], 2);
 }
 
 fn enable_prs(f: &mut Fixture) {
