@@ -190,12 +190,16 @@ fn directory(db: &Connection, p: &Project) -> Result<String> {
 }
 fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> {
     let defaults = project_settings(db, p)?;
+    configured_runtime(c, &defaults, checkout(db, c, p)?)
+}
+
+fn configured_runtime(c: &Settings, defaults: &Value, cwd: String) -> Result<ProjectConfig> {
     Ok(ProjectConfig {
         prompt: c
             .prompt
             .clone()
             .unwrap_or_else(|| defaults["prompt"].as_str().unwrap().into()),
-        cwd: checkout(db, c, p)?,
+        cwd,
         concurrency: c.concurrency,
         labels: c.tags.clone(),
         use_goal: c.use_goal,
@@ -992,18 +996,28 @@ pub(super) fn reserve(
     // snapshot, then run Git/filesystem/process validation before reserving.
     let tx = store.db.read_transaction()?;
     let mut prepared = HashMap::new();
+    let mut defaults_by_project = HashMap::new();
     for (id, text) in ready_workers(&tx, worker_id)? {
         let settings: Settings = serde_json::from_str(&text)?;
         let mut projects = HashMap::new();
         for (project, _) in project_pickup_candidates(&tx, &settings)? {
-            let config = runtime(&tx, &settings, &project)?;
-            let defaults = project_settings(&tx, &project)?;
+            // Settings are shared, but checkout and overrides belong to each
+            // worker. The cache ends with this read snapshot; reservation still
+            // checks settings again inside its write transaction below.
+            let defaults = match defaults_by_project.entry(project.id.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(project_settings(&tx, &project)?)
+                }
+            };
+            let config =
+                configured_runtime(&settings, defaults, checkout(&tx, &settings, &project)?)?;
             projects.insert(
                 project.id.clone(),
                 PreparedProject {
                     project,
                     config,
-                    defaults,
+                    defaults: defaults.clone(),
                     valid: false,
                 },
             );
@@ -1240,6 +1254,50 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pickup_preflight_reads_shared_project_defaults_once() {
+        let mut work = Vec::new();
+        for count in [16, 128] {
+            let root =
+                std::env::temp_dir().join(format!("hb-pickup-defaults-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id),owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL);
+                INSERT INTO projects(id,name,next_number) VALUES('named:Shared','Shared',2);
+                INSERT INTO agents VALUES('creator','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                VALUES('named:Shared',1,'Task','','open','creator',0,0,1,'[]',1)").unwrap();
+            for index in 0..count {
+                let settings = Settings {
+                    enabled: true,
+                    directory: root.join("missing").to_string_lossy().into(),
+                    projects: vec!["named:Shared".into()],
+                    prompt: Some(format!("Worker {index}")),
+                    ..Settings::default()
+                };
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)", params![format!("worker-{index}"),serde_json::to_string(&settings).unwrap()]).unwrap();
+            }
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            assert!(reserve(&mut store, "unit", None).unwrap().is_none());
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!(
+                "Pickup preflight, {count} workers sharing one project: {commands} RPCs, {steps} query VM steps"
+            );
+            work.push((count, commands));
+        }
+        assert!(
+            work.iter()
+                .all(|(count, commands)| *commands <= count * 2 + 7),
+            "Repeated shared settings reads: {work:?}"
+        );
+    }
+
     #[test]
     fn pickup_rechecks_the_project_head_after_preflight() {
         let provider = std::env::current_exe().unwrap();
