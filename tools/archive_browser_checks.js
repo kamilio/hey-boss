@@ -11,6 +11,10 @@ async page => {
   for(const [surface,base] of [['desktop','http://127.0.0.1:59662/'],['phone',phone+'/issues']]) {
     const detail=async n=>{await page.goto(base+'#project=named%3AArchive%20QA&issue='+n);await page.locator('.issue-description').waitFor();await page.locator('.issue-activity').first().waitFor();};
     await detail(1);
+    const run=await page.evaluate(()=>api({action:'worker_run',run_id:'archive-ui-run'},'named:Archive QA'));
+    check(run.prompt==='Saved expanded prompt'&&run.config.prompt==='Saved prompt',surface+': archived worker prompt and settings remain retrievable');
+    const workers=await page.evaluate(()=>api({action:'worker_status'},'named:Archive QA'));
+    check(JSON.stringify(workers).includes('Archived worker event 28'),surface+': archived worker log tail remains visible to dashboards');
     check((await page.locator('.issue-description').innerText()).includes('cold-search-needle 🦀'),surface+': cold body renders');
     check(await page.locator('.issue-description strong').innerText()==='Formatting survives.',surface+': rich body unchanged');
     const ids=await page.locator('#comments [data-event-id]').evaluateAll(nodes=>nodes.map(n=>n.dataset.eventId));
