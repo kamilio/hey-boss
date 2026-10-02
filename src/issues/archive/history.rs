@@ -497,6 +497,7 @@ fn same_record(table: &str, expected: &Value, actual: &Value) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn cleanup_history(db: &HotConnection) -> Result<usize> {
     let target: Option<(String,i64)> = db.query_row("SELECT project_id,number FROM issues WHERE archive_key IS NOT NULL AND archive_cleanup=1 AND archive_restoring=0 LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     match target {
