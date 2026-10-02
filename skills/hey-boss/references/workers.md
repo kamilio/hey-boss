@@ -15,9 +15,9 @@ Standalone queues are per machine. `status` prints one snapshot; `watch` opens
 the dashboard. Bare `worker` and `auto-workers` show help.
 Local startup connection outages leave `worker run` idle until recovery; Ctrl+C cancels the wait.
 
-`auto-workers run` applies the machine's saved configuration and explicitly
-resumes paused pickup. Use `status`, `config`, or `watch` to observe without
-resuming it. Quitting the dashboard leaves workers running.
+`auto-workers run` applies saved configuration while preserving paused or stopped
+intent. Use `status`, `config`, or `watch` to observe. Quitting the dashboard
+leaves workers running.
 
 ## Saved workers and fleet
 
