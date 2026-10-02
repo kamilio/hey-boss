@@ -35,6 +35,9 @@ impl IssueReference {
 pub enum Action {
     List,
     Count,
+    Related {
+        issue: IssueReference,
+    },
     Clear {
         task_ids: Vec<String>,
     },
@@ -87,7 +90,7 @@ pub enum Action {
 impl Action {
     pub fn payload(&self) -> Result<Value> {
         let (command, id) = match self {
-            Self::List | Self::Count => ("inbox_list", None),
+            Self::List | Self::Count | Self::Related { .. } => ("inbox_list", None),
             Self::Clear { .. } => ("inbox_clear", None),
             Self::View { task_id } => ("inbox_view", Some(task_id)),
             Self::Read { task_id } => ("inbox_read", Some(task_id)),
@@ -105,6 +108,10 @@ impl Action {
         let mut value = json!({"command":command,"sync":false,"task_id":id});
         match self {
             Self::Count => value["count_only"] = json!(true),
+            Self::Related { issue } => {
+                issue.validate()?;
+                value["issue"] = json!(issue);
+            }
             Self::Clear { task_ids } => {
                 if task_ids.is_empty() || task_ids.len() > 10000 {
                     return Err(Error::invalid("Select 1–10000 notices to clear"));
@@ -250,6 +257,41 @@ pub fn execute(action: &Action) -> Result<Value> {
 }
 
 fn project_response(action: &Action, mut result: Value) -> Result<Value> {
+    if let Action::Related { issue } = action {
+        // Also bound responses from older daemons that ignore the relationship.
+        let unread = result["unread"]
+            .as_u64()
+            .ok_or_else(|| Error::invalid("Invalid Inbox unread count"))?;
+        let tasks = result["tasks"]
+            .as_array()
+            .ok_or_else(|| Error::invalid("Invalid Inbox notices"))?;
+        let tasks: Vec<Value> = tasks
+            .iter()
+            .filter(|task| {
+                task["issue"]["project"].as_str() == Some(issue.project.as_str())
+                    && task["issue"]["number"].as_i64() == Some(issue.number)
+                    && task["issue"]["host"].as_str().unwrap_or("")
+                        == issue.host.as_deref().unwrap_or("")
+            })
+            .map(|task| {
+                let mut row = serde_json::Map::new();
+                for key in [
+                    "taskID",
+                    "title",
+                    "kind",
+                    "status",
+                    "commentsEnabled",
+                    "issue",
+                ] {
+                    if let Some(value) = task.get(key) {
+                        row.insert(key.into(), value.clone());
+                    }
+                }
+                Value::Object(row)
+            })
+            .collect();
+        return Ok(json!({"ok":true,"unread":unread,"tasks":tasks}));
+    }
     if matches!(action, Action::Count) {
         // Older desktop daemons ignore count_only and return their full list.
         // Keep the web response compact while desktop/CLI upgrades converge.
@@ -283,6 +325,35 @@ fn project_response(action: &Action, mut result: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn related_notices_match_the_whole_reference_and_project_legacy_responses() {
+        let action: Action = serde_json::from_value(
+            json!({"action":"related","issue":{"project":"named:A","number":7}}),
+        )
+        .unwrap();
+        assert_eq!(action.payload().unwrap()["command"], "inbox_list");
+        assert_eq!(
+            action.payload().unwrap()["issue"],
+            json!({"project":"named:A","number":7})
+        );
+        let task = |project, number, host| json!({"taskID":"notice","title":"Title","kind":"update","status":"ok","commentsEnabled":true,"issue":{"project":project,"number":number,"host":host},"iconData":"x".repeat(200000)});
+        let reply = project_response(&action, json!({"unread":12,"tasks":[task("named:A",7,None::<&str>),task("named:A",8,None),task("named:B",7,None),task("named:A",7,Some("remote"))]})).unwrap();
+        assert_eq!(reply["unread"], 12);
+        assert_eq!(reply["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(reply["tasks"][0]["commentsEnabled"], true);
+        assert!(reply["tasks"][0].get("iconData").is_none());
+        assert!(reply.to_string().len() < 500);
+        for reference in [
+            json!({"project":"","number":7}),
+            json!({"project":"named:A","number":0}),
+            json!({"project":"named:A","number":7,"host":"-bad"}),
+        ] {
+            let invalid: Action =
+                serde_json::from_value(json!({"action":"related","issue":reference})).unwrap();
+            assert!(invalid.payload().is_err());
+        }
+    }
+
     #[test]
     fn unread_count_uses_a_compact_backward_compatible_inbox_request() {
         let action: Action = serde_json::from_value(json!({"action":"count"})).unwrap();

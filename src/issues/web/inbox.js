@@ -5,6 +5,8 @@ let inboxTasks = [],
   inboxAt = 0,
   inboxLoading = null,
   inboxCountLoading = null,
+  inboxRelatedLoading = new Map(),
+  inboxBadgeVersion = 0,
   inboxSignature = "",
   inboxBusy = false,
   inboxSearchTimer,
@@ -137,6 +139,7 @@ function updateAppNavigation() {
   });
 }
 function updateInboxBadge(unread) {
+  ++inboxBadgeVersion;
   $("#inbox-unread").textContent = unread;
   $("#inbox-unread").hidden = !unread;
   $("#nav-inbox").setAttribute(
@@ -165,11 +168,14 @@ async function refreshInboxBadge() {
   try {
     if (model.route.view !== "inbox" && !model.detail) {
       if (!inboxCountLoading) {
-        const snapshotAt = inboxAt;
+        const badgeVersion = inboxBadgeVersion;
         inboxCountLoading = inboxApi({ action: "count" })
           .then((value) => {
-            // A full notice read may have refreshed the badge while this ran.
-            if (inboxAt === snapshotAt && model.route.view !== "inbox" && !model.detail)
+            // Another notice read may have refreshed the badge while this ran.
+            if (
+              inboxBadgeVersion === badgeVersion &&
+              model.route.view !== "inbox" && !model.detail
+            )
               updateInboxBadge(value.unread);
           })
           .finally(() => (inboxCountLoading = null));
@@ -177,14 +183,13 @@ async function refreshInboxBadge() {
       await inboxCountLoading;
       return;
     }
-    const tasks = await inboxSnapshot();
     if (model.route.view === "issues" && model.detail)
       await loadRelatedNotices(
         model.detail.issue.number,
         model.project.id,
         model.route.host,
-        tasks,
       );
+    else await inboxSnapshot();
   } catch {
     $("#inbox-unread").hidden = true;
   }
@@ -483,7 +488,7 @@ async function refreshInbox(quiet = true) {
     if (!quiet) toast(error.message, true);
   }
 }
-async function loadRelatedNotices(number, project, host, snapshot = null) {
+async function loadRelatedNotices(number, project, host) {
   const sequence = model.sequence;
   const current = () =>
     sequence === model.sequence &&
@@ -493,14 +498,18 @@ async function loadRelatedNotices(number, project, host, snapshot = null) {
     (model.route.host || "") === (host || "");
   const heading = `<h2 class="side-heading">Related notices${icon("inbox")}</h2>`;
   try {
-    const tasks = snapshot || (await inboxSnapshot());
+    const issue = { project, number, ...(host ? { host } : {}) };
+    const key = JSON.stringify(issue);
+    if (!inboxRelatedLoading.has(key))
+      inboxRelatedLoading.set(
+        key,
+        inboxApi({ action: "related", issue })
+          .finally(() => inboxRelatedLoading.delete(key)),
+      );
+    const value = await inboxRelatedLoading.get(key);
     if (!current()) return;
-    const related = tasks.filter(
-      (task) =>
-        task.issue?.number === number &&
-        task.issue.project === project &&
-        (task.issue.host || "") === (host || ""),
-    );
+    updateInboxBadge(value.unread);
+    const related = value.tasks;
     const root = $("#related-notices");
     if (!root) return;
     root.hidden = false;
