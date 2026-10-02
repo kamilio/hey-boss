@@ -16,6 +16,22 @@ use std::{
     },
     time::{Duration, Instant},
 };
+// A receipt is published only after installation succeeds. Check the actual
+// binary too, so an incomplete swap or rollback never forces a reconnect.
+fn completed_upgrade(ctx: &Context) -> bool {
+    let Ok(receipt) = ctx.read_json(&ctx.state.join("upgrade-receipt.json"), Value::Null) else {
+        return false;
+    };
+    let Some(build) = receipt["source"]["build"].as_str() else {
+        return false;
+    };
+    if build.is_empty() || build == env!("HEY_BOSS_BUILD_ID") {
+        return false;
+    }
+    ctx.build()
+        .is_ok_and(|installed| installed.ends_with(&format!("(build {build})")))
+}
+
 fn local_config(ctx: &Context) -> Result<Vec<Value>> {
     Ok(
         ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?["workers"]
@@ -320,6 +336,11 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         let Some(message) = input.next()? else {
             break;
         };
+        // End at a message boundary, before starting another database task.
+        // The supervisor reconnects; detached workers keep their execution.
+        if message["kind"] == "ping" && completed_upgrade(&ctx) {
+            break;
+        }
         let operation = match message["kind"].as_str() {
             Some("pull" | "pull_end") => Some("pull"),
             Some("configure") => Some("configure"),
