@@ -542,10 +542,13 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
                 .trim_end_matches('/');
             super::projects::validate_path(workspace)?;
             let name = id.rsplit('/').next().unwrap();
+            let existing = machine["projects"][&id].clone();
+            let automatic = update["path"].as_str().is_none_or(|p| p.trim().is_empty());
             let path = update["path"]
                 .as_str()
                 .filter(|p| !p.trim().is_empty())
                 .map(|p| p.trim().to_owned())
+                .or_else(|| existing["path"].as_str().map(str::to_owned))
                 .unwrap_or_else(|| format!("{workspace}/{name}"));
             super::projects::validate_path(&path)?;
             if let Some(worker_id) = update["worker"].as_str().filter(|s| !s.is_empty()) {
@@ -576,6 +579,9 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
             }
             machine["workspace"] = json!(workspace);
             machine["projects"][&id] = json!({"git":git,"path":path});
+            if automatic && (existing.is_null() || existing["reuse_existing"] == true) {
+                machine["projects"][&id]["reuse_existing"] = json!(true);
+            }
         }
         _ => return Err(invalid("Unknown machine edit")),
     }
@@ -712,6 +718,33 @@ mod tests {
         assert_eq!(
             reloaded["document"]["machines"]["local"]["workspace"],
             "~/Work"
+        );
+    }
+
+    #[test]
+    fn project_path_is_automatic_only_when_not_explicitly_chosen() {
+        let mut doc = parse("machines: {local: {workers: []}}\n").unwrap();
+        let mut update = json!({"host":"local","action":"project","git":"https://github.com/acme/atlas.git","workspace":"~/Work"});
+        machine_update(&mut doc, &update).unwrap();
+        assert_eq!(
+            doc["machines"]["local"]["projects"]["github.com/acme/atlas"]["reuse_existing"],
+            true
+        );
+        update["path"] = json!("~/Work/atlas-separate");
+        machine_update(&mut doc, &update).unwrap();
+        assert_ne!(
+            doc["machines"]["local"]["projects"]["github.com/acme/atlas"]["reuse_existing"],
+            true
+        );
+        update.as_object_mut().unwrap().remove("path");
+        machine_update(&mut doc, &update).unwrap();
+        assert_eq!(
+            doc["machines"]["local"]["projects"]["github.com/acme/atlas"]["path"],
+            "~/Work/atlas-separate"
+        );
+        assert_ne!(
+            doc["machines"]["local"]["projects"]["github.com/acme/atlas"]["reuse_existing"],
+            true
         );
     }
 

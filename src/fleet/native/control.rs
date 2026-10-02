@@ -189,6 +189,7 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
     super::projects::retry(ctx, retries)?;
     let mut reply = configure_companion_locked(ctx, message)?;
     reply["project_retries"] = retries.clone();
+    reply["project_checkouts"] = super::projects::resolved(ctx)?;
     Ok(reply)
 }
 fn configure_companion_locked(ctx: &Context, message: &Value) -> Result<Value> {
