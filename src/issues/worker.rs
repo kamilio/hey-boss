@@ -1097,6 +1097,8 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
         }
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::environment::check_worker(Path::new(&job.config.cwd))
+            .map_err(|e| Error::new("infrastructure_blocked", e.to_string()))?;
         if job.config.provider == crate::agent_runtime::Provider::Codex {
             run_codex(path, &mut store, &mut job, &stop)
         } else {

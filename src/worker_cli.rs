@@ -164,6 +164,12 @@ fn run_inner(o: &Options) -> Result<()> {
         .unwrap_or(std::env::current_dir()?)
         .canonicalize()?;
     let machine = issues::identity::machine()?;
+    if matches!(o.action, None | Some(Action::Run)) {
+        for directory in std::iter::once(&cwd).chain(o.directory.iter().skip(1)) {
+            hey_boss::environment::check_worker(directory)
+                .map_err(|e| Error::new("environment_check_failed", e.to_string()))?;
+        }
+    }
     let base = issues::identity::project(&cwd, &machine)?;
     if matches!(o.action, Some(Action::RunChief)) {
         if o.all_projects || o.project.len() > 1 {

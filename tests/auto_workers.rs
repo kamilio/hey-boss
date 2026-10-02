@@ -1,3 +1,5 @@
+#[path = "support/environment.rs"]
+mod signing;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,6 +15,7 @@ struct Fixture {
     desired: PathBuf,
     owner: hey_boss::database::Owner,
     owner_lock: PathBuf,
+    signing: Option<signing::Fixture>,
 }
 impl Fixture {
     fn new(name: &str) -> Self {
@@ -44,10 +47,15 @@ impl Fixture {
             root,
             owner,
             owner_lock,
+            signing: None,
         }
     }
     fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        let mut c = self
+            .signing
+            .as_ref()
+            .map(|signing| signing.command(env!("CARGO_BIN_EXE_hey-boss")))
+            .unwrap_or_else(|| Command::new(env!("CARGO_BIN_EXE_hey-boss")));
         c.args(args)
             .current_dir(self.root.join("checkout"))
             .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
@@ -413,7 +421,10 @@ fn invalid_configuration_never_starts_an_earlier_valid_worker() {
 
 #[test]
 fn saves_separate_checkouts_and_a_shared_multi_project_pool() {
-    let f = Fixture::new("layouts");
+    let mut f = Fixture::new("layouts");
+    let signing = signing::Fixture::new();
+    signing.success("setup");
+    f.signing = Some(signing);
     let mut paths = Vec::new();
     for (directory, repo) in [
         ("one", "shared"),
