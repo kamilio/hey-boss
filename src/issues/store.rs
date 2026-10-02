@@ -1622,8 +1622,22 @@ impl Store {
         } else {
             TransactionBehavior::Deferred
         };
-        // BEGIN IMMEDIATE is the safe retry boundary: guards are evaluated only
-        // after this succeeds, and the mutation itself is executed exactly once.
+        let attempt_hold = match &r.operation {
+            Operation::HoldAttempt {
+                number,
+                if_version,
+                report,
+            } => Some(attempts::prepare_hold(
+                &self.db,
+                &detected,
+                *number,
+                *if_version,
+                report,
+            )),
+            _ => None,
+        };
+        // BEGIN IMMEDIATE is the safe retry boundary: mutation guards are
+        // checked under the writer, and the mutation executes exactly once.
         let tx = retry_contention(deadline, || {
             Ok(if matches!(behavior, TransactionBehavior::Deferred) {
                 self.db.read_transaction()?
@@ -1648,6 +1662,9 @@ impl Store {
         if let Some(response) = cached_response(&tx, &project, r, &payload)? {
             return self.finish_replay(r, response);
         }
+        // A duplicate may finish while Git is being inspected. Its durable
+        // receipt takes precedence even if those files disappeared meanwhile.
+        let attempt_hold = attempt_hold.transpose()?;
         if supervisor_unowned {
             super::authority::guard_unowned(&tx, &project.id, r.operation.number().unwrap())?;
         }
@@ -1931,16 +1948,14 @@ impl Store {
                 now,
             )?,
             Operation::HoldAttempt {
-                number,
-                if_version,
-                report,
+                number, if_version, ..
             } => attempts::hold(
                 &tx,
                 &project,
                 actor.unwrap(),
                 *number,
                 *if_version,
-                report,
+                attempt_hold.as_ref().unwrap(),
                 now,
             )?,
             Operation::InspectAttempt { number } => attempts::inspect(&tx, &project, *number)?,
@@ -3108,7 +3123,10 @@ mod contention_tests {
             INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
             SELECT 'named:Recovery',1+id%2,'creator','commented',id,'{}' FROM n;").unwrap();
         // Existing installations acquire the additive index on migration too.
-        store.db.execute_batch("DROP INDEX IF EXISTS issue_attempt_recovery").unwrap();
+        store
+            .db
+            .execute_batch("DROP INDEX IF EXISTS issue_attempt_recovery")
+            .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
@@ -3128,7 +3146,10 @@ mod contention_tests {
         assert!(untouched.get("attempt_recovery").is_none());
         assert_eq!(other["attempt_recovery"]["attempt_id"], "other-project");
         eprintln!("Attempt recovery: {commands} RPCs, {steps} query steps");
-        assert!(steps < 100, "Unrelated event history caused {steps} query steps");
+        assert!(
+            steps < 100,
+            "Unrelated event history caused {steps} query steps"
+        );
     }
 
     #[test]

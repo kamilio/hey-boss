@@ -99,6 +99,8 @@ impl Store {
 }
 
 fn git(path: &Path, args: &[&str]) -> Result<String> {
+    #[cfg(test)]
+    tests::before_git();
     let output = Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
@@ -230,15 +232,13 @@ fn evidence(hold: &Hold) -> Result<AttemptEvidence> {
     })
 }
 
-pub(super) fn hold(
+fn check_hold(
     db: &Connection,
     project: &Project,
-    actor: &Actor,
     number: i64,
     version: i64,
     report: &AttemptReport,
-    now: i64,
-) -> Result<Value> {
+) -> Result<()> {
     let issue = get_issue(db, &project.id, number, false)?;
     if version != issue.version {
         return Err(Error::conflict(
@@ -270,6 +270,30 @@ pub(super) fn hold(
             "Original owner does not match this issue's retained attempt",
         ));
     }
+    let other: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id<>?3 AND finished_at IS NULL)", params![project.id,number,report.owner], |r| r.get(0))?;
+    if other {
+        return Err(Error::conflict(
+            "Another attempt already reserved this issue; inspect its ownership before reporting a surviving process",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) struct PreparedHold {
+    report: AttemptReport,
+    git_dir: String,
+    git_head: String,
+    git_branch: String,
+}
+
+pub(super) fn prepare_hold(
+    db: &Connection,
+    project: &Project,
+    number: i64,
+    version: i64,
+    report: &AttemptReport,
+) -> Result<PreparedHold> {
+    check_hold(db, project, number, version, report)?;
     let mut report = report.clone();
     let actual = crate::agents::process_identity(report.pid);
     let expected = report.process_start.clone().or(actual).ok_or_else(|| Error::conflict("Process identity unavailable; supply its recorded process_start before placing a safe hold"))?;
@@ -286,10 +310,34 @@ pub(super) fn hold(
         return Err(Error::invalid("Attempt log must be a regular file"));
     }
     let path = &report.worktree;
-    let other: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id<>?3 AND finished_at IS NULL)", params![project.id,number,report.owner], |r| r.get(0))?;
-    if other {
+    // Git and filesystem observations do not need the database writer. The
+    // mutation rechecks ownership/version and the captured process identity.
+    Ok(PreparedHold {
+        git_dir: git(path, &["rev-parse", "--absolute-git-dir"])?
+            .trim()
+            .into(),
+        git_head: git(path, &["rev-parse", "HEAD"])?.trim().into(),
+        git_branch: git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?
+            .trim()
+            .into(),
+        report,
+    })
+}
+
+pub(super) fn hold(
+    db: &Connection,
+    project: &Project,
+    actor: &Actor,
+    number: i64,
+    version: i64,
+    prepared: &PreparedHold,
+    now: i64,
+) -> Result<Value> {
+    let report = &prepared.report;
+    check_hold(db, project, number, version, report)?;
+    if process_state(report.pid, report.process_start.as_deref().unwrap()) == "terminal" {
         return Err(Error::conflict(
-            "Another attempt already reserved this issue; inspect its ownership before reporting a surviving process",
+            "The reported process is already terminal; no live-attempt hold was created. Review its log and Git outcome before ordinary continuation.",
         ));
     }
     let previous: Option<(String,String,Option<i64>)> = db.query_row("SELECT id,state,finished_at FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 ORDER BY started_at DESC,id DESC LIMIT 1", params![project.id,number,report.owner], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -301,14 +349,10 @@ pub(super) fn hold(
         db.execute("UPDATE worker_runs SET state='attempt_held',finished_at=NULL,updated_at=?2,retry_at=NULL WHERE id=?1",params![id,now])?;
     }
     let hold = Hold {
-        git_dir: git(path, &["rev-parse", "--absolute-git-dir"])?
-            .trim()
-            .into(),
-        git_head: git(path, &["rev-parse", "HEAD"])?.trim().into(),
-        git_branch: git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?
-            .trim()
-            .into(),
-        report,
+        git_dir: prepared.git_dir.clone(),
+        git_head: prepared.git_head.clone(),
+        git_branch: prepared.git_branch.clone(),
+        report: report.clone(),
         machine: super::super::identity::machine()?,
         host: super::super::identity::host(),
         reported_by: actor.id.clone(),
@@ -409,6 +453,154 @@ mod tests {
     use std::io::Write;
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Stdio};
+
+    thread_local! {
+        static GIT_PAUSE: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn before_git() {
+        if let Some((entered, release)) = GIT_PAUSE.with(|pause| pause.borrow_mut().take()) {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+    }
+
+    #[test]
+    fn reporting_an_attempt_keeps_git_inspection_outside_the_writer() {
+        for scenario in ["unchanged", "changed", "terminal"] {
+            let mut fixture = Fixture::new();
+            let path = fixture.root.join("issues.db");
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            fixture
+                .store
+                .replace_connection_for_test(Connection::connect(&path).unwrap());
+            let report = fixture.report();
+            let pid = fixture.child.id();
+            let start = crate::agents::process_identity(pid).unwrap();
+            let finish = (scenario == "terminal").then(|| fixture.child.stdin.take().unwrap());
+            let version = fixture.version();
+            let project = fixture.project.id.clone();
+            let writer = Connection::connect(&path).unwrap();
+            let (entered, paused) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let reporting = std::thread::spawn(move || {
+                GIT_PAUSE.with(|pause| *pause.borrow_mut() = Some((entered, released)));
+                let result = fixture.apply(Operation::HoldAttempt {
+                    number: 1,
+                    if_version: version,
+                    report,
+                });
+                (fixture, result)
+            });
+            paused
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let (written, completed) = std::sync::mpsc::channel();
+            let editing = std::thread::spawn(move || {
+                let result = if scenario == "changed" {
+                    writer.execute(
+                        "UPDATE issues SET version=version+1 WHERE project_id=?1 AND number=1",
+                        [project],
+                    )
+                } else {
+                    writer.execute(
+                        "UPDATE projects SET activity_at=activity_at+1 WHERE id=?1",
+                        [project],
+                    )
+                };
+                if let Some(mut finish) = finish {
+                    writeln!(finish, "0").unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while process_state(pid, &start) != "terminal"
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    assert_eq!(process_state(pid, &start), "terminal");
+                }
+                written.send(result.is_ok()).unwrap();
+                result
+            });
+            let finished_while_paused = completed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .ok()
+                == Some(true);
+            release.send(()).unwrap();
+            let (fixture, result) = reporting.join().unwrap();
+            let edited = editing.join().unwrap();
+            let retained = held(&fixture.store.db, &fixture.project.id, 1).unwrap();
+            owner.stop();
+            drop(fixture);
+            assert!(
+                finished_while_paused,
+                "Git inspection held the database writer"
+            );
+            edited.unwrap();
+            if scenario == "changed" {
+                assert!(result.unwrap_err().message.contains("Issue changed"));
+                assert!(!retained);
+            } else if scenario == "terminal" {
+                assert!(result.unwrap_err().message.contains("already terminal"));
+                assert!(!retained);
+            } else {
+                result.unwrap();
+                assert!(retained);
+            }
+        }
+    }
+
+    #[test]
+    fn raced_attempt_receipt_survives_a_later_git_inspection_failure() {
+        let mut fixture = Fixture::new();
+        let path = fixture.root.join("issues.db");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        fixture
+            .store
+            .replace_connection_for_test(Connection::connect(&path).unwrap());
+        let request = Request {
+            version: 1,
+            project: fixture.project.clone(),
+            project_override: None,
+            actor: Some(fixture.actor.clone()),
+            operation: Operation::HoldAttempt {
+                number: 1,
+                if_version: fixture.version(),
+                report: fixture.report(),
+            },
+            request_id: Some("same-retained-attempt".into()),
+        };
+        let other = request.clone();
+        let root = fixture.root.clone();
+        let (entered, paused) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let reporting = std::thread::spawn(move || {
+            GIT_PAUSE.with(|pause| *pause.borrow_mut() = Some((entered, released)));
+            let result = fixture.store.execute(&request);
+            (fixture, result)
+        });
+        paused
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let mut competing = Store::open(&path).unwrap();
+        competing.replace_connection_for_test(Connection::connect(&path).unwrap());
+        let saved = competing.execute(&other).unwrap();
+        fs::rename(root.join(".git"), root.join("saved-git")).unwrap();
+        release.send(()).unwrap();
+        let (fixture, result) = reporting.join().unwrap();
+        let events: i64 = fixture
+            .store
+            .db
+            .query_row(
+                "SELECT count(*) FROM events WHERE action='attempt_held'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(competing);
+        owner.stop();
+        drop(fixture);
+        assert_eq!(result.unwrap(), saved);
+        assert_eq!(events, 1, "Receipt replay must not repeat the hold");
+    }
 
     struct Fixture {
         root: PathBuf,
