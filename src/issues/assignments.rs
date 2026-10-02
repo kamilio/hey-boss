@@ -2,6 +2,8 @@
 use super::*;
 
 const WATCHER: &str = "watcher:github";
+#[path = "github_watch_comments.rs"]
+mod comments;
 #[path = "assignment_evidence.rs"]
 mod evidence;
 #[path = "github_fetch.rs"]
@@ -440,6 +442,14 @@ impl Store {
             tx.execute("INSERT OR IGNORE INTO issue_github_signals SELECT ?1,?2,?3,?4,value FROM json_each(?5)",params![update.project,update.number,signal_url,observation.head,signals])?;
             tx.execute("INSERT INTO issue_github_watches(project_id,issue_number,status) VALUES(?1,?2,?3) ON CONFLICT(project_id,issue_number) DO UPDATE SET status=excluded.status",params![update.project,update.number,update.status.to_string()])?;
             if update.wake {
+                comments::record(
+                    &tx,
+                    &update.project,
+                    update.number,
+                    url,
+                    observation,
+                    &update.new_signals,
+                )?;
                 let was_ready: bool = tx.query_row(
                     "SELECT state='ready' FROM issues WHERE project_id=?1 AND number=?2",
                     params![update.project, update.number],
@@ -470,6 +480,7 @@ struct ObservationUpdate {
     number: i64,
     status: Value,
     wake: bool,
+    new_signals: Vec<String>,
 }
 
 fn watch_tasks(db: &Connection, url: &str) -> Result<Vec<(String, i64, Value)>> {
@@ -535,6 +546,7 @@ fn error_updates(
                 number,
                 status,
                 wake: false,
+                new_signals: Vec::new(),
             })
         })
         .collect())
@@ -558,7 +570,10 @@ fn observation_updates(
         }
         // A trailing slash changes the attached link, not the GitHub event.
         // Read both spellings so existing durable histories remain effective.
-        let wake: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal=s.value))",params![project,number,url.trim_end_matches('/'),observation.head,signals],|r|r.get(0))?;
+        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal=s.value)")?
+            .query_map(params![project,number,url.trim_end_matches('/'),observation.head,signals], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let wake = !new_signals.is_empty();
         let mut errors = source_errors(previous);
         errors.remove("required_checks");
         let evidence = &observation.evidence;
@@ -588,6 +603,7 @@ fn observation_updates(
             number,
             status,
             wake,
+            new_signals,
         });
     }
     Ok(updates)
@@ -879,6 +895,135 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+    #[test]
+    fn watcher_comments_record_new_events_once_and_survive_restart() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.observation(Some("failed-build"));
+        let comments = f.call(json!({"action":"view","number":1})).unwrap();
+        let comments = comments["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["author"], WATCHER);
+        let body = comments[0]["body"].as_str().unwrap();
+        assert!(body.contains("Required checks failed"), "{body}");
+        assert!(body.contains("[o/r#1](https://github.com/o/r/pull/1)"));
+        assert!(body.contains("head"));
+
+        f.observation(Some("failed-build"));
+        f.observation(None);
+        f.store = Store::open(&f.root.join("issues.db")).unwrap();
+        f.observation(Some("failed-build"));
+        assert_eq!(
+            f.call(json!({"action":"view","number":1})).unwrap()["comments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        f.observation(Some("rerun-failed"));
+        assert_eq!(
+            f.call(json!({"action":"view","number":1})).unwrap()["comments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn watcher_comments_and_wakeup_roll_back_together() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        let observation = hey_gh::watcher::Observation {
+            head: "head".into(),
+            blocking: vec!["failed".into()],
+            completed: None,
+            feedback: vec![],
+            evidence: json!({}),
+        };
+        f.store.db.execute_batch("CREATE TRIGGER reject_watch_comment BEFORE INSERT ON comments BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        assert!(
+            f.store
+                .record_github_observation("https://github.com/o/r/pull/1", &observation, 100)
+                .is_err()
+        );
+        assert_eq!(
+            get_issue(&f.store.db, "named:test", 1, false)
+                .unwrap()
+                .assignee
+                .as_deref(),
+            Some(WATCHER)
+        );
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT count(*) FROM issue_github_signals", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        f.store
+            .db
+            .execute_batch("DROP TRIGGER reject_watch_comment")
+            .unwrap();
+        f.observation(Some("failed"));
+        assert_eq!(
+            f.call(json!({"action":"view","number":1})).unwrap()["comments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn watcher_comments_only_describe_new_reasons_and_ignore_stale_polls() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.observation(Some("failed"));
+        let mut observation = hey_gh::watcher::Observation {
+            head: "head".into(),
+            blocking: vec!["failed".into()],
+            completed: Some("finished".into()),
+            feedback: vec!["review".into()],
+            evidence: json!({"required":[{"context":"Build","state":"failure"}]}),
+        };
+        f.store
+            .record_github_observation("https://github.com/o/r/pull/1", &observation, 200)
+            .unwrap();
+        let view = f.call(json!({"action":"view","number":1})).unwrap();
+        let comments = view["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 2);
+        let body = comments
+            .iter()
+            .map(|c| c["body"].as_str().unwrap())
+            .find(|body| body.contains("CI finished"))
+            .unwrap();
+        assert!(body.contains("New feedback"));
+        assert!(!body.contains("Required checks failed"));
+        observation.feedback.push("late".into());
+        f.store
+            .record_github_observation("https://github.com/o/r/pull/1", &observation, 150)
+            .unwrap();
+        assert_eq!(
+            f.call(json!({"action":"view","number":1})).unwrap()["comments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let events: i64 = f
+            .store
+            .db
+            .query_row(
+                "SELECT count(*) FROM events WHERE actor=?1 AND action='commented'",
+                [WATCHER],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 2);
+    }
+
     #[test]
     fn manual_fetch_preserves_ownership_and_survives_an_inflight_request() {
         let mut f = Fixture::new();
