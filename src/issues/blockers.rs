@@ -114,15 +114,28 @@ impl Graph {
             }
             graph.children.entry(parent).or_default().push(child);
         }
-        let mut prs = db.prepare("SELECT issue_number,url,purpose,status FROM issue_pull_requests WHERE project_id=?1 ORDER BY created_at,url")?;
-        for row in prs.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"url":r.get::<_,String>(1)?,"purpose":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?}))))? {
+        Ok(graph)
+    }
+    fn load_prs(
+        &mut self,
+        db: &Connection,
+        project: &str,
+        references: &BTreeSet<i64>,
+    ) -> Result<()> {
+        if references.is_empty() {
+            return Ok(());
+        }
+        // Drive indexed lookups from the referenced issues; a project's older
+        // PR history must not add work to an unrelated dependency response.
+        let mut prs = db.prepare("SELECT pr.issue_number,pr.url,pr.purpose,pr.status FROM json_each(?2) referenced CROSS JOIN issue_pull_requests pr WHERE pr.project_id=?1 AND pr.issue_number=referenced.value ORDER BY pr.created_at,pr.url")?;
+        for row in prs.query_map(params![project, serde_json::to_string(references)?], |r| Ok((r.get::<_,i64>(0)?, json!({"url":r.get::<_,String>(1)?,"purpose":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?}))))? {
             let (n, pr) = row?;
-            if let Some(issue) = graph.issues.get_mut(&n) {
+            if let Some(issue) = self.issues.get_mut(&n) {
                 if !issue["pull_requests"].is_array() { issue["pull_requests"] = json!([]); }
                 issue["pull_requests"].as_array_mut().unwrap().push(pr);
             }
         }
-        Ok(graph)
+        Ok(())
     }
     fn unfinished(&self, n: i64) -> bool {
         if let Some(done) = self.satisfied.borrow().get(&n) {
@@ -308,9 +321,10 @@ pub(super) fn has_dependencies(db: &Connection, project: &str, number: i64) -> R
 }
 
 pub(super) fn reopen_blockers(db: &Connection, project: &str, number: i64) -> Result<Vec<Value>> {
-    let graph = Graph::load(db, project)?;
-    Ok(graph
-        .active(number)
+    let mut graph = Graph::load(db, project)?;
+    let active = graph.active(number);
+    graph.load_prs(db, project, &active.keys().copied().collect())?;
+    Ok(active
         .into_iter()
         .map(|(n, source)| graph.reference(n, source))
         .collect())
@@ -487,7 +501,30 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
     }) {
         return Ok(());
     }
-    let graph = Graph::load(db, project)?;
+    let mut graph = Graph::load(db, project)?;
+    let mut references = BTreeSet::new();
+    for number in ["issue", "parent_issue", "child_issue"]
+        .iter()
+        .filter_map(|key| result[*key]["number"].as_i64())
+        .chain(
+            ["issues", "subtasks", "created_chain"]
+                .iter()
+                .flat_map(|key| result[*key].as_array().into_iter().flatten())
+                .filter_map(|issue| issue["number"].as_i64()),
+        )
+    {
+        references.extend(graph.links.get(&number).into_iter().flatten().copied());
+        references.extend(graph.active(number).into_keys());
+        references.extend(
+            graph
+                .dependents
+                .get(&number)
+                .into_iter()
+                .flatten()
+                .map(|(number, _)| *number),
+        );
+    }
+    graph.load_prs(db, project, &references)?;
     let attach = |issue: &mut Value| {
         let Some(n) = issue["number"].as_i64() else {
             return;
@@ -567,4 +604,94 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_work_does_not_grow_with_unreferenced_pr_history() {
+        let mut measurements = Vec::new();
+        for unrelated in [0, 2048] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-dependency-prs-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            drop(crate::issues::Store::open(&path).unwrap());
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',6);
+                INSERT INTO agents VALUES('human:test','{}',0);
+                INSERT INTO project_settings(project_id,prompt,version,prs_enabled) VALUES('named:test','',1,1);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                SELECT 'named:test',x,'Task','','open','human:test',0,0,1,'[]',x FROM n;
+                UPDATE issues SET blockers='[1]',state='blocked' WHERE number=2;
+                UPDATE issues SET state='blocked' WHERE number=4;
+                INSERT INTO issue_subtasks VALUES('named:test',4,5,0,'human:test');
+                INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose,status) VALUES
+                ('named:test',1,'https://github.com/o/r/pull/11','human:test',20,'fix','open'),
+                ('named:test',1,'https://github.com/o/r/pull/12','human:test',10,'supporting-evidence','merged'),
+                ('named:test',2,'https://github.com/o/r/pull/2','human:test',0,'fix','open'),
+                ('named:test',5,'https://github.com/o/r/pull/5','human:test',0,'prerequisite','open');").unwrap();
+            db.execute("WITH RECURSIVE n(x) AS (SELECT 1 WHERE ?1>0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at) SELECT 'named:test',3,'https://github.com/o/r/pull/'||(100+x),'human:test',x FROM n", [unrelated]).unwrap();
+            drop(db);
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let expected = json!([
+                {"url":"https://github.com/o/r/pull/12","purpose":"supporting-evidence","status":"merged"},
+                {"url":"https://github.com/o/r/pull/11","purpose":"fix","status":"open"}
+            ]);
+            for mode in ["lifecycle", "context", "reopen"] {
+                let (db, transport) = crate::database::tests::measured_connection(&path);
+                db.execute_batch("BEGIN IMMEDIATE").unwrap();
+                match mode {
+                    "lifecycle" => {
+                        validate_links(&db, "named:test", 2, &[1]).unwrap();
+                        validate_subtask_claims(&db, "named:test").unwrap();
+                        assert!(has_dependencies(&db, "named:test", 2).unwrap());
+                        reconcile(&db, "named:test", None, 1).unwrap();
+                    }
+                    "context" => {
+                        let mut result =
+                            json!({"issue":{"number":2},"issues":[{"number":1},{"number":4}]});
+                        enrich(&db, "named:test", &mut result).unwrap();
+                        for key in ["dependency_context", "blocked_by", "blocker_links"] {
+                            assert_eq!(result["issue"][key][0]["pull_requests"], expected, "{key}");
+                        }
+                        assert_eq!(
+                            result["issues"][0]["blocking"][0]["pull_requests"][0]["url"],
+                            "https://github.com/o/r/pull/2"
+                        );
+                        assert_eq!(
+                            result["issues"][1]["blocked_by"][0]["pull_requests"][0]["url"],
+                            "https://github.com/o/r/pull/5"
+                        );
+                    }
+                    "reopen" => assert_eq!(
+                        reopen_blockers(&db, "named:test", 2).unwrap()[0]["pull_requests"],
+                        expected
+                    ),
+                    _ => unreachable!(),
+                }
+                db.execute_batch("COMMIT").unwrap();
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                eprintln!(
+                    "{mode}, {unrelated} unrelated PRs: {commands} RPCs, {steps} query VM steps"
+                );
+                measurements.push((commands, steps));
+            }
+            owner.stop();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        for index in 0..3 {
+            assert_eq!(
+                measurements[index],
+                measurements[index + 3],
+                "Unreferenced PRs added work: {measurements:?}"
+            );
+        }
+    }
 }
