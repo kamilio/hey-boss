@@ -65,6 +65,7 @@ fn agent_comment_limits_apply_before_mutations_and_offer_an_override() {
                     .contains("Write so user can understand it, who is gonna read this?")
             );
             assert!(error.message.contains("--allow-long-comment"));
+            assert!(error.message.contains("Do not sound like a robot."));
         }
     }
     let unchanged = store
