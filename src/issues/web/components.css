@@ -762,6 +762,38 @@ h1 {
   }}
 .navigation-inner > a[aria-current="page"] {color:var(--text);border-bottom-color:var(--accent);}
 
+/* Keep secondary navigation out of the main tabs and above scrolling surfaces. */
+.navigation-overflow:not(:has(a:not([hidden]))) { display: none; }
+#navigation-more { width: 44px; height: 44px; }
+.navigation-overflow:has([aria-current="page"]) #navigation-more {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.navigation-more-links {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: 176px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--solid);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.navigation-more-links a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 7px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.navigation-more-links a:hover { background: var(--hover); color: var(--text); }
+.navigation-more-links a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+
 @media (max-width: 380px) {
   .header-inner { gap: 8px; padding: 0 12px; }
   .header-divider { display: none; }
