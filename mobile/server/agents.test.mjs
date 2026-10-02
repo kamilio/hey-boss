@@ -101,4 +101,12 @@ test('fleet YAML editing is paired, guarded and relayed to the supervisor',async
  assert.deepEqual(queue.requests[0]?.machine_update,machine);
  await call('/api/bridge/agents/'+queue.requests[0].id+'/result',{ok:true,revision:'three'},bridge);
  assert.equal((await(await machineEdit).json()).revision,'three');
+ const retry_project={host:'devbox',project:'github.com/acme/project'};
+ assert.equal((await call('/api/fleet/configuration',{retry_project:{}},headers)).status,400);
+ assert.equal((await call('/api/fleet/configuration',{retry_project,text:'machines: {}',revision:'three',save:true},headers)).status,400);
+ const retry=call('/api/fleet/configuration',{retry_project},headers);
+ for(let n=0;n<30;n++){queue=await(await call('/api/bridge/agents',null,bridge)).json();if(queue.requests.length)break;await new Promise(r=>setTimeout(r,10));}
+ assert.deepEqual(queue.requests[0]?.retry_project,retry_project);
+ await call('/api/bridge/agents/'+queue.requests[0].id+'/result',{ok:true},bridge);
+ assert.equal((await(await retry).json()).ok,true);
 });
