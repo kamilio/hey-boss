@@ -48,17 +48,55 @@ fn projected_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Value> {
     node["has_body"] = json!(r.get::<_, bool>(13)?);
     Ok(node)
 }
-fn get_projected(db: &Connection, id: &str, mode: BodyMode) -> Result<Value> {
-    db.query_row(
-        &format!(
-            "SELECT {} FROM mindmap_nodes WHERE id=?1",
-            projected_columns(mode)
-        ),
-        [id],
-        projected_row,
-    )
-    .optional()?
-    .ok_or_else(|| Error::new("not_found", "Mindmap node was not found"))
+enum ExternalNode {
+    Saved(String),
+    Resource(Value),
+}
+
+fn external_nodes(
+    db: &Connection,
+    endpoints: Vec<ExternalNode>,
+    mode: BodyMode,
+    budget: &mut ReadBudget,
+) -> Result<Vec<Value>> {
+    let batch_size = if mode == BodyMode::Full {
+        16
+    } else {
+        endpoints.len().max(1)
+    };
+    let mut nodes = Vec::with_capacity(endpoints.len());
+    for batch in endpoints.chunks(batch_size) {
+        let ids: Vec<_> = batch
+            .iter()
+            .filter_map(|endpoint| match endpoint {
+                ExternalNode::Saved(id) => Some(id),
+                ExternalNode::Resource(_) => None,
+            })
+            .collect();
+        let mut saved = BTreeMap::new();
+        if !ids.is_empty() {
+            let mut query = db.prepare(&format!(
+                "SELECT {} FROM mindmap_nodes WHERE id IN (SELECT value FROM json_each(?1))",
+                projected_columns(mode)
+            ))?;
+            for node in query.query_map([serde_json::to_string(&ids)?], projected_row)? {
+                let node = node?;
+                saved.insert(id(&node).to_owned(), node);
+            }
+        }
+        let mut projected = batch
+            .iter()
+            .map(|endpoint| match endpoint {
+                ExternalNode::Saved(id) => saved
+                    .remove(id)
+                    .ok_or_else(|| Error::new("not_found", "Mindmap node was not found")),
+                ExternalNode::Resource(node) => Ok(node.clone()),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        live_nodes(db, &mut projected, mode, budget)?;
+        nodes.extend(projected);
+    }
+    Ok(nodes)
 }
 fn id(node: &Value) -> &str {
     node["id"].as_str().unwrap()
@@ -1081,7 +1119,7 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
         for field in ["from", "to"] {
             let key = link[field].as_str().unwrap();
             if known.insert(key.to_owned()) {
-                external.push(get_projected(db, key, mode)?);
+                external.push(ExternalNode::Saved(key.to_owned()));
             }
         }
     }
@@ -1157,7 +1195,7 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
                     budget.charge(&automatic_node)?;
                     automatic.push(automatic_node);
                 } else if known.insert(target.clone()) {
-                    external.push(get_projected(db, &target, mode)?);
+                    external.push(ExternalNode::Saved(target.clone()));
                 }
                 let link = json!({"from":node["id"],"to":target,"kind":"pull-request","description":null,"automatic":true});
                 budget.charge(&link)?;
@@ -1168,6 +1206,57 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
     // PR attachments are authoritative even if no issue node has been placed in
     // a map. Prefer a saved node in this map, then the issue's own project map;
     // otherwise expose a live resource-only endpoint, without persisting a node.
+    let pr_urls: BTreeSet<_> = nodes
+        .iter()
+        .filter(|n| n["kind"] == "pr")
+        .map(|n| n["reference"].as_str().unwrap())
+        .collect();
+    let mut pr_issues: BTreeMap<String, Vec<(String, i64, String)>> = BTreeMap::new();
+    if !pr_urls.is_empty() {
+        let mut query = db.prepare(
+            "SELECT DISTINCT rtrim(pr.url,'/'),pr.project_id,pr.issue_number,p.name
+            FROM json_each(?1) selected
+            JOIN issue_pull_requests pr ON rtrim(pr.url,'/')=selected.value
+            JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number
+            JOIN projects p ON p.id=pr.project_id WHERE i.deleted_at IS NULL
+            ORDER BY rtrim(pr.url,'/'),pr.project_id,pr.issue_number",
+        )?;
+        for attachment in query.query_map([serde_json::to_string(&pr_urls)?], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ),
+            ))
+        })? {
+            let (url, issue) = attachment?;
+            pr_issues.entry(url).or_default().push(issue);
+        }
+    }
+    let issue_refs: BTreeSet<_> = pr_issues
+        .values()
+        .flatten()
+        .map(|(project, number, _)| (project, number.to_string()))
+        .collect();
+    let mut saved_issues = BTreeMap::new();
+    if !issue_refs.is_empty() {
+        let mut query = db.prepare("SELECT json_extract(selected.value,'$[0]'),json_extract(selected.value,'$[1]'),
+            (SELECT id FROM mindmap_nodes
+             WHERE kind='issue' AND reference_project=json_extract(selected.value,'$[0]') AND reference=json_extract(selected.value,'$[1]')
+             ORDER BY (project_id=?2) DESC,(project_id=json_extract(selected.value,'$[0]')) DESC,project_id,id LIMIT 1)
+            FROM json_each(?1) selected")?;
+        for row in query.query_map(params![serde_json::to_string(&issue_refs)?, p.id], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })? {
+            let (key, saved) = row?;
+            saved_issues.insert(key, saved);
+        }
+    }
     for node in &nodes {
         if focus.is_some_and(|focus| focus != id(node)) {
             continue;
@@ -1175,33 +1264,32 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
         if node["kind"] != "pr" {
             continue;
         }
-        let mut stmt=db.prepare("SELECT DISTINCT pr.project_id,pr.issue_number,p.name FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number JOIN projects p ON p.id=pr.project_id WHERE rtrim(pr.url,'/')=?1 AND i.deleted_at IS NULL ORDER BY pr.project_id,pr.issue_number")?;
-        let attachments = stmt.query_map([node["reference"].as_str().unwrap()], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for attachment in attachments {
-            let (project, number, name) = attachment?;
-            let saved: Option<String> = db.query_row("SELECT id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=?2 ORDER BY (project_id=?3) DESC,(project_id=?1) DESC,project_id,id LIMIT 1",params![project,number.to_string(),p.id],|r|r.get(0)).optional()?;
-            let issue = if let Some(saved) = saved {
-                get_projected(db, &saved, mode)?
-            } else {
-                json!({"id":format!("auto-issue:{project}:{number}"),"project_id":project,"project_name":name,"parent_id":null,"position":0,"kind":"issue","title":format!("Issue #{number}"),"body":"","reference":number.to_string(),"reference_project":project,"automatic":true,"resource_only":true,"available":true})
-            };
-            if automatic_links.insert((id(&issue).to_owned(), id(node).to_owned())) {
-                let link = json!({"from":issue["id"],"to":node["id"],"kind":"pull-request","description":null,"automatic":true});
+        for (project, number, name) in pr_issues
+            .get(node["reference"].as_str().unwrap())
+            .into_iter()
+            .flatten()
+        {
+            let saved = saved_issues
+                .get(&(project.clone(), number.to_string()))
+                .and_then(Option::as_ref);
+            let issue_id = saved
+                .cloned()
+                .unwrap_or_else(|| format!("auto-issue:{project}:{number}"));
+            if automatic_links.insert((issue_id.clone(), id(node).to_owned())) {
+                let link = json!({"from":issue_id,"to":node["id"],"kind":"pull-request","description":null,"automatic":true});
                 budget.charge(&link)?;
                 links.push(link);
             }
-            if known.insert(id(&issue).to_owned()) {
-                external.push(issue);
+            if known.insert(issue_id.clone()) {
+                external.push(if saved.is_some() {
+                    ExternalNode::Saved(issue_id)
+                } else {
+                    ExternalNode::Resource(json!({"id":issue_id,"project_id":project,"project_name":name,"parent_id":null,"position":0,"kind":"issue","title":format!("Issue #{number}"),"body":"","reference":number.to_string(),"reference_project":project,"automatic":true,"resource_only":true,"available":true}))
+                });
             }
         }
     }
-    live_nodes(db, &mut external, mode, &mut budget)?;
+    let mut external = external_nodes(db, external, mode, &mut budget)?;
     nodes.extend(automatic);
     super::artifacts::enrich_nodes(db, &mut nodes)?;
     super::artifacts::enrich_nodes(db, &mut external)?;
@@ -1216,6 +1304,139 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_batches_pr_backreferences_and_external_endpoints() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-map-backrefs-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let store = crate::issues::Store::open(&path).unwrap();
+            store.db.execute_batch(&format!("
+                INSERT INTO projects(id,name,next_number) VALUES('named:Map','Map',1),('named:Tasks','Tasks',1),('named:Other','Other',1);
+                INSERT INTO agents VALUES('creator','{{}}',0);
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,deleted_at)
+                SELECT 'named:Tasks',id,'Live '||id,'Body '||id,'open','creator',0,0,7,'[]',CASE WHEN id%8=0 THEN 1 END FROM n;
+                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,reference,reference_project,created_at,updated_at)
+                SELECT 'pr-'||number,'named:Map',number,'pr','Pull request','','https://github.com/example/repo/pull/'||number,'',0,0 FROM issues;
+                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,reference,reference_project,created_at,updated_at,display_label)
+                SELECT 'local-'||number,'named:Map',number+{count},'issue','Placeholder','',CAST(number AS TEXT),'named:Tasks',0,0,'Custom '||number FROM issues WHERE number%4=1;
+                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,reference,reference_project,created_at,updated_at)
+                SELECT 'own-'||number,'named:Tasks',number,'issue','Placeholder','',CAST(number AS TEXT),'named:Tasks',0,0 FROM issues WHERE number%4 IN (1,2);
+                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,reference,reference_project,created_at,updated_at)
+                SELECT 'other-'||number,'named:Other',number,'issue','Placeholder','',CAST(number AS TEXT),'named:Tasks',0,0 FROM issues WHERE number%4 IN (1,2,3);
+                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,created_at,updated_at)
+                SELECT 'text-'||number,'named:Other',number+{count},'markdown','External '||number,'Stored body '||number,0,0 FROM issues;
+                INSERT INTO mindmap_links(source,target,kind,created_at)
+                SELECT 'pr-'||number,'text-'||number,'related',number FROM issues;
+                INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                SELECT project_id,number,'https://github.com/example/repo/pull/'||number,'creator',number FROM issues;
+                INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                SELECT project_id,number,'https://github.com/example/repo/pull/'||number||'/','creator',number FROM issues;
+            ")).unwrap();
+            let project = Project {
+                id: "named:Map".into(),
+                name: "Map".into(),
+            };
+            let uncrowded = graph(&store.db, &project, BodyMode::None, None).unwrap();
+            store.db.execute_batch("
+                WITH RECURSIVE n(id) AS (VALUES(1000) UNION ALL SELECT id+1 FROM n WHERE id<9191)
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+                SELECT 'named:Tasks',id,'Unrelated','','open','creator',0,0,1,'[]' FROM n;
+                INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                SELECT project_id,number,'https://github.com/example/unrelated/pull/'||number,'creator',number FROM issues WHERE number>=1000;
+            ").unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            for mode in [BodyMode::None, BodyMode::Preview, BodyMode::Full] {
+                let expected = graph(&store.db, &project, mode, None).unwrap();
+                if mode == BodyMode::None {
+                    assert_eq!(expected, uncrowded);
+                }
+                let (db, transport) = crate::database::tests::measured_connection(&path);
+                let actual = graph(&db, &project, mode, None).unwrap();
+                assert_eq!(actual, expected);
+                let links = actual["links"].as_array().unwrap();
+                assert_eq!(links.len(), count + count - count / 8);
+                let nodes: BTreeMap<_, _> = actual["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(actual["external_nodes"].as_array().unwrap())
+                    .map(|n| (id(n), n))
+                    .collect();
+                let mut external_ids: Vec<_> = (1..=count).map(|n| format!("text-{n}")).collect();
+                external_ids.extend((1..=count).filter_map(|n| match n % 4 {
+                    2 => Some(format!("own-{n}")),
+                    3 => Some(format!("other-{n}")),
+                    0 if n % 8 != 0 => Some(format!("auto-issue:named:Tasks:{n}")),
+                    _ => None,
+                }));
+                assert_eq!(
+                    actual["external_nodes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|n| id(n))
+                        .collect::<Vec<_>>(),
+                    external_ids
+                );
+                for number in 1..=count {
+                    assert!(nodes.contains_key(format!("text-{number}").as_str()));
+                    if number % 8 == 0 {
+                        continue;
+                    }
+                    let key = match number % 4 {
+                        1 => format!("local-{number}"),
+                        2 => format!("own-{number}"),
+                        3 => format!("other-{number}"),
+                        _ => format!("auto-issue:named:Tasks:{number}"),
+                    };
+                    let node = nodes[key.as_str()];
+                    assert_eq!(
+                        node["title"],
+                        format!(
+                            "{} {number}",
+                            if number % 4 == 1 { "Custom" } else { "Live" }
+                        )
+                    );
+                    assert_eq!(
+                        node["body"],
+                        if mode == BodyMode::None {
+                            String::new()
+                        } else {
+                            format!("Body {number}")
+                        }
+                    );
+                    assert_eq!(node["resource_version"], 7);
+                    assert!(links.iter().any(|l| l["from"] == key
+                        && l["to"] == format!("pr-{number}")
+                        && l["automatic"] == true));
+                }
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                eprintln!("{count} PR nodes ({mode:?}): {commands} RPCs/{steps} steps");
+                measurements.push((count, mode, commands, steps));
+            }
+            drop(store);
+            owner.stop();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        for (count, mode, commands, steps) in measurements {
+            let limit = if mode == BodyMode::Full { 100 } else { 25 };
+            assert!(
+                commands < limit,
+                "{count} PR nodes ({mode:?}) used {commands} RPCs"
+            );
+            assert!(
+                steps < 500 * count as i64,
+                "{count} PR nodes scanned {steps} steps with unrelated attachments"
+            );
+        }
+    }
 
     #[test]
     fn graph_batches_live_issue_fields_and_attached_pull_requests() {
