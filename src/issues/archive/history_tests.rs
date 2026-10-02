@@ -651,3 +651,112 @@ fn imported_history_reserves_unused_ids_before_new_local_comments() {
         3
     );
 }
+
+#[test]
+fn restoring_history_does_not_reapply_commit_attachment_side_effects() {
+    let f = Fixture::new();
+    f.db.execute_batch("INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data) VALUES
+        (9,'named:Archive',1,'human:boss','commit_attached',20,'{\"sha\":\"1234567890abcdef\",\"url\":\"https://github.com/example/repo/commit/1234567890abcdef\"}'),
+        (10,'named:Archive',1,'human:boss','commit_removed',30,'{\"sha\":\"1234567890abcdef\"}');").unwrap();
+    assert_eq!(
+        f.db.query_row("SELECT count(*) FROM issue_commits", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    f.archive();
+    restore_issue(&f.db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+    assert_eq!(
+        f.db.query_row("SELECT count(*) FROM issue_commits", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn historical_events_survive_policy_changes_that_reject_new_matching_events() {
+    let f = Fixture::new();
+    f.db.execute_batch("DROP TRIGGER dependency_notice_event;
+        INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data) VALUES(9,'named:Archive',1,'human:boss','dependency_rework',20,'{\"dependencies\":[[999]]}');").unwrap();
+    crate::issues::dependency_notices::migrate(&f.db).unwrap();
+    assert_eq!(f.db.execute("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Archive',1,'human:boss','dependency_rework',20,'{\"dependencies\":[[999]]}')",[]).unwrap(),0);
+    f.archive();
+    restore_issue(&f.db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+    assert_eq!(
+        f.db.query_row(
+            "SELECT count(*) FROM events WHERE action='dependency_rework'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.db.query_row("SELECT syncing FROM fleet_meta WHERE id=1", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn complete_backup_opens_with_archived_body_and_history_at_a_new_path() {
+    let mut f = Fixture::new();
+    let before = f.read(json!({"action":"view","number":1}));
+    f.archive();
+    let destination = f.root.join("backup/copy.sqlite");
+    backup_store(&f.db, &destination).unwrap();
+    let mut backup = Store::open(&destination).unwrap();
+    let request:Request=serde_json::from_value(json!({"version":1,"project":{"id":"named:Archive","name":"Archive"},"operation":{"action":"view","number":1}})).unwrap();
+    assert_eq!(backup.execute(&request).unwrap(), before);
+    let archive = f.root.join("backup/copy.sqlite.archive.db");
+    assert!(archive.exists());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(archive).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn archive_files_and_sidecars_cannot_be_overwritten_by_auxiliary_outputs() {
+    let f = Fixture::new();
+    f.archive();
+    let hot = f.root.join("issues.db");
+    let archive = archive_path(&f.db).unwrap();
+    let connection = Archive::open(&archive).unwrap();
+    connection
+        .db
+        .execute("INSERT INTO objects VALUES('test','test',1,1,x'00')", [])
+        .unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = archive.as_os_str().to_owned();
+        path.push(suffix);
+        let path = std::path::PathBuf::from(path);
+        assert!(path.exists());
+        assert!(crate::issues::planning::protect_database_paths(&hot, [&path]).is_err());
+    }
+    assert!(backup_store(&f.db, &archive).is_err());
+}
+
+#[test]
+fn a_backup_never_reports_success_when_referenced_cold_storage_is_missing() {
+    let f = Fixture::new();
+    f.archive();
+    std::fs::rename(
+        archive_path(&f.db).unwrap(),
+        f.root.join("unavailable.archive.db"),
+    )
+    .unwrap();
+    assert!(backup_store(&f.db, &f.root.join("backup/incomplete.db")).is_err());
+}
+
+#[test]
+fn a_reserved_archive_path_is_protected_before_its_first_publication() {
+    let f = Fixture::new();
+    let archive = archive_path(&f.db).unwrap();
+    assert!(!archive.exists());
+    assert!(backup_store(&f.db, &archive).is_err());
+    assert!(!archive.exists());
+}

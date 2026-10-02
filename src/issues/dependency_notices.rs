@@ -44,7 +44,7 @@ fn obsolete(project: &str, number: &str, list: &str, entry: &str) -> String {
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode') FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
+    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode' OR (name='dependency_notice_comment' AND instr(sql,'syncing')=0)) FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
         return Ok(());
     }
     let tx =
@@ -95,11 +95,11 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         DROP TRIGGER IF EXISTS dependency_notice_mode;
         DROP TRIGGER IF EXISTS dependency_notice_delivery;
         DROP VIEW IF EXISTS obsolete_dependency_steering;
-        CREATE TRIGGER IF NOT EXISTS dependency_notice_comment BEFORE INSERT ON comments
-        WHEN {comment} BEGIN SELECT RAISE(IGNORE); END;
+        CREATE TRIGGER dependency_notice_comment BEFORE INSERT ON comments
+        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND {comment} BEGIN SELECT RAISE(IGNORE); END;
         DROP TRIGGER IF EXISTS dependency_notice_event;
         CREATE TRIGGER dependency_notice_event BEFORE INSERT ON events
-        WHEN CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN {commented} WHEN 'dependency_rework' THEN {event} WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
+        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN {commented} WHEN 'dependency_rework' THEN {event} WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
         BEGIN SELECT RAISE(IGNORE); END;
         -- Old reconcilers continue after ignored notices. Reject an automatic
         -- transition with no unfinished declared prerequisite or descendant.

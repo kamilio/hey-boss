@@ -133,7 +133,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -233,6 +233,7 @@ impl Relay {
                             "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
                             "issue_assignment": message["capabilities"]["issue_assignment"] == true,
                             "issue_github_refresh": message["capabilities"]["issue_github_refresh"] == true,
+                            "issue_archives": message["capabilities"]["issue_archives"] == true,
                         });
                         return Ok(capability_report(
                             "supervisor_tunnel",
@@ -295,10 +296,16 @@ impl Relay {
                     if !matches!(
                         request["request"]["kind"].as_str(),
                         Some(
-                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata" | "configuration" | "worker_signal" | "chief_run"
+                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata" | "configuration" | "worker_signal" | "chief_run" | "issue_archive"
                         )
                     ) {
                         return Err(Error::invalid("Unsupported authority request").into());
+                    }
+                    if request["request"]["kind"]=="issue_archive" {
+                        let message=advertisement.lock().unwrap();
+                        if message["capabilities"]["issue_archives"]!=true {
+                            return Err(unsupported("issue_archives",&message["build"]).into());
+                        }
                     }
                     if request["request"]["kind"] == "issue_numbers"
                         && !numbers_ready.load(Ordering::Acquire)

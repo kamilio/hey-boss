@@ -137,6 +137,7 @@ struct RowWriter<'a> {
     db: &'a Connection,
     plans: BTreeMap<String, RowPlan>,
     changed_projects: BTreeSet<String>,
+    archives: Option<crate::issues::archive::transfer::Catalog>,
 }
 impl<'a> RowWriter<'a> {
     fn new(db: &'a Connection) -> Self {
@@ -144,6 +145,7 @@ impl<'a> RowWriter<'a> {
             db,
             plans: BTreeMap::new(),
             changed_projects: BTreeSet::new(),
+            archives: None,
         }
     }
     fn put(&mut self, table: &str, row: &Value) -> Result<()> {
@@ -151,9 +153,11 @@ impl<'a> RowWriter<'a> {
         let db = self.db;
         let mut row = row.clone();
         if table == "issues" {
+            super::archive::ensure_copy(db, &row, &mut self.archives)?;
             let m = row
                 .as_object_mut()
                 .ok_or_else(|| invalid("Invalid issue row"))?;
+            super::archive::incoming_issue(m);
             let manual = i64::from(m["state"] == "blocked");
             m.entry("manual_blocked").or_insert(json!(manual));
             m.entry("blockers").or_insert(json!("[]"));
@@ -311,7 +315,13 @@ impl RowPlan {
         let updates = columns
             .iter()
             .filter(|c| !k.contains(&c.as_str()))
-            .map(|c| format!("\"{c}\"=excluded.\"{c}\""))
+            .map(|c| {
+                if table=="issues" && matches!(c.as_str(),"archive_cleanup"|"archive_restoring") {
+                    format!("\"{c}\"=CASE WHEN issues.archive_key IS excluded.archive_key THEN issues.\"{c}\" ELSE excluded.\"{c}\" END")
+                } else if table=="issues" && c=="archive_touched_at" {
+                    "archive_touched_at=max(issues.archive_touched_at,excluded.archive_touched_at)".into()
+                } else { format!("\"{c}\"=excluded.\"{c}\"") }
+            })
             .collect::<Vec<_>>()
             .join(",");
         let placeholders = vec!["?"; columns.len()].join(",");
@@ -348,6 +358,7 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
         db.execute_batch("ALTER TABLE fleet_row_ids RENAME TO fleet_row_ids_legacy; CREATE TABLE fleet_row_ids(origin TEXT NOT NULL,table_name TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER NOT NULL,PRIMARY KEY(origin,table_name,origin_id)); INSERT INTO fleet_row_ids SELECT * FROM fleet_row_ids_legacy; DROP TABLE fleet_row_ids_legacy;")?;
     }
     db.execute_batch(crate::issues::FLEET_INDEXES)?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS fleet_outbox_issue_archive ON fleet_outbox(json_extract(coalesce(after_json,before_json),'$.project_id'),coalesce(json_extract(coalesce(after_json,before_json),'$.number'),json_extract(coalesce(after_json,before_json),'$.issue_number'))) WHERE table_name IN ('issues','comments','events','issue_status_updates');")?;
     if role == "controller" {
         for table in ["comments", "events"] {
             db.execute(
@@ -360,6 +371,12 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
         let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
             .iter()
             .map(|r| r["name"].as_str().unwrap().to_string())
+            .filter(|column| {
+                *table != "issues"
+                    || (!super::archive::local_column(column)
+                        && (role != "agent"
+                            || !matches!(column.as_str(), "archive_key" | "archived_comments")))
+            })
             .collect::<Vec<_>>();
         let row_json = |prefix: Option<&str>| {
             prefix
@@ -477,10 +494,29 @@ fn append_row(
         )
         .optional()?;
     if let Some(id) = mapped {
-        return Ok(Some(id));
+        let present: bool = db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?1)"),
+            [id],
+            |r| r.get(0),
+        )?;
+        let metadata = table == "events"
+            && matches!(
+                row["action"].as_str(),
+                Some(
+                    "moved_to"
+                        | "pr_attached"
+                        | "pr_classified"
+                        | "attempt_reconciled"
+                        | "commit_attached"
+                        | "commit_removed"
+                )
+            );
+        if present || (!metadata && db.query_row("SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1 AND number=?2 AND archive_key IS NOT NULL)",rusqlite::params![row["project_id"].as_str(),row["issue_number"].as_i64()],|r|r.get::<_,bool>(0))?) {
+            return Ok(Some(id));
+        }
     }
     let own: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
-    let local_id = if own == origin {
+    let local_id = if own == origin && mapped.is_none() {
         db.query_row(
             &format!("SELECT id FROM {table} WHERE id=?"),
             [origin_id],
@@ -494,6 +530,9 @@ fn append_row(
             .ok_or_else(|| invalid("Invalid history row"))?
             .clone();
         values.remove("id");
+        if let Some(id) = mapped {
+            values.insert("id".into(), json!(id));
+        }
         if table == "events" {
             let mut data: Value = serde_json::from_str(
                 values["data"]
@@ -619,6 +658,20 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
     }
     let mut before = row_json(change, "before_json")?;
     let mut after = row_json(change, "after_json")?;
+    if table == "issues" {
+        if after["archive_key"].is_string() {
+            return Err(invalid(
+                "Issue archive manifests are written by the supervisor",
+            ));
+        }
+        for row in [&mut before, &mut after] {
+            if let Some(row) = row.as_object_mut() {
+                row.retain(|field, _| {
+                    !field.starts_with("archive_") && field != "archived_comments"
+                });
+            }
+        }
+    }
     let key = if after.is_null() { &before } else { &after };
     let old = current_row(db, table, key)?;
     if table == "issue_pull_requests" {
@@ -985,6 +1038,35 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
         }
         None => None,
     };
+    let unapplied: Vec<_> = changes
+        .iter()
+        .filter(|change| {
+            saved
+                .as_ref()
+                .is_none_or(|saved| !saved.contains_key(&change["seq"].as_i64().unwrap()))
+        })
+        .cloned()
+        .collect();
+    let archived = super::archive::archived_changes(db, node, &unapplied)?;
+    if !archived.is_empty() {
+        let Some(tx) = tx else {
+            return Err(crate::issues::Error::new(
+                "archive_retry",
+                "Issue storage changed before fleet arbitration; retry after restoring history",
+            )
+            .into());
+        };
+        drop(tx);
+        for (project, number) in archived {
+            crate::issues::archive::restore_issue(
+                db,
+                &project,
+                number,
+                crate::issues::worker::now(),
+            )?;
+        }
+        return accept_changes(db, node, changes);
+    }
     let mut results = vec![];
     let mut subtask_keys = vec![];
     for change in changes {
@@ -1237,7 +1319,10 @@ pub(super) fn snapshot(db: &Connection, node: &str) -> Result<Value> {
     let ids = identities(db)?;
     let mut tables = serde_json::Map::new();
     for (table, _) in TABLES {
-        let mut data = rows(db, &format!("SELECT * FROM {table}"), &[])?;
+        let mut data = rows(db, &super::archive::snapshot_sql(table), &[])?;
+        for row in &mut data {
+            super::archive::strip_local(table, row);
+        }
         if append(table) {
             data = data
                 .into_iter()
@@ -3901,6 +3986,246 @@ mod tests {
     }
 
     #[test]
+    fn archived_snapshots_fetch_cold_history_without_refilling_the_hot_replica() {
+        use super::super::archive as archive_sync;
+        use crate::issues::archive as cold;
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("UPDATE issues SET state='closed',closed_at=100,closed_by='human:fixture',updated_at=100; UPDATE events SET created_at=1;
+            INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Native fleet',1,'human:fixture','Historical comment',10);").unwrap();
+        main.db.execute_batch("INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data) VALUES
+            (9,'named:Native fleet',1,'human:fixture','commit_attached',20,'{\"sha\":\"1234567890abcdef\",\"url\":\"https://github.com/example/repo/commit/1234567890abcdef\"}'),
+            (10,'named:Native fleet',1,'human:fixture','commit_removed',30,'{\"sha\":\"1234567890abcdef\"}'),
+            (11,'named:Native fleet',1,'human:fixture','commit_attached',40,'{\"sha\":\"abcdef1234567890\",\"url\":\"https://github.com/example/repo/commit/abcdef1234567890\"}');").unwrap();
+        assert!(
+            cold::archive_issue(&main.db, "named:Native fleet", 1, cold::GRACE_MS + 100).unwrap()
+        );
+        let payload = snapshot(&main.db, "agent").unwrap();
+        assert!(payload["tables"]["comments"].as_array().unwrap().is_empty());
+        let issue = &payload["tables"]["issues"][0];
+        assert!(issue.get("archive_cleanup").is_none());
+        assert!(issue.get("archive_restoring").is_none());
+        assert!(issue.get("archive_touched_at").is_none());
+        assert!(issue["archive_key"].is_string());
+        let agent = Fixture::new();
+        agent.db.execute("DELETE FROM events", []).unwrap();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        let mut pages = 0;
+        let prepared =
+            archive_sync::prepare_pull(&agent.db, &payload, |key, project, number, cursor| {
+                pages += 1;
+                cold::transfer::export_page(&main.db, key, project, number, cursor)
+            })
+            .unwrap();
+        assert!(pages > 0);
+        apply_pull(&agent.db, "agent", &prepared, &[]).unwrap();
+        while cold::cleanup_history(&agent.db).unwrap() != 0 {}
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            cold::issue_body(
+                &agent.db,
+                "named:Native fleet",
+                1,
+                issue["archive_key"].as_str().unwrap()
+            )
+            .unwrap(),
+            "Requirements"
+        );
+        let again = archive_sync::prepare_pull(&agent.db, &payload, |_, _, _, _| {
+            panic!("An existing cold copy must not transfer again")
+        })
+        .unwrap();
+        agent
+            .db
+            .execute(
+                "UPDATE issues SET archive_restoring=1,archive_cleanup=1 WHERE number=1",
+                [],
+            )
+            .unwrap();
+        apply_pull(&agent.db, "agent", &again, &[]).unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row(
+                    "SELECT archive_restoring FROM issues WHERE number=1",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(cold::cleanup_history(&agent.db).unwrap(), 0);
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT sha FROM issue_commits", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "abcdef1234567890"
+        );
+        cold::restore_issue(&agent.db, "named:Native fleet", 1, cold::GRACE_MS + 101).unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT sha FROM issue_commits", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "abcdef1234567890"
+        );
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT body FROM comments", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "Historical comment"
+        );
+        for fixture in [&main, &agent] {
+            let archive =
+                std::path::PathBuf::from(format!("{}.archive.db", fixture.path.display()));
+            std::fs::remove_file(archive).unwrap();
+        }
+    }
+
+    #[test]
+    fn offline_edits_survive_archive_snapshots_and_lost_acknowledgments() {
+        use super::super::archive as archive_sync;
+        use crate::issues::archive as cold;
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("UPDATE issues SET state='closed',closed_at=100,closed_by='human:fixture',updated_at=100; UPDATE events SET created_at=1;
+            INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Native fleet',1,'human:fixture','Original comment',10);").unwrap();
+        let agent = Fixture::new();
+        agent.db.execute("DELETE FROM events", []).unwrap();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let mut store = Store::open(&agent.path).unwrap();
+        let request:Request=serde_json::from_value(json!({"version":1,"project":{"id":"named:Native fleet","name":"Native fleet"},"actor":{"id":"human:fixture","kind":"human","machine":"agent","host":"fixture","cwd":std::env::temp_dir(),"source":"test"},"request_id":"offline-archive-comment","operation":{"action":"comment","number":1,"body":"Offline comment"}})).unwrap();
+        store.execute(&request).unwrap();
+        assert!(
+            cold::archive_issue(&main.db, "named:Native fleet", 1, cold::GRACE_MS + 100).unwrap()
+        );
+        while cold::cleanup_history(&main.db).unwrap() != 0 {}
+        let payload = snapshot(&main.db, "agent").unwrap();
+        let prepared =
+            archive_sync::prepare_pull(&agent.db, &payload, |key, project, number, cursor| {
+                cold::transfer::export_page(&main.db, key, project, number, cursor)
+            })
+            .unwrap();
+        assert!(prepared["tables"]["issues"][0]["archive_key"].is_null());
+        apply_pull(&agent.db, "agent", &prepared, &[]).unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT body FROM issues", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "Requirements"
+        );
+        let outgoing = journal(&agent.db, 0).unwrap();
+        let receipts = accept_changes(&main.db, "agent", &outgoing).unwrap();
+        assert!(
+            receipts.iter().all(|receipt| receipt["state"] == "applied"),
+            "{receipts:?}"
+        );
+        assert_eq!(
+            accept_changes(&main.db, "agent", &outgoing).unwrap(),
+            receipts
+        );
+        assert_eq!(
+            main.db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let payload = snapshot(&main.db, "agent").unwrap();
+        let prepared = archive_sync::prepare_pull(&agent.db, &payload, |_, _, _, _| {
+            panic!("Restored snapshots do not need another transfer")
+        })
+        .unwrap();
+        apply_pull(&agent.db, "agent", &prepared, &receipts).unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        for fixture in [&main, &agent] {
+            std::fs::remove_file(format!("{}.archive.db", fixture.path.display())).unwrap();
+        }
+    }
+
+    #[test]
+    fn archive_preflight_batches_hot_metadata_reads_and_rejects_stale_snapshots_early() {
+        use super::super::archive as archive_sync;
+        for count in [16, 128] {
+            let f = Fixture::new();
+            f.capture();
+            f.db.execute("WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) SELECT 'named:Native fleet',x,'Task','','closed','human:fixture',1,1,1,'[]' FROM n",[count]).unwrap();
+            let payload = snapshot(&f.db, "agent").unwrap();
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            archive_sync::prepare_pull(&db, &payload, |_, _, _, _| {
+                panic!("No archive is referenced")
+            })
+            .unwrap();
+            drop(db);
+            let (commands, _) = transport.join().unwrap();
+            assert!(
+                commands <= 2,
+                "{count} issues made {commands} metadata reads"
+            );
+            state_set(
+                &f.db,
+                "cursor",
+                &json!(payload["cursor"].as_i64().unwrap() + 1),
+            )
+            .unwrap();
+            assert!(
+                archive_sync::prepare_pull(&f.db, &payload, |_, _, _, _| panic!(
+                    "A stale pull must never transfer data"
+                ))
+                .is_err()
+            );
+            owner.stop();
+        }
+    }
+
+    #[test]
     fn issue_transfer_replicates_append_only_comments_and_resolutions() {
         let main = Fixture::new();
         main.capture();
@@ -4361,17 +4686,34 @@ mod tests {
         let main = Fixture::new();
         main.capture();
         let quiet = serde_json::to_string(&crate::quiet_hours::QuietHours {
-            enabled: true, start: "21:30".into(), end: "08:15".into(), time_zone: "America/Chicago".into(),
-        }).unwrap();
-        main.db.execute("UPDATE global_settings SET quiet_hours=?", [&quiet]).unwrap();
+            enabled: true,
+            start: "21:30".into(),
+            end: "08:15".into(),
+            time_zone: "America/Chicago".into(),
+        })
+        .unwrap();
+        main.db
+            .execute("UPDATE global_settings SET quiet_hours=?", [&quiet])
+            .unwrap();
         let agent = Fixture::new();
         install_capture(&agent.db, "agent", "agent").unwrap();
-        apply_pull(&agent.db, "agent", &snapshot(&main.db, "agent").unwrap(), &[]).unwrap();
-        let mut settings = rows(&agent.db, "SELECT * FROM global_settings", &[]).unwrap().remove(0);
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let mut settings = rows(&agent.db, "SELECT * FROM global_settings", &[])
+            .unwrap()
+            .remove(0);
         assert_eq!(settings["quiet_hours"], quiet);
         settings.as_object_mut().unwrap().remove("quiet_hours");
         put_row(&agent.db, "global_settings", &settings).unwrap();
-        assert_eq!(rows(&agent.db, "SELECT quiet_hours FROM global_settings", &[]).unwrap()[0]["quiet_hours"], quiet);
+        assert_eq!(
+            rows(&agent.db, "SELECT quiet_hours FROM global_settings", &[]).unwrap()[0]["quiet_hours"],
+            quiet
+        );
     }
 
     #[test]

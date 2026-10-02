@@ -24,7 +24,7 @@ CREATE INDEX IF NOT EXISTS issue_commits_origin_run ON issue_commits(json_extrac
 
 CREATE TRIGGER IF NOT EXISTS issue_commits_event_sync_insert
 AFTER INSERT ON events
-WHEN NEW.action = 'commit_attached' AND json_valid(NEW.data) AND json_extract(NEW.data, '$.sha') IS NOT NULL
+WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND NEW.action = 'commit_attached' AND json_valid(NEW.data) AND json_extract(NEW.data, '$.sha') IS NOT NULL
 BEGIN
     DELETE FROM issue_commits
     WHERE project_id = NEW.project_id
@@ -60,7 +60,7 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS issue_commits_event_sync_delete
 AFTER INSERT ON events
-WHEN NEW.action = 'commit_removed' AND json_valid(NEW.data) AND json_extract(NEW.data, '$.sha') IS NOT NULL
+WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND NEW.action = 'commit_removed' AND json_valid(NEW.data) AND json_extract(NEW.data, '$.sha') IS NOT NULL
 BEGIN
     DELETE FROM issue_commits
     WHERE project_id = NEW.project_id
@@ -76,7 +76,7 @@ END;
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits' AND type='table')
-         AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits_event_sync_insert' AND type='trigger')",
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits_event_sync_insert' AND type='trigger' AND instr(sql,'syncing')>0)",
         [],
         |r| r.get(0),
     )?;
@@ -90,6 +90,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
             [],
             |r| r.get(0),
         )?;
+        db.execute_batch("DROP TRIGGER IF EXISTS issue_commits_event_sync_insert; DROP TRIGGER IF EXISTS issue_commits_event_sync_delete;")?;
         db.execute_batch(SCHEMA)?;
         if !already {
             // Replay any replicated commit events if bootstrapping an existing store.
@@ -1452,6 +1453,8 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE agents(id TEXT PRIMARY KEY, metadata TEXT);
+             CREATE TABLE fleet_meta(id INTEGER PRIMARY KEY,role TEXT NOT NULL,node TEXT NOT NULL,syncing INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO fleet_meta VALUES(1,'standalone','',0);
              CREATE TABLE project_settings(project_id TEXT PRIMARY KEY, prs_enabled INTEGER);
              CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT, hidden_at INTEGER);
              INSERT INTO projects VALUES('github.com/kamilio/hey-boss', 'hey-boss', NULL);

@@ -257,11 +257,24 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     if role == "standalone" {
         startup.phase("bootstrap");
-        db.backup(
-            "main",
-            ctx.state
+        // The initial contribution is a logical journal. A standalone archive
+        // has no remote source yet, so materialize its history before joining.
+        for row in replica::rows(
+            &db,
+            "SELECT project_id,number FROM issues WHERE archive_key IS NOT NULL",
+            &[],
+        )? {
+            crate::issues::archive::restore_issue(
+                &db,
+                row["project_id"].as_str().unwrap(),
+                row["number"].as_i64().unwrap(),
+                crate::issues::worker::now(),
+            )?;
+        }
+        crate::issues::archive::backup_store(
+            &db,
+            &ctx.state
                 .join(format!("fleet-bootstrap-{}.db", now() as i64)),
-            None,
         )?;
         replica::install_capture(&db, "agent", &ctx.node)?;
         let tx = db.unchecked_transaction()?;
@@ -301,7 +314,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     let workers = ctx.workers()?;
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true,"issue_archives":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
     let status = Arc::new(Mutex::new(ConnectionStatus::new(
         ctx.clone(),
         replica::state_get(&db, "last_sync", Value::Null)?,
@@ -359,10 +372,21 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 reply(&output, control::configure_companion(&ctx, &message)?)?;
             }
             Some("pull") => {
+                let payload = super::archive::prepare_pull(
+                    &db,
+                    &message["payload"],
+                    |key, project, number, cursor| {
+                        authority::call(
+                            &ctx.state,
+                            &ctx.path,
+                            json!({"kind":"issue_archive","key":key,"project":project,"number":number,"cursor":cursor}),
+                        )
+                    },
+                )?;
                 replica::apply_pull(
                     &db,
                     &ctx.node,
-                    &message["payload"],
+                    &payload,
                     message["receipts"]
                         .as_array()
                         .map(Vec::as_slice)

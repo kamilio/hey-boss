@@ -5,8 +5,8 @@ pub(crate) use runs::{archive_runs, worker_event_tails, worker_payload};
 mod history;
 pub(crate) mod transfer;
 pub(crate) use history::{
-    archive_issue, cleanup_history, history_connection, issue_body, mutation_targets,
-    restore_issue, search_bodies,
+    archive_issue, cleanup_history, history_connection, issue_body, materialize_history,
+    mutation_targets, restore_issue, search_bodies,
 };
 #[cfg(test)]
 mod history_tests;
@@ -189,6 +189,44 @@ fn archive_path(db: &crate::database::Connection) -> Result<std::path::PathBuf> 
             name.into()
         })
         .ok_or_else(|| unavailable("Archival requires a persistent database"))
+}
+
+/// Copies the hot snapshot first, then its immutable cold superset. Archive
+/// generations stay available, so concurrent publication cannot leave a dangling
+/// reference in the completed pair. A hot file alone is not a complete backup.
+pub(crate) fn backup_store(db: &crate::database::Connection, destination: &Path) -> Result<()> {
+    let source = db
+        .path()
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| unavailable("A complete backup requires a persistent database"))?;
+    let mut cold_destination = destination.as_os_str().to_owned();
+    cold_destination.push(".archive.db");
+    let cold_destination = std::path::PathBuf::from(cold_destination);
+    super::planning::protect_database_paths(
+        Path::new(source),
+        [destination, cold_destination.as_path()],
+    )?;
+    Store::create_database_if_missing(destination)?;
+    db.backup("main", destination, None)?;
+    let cold_source = archive_path(db)?;
+    if cold_source.try_exists()? {
+        let archive = Archive::read(&cold_source)?;
+        Store::create_database_if_missing(&cold_destination)?;
+        // Refuse unrelated existing files before replacing a prior archive backup.
+        drop(Archive::open(&cold_destination)?);
+        archive.db.backup("main", &cold_destination, None)?;
+        Archive::read(&cold_destination)?;
+    } else {
+        let backup = Connection::open_with_flags(
+            destination,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let version: i64 = backup.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version>=16 && backup.query_row("SELECT EXISTS(SELECT 1 FROM issues WHERE archive_key IS NOT NULL) OR EXISTS(SELECT 1 FROM requests WHERE archive_key IS NOT NULL) OR EXISTS(SELECT 1 FROM worker_runs WHERE archive_key IS NOT NULL OR events_archive_key IS NOT NULL)",[],|r|r.get::<_,bool>(0))? {
+            return Err(unavailable("Backup is incomplete: referenced cold storage is missing"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn receipt_response(

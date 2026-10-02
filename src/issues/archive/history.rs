@@ -495,7 +495,7 @@ pub(crate) fn cleanup_history(db: &HotConnection) -> Result<usize> {
         (
             "events",
             "data",
-            "AND action NOT IN ('moved_to','pr_attached','pr_classified','attempt_reconciled')",
+            "AND action NOT IN ('moved_to','pr_attached','pr_classified','attempt_reconciled','commit_attached','commit_removed')",
             "ORDER BY id LIMIT 16",
         ),
         (
@@ -583,11 +583,64 @@ pub(crate) fn restore_issue(
     mapped_history_ready(&archive, &key)?;
     let root = verify_copy(&archive, &key, project, number)?;
     db.execute("UPDATE issues SET archive_restoring=1 WHERE project_id=?1 AND number=?2 AND archive_key=?3",params![project,number,key])?;
+    if !restore_rows(db, &archive, &key, project, number, Some(&key))? {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    let (replica, syncing): (bool, i64) = tx.query_row(
+        "SELECT role='agent',syncing FROM fleet_meta WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if replica {
+        tx.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
+    }
+    tx.execute("UPDATE issues SET body=?4,archive_key=NULL,archived_comments=0,archive_restoring=0,archive_cleanup=0,archive_touched_at=?5 WHERE project_id=?1 AND number=?2 AND archive_key=?3",params![project,number,key,root["body"].as_str().ok_or_else(||unavailable("Invalid archived issue body"))?,now])?;
+    if replica {
+        tx.execute("UPDATE fleet_meta SET syncing=?1 WHERE id=1", [syncing])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Merge canonical history behind an existing local edit. The issue body and
+/// lifecycle stay hot and continue through ordinary fleet field arbitration.
+pub(crate) fn materialize_history(
+    db: &HotConnection,
+    key: &str,
+    project: &str,
+    number: i64,
+) -> Result<()> {
+    if !db.is_autocommit() {
+        return Err(unavailable(
+            "History restoration must precede the hot transaction",
+        ));
+    }
+    let archive = Archive::read(&archive_path(db)?)?;
+    mapped_history_ready(&archive, key)?;
+    verify_copy(&archive, key, project, number)?;
+    if !restore_rows(db, &archive, key, project, number, None)? {
+        return Err(Error::new(
+            "archive_retry",
+            "Issue storage changed while restoring replicated history",
+        ));
+    }
+    Ok(())
+}
+
+fn restore_rows(
+    db: &HotConnection,
+    archive: &Archive,
+    key: &str,
+    project: &str,
+    number: i64,
+    expected: Option<&str>,
+) -> Result<bool> {
     for table in ["agents", "comments", "events", "issue_status_updates"] {
         let mut query = archive.db.prepare(
-            "SELECT record FROM issue_history WHERE archive_key=?1 AND kind=?2 ORDER BY text_id",
+            "SELECT record FROM issue_history WHERE archive_key=?1 AND kind=?2 AND (?3 OR kind!='events' OR action NOT IN ('commit_attached','commit_removed')) ORDER BY CASE WHEN id IS NOT NULL THEN id END,text_id",
         )?;
-        let mut rows = query.query(params![key, table])?;
+        let mut rows = query.query(params![key, table, expected.is_some()])?;
         let mut pending = None;
         loop {
             let mut batch = Vec::new();
@@ -622,14 +675,16 @@ pub(crate) fn restore_issue(
                 break;
             }
             let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-            if self::key(&tx, project, number)?.as_deref() != Some(&key) {
-                return Ok(());
+            if self::key(&tx, project, number)?.as_deref() != expected {
+                return Ok(false);
             }
             let syncing: i64 =
                 tx.query_row("SELECT syncing FROM fleet_meta WHERE id=1", [], |r| {
                     r.get(0)
                 })?;
-            tx.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
+            // 2 marks physical restoration: bypass event projection and policy
+            // triggers as well as the replication journal, within this lease.
+            tx.execute("UPDATE fleet_meta SET syncing=2 WHERE id=1", [])?;
             for row in batch {
                 restore_row(&tx, table, &row)?;
             }
@@ -637,8 +692,7 @@ pub(crate) fn restore_issue(
             tx.commit()?;
         }
     }
-    db.execute("UPDATE issues SET body=?4,archive_key=NULL,archived_comments=0,archive_restoring=0,archive_cleanup=0,archive_touched_at=?5 WHERE project_id=?1 AND number=?2 AND archive_key=?3",params![project,number,key,root["body"].as_str().ok_or_else(||unavailable("Invalid archived issue body"))?,now])?;
-    Ok(())
+    Ok(true)
 }
 
 fn restore_row(db: &HotConnection, table: &str, row: &Value) -> Result<()> {
@@ -691,7 +745,7 @@ fn restore_row(db: &HotConnection, table: &str, row: &Value) -> Result<()> {
             _ => return Err(unavailable("Invalid archive value")),
         });
     }
-    db.execute(
+    let inserted = db.execute(
         &format!(
             "INSERT INTO {table}({}) VALUES({}) ON CONFLICT(id) DO NOTHING",
             columns.join(","),
@@ -699,5 +753,10 @@ fn restore_row(db: &HotConnection, table: &str, row: &Value) -> Result<()> {
         ),
         params_from_iter(values),
     )?;
+    if inserted != 1 {
+        return Err(unavailable(
+            "An archived history row was suppressed during restoration",
+        ));
+    }
     Ok(())
 }

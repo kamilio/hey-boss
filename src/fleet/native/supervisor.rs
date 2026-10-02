@@ -852,15 +852,31 @@ impl Supervisor {
             pending
         };
         let receipts = if pending {
-            let write = crate::database::Transaction::new_unchecked(
-                db,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let receipts = replica::accept_changes(&write, node, changes)?;
-            replica::refresh_allocation_deadlines(&write, node, observed)?;
-            self.allocate_work(&write, node, configured, observed)?;
-            write.commit()?;
-            receipts
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                super::archive::prepare_changes(db, node, changes)?;
+                let write = crate::database::Transaction::new_unchecked(
+                    db,
+                    rusqlite::TransactionBehavior::Immediate,
+                )?;
+                let receipts = match replica::accept_changes(&write, node, changes) {
+                    Ok(receipts) => receipts,
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::issues::Error>()
+                            .is_some_and(|e| e.code == "archive_retry")
+                            && Instant::now() < deadline =>
+                    {
+                        drop(write);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                replica::refresh_allocation_deadlines(&write, node, observed)?;
+                self.allocate_work(&write, node, configured, observed)?;
+                write.commit()?;
+                break receipts;
+            }
         } else {
             Vec::new()
         };
@@ -1141,6 +1157,13 @@ impl Supervisor {
                     }
                     let (payload, receipts, signals) =
                         self.heartbeat_pull(&self.ctx.db()?, host, node, &workers, &message)?;
+                    if super::archive::requires_support(&payload)?
+                        && hello["capabilities"]["issue_archives"] != true
+                    {
+                        return Err(invalid(
+                            "Companion needs upgrading to receive archived issues; no archive manifest was sent",
+                        ));
+                    }
                     pull::send_pull(
                         &mut *input.lock().unwrap(),
                         payload,
@@ -1648,6 +1671,28 @@ impl Supervisor {
 
     fn authoritative(&self, value: &Value) -> crate::issues::Result<Value> {
         match value["kind"].as_str() {
+            Some("issue_archive") => {
+                let key = value["key"]
+                    .as_str()
+                    .ok_or_else(|| crate::issues::Error::invalid("Missing archive key"))?;
+                let project = value["project"]
+                    .as_str()
+                    .ok_or_else(|| crate::issues::Error::invalid("Missing archive project"))?;
+                let number = value["number"]
+                    .as_i64()
+                    .ok_or_else(|| crate::issues::Error::invalid("Missing archive issue number"))?;
+                let db = self
+                    .ctx
+                    .db()
+                    .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string()))?;
+                crate::issues::archive::transfer::export_page(
+                    &db,
+                    key,
+                    project,
+                    number,
+                    &value["cursor"],
+                )
+            }
             Some("issue_metadata") => {
                 let request: crate::issues::Request =
                     serde_json::from_value(value["request"].clone())?;
