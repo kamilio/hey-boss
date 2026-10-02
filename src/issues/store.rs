@@ -2258,11 +2258,11 @@ impl Store {
             }
         }
         if let Some(issues) = result["issues"].as_array_mut() {
-            let mut commits_by_issue = super::commits::list_by_project(&tx, &project.id)?;
             let numbers: Vec<_> = issues
                 .iter()
                 .filter_map(|issue| issue["number"].as_i64())
                 .collect();
+            let mut commits_by_issue = super::commits::list_for_issues(&tx, &project.id, &numbers)?;
             let mut prs_by_issue = registry::pull_requests_for_issues(&tx, &project.id, &numbers)?;
             for issue in issues {
                 if let Some(number) = issue["number"].as_i64() {
@@ -3527,6 +3527,60 @@ mod contention_tests {
                 "{count} listed issues used {commands} owner RPCs"
             );
         }
+    }
+
+    #[test]
+    fn issue_lists_do_not_read_commits_for_excluded_issues() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-list-commits-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let mut store = Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Commits','Commits',100);
+            INSERT INTO agents VALUES('creator','{}',0);
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<33)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT 'named:Commits',id,'Task '||id,'',CASE WHEN id IN (1,33) THEN 'open' ELSE 'closed' END,'creator',0,0,1,'[]',id FROM n;
+            INSERT INTO issue_commits VALUES
+              ('named:Commits',1,'abcdef0','short','Short','creator',10,'{\"host\":\"original\"}'),
+              ('named:Commits',1,'abcdef0123456789abcdef0123456789abcdef0123','full','Full','creator',20,NULL),
+              ('named:Commits',1,'1234567890123456789012345678901234567890','first','First','creator',5,NULL),
+              ('named:Commits',33,'abcdef0','other','Other issue','creator',30,NULL);").unwrap();
+        let request: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Commits","name":"Commits"},"actor":null,
+            "operation":{"action":"list","state":"open","mine":false,"unassigned":false,"labels":[],"search":null,"limit":50,"offset":0,"all":true}})).unwrap();
+        let expected = store.execute(&request).unwrap();
+        let commits = expected["issues"][0]["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0]["title"], "First");
+        assert_eq!(commits[1]["title"], "Full");
+        assert_eq!(commits[1]["created_at"], 10);
+        assert_eq!(commits[1]["origin"]["host"], "original");
+        assert_eq!(expected["issues"].as_array().unwrap().len(), 2);
+        assert_eq!(expected["issues"][1]["commits"][0]["title"], "Other issue");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let mut work = Vec::new();
+        for extra in [false, true] {
+            if extra {
+                store.db.execute_batch("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+                    INSERT INTO issue_commits SELECT 'named:Commits',2+id%31,printf('%040x',id),'unrelated','Archived commit','creator',id,NULL FROM n").unwrap();
+            }
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            let mut reader = Store::open(&path).unwrap();
+            reader.replace_connection_for_test(db);
+            assert_eq!(reader.execute(&request).unwrap(), expected);
+            drop(reader);
+            work.push(transport.join().unwrap());
+        }
+        owner.stop();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+        eprintln!("Listed commits with 0/8192 excluded attachments: {work:?} (RPCs, VM steps)");
+        assert_eq!(work[0].0, work[1].0);
+        assert!(
+            work[1].1 <= work[0].1 + 100,
+            "Excluded commit history increased query work: {work:?}"
+        );
     }
 
     #[test]
