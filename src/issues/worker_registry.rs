@@ -580,31 +580,11 @@ fn worker_runs(db: &Connection, workers: &[&str]) -> Result<HashMap<String, Vec<
         return Ok(HashMap::new());
     }
     let mut runs=db.query_collect(STATUS_RUNS, [serde_json::to_string(workers)?],|r| -> rusqlite::Result<_> { Ok((r.get::<_,String>(19)?,json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?,"retry_at":r.get::<_,Option<i64>>(17)?,"retry_count":r.get::<_,i64>(18)?}))) })?;
-    let mut events_by_run: HashMap<String, Vec<(i64, Value)>> = HashMap::new();
-    if !runs.is_empty() {
-        let ids: Vec<_> = runs
-            .iter()
-            .map(|(_, run)| run["id"].as_str().unwrap())
-            .collect();
-        // Drive the indexed tail lookup from only the displayed runs. Ranking
-        // a worker's entire event history would make old runs slow every poll.
-        for (run_id, id, event) in db.query_collect(
-            "SELECT e.run_id,e.id,e.created_at,e.text FROM json_each(?1) selected
-             CROSS JOIN worker_events e WHERE e.id IN (
-                SELECT id FROM worker_events WHERE run_id=selected.value ORDER BY id DESC LIMIT 12
-             )",
-            [serde_json::to_string(&ids)?],
-            |row| -> rusqlite::Result<_> {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    json!({"at":row.get::<_,i64>(2)?,"text":row.get::<_,String>(3)?}),
-                ))
-            },
-        )? {
-            events_by_run.entry(run_id).or_default().push((id, event));
-        }
-    }
+    let ids: Vec<_> = runs
+        .iter()
+        .map(|(_, run)| run["id"].as_str().unwrap())
+        .collect();
+    let mut events_by_run = crate::issues::archive::worker_event_tails(db, &ids)?;
     let models = super::actor_labels::models(db, runs.iter().map(|(_, run)| run))?;
     for (_, run) in &mut runs {
         run["model"] = models
