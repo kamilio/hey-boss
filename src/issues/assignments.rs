@@ -245,7 +245,7 @@ fn metadata(
     project: &str,
     numbers: &[i64],
 ) -> Result<std::collections::BTreeMap<i64, AssignmentMetadata>> {
-    Ok(db.prepare("SELECT i.number,i.assignment_target,a.node,json_extract(g.metadata,'$.machine'),json_extract(g.metadata,'$.host') FROM issues i LEFT JOIN fleet_allocations a ON a.project_id=i.project_id AND a.issue_number=i.number LEFT JOIN agents g ON g.id=i.assignee WHERE i.project_id=?1 AND i.number IN (SELECT value FROM json_each(?2))")?.query_map(params![project,serde_json::to_string(numbers)?],|r|Ok((r.get(0)?,AssignmentMetadata{target:r.get(1)?,reserved:r.get(2)?,actor_machine:r.get(3)?,actor_host:r.get(4)?})))?.collect::<rusqlite::Result<_>>()?)
+    Ok(db.query_collect::<_, _, rusqlite::Error>("SELECT i.number,i.assignment_target,a.node,json_extract(g.metadata,'$.machine'),json_extract(g.metadata,'$.host') FROM issues i LEFT JOIN fleet_allocations a ON a.project_id=i.project_id AND a.issue_number=i.number LEFT JOIN agents g ON g.id=i.assignee WHERE i.project_id=?1 AND i.number IN (SELECT value FROM json_each(?2))",params![project,serde_json::to_string(numbers)?],|r|Ok((r.get(0)?,AssignmentMetadata{target:r.get(1)?,reserved:r.get(2)?,actor_machine:r.get(3)?,actor_host:r.get(4)?})))?.into_iter().collect())
 }
 
 fn machines(db: &Connection, actor: Option<&Actor>) -> Result<Vec<Value>> {
@@ -255,7 +255,7 @@ fn machines(db: &Connection, actor: Option<&Actor>) -> Result<Vec<Value>> {
         [],
         |r| r.get::<_, bool>(0),
     )? {
-        machines=db.prepare("SELECT json_extract(m.value,'$.node'),json_extract(m.value,'$.hostname'),json_extract(m.value,'$.host'),json_extract(m.value,'$.state') FROM fleet_state s,json_each(s.value) m WHERE s.key='machines' AND json_extract(m.value,'$.node') IS NOT NULL")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,Option<String>>(1)?,"host":r.get::<_,Option<String>>(2)?,"state":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<_>>()?;
+        machines=db.query_collect::<_, _, rusqlite::Error>("SELECT json_extract(m.value,'$.node'),json_extract(m.value,'$.hostname'),json_extract(m.value,'$.host'),json_extract(m.value,'$.state') FROM fleet_state s,json_each(s.value) m WHERE s.key='machines' AND json_extract(m.value,'$.node') IS NOT NULL",[],|r|Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,Option<String>>(1)?,"host":r.get::<_,Option<String>>(2)?,"state":r.get::<_,Option<String>>(3)?})))?;
     }
     let local: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     let local = if local.is_empty() {
