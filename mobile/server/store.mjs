@@ -120,7 +120,7 @@ export class HubStore{
   const confirmed=reliable&&presence.awaySince!=null&&presence.seenAt-presence.awaySince>=60000;
   const state=!presence?'unknown':stale?'offline':presence.unavailable?'locked':confirmed?'away':reliable&&presence.awaySince!=null?'confirming':'active';
   const quiet_hours=this.quietHours(),muted=quietHoursActive(quiet_hours,now);
-  return {...preferences,quiet_hours,quietHoursActive:muted,macState:state,macIdleSeconds:reliable?presence.idleSeconds+Math.max(0,age)/1000:null,notifyPhone:!muted&&(preferences.mode==='always'||preferences.mode==='automatic'&&['away','locked','offline'].includes(state))};
+  return {...preferences,quiet_hours,quietHoursActive:muted,macState:state,macIdleSeconds:reliable?presence.idleSeconds+Math.max(0,age)/1000:null,notifyPhone:quiet_hours!==null&&!muted&&(preferences.mode==='always'||preferences.mode==='automatic'&&['away','locked','offline'].includes(state))};
  }
  issueProjects(){const row=this.db.prepare("SELECT value FROM metadata WHERE key='issue_projects'").get();return row?JSON.parse(row.value):[];}
  setIssueProjects(projects){
