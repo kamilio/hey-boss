@@ -1483,18 +1483,49 @@ pub(super) fn apply_pull(
         )?;
     }
     let mut acknowledged = BTreeMap::new();
+    let sequences = receipts
+        .iter()
+        .map(|receipt| receipt["seq"].as_i64())
+        .collect::<Option<Vec<_>>>();
+    let mut outgoing = sequences.as_ref().map(|_| BTreeMap::new());
+    if let Some(outgoing) = &mut outgoing {
+        // Successful acknowledgments only need deletion. Load bodies only for
+        // receipts that must retain a conflict or map an append-only identity.
+        let needed: BTreeSet<_> = receipts
+            .iter()
+            .filter(|receipt| {
+                receipt["state"] == "conflict" || receipt.get("canonical_append").is_some()
+            })
+            .map(|receipt| receipt["seq"].as_i64().unwrap())
+            .collect();
+        if !needed.is_empty() {
+            for row in rows(
+                db,
+                "SELECT o.* FROM json_each(?1) requested CROSS JOIN fleet_outbox o WHERE o.seq=requested.value",
+                &[json!(serde_json::to_string(&needed)?)],
+            )? {
+                outgoing.insert(row["seq"].as_i64().unwrap(), row);
+            }
+        }
+    }
     for receipt in receipts {
         if receipt.get("canonical_subtask").is_some() {
             let row = &receipt["canonical_subtask"];
             acknowledged.insert(graph_key(row)?, row["row"].clone());
         }
-        let change = rows(
-            db,
-            "SELECT * FROM fleet_outbox WHERE seq=?",
-            &[receipt["seq"].clone()],
-        )?
-        .into_iter()
-        .next();
+        let change = if let Some(outgoing) = &mut outgoing {
+            // The first receipt consumes the row even when a later duplicate
+            // has different conflict or identity metadata.
+            outgoing.remove(&receipt["seq"].as_i64().unwrap())
+        } else {
+            rows(
+                db,
+                "SELECT * FROM fleet_outbox WHERE seq=?",
+                &[receipt["seq"].clone()],
+            )?
+            .into_iter()
+            .next()
+        };
         if let Some(change) = change {
             if let Some(origin) = receipt.get("canonical_append") {
                 let local = row_json(&change, "after_json")?;
@@ -1539,10 +1570,23 @@ pub(super) fn apply_pull(
                 }
             }
         }
+        if sequences.is_none() {
+            // Preserve SQLite's affinity and duplicate-key behavior for old
+            // peers that send non-integer sequence representations.
+            execute(
+                db,
+                "DELETE FROM fleet_outbox WHERE seq=?",
+                &[receipt["seq"].clone()],
+            )?;
+        }
+    }
+    if let Some(sequences) = sequences
+        && !sequences.is_empty()
+    {
         execute(
             db,
-            "DELETE FROM fleet_outbox WHERE seq=?",
-            &[receipt["seq"].clone()],
+            "DELETE FROM fleet_outbox WHERE seq IN (SELECT value FROM json_each(?1))",
+            &[json!(serde_json::to_string(&sequences)?)],
         )?;
     }
     let mut pending = Pending::new();
@@ -4188,6 +4232,130 @@ mod tests {
         }
         drop(remote);
         owner.stop();
+    }
+
+    #[test]
+    fn applied_receipt_batches_do_not_read_and_delete_each_journal_row() {
+        let mut work = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            install_capture(&f.db, "agent", "peer").unwrap();
+            f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+            f.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<=?1) INSERT INTO agents SELECT 'human:ack-'||x,?2,0 FROM n", rusqlite::params![count,json!({"padding":"x".repeat(4096)}).to_string()]).unwrap();
+            let pending = journal(&f.db, 0).unwrap();
+            assert_eq!(pending.len(), count as usize + 1);
+            let receipts: Vec<_> = pending
+                .iter()
+                .take(count as usize)
+                .map(|row| json!({"seq":row["seq"],"state":"applied"}))
+                .collect();
+            let payload = json!({"cursor":1,"allocations":[],"ranges":[]});
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            for replay in [false, true] {
+                let (db, transport) = crate::database::tests::measured_connection(&f.path);
+                apply_pull(&db, "peer", &payload, &receipts).unwrap();
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                eprintln!(
+                    "{count} applied receipts, replay={replay}: {commands} RPCs, {steps} query VM steps"
+                );
+                work.push(commands);
+                assert_eq!(
+                    journal(&f.db, 0).unwrap(),
+                    vec![pending.last().unwrap().clone()]
+                );
+            }
+            owner.stop();
+        }
+        assert!(
+            work.iter().all(|commands| *commands <= 14),
+            "Per-receipt database calls remain: {work:?}"
+        );
+    }
+
+    #[test]
+    fn pull_acknowledgments_keep_duplicate_order_append_mappings_and_atomicity() {
+        let f = Fixture::new();
+        install_capture(&f.db, "agent", "peer").unwrap();
+        f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+        f.db.execute_batch("INSERT INTO agents VALUES('human:ack-one','{}',0),('human:ack-two','{}',0);
+            INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Native fleet',1,'human:fixture','Comment',123);").unwrap();
+        let pending = journal(&f.db, 0).unwrap();
+        assert_eq!(pending.len(), 3);
+        let one = &pending[0]["seq"];
+        let two = &pending[1]["seq"];
+        let comment = &pending[2]["seq"];
+        let receipts = vec![
+            json!({"seq":one,"state":"applied"}),
+            json!({"seq":one,"state":"conflict","reason":"Ignored duplicate"}),
+            json!({"seq":two,"state":"conflict","reason":"Saved conflict"}),
+            json!({"seq":two,"state":"conflict","reason":"Ignored duplicate"}),
+            json!({"seq":comment,"state":"applied","canonical_append":{"origin":"main","origin_id":101}}),
+        ];
+        assert!(
+            apply_pull(
+                &f.db,
+                "peer",
+                &json!({"cursor":1,"allocations":[]}),
+                &receipts
+            )
+            .is_err()
+        );
+        assert_eq!(journal(&f.db, 0).unwrap(), pending);
+        assert!(
+            rows(&f.db, "SELECT * FROM fleet_conflicts", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            rows(
+                &f.db,
+                "SELECT * FROM fleet_row_ids WHERE origin='main'",
+                &[]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let payload = json!({"cursor":1,"allocations":[],"ranges":[]});
+        apply_pull(&f.db, "peer", &payload, &receipts).unwrap();
+        assert!(journal(&f.db, 0).unwrap().is_empty());
+        let conflicts = rows(&f.db, "SELECT seq,reason FROM fleet_conflicts", &[]).unwrap();
+        assert_eq!(
+            conflicts,
+            vec![json!({"seq":two,"reason":"Saved conflict"})]
+        );
+        let mappings = rows(&f.db, "SELECT origin_id,local_id FROM fleet_row_ids WHERE origin='main' AND table_name='comments'", &[]).unwrap();
+        assert_eq!(
+            mappings,
+            vec![
+                json!({"origin_id":101,"local_id":row_json(&pending[2], "after_json").unwrap()["id"]})
+            ]
+        );
+        apply_pull(&f.db, "peer", &payload, &receipts).unwrap();
+        assert_eq!(
+            rows(&f.db, "SELECT seq,reason FROM fleet_conflicts", &[]).unwrap(),
+            conflicts
+        );
+
+        f.db.execute("INSERT INTO agents VALUES('human:ack-legacy','{}',0)", [])
+            .unwrap();
+        let legacy = journal(&f.db, 0).unwrap();
+        let sequence = legacy[0]["seq"].as_i64().unwrap();
+        apply_pull(
+            &f.db,
+            "peer",
+            &payload,
+            &[
+                json!({"seq":sequence.to_string(),"state":"applied"}),
+                json!({"seq":sequence,"state":"conflict","reason":"Ignored legacy duplicate"}),
+            ],
+        )
+        .unwrap();
+        assert!(journal(&f.db, 0).unwrap().is_empty());
+        assert_eq!(
+            rows(&f.db, "SELECT seq,reason FROM fleet_conflicts", &[]).unwrap(),
+            conflicts
+        );
     }
 
     #[test]
