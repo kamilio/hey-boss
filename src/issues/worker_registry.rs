@@ -7,7 +7,10 @@ pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_
 pub(super) const LEGACY_RUNTIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_legacy_runtime ON issue_workers(id) WHERE json_type(config,'$.upgrading') IS NOT NULL;";
 
 // PR origins only need attachment events, not the issue's full activity log.
-pub(super) const PR_ORIGIN_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_pr_origin ON events(project_id,issue_number,id DESC) WHERE action='pr_attached';";
+// Match the PR URL's TEXT affinity so SQLite can seek the indexed expression.
+// Keep the prior index for queries from clients still running during upgrades.
+pub(super) const PR_ORIGIN_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_pr_origin ON events(project_id,issue_number,id DESC) WHERE action='pr_attached';
+    CREATE INDEX IF NOT EXISTS issue_pr_origin_url ON events(project_id,issue_number,CAST(json_extract(data,'$.url') AS TEXT),id DESC) WHERE action='pr_attached' AND json_valid(data);";
 
 const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
     ("issues", "project_id", &["attempt_hold"]),
@@ -1027,7 +1030,7 @@ pub(super) fn pull_requests_for_issues(
     if numbers.is_empty() {
         return Ok(by_issue);
     }
-    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error,(SELECT json_extract(e.data,'$.origin') FROM events e WHERE e.project_id=issue_pull_requests.project_id AND e.issue_number=issue_pull_requests.issue_number AND e.action='pr_attached' AND json_valid(e.data) AND json_extract(e.data,'$.url')=issue_pull_requests.url AND json_type(e.data,'$.origin')='object' ORDER BY e.id DESC LIMIT 1),issue_number FROM json_each(?2) requested CROSS JOIN issue_pull_requests WHERE project_id=?1 AND issue_number=requested.value ORDER BY issue_number,created_at,url")?;
+    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error,(SELECT json_extract(e.data,'$.origin') FROM events e WHERE e.project_id=issue_pull_requests.project_id AND e.issue_number=issue_pull_requests.issue_number AND e.action='pr_attached' AND json_valid(e.data) AND CAST(json_extract(e.data,'$.url') AS TEXT)=issue_pull_requests.url AND json_type(e.data,'$.origin')='object' ORDER BY e.id DESC LIMIT 1),issue_number FROM json_each(?2) requested CROSS JOIN issue_pull_requests WHERE project_id=?1 AND issue_number=requested.value ORDER BY issue_number,created_at,url")?;
     for row in stmt.query_map(params![project,serde_json::to_string(numbers)?],|r|{
         let origin_raw: Option<String> = r.get(7)?;
         let origin = origin_raw.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok());
