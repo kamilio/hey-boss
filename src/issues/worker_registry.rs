@@ -448,13 +448,22 @@ fn worker_overview_for(
     db: &Connection,
     ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<Value>> {
-    let builds_exist: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds')", [], |r| r.get(0))?;
+    // Both metadata tables are additive; older installations may have neither.
+    let (builds_exist, runtime_exists): (bool, bool) = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds'),EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime')",
+        [], |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let build = if builds_exist {
         "(SELECT build FROM issue_worker_builds b WHERE b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start)"
     } else {
         "NULL"
     };
-    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start FROM issue_workers w WHERE (?1 IS NULL OR w.id IN (SELECT value FROM json_each(?1))) ORDER BY updated_at DESC,id LIMIT ?2"))?;
+    let upgrading = if runtime_exists {
+        "EXISTS(SELECT 1 FROM issue_worker_runtime r WHERE r.worker_id=w.id AND r.owner_pid=w.owner_pid AND r.owner_start=w.owner_start)"
+    } else {
+        "0"
+    };
+    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start,{upgrading} FROM issue_workers w WHERE (?1 IS NULL OR w.id IN (SELECT value FROM json_each(?1))) ORDER BY updated_at DESC,id LIMIT ?2"))?;
     let rows = stmt
         .query_map(
             params![
@@ -472,21 +481,15 @@ fn worker_overview_for(
                     r.get::<_, u32>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
+                    r.get::<_, bool>(9)?,
                 ))
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    // Runtime state is additive, so older CLIs can still read worker settings.
-    let runtime_exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime')", [], |r| r.get(0))?;
-    let mut workers: Vec<Value> = rows.into_iter().map(|(id,c,v,k,pid,at,active,build,start)| {
+    let workers: Vec<Value> = rows.into_iter().map(|(id,c,v,k,pid,at,active,build,start,upgrading)| {
         let build = build.filter(|_| pid.zip(start.as_deref()).is_some_and(|(pid,start)| crate::agents::process_identity(pid).as_deref() == Some(start)));
-        Ok(json!({"id":id,"config":serde_json::from_str::<Settings>(&c)?,"upgrading":false,"version":v,"kind":k,"pid":pid,"updated_at":at,"active":active,"build":build}))
+        Ok(json!({"id":id,"config":serde_json::from_str::<Settings>(&c)?,"upgrading":upgrading,"version":v,"kind":k,"pid":pid,"updated_at":at,"active":active,"build":build}))
     }).collect::<Result<_>>()?;
-    if runtime_exists {
-        for w in &mut workers {
-            w["upgrading"] = json!(db.query_row("SELECT EXISTS(SELECT 1 FROM issue_worker_runtime r JOIN issue_workers w ON w.id=r.worker_id WHERE w.id=?1 AND r.owner_pid=w.owner_pid AND r.owner_start=w.owner_start)", [w["id"].as_str().unwrap()], |r| r.get::<_,bool>(0))?);
-        }
-    }
     Ok(workers)
 }
 fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -> Result<Value> {
@@ -1278,6 +1281,91 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_overview_reads_owner_matched_upgrade_state_in_one_batch() {
+        let mut measurements = Vec::new();
+        for modern in [false, true] {
+            for count in [16, 128] {
+                let root = std::env::temp_dir()
+                    .join(format!("hb-worker-upgrading-{}", random_id().unwrap()));
+                fs::create_dir(&root).unwrap();
+                let path = root.join("issues.db");
+                let store = Store::open(&path).unwrap();
+                if modern {
+                    store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id),owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL);
+                        CREATE TABLE issue_worker_builds(worker_id TEXT PRIMARY KEY REFERENCES issue_workers(id),owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL,build TEXT NOT NULL)").unwrap();
+                }
+                let pid = std::process::id();
+                let start = crate::agents::process_identity(pid).unwrap();
+                let mut selected = std::collections::HashSet::new();
+                for index in 0..count {
+                    let id = format!("worker-{index}");
+                    selected.insert(id.clone());
+                    store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at,owner_pid,owner_start) VALUES(?1,'managed',?2,1,?3,?4,?5)",params![id,serde_json::to_string(&Settings::default()).unwrap(),index,pid,start]).unwrap();
+                    if modern {
+                        if index % 4 != 3 {
+                            store
+                                .db
+                                .execute(
+                                    "INSERT INTO issue_worker_runtime VALUES(?1,?2,?3)",
+                                    params![
+                                        id,
+                                        if index % 4 == 2 { pid + 1000000 } else { pid },
+                                        if index % 4 == 1 { "old-start" } else { &start }
+                                    ],
+                                )
+                                .unwrap();
+                        }
+                        store
+                            .db
+                            .execute(
+                                "INSERT INTO issue_worker_builds VALUES(?1,?2,?3,'current-build')",
+                                params![id, pid, if index % 2 == 0 { &start } else { "old-start" }],
+                            )
+                            .unwrap();
+                    }
+                }
+                drop(store);
+                let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+                let (db, transport) = crate::database::tests::measured_connection(&path);
+                let tx = db.read_transaction().unwrap();
+                let workers = worker_overview_for(&tx, Some(&selected)).unwrap();
+                tx.commit().unwrap();
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                owner.stop();
+                assert_eq!(workers.len(), count);
+                for worker in workers {
+                    let index = worker["id"]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("worker-")
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap();
+                    assert_eq!(worker["upgrading"], modern && index % 4 == 0);
+                    assert_eq!(
+                        worker["build"],
+                        if modern && index % 2 == 0 {
+                            json!("current-build")
+                        } else {
+                            Value::Null
+                        }
+                    );
+                }
+                eprintln!(
+                    "{count} workers, modern={modern}: {commands} RPCs, {steps} query VM steps"
+                );
+                measurements.push(commands);
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+        assert!(
+            measurements.iter().all(|commands| *commands <= 6),
+            "Per-worker runtime lookups remain: {measurements:?}"
+        );
+    }
+
     #[test]
     fn worker_event_previews_use_one_bounded_batch() {
         let mut measurements = Vec::new();
