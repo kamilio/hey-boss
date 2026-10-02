@@ -258,7 +258,7 @@ fn lookup_agent_links_load_real_saved_conversation_and_filter_overview() {
                         "overview"
                     }
                 );
-                let run = json!({"id":"run-1","kind":"issue","next_at":null,"enabled":null,"project_id":"github.com/poe-platform/poe-code","project_name":"poe-code","number":1,"title":"Agent task","session_id":session,"actor_id":"human:boss","state":"completed","started_at":1,"finished_at":2,"summary":"Done","last_event":"Done"});
+                let run = json!({"id":"run-1","kind":"issue","next_at":null,"enabled":null,"project_id":"github.com/poe-platform/poe-code","project_name":"poe-code","number":1,"title":"Agent task","session_id":session,"actor_id":"human:boss","model":null,"state":"completed","started_at":1,"finished_at":2,"summary":"Done","last_event":"Done"});
                 let mut hidden = run.clone();
                 hidden["id"] = json!("hidden");
                 hidden["project_id"] = json!("named:Hidden");
