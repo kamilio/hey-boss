@@ -158,6 +158,7 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("issue_pull_requests", "pr_title", "TEXT"),
     ("issue_pull_requests", "author_id", "INTEGER"),
     ("global_settings", "github_user_id", "INTEGER"),
+    ("global_settings", "quiet_hours", "TEXT"),
     (
         "issue_pull_requests",
         "purpose",

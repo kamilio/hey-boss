@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUIET_HOURS"] == "1" { auditQuietHours(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ACTIVE_AGENTS_ONLY"] == "1" { auditActiveAgentFilter(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WEB_INBOX_ONLY"] == "1" {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-web-inbox-"+UUID().uuidString)
@@ -3051,4 +3052,44 @@ func auditArtifactEditor() {
     third.window.close()
     nextOpen.window.close()
     print("PASS focus, quick switch, find, undo/redo, automatic disk save and external-edit protection")
+}
+
+func auditQuietHours() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-quiet-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    var schedule = NotificationQuietHours(time_zone: "America/Chicago")
+    let date = ISO8601DateFormatter()
+    for (time, muted) in [("2026-10-02T02:59:59Z", false), ("2026-10-02T03:00:00Z", true), ("2026-10-02T11:59:59Z", true), ("2026-10-02T12:00:00Z", false), ("2026-11-01T07:30:00Z", true)] {
+        precondition(schedule.active(at: date.date(from: time)!) == muted)
+    }
+    schedule.enabled = false
+    precondition(!schedule.active(at: date.date(from: "2026-10-02T03:00:00Z")!))
+    let store = try! Store(root.appendingPathComponent("history.db").path)
+    var muted = true
+    store.notificationsMuted = { muted }
+    var shown = 0
+    store.show = { _ in shown += 1 }
+    for kind in ["alert", "update", "prompt", "approval"] {
+        var row = Record(taskID: kind, kind: kind, question: "Synthetic", project: "Test", title: "Quiet", description: "", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 0, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+        row.quietHoursMuted = true
+        try! store.database.save(row)
+    }
+    for command in ["alert", "update", "ask"] {
+        let raw: [String: Any] = ["command": command, "project": "Synthetic", "title": "Quiet", "question": "Synthetic", "description": "", "sync": false]
+        let request = try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: raw))
+        var fds: [Int32] = [0,0]; precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        store.handle(request, Reply(fds[1]))
+        let input = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+        let response = try! JSONSerialization.jsonObject(with: input.readDataToEndOfFile()) as! [String: Any]
+        let row = try! store.database.get(response["task_id"] as! String)
+        precondition(row.quietHoursMuted == true && row.status == "pending" && row.presentedAt == nil)
+    }
+    store.restore(); precondition(shown == 0)
+    muted = false; store.restore(); precondition(shown == 0)
+    precondition(try! store.database.pending().count == 7)
+    let ui = Interface(present: false); ui.notificationsMuted = { true }
+    ui.add(try! store.database.get("alert")); ui.add(try! store.database.get("prompt"))
+    precondition(ui.cards.isEmpty && ui.questions.isEmpty && ui.current == nil)
+    print("PASS quiet hours: boundaries, timezone, DST, disabled mode, durable inbox, restart suppression, native surfaces")
 }

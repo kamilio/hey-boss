@@ -25,7 +25,7 @@ async page => {
    check(await page.locator('.activity-content').evaluateAll(nodes=>nodes.every(n=>n.getBoundingClientRect().right<=innerWidth)),`${mode}/${theme}/${width}: activity stays within viewport`);
    if([1440,390].includes(width)){
     await page.locator('#comments .comment-card').first().scrollIntoViewIfNeeded();
-    await page.screenshot({path:`/tmp/hey-boss-947/${mode}-${theme}-${width}.png`});
+    await page.screenshot({path:`/tmp/hb-timeline-visual-review/${mode}-${theme}-${width}.png`});
    }
   }
   await page.setViewportSize({width:1024,height:900});

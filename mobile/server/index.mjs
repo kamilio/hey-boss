@@ -54,6 +54,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.post('/api/tasks/clear',auth,(req,res)=>{const cleared=store.clear(req.body.taskIDs);change();res.json({cleared});});
  app.post('/api/tasks/:id/open',auth,(req,res)=>{const task=store.open(req.params.id);change();res.json({task:outcome(task)});});
  app.post('/api/notifications',auth,(req,res)=>{const preferences=store.setPreferences(req.body);change();res.json({notifications:{...preferences,...store.routing(now())}});});
+ app.post('/api/bridge/quiet-hours',bridge,(req,res)=>{store.setQuietHours(req.body);change();res.json({ok:true});});
  app.post('/api/bridge/presence',bridge,(req,res)=>{store.presence(req.body,now());res.json({notifications:store.routing(now())});});
  app.post('/api/tasks/:id/resolve',auth,(req,res)=>{const task=store.resolve(req.params.id,req.body.result,'phone',req.body.cancel===true);change();res.json({task});});
  app.post('/api/subscribe',auth,(req,res)=>{
@@ -84,6 +85,8 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
   if(!vapid||pumping)return;
   pumping=true;
   try{
+   // Muting drops delivery attempts, never the inbox requests. No morning replay.
+   if(store.routing(now()).quietHoursActive){store.db.exec('DELETE FROM outbox');return;}
    const groups=new Map();
    for(const row of store.db.prepare('SELECT * FROM outbox WHERE retry<=? ORDER BY id LIMIT 100').all(now())){
     const device=store.db.prepare('SELECT * FROM devices WHERE id=?').get(row.device);
@@ -98,6 +101,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
     // A backlog becomes one useful summary rather than a burst of old banners.
     const batches=rows.length>=3?[rows]:rows.map(row=>[row]);
     for(const candidates of batches){
+     if(store.routing(now()).quietHoursActive){store.db.exec('DELETE FROM outbox');break;}
      if(!store.routing(now()).notifyPhone)break;
      const batch=candidates.filter(x=>store.get(x.task.taskID).status==='pending');
      if(!batch.length)continue;

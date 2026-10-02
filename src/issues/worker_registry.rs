@@ -30,7 +30,7 @@ const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
     (
         "global_settings",
         "id",
-        &["auto_close_merged_prs", "github_user_id"],
+        &["auto_close_merged_prs", "github_user_id", "quiet_hours"],
     ),
 ];
 fn capture_repairs(db: &Connection) -> Result<Vec<(String, String)>> {

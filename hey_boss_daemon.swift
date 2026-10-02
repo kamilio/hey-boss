@@ -153,6 +153,34 @@ struct DocumentComment: Codable {
     }
 }
 
+struct NotificationQuietHours: Codable {
+    var enabled = true
+    var start = "22:00"
+    var end = "07:00"
+    var time_zone = TimeZone.current.identifier
+    func active(at date: Date = Date()) -> Bool {
+        guard enabled else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: time_zone) ?? .current
+        let parts = calendar.dateComponents([.hour, .minute], from: date)
+        let time = String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0)
+        return start < end ? time >= start && time < end : time >= start || time < end
+    }
+    static func load(_ path: String) -> Self {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else {
+            if let db { sqlite3_close(db) }; return Self()
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT quiet_hours FROM global_settings WHERE id=1", -1, &statement, nil) == SQLITE_OK else { return Self() }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0),
+              let value = try? JSONDecoder().decode(Self.self, from: Data(String(cString: raw).utf8)) else { return Self() }
+        return value
+    }
+}
+
 struct Record: Codable {
     let taskID: String
     let kind: String
@@ -181,6 +209,7 @@ struct Record: Codable {
     var icon: String?
     var iconData: Data?
     var bannerHidden: Bool?
+    var quietHoursMuted: Bool?
     var issue: IssueReference?
 
     var isLocalSource: Bool { sourceHost == "This Mac" }
@@ -549,12 +578,30 @@ final class Store {
     var pendingChanged: (Int) -> Void = { _ in }
     func refreshPendingCount() { if let count = try? database.pendingCount() { pendingChanged(count) } }
     init(_ path: String) throws { database = try Database(path) }
+    var notificationsMuted: () -> Bool = { false }
+    var quietHoursWereActive = false
+    func mutePendingNotifications() {
+        let active = notificationsMuted()
+        guard active != quietHoursWereActive else { return }
+        quietHoursWereActive = active
+        guard active else { return }
+        do {
+            let pending = try database.pending()
+            try database.transaction {
+                for var row in pending where row.quietHoursMuted != true { row.quietHoursMuted = true; try database.save(row) }
+            }
+            removeMany(pending.map(\.taskID))
+        } catch { reportFailure(error) }
+    }
     func restore() {
         defer { refreshPendingCount() }
         do {
+            let muted = notificationsMuted()
             for var row in try database.pending() {
                 if let expiry = row.expiresAt, expiry <= Date().timeIntervalSince1970 { complete(row.taskID, nil) }
                 else {
+                    if muted { row.quietHoursMuted = true; try database.save(row) }
+                    if row.quietHoursMuted == true { continue }
                     if row.bannerHidden == true { row.bannerHidden = false; try database.save(row) }
                     show(row)
                 }
@@ -588,10 +635,11 @@ final class Store {
             row.sourceHost = request.source_host
             row.severity = request.severity; row.icon = request.icon
             row.iconData = request.icon_path.flatMap(snapshotIcon)
+            row.quietHoursMuted = notificationsMuted()
             try database.transaction { try database.save(row); try mobile?.track(row) }
             refreshPendingCount()
             if request.sync { waiters[row.taskID] = [reply] } else { reply.send(["task_id": row.taskID]) }
-            show(row)
+            if row.quietHoursMuted != true { show(row) }
             return
         }
         guard ["status", "hide", "wait"].contains(request.command) else { throw invalid("Unknown command") }
@@ -2723,6 +2771,7 @@ final class Interface {
         observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.layout() }
     }
     func add(_ row: Record) {
+        guard !notificationsMuted() else { return }
         guard pendingCompletions[row.taskID] == nil, !cards.contains(where: { $0.row.taskID == row.taskID }), !questions.contains(where: { $0.taskID == row.taskID }), current?.taskID != row.taskID else { return }
         stackHiddenByUser = false
         if row.kind == "alert" || row.kind == "update" {
@@ -2914,7 +2963,7 @@ final class Interface {
         }
         scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, total - height - max(0, oldTop))))
         scroll.reflectScrolledClipView(scroll.contentView)
-        if present && !stackHiddenByUser { stack.orderFrontRegardless() }
+        if present && !stackHiddenByUser && !notificationsMuted() { stack.orderFrontRegardless() }
     }
     func presentQuestion(_ row: Record) {
         add(row)
@@ -2930,7 +2979,9 @@ final class Interface {
         }
         if present { question.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     }
+    var notificationsMuted: () -> Bool = { false }
     func nextQuestion() {
+        if notificationsMuted() { return }
         if current != nil || questions.isEmpty { return }
         let row = questions.removeFirst()
         current = row
@@ -6606,6 +6657,14 @@ struct Daemon {
         let store: Store
         do { store = try Store(directory + "/history.db") }
         catch { reportFailure(error); return }
+        let quietPath = ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"] ?? directory + "/issues.db"
+        store.notificationsMuted = { NotificationQuietHours.load(quietPath).active() }
+        ui.notificationsMuted = store.notificationsMuted
+        // Check boundaries and settings changes even when no new requests arrive.
+        let quietTimer = DispatchSource.makeTimerSource(queue: store.queue)
+        quietTimer.schedule(deadline: .now(), repeating: 1)
+        quietTimer.setEventHandler { store.mutePendingNotifications() }
+        quietTimer.resume()
         store.mobileRequired = FileManager.default.fileExists(atPath: directory + "/mobile.json")
         store.mobile = MobileHub.load(store: store, directory: directory)
         let presence = MacPresence()
@@ -6685,7 +6744,7 @@ struct Daemon {
                 }
             }
         }
-        app.run()
+        withExtendedLifetime(quietTimer) { app.run() }
         #endif
     }
 }
