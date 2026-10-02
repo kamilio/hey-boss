@@ -1707,6 +1707,8 @@ impl Store {
         // A preflight miss can race a successful copy of this request. Recheck
         // only after acquiring the mutation lock to preserve exactly-once writes.
         if let Some(response) = cached_response(&tx, &project, r, &payload)? {
+            // Replayed deletions may touch disk; the saved receipt needs no writer.
+            drop(tx);
             return self.finish_replay(r, response);
         }
         // A duplicate may finish while Git is being inspected. Its durable
@@ -1733,6 +1735,7 @@ impl Store {
             tx = begin()?;
             project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
             if let Some(response) = cached_response(&tx, &project, r, &payload)? {
+                drop(tx);
                 return self.finish_replay(r, response);
             }
             stopped?;
