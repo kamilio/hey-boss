@@ -959,6 +959,7 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
         None => None,
     };
     let mut results = vec![];
+    let mut subtask_keys = vec![];
     for change in changes {
         let previous = if let Some(saved) = &saved {
             saved.get(&change["seq"].as_i64().unwrap()).cloned()
@@ -1019,22 +1020,33 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
                     receipt["state"].clone(),
                 ],
             )?;
-            receipt["canonical_subtask"] = json!({"project_id":row["project_id"],"child_number":row["child_number"],"row":current_row(db,"issue_subtasks",&row)?});
+            subtask_keys.push(json!([
+                results.len(),
+                row["project_id"],
+                row["child_number"]
+            ]));
+            receipt["canonical_subtask"] = json!({"project_id":row["project_id"],"child_number":row["child_number"],"row":null});
         }
         receipt["seq"] = change["seq"].clone();
         results.push(receipt);
     }
     writer.reconcile()?;
-    // Project the final graph, including earlier receipts in the same batch.
-    for (change, receipt) in changes.iter().zip(&mut results) {
-        if change["table_name"] == "issue_subtasks" {
-            let after = row_json(change, "after_json")?;
-            let row = if after.is_null() {
-                row_json(change, "before_json")?
-            } else {
-                after
-            };
-            receipt["canonical_subtask"]["row"] = current_row(db, "issue_subtasks", &row)?;
+    // Read the final graph once, including earlier receipts for the same child.
+    // Joining on the original key values retains SQLite's affinity semantics.
+    if !subtask_keys.is_empty() {
+        for mut row in rows(
+            db,
+            "SELECT json_extract(requested.value,'$[0]') AS receipt_index,s.* FROM json_each(?1) requested CROSS JOIN issue_subtasks s WHERE s.project_id=json_extract(requested.value,'$[1]') AND s.child_number=json_extract(requested.value,'$[2]')",
+            &[json!(serde_json::to_string(&subtask_keys)?)],
+        )? {
+            let index = row
+                .as_object_mut()
+                .unwrap()
+                .remove("receipt_index")
+                .unwrap()
+                .as_u64()
+                .unwrap() as usize;
+            results[index]["canonical_subtask"]["row"] = row;
         }
     }
     if let Some(tx) = tx {
@@ -4232,6 +4244,72 @@ mod tests {
         }
         drop(remote);
         owner.stop();
+    }
+
+    #[test]
+    fn subtask_receipt_replays_batch_the_final_graph_projection() {
+        let mut work = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            f.db.execute("WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<=?1) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) SELECT 'named:Native fleet',x,'Child','','open','human:fixture',0,0,1,'[]',x FROM n", [count]).unwrap();
+            f.db.execute_batch("INSERT INTO issue_subtasks SELECT project_id,1,number,0,'human:fixture' FROM issues WHERE number%2=0").unwrap();
+            let changes: Vec<_> = (1..=count).map(|seq| {
+                f.db.execute("INSERT INTO fleet_receipts VALUES('peer',?1,'{\"state\":\"applied\"}')", [seq]).unwrap();
+                let child = if seq%3==0 { json!((seq+1).to_string()) } else { json!(seq+1) };
+                let row = json!({"project_id":"named:Native fleet","child_number":child,"parent_number":1,"created_at":0,"created_by":"human:fixture"});
+                json!({"seq":seq,"table_name":"issue_subtasks","before_json":row.to_string(),"after_json":null})
+            }).collect();
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            let receipts = accept_changes(&db, "peer", &changes).unwrap();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            for (change, receipt) in changes.iter().zip(&receipts) {
+                let key = row_json(change, "before_json").unwrap();
+                assert_eq!(
+                    receipt["canonical_subtask"],
+                    json!({"project_id":key["project_id"],"child_number":key["child_number"],"row":current_row(&f.db,"issue_subtasks",&key).unwrap()})
+                );
+            }
+            eprintln!("{count} replayed subtask receipts: {commands} RPCs, {steps} query VM steps");
+            work.push((count, commands));
+        }
+        assert!(
+            work.iter()
+                .all(|(count, commands)| *commands <= *count as usize + 4),
+            "Repeated canonical graph reads: {work:?}"
+        );
+    }
+
+    #[test]
+    fn subtask_receipts_all_project_the_last_relationship_in_a_batch() {
+        let f = Fixture::new();
+        f.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES('named:Native fleet',2,'Child','','open','human:fixture',0,0,1,'[]',2),('named:Native fleet',3,'Other parent','','open','human:fixture',0,0,1,'[]',3)").unwrap();
+        let first = json!({"project_id":"named:Native fleet","parent_number":1,"child_number":2,"created_at":0,"created_by":"human:fixture"});
+        let mut last = first.clone();
+        last["parent_number"] = json!(3);
+        let changes = vec![
+            json!({"seq":1,"table_name":"issue_subtasks","before_json":null,"after_json":first.to_string()}),
+            json!({"seq":2,"table_name":"issue_subtasks","before_json":first.to_string(),"after_json":null}),
+            json!({"seq":3,"table_name":"issue_subtasks","before_json":null,"after_json":last.to_string()}),
+        ];
+        let receipts = accept_changes(&f.db, "peer", &changes).unwrap();
+        assert!(
+            receipts.iter().all(|receipt| receipt["state"] == "applied"),
+            "{receipts:?}"
+        );
+        for receipt in &receipts {
+            assert_eq!(receipt["canonical_subtask"]["row"], last);
+        }
+        assert_eq!(accept_changes(&f.db, "peer", &changes).unwrap(), receipts);
+        f.db.execute("DELETE FROM issue_subtasks", []).unwrap();
+        assert!(
+            accept_changes(&f.db, "peer", &changes)
+                .unwrap()
+                .iter()
+                .all(|receipt| receipt["canonical_subtask"]["row"].is_null())
+        );
     }
 
     #[test]
