@@ -10,6 +10,15 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+mod quota;
+
+/// A server-directed preflight retry, preserved through the worker result journal.
+pub fn retry_at(error: &io::Error) -> Option<i64> {
+    error
+        .get_ref()?
+        .downcast_ref::<quota::Quota>()
+        .map(|q| q.retry_at)
+}
 
 type Config = BTreeMap<String, String>;
 const SETTINGS: &[&str] = &[
@@ -90,9 +99,10 @@ pub fn run(options: &Options) -> io::Result<()> {
         }
         Err(error) => {
             if options.json {
+                let retry_at = retry_at(&error);
                 println!(
                     "{}",
-                    serde_json::json!({"ok":false,"error":error.to_string()})
+                    serde_json::json!({"ok":false,"error":error.to_string(),"retry_at":retry_at})
                 );
             }
             Err(error)
@@ -190,6 +200,7 @@ fn format(config: &Config) -> &str {
         .unwrap_or("openpgp")
 }
 fn api(endpoint: &str, fields: &[(&str, &str)], pages: bool) -> io::Result<Value> {
+    let mut gate = quota::Gate::open(&quota::scope()?)?;
     // launchd's normal PATH omits Homebrew and ~/.local/bin. Resolve the CLI
     // without changing Git's environment or relying on an interactive shell.
     use std::os::unix::fs::PermissionsExt;
@@ -211,9 +222,9 @@ fn api(endpoint: &str, fields: &[(&str, &str)], pages: bool) -> io::Result<Value
             fail("GitHub CLI (gh) is missing; install and authenticate it as the worker OS user")
         })?;
     let mut c = Command::new(gh);
-    c.args(["api", "--hostname", "github.com", endpoint]);
+    c.args(["api", "--hostname", "github.com", "--include", endpoint]);
     if pages {
-        c.args(["--paginate", "--slurp"]);
+        c.arg("--paginate");
     }
     if !fields.is_empty() {
         c.args(["--method", "POST"]);
@@ -221,13 +232,136 @@ fn api(endpoint: &str, fields: &[(&str, &str)], pages: bool) -> io::Result<Value
     for (key, value) in fields {
         c.arg("-f").arg(format!("{key}={value}"));
     }
-    let permission = if endpoint == "user/ssh_signing_keys" {
+    let permission = if endpoint == "user/ssh_signing_keys" && !fields.is_empty() {
         "GitHub signing-key registration requires admin:ssh_signing_key permission (or fine-grained SSH signing keys write access). Use gh auth refresh -h github.com -s admin:ssh_signing_key"
     } else {
-        "Authenticate gh for github.com with permission to read the current account"
+        "Check the current account's GitHub permissions"
     };
-    let text = output(&mut c, &format!("GitHub {endpoint}. {permission}"))?;
-    serde_json::from_str(&text).map_err(io::Error::other)
+    let result = crate::admin::capture(&mut c, &[])?;
+    if result["timed_out"] == true || result["truncated"] == true {
+        return Err(fail(format!(
+            "GitHub request failed for {endpoint}: response timed out or exceeded the capture limit"
+        )));
+    }
+    let responses = responses(result["stdout"].as_str().unwrap_or_default())?;
+    for response in &responses {
+        let message = response.body["message"].as_str().unwrap_or_default();
+        let lower = message.to_ascii_lowercase();
+        if response.status == 429
+            || response.status == 403
+                && (response
+                    .headers
+                    .get("x-ratelimit-remaining")
+                    .is_some_and(|v| v == "0")
+                    || response.headers.contains_key("retry-after")
+                    || lower.contains("rate limit")
+                    || lower.contains("abuse detection"))
+        {
+            return Err(gate.exhausted(&response.headers)?);
+        }
+        if response.status == 401 {
+            return Err(fail(format!(
+                "GitHub authentication failed for {endpoint} (HTTP 401). Authenticate gh for github.com as the worker OS user"
+            )));
+        }
+        if response.status == 403 {
+            return Err(fail(format!(
+                "GitHub permission denied for {endpoint} (HTTP 403). {permission}"
+            )));
+        }
+        if response.status >= 400 {
+            return Err(fail(format!(
+                "GitHub request failed for {endpoint} (HTTP {})",
+                response.status
+            )));
+        }
+    }
+    if result["exit_code"] != 0 || responses.is_empty() {
+        let detail = result["stderr"].as_str().unwrap_or_default().trim();
+        if detail.contains("gh auth login") || detail.contains("not logged into") {
+            return Err(fail(
+                "GitHub authentication failed. Authenticate gh for github.com as the worker OS user",
+            ));
+        }
+        return Err(fail(format!(
+            "GitHub request failed for {endpoint}: {detail}"
+        )));
+    }
+    if pages {
+        Ok(Value::Array(
+            responses.into_iter().map(|r| r.body).collect(),
+        ))
+    } else {
+        Ok(responses.into_iter().last().unwrap().body)
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    #[test]
+    fn paginated_headers_and_json_are_kept_per_response() {
+        let parsed = responses("HTTP/2.0 200 OK\r\nX-RateLimit-Remaining: 1\r\n\r\n[{\"key\":\"first\"}]\nHTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 200\r\n\r\n{\"message\":\"API rate limit exceeded\"}").unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].body[0]["key"], "first");
+        assert_eq!(parsed[1].status, 403);
+        assert_eq!(parsed[1].headers["x-ratelimit-reset"], "200");
+        let parsed = responses("HTTP/1.1 200 OK\n\n[]\nHTTP/1.1 200 OK\n\n[1]").unwrap();
+        assert_eq!(parsed[1].body[0], 1);
+        assert_eq!(
+            responses("HTTP/2.0 429\r\nRetry-After: 60\r\n\r\n<html>Busy</html>").unwrap()[0]
+                .headers["retry-after"],
+            "60"
+        );
+    }
+}
+
+struct Response {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: Value,
+}
+fn responses(mut text: &str) -> io::Result<Vec<Response>> {
+    let mut responses = vec![];
+    while !text.trim().is_empty() {
+        text = text.trim_start();
+        let (headers, body) = text
+            .split_once("\r\n\r\n")
+            .or_else(|| text.split_once("\n\n"))
+            .ok_or_else(|| fail("GitHub request failed: missing response headers"))?;
+        let mut lines = headers.lines();
+        let status = lines
+            .next()
+            .and_then(|l| l.strip_prefix("HTTP/"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| fail("GitHub request failed: invalid response status"))?;
+        let headers = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_owned()))
+            .collect();
+        if status >= 400 {
+            responses.push(Response {
+                status,
+                headers,
+                body: serde_json::from_str(body).unwrap_or(Value::Null),
+            });
+            break;
+        }
+        let mut stream = serde_json::Deserializer::from_str(body).into_iter::<Value>();
+        let value = stream
+            .next()
+            .transpose()
+            .map_err(io::Error::other)?
+            .unwrap_or(Value::Null);
+        text = &body[stream.byte_offset()..];
+        responses.push(Response {
+            status,
+            headers,
+            body: value,
+        });
+    }
+    Ok(responses)
 }
 fn items(value: &Value) -> impl Iterator<Item = &Value> {
     value
@@ -256,7 +390,10 @@ fn identity() -> io::Result<Identity> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(login)
         .to_owned();
-    let emails = api("user/emails", &[], true).unwrap_or(Value::Null);
+    let emails = match api("user/emails", &[], true) {
+        Err(e) if retry_at(&e).is_some() => return Err(e),
+        result => result.unwrap_or(Value::Null),
+    };
     let verified: Vec<_> = items(&emails).filter(|e| e["verified"] == true).collect();
     let noreply = format!("{id}+{login}@users.noreply.github.com");
     let email = verified
@@ -541,11 +678,12 @@ fn check_inner(cwd: &Path, worker: bool) -> io::Result<Report> {
             use std::time::{Duration, Instant};
             static VERIFIED: OnceLock<Mutex<BTreeMap<String, Instant>>> = OnceLock::new();
             let key = format!(
-                "{}:{:?}:{}:{:?}",
+                "{}:{:?}:{}:{:?}:{}",
                 unsafe { libc::geteuid() },
                 home()?,
                 proof.signature,
-                proof.emails
+                proof.emails,
+                quota::scope()?
             );
             let mut cache = VERIFIED
                 .get_or_init(Default::default)
@@ -575,14 +713,19 @@ fn check_inner(cwd: &Path, worker: bool) -> io::Result<Report> {
             .filter(|(key, v)| global.get(*key) != Some(*v))
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
-        return Err(if overrides.is_empty() {
-            error
-        } else {
-            fail(format!(
-                "{error}. Repository overrides: {}",
-                overrides.join(", ")
-            ))
-        });
+        return Err(
+            if overrides.is_empty()
+                || retry_at(&error).is_some()
+                || error.to_string().starts_with("GitHub ")
+            {
+                error
+            } else {
+                fail(format!(
+                    "{error}. Repository overrides: {}",
+                    overrides.join(", ")
+                ))
+            },
+        );
     }
     report(cwd, effective, &global)
 }
@@ -738,5 +881,14 @@ pub fn check_worker(cwd: &Path) -> io::Result<()> {
             "Worker environment repository check failed: {error}"
         )));
     }
-    check_inner(cwd, true).map(|_| ()).map_err(|e| fail(format!("Worker environment check failed in {}: {e}. Run hey-boss environment setup as this worker's OS user", cwd.display())))
+    check_inner(cwd, true).map(|_| ()).map_err(|e| {
+        if retry_at(&e).is_some() || e.to_string().starts_with("GitHub ") {
+            e
+        } else {
+            fail(format!(
+                "Worker environment check failed in {}: {e}",
+                cwd.display()
+            ))
+        }
+    })
 }

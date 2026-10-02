@@ -811,6 +811,7 @@ dependencies = [
  "hey-gh",
  "hey-harvester",
  "html-escape",
+ "httpdate",
  "libc",
  "linkify",
  "memchr",

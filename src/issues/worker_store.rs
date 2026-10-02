@@ -525,6 +525,16 @@ impl Store {
         }
     }
     pub(crate) fn worker_finish(&mut self, job: &Job, state: &str, summary: &str) -> Result<()> {
+        self.worker_finish_with_retry(job, state, summary, None)
+    }
+
+    pub(crate) fn worker_finish_with_retry(
+        &mut self,
+        job: &Job,
+        state: &str,
+        summary: &str,
+        retry_at: Option<i64>,
+    ) -> Result<()> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -590,12 +600,10 @@ impl Store {
         {
             state = worker_infrastructure::STATE;
         }
-        if state == worker_infrastructure::STATE {
-            summary = format!(
-                "{}\n\n{summary}",
-                worker_infrastructure::unavailable(&summary)
-                    .unwrap_or(worker_infrastructure::GUIDANCE)
-            );
+        if state == worker_infrastructure::STATE
+            && let Some(guidance) = worker_infrastructure::unavailable(&summary)
+        {
+            summary = format!("{guidance}\n\n{summary}");
         }
         let mut watcher_waiting = false;
         if (own || handed_off)
@@ -692,7 +700,13 @@ impl Store {
             && issue.state == "open"
             && issue.deleted_at.is_none()
             && (own || issue.assignee.is_none()))
-        .then(|| finished + (30_000_i64 * (1 << count.saturating_sub(1).min(4))).min(300_000));
+        .then(|| {
+            retry_at
+                .unwrap_or_else(|| {
+                    finished + (30_000_i64 * (1 << count.saturating_sub(1).min(4))).min(300_000)
+                })
+                .max(finished)
+        });
         tx.execute(
             "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_count=?5,retry_at=?6,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
             params![job.id, state, summary, finished, count, retry_at],
@@ -721,6 +735,69 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_deadline_survives_result_recovery_without_relabeling_or_losing_session() {
+        let mut f = HandoffFixture::new(false);
+        let reset = now() + 3_600_000;
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET session_id='saved-session'", [])
+            .unwrap();
+        let database = f.root.join("issues.db");
+        crate::issues::worker_results::save_with_retry(
+            &database,
+            &f.job,
+            "infrastructure_blocked",
+            "GitHub quota exhausted. Retry at the server reset.",
+            Some(reset),
+        )
+        .unwrap();
+        // Generic crash recovery cannot replace the original structured deadline.
+        let saved =
+            crate::issues::worker_results::save(&database, &f.job, "startup_failed", "Interrupted")
+                .unwrap();
+        assert_eq!(saved.retry_at, Some(reset));
+        f.store
+            .worker_finish_with_retry(&saved.job, &saved.state, &saved.summary, saved.retry_at)
+            .unwrap();
+        assert!(f.issue().assignee.is_none());
+        assert_eq!(f.issue().state, "open");
+        let (summary, retry, session): (String, i64, String) = f
+            .store
+            .db
+            .query_row(
+                "SELECT summary,retry_at,session_id FROM worker_runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(summary.starts_with("GitHub quota exhausted"));
+        assert!(!summary.contains("Approval") && !summary.contains("setup"));
+        assert_eq!(retry, reset);
+        assert_eq!(session, "saved-session");
+    }
+
+    #[test]
+    fn preflight_causes_do_not_default_to_approval_outages() {
+        for summary in [
+            "GitHub authentication failed (HTTP 401)",
+            "GitHub permission denied (HTTP 403)",
+            "Worker environment check failed: Commit signing failed",
+            "Unknown infrastructure failure",
+        ] {
+            let mut f = HandoffFixture::new(false);
+            f.store
+                .worker_finish(&f.job, "infrastructure_blocked", summary)
+                .unwrap();
+            let actual: String = f
+                .store
+                .db
+                .query_row("SELECT summary FROM worker_runs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(actual, summary);
+        }
+    }
 
     struct HandoffFixture {
         store: Store,
@@ -1237,6 +1314,7 @@ mod tests {
     fn a_crash_after_closing_an_issue_is_still_a_failed_run() {
         let mut f = HandoffFixture::new(false);
         f.apply(Operation::Close {
+                    guard: None,
             allow_long_comment: false,
             number: 1,
             comment: None,
@@ -1516,6 +1594,7 @@ mod tests {
                 }
                 "closed" => {
                     f.apply(Operation::Close {
+                    guard: None,
                         allow_long_comment: false,
                         number: 1,
                         comment: None,
@@ -2422,6 +2501,7 @@ mod tests {
         for prs in [false, true] {
             let mut f = HandoffFixture::new(prs);
             f.apply(Operation::Close {
+                    guard: None,
                 allow_long_comment: false,
                 number: 1,
                 comment: Some("Source/group explicitly completed".into()),

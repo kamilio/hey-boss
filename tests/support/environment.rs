@@ -26,19 +26,27 @@ const fs = require('fs'), path = require('path');
 const root = process.env.HOME, args = process.argv.slice(2);
 const endpoint = args.find(a => /^users?(?:\/|$)/.test(a));
 fs.appendFileSync(path.join(root, 'api-log'), args.join(' ') + '\n');
+const failure = path.join(root, 'github-failure');
+if (fs.existsSync(failure)) {
+  const response = JSON.parse(fs.readFileSync(failure));
+  console.log(`HTTP/2.0 ${response.status}\r\n${response.headers || ''}\r\n${JSON.stringify({message:response.message})}`);
+  console.error(`gh: ${response.message} (HTTP ${response.status})`); process.exit(1);
+}
 if (fs.existsSync(path.join(root, 'denied')) && endpoint === 'user/ssh_signing_keys') {
+  console.log('HTTP/2.0 403\r\n\r\n{"message":"Resource not accessible by personal access token"}');
   console.error('HTTP 403 Resource not accessible by personal access token'); process.exit(1);
 }
+if (args.includes('--include')) console.log('HTTP/2.0 200 OK\r\n\r\n');
 const file = path.join(root, 'github-keys');
 let keys = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : [];
 if (endpoint === 'user') console.log(JSON.stringify({id: 42, login: 'octocat', name: 'Octo Cat'}));
-else if (endpoint === 'users/octocat/gpg_keys') console.log(JSON.stringify([[{key_id:fs.readFileSync(path.join(root,'gpg-key-id'),'utf8').trim(), can_sign:true}]]));
-else if (endpoint === 'user/emails') console.log(JSON.stringify([[{email:'unverified@example.com', primary:true, verified:false}]]));
+else if (endpoint === 'users/octocat/gpg_keys') console.log(JSON.stringify([{key_id:fs.readFileSync(path.join(root,'gpg-key-id'),'utf8').trim(), can_sign:true}]));
+else if (endpoint === 'user/emails') console.log(JSON.stringify([{email:'unverified@example.com', primary:true, verified:false}]));
 else if (endpoint === 'user/ssh_signing_keys' && args.includes('POST')) {
   const key = args.find(a => a.startsWith('key=')).slice(4);
   if (!fs.existsSync(path.join(root, 'discard-registration'))) { keys.push({key}); fs.writeFileSync(file, JSON.stringify(keys)); }
   console.log(JSON.stringify({key}));
-} else if (endpoint === 'users/octocat/ssh_signing_keys') console.log(JSON.stringify([keys]));
+} else if (endpoint === 'users/octocat/ssh_signing_keys') console.log(JSON.stringify(keys));
 else { console.error('Unexpected gh call: ' + args.join(' ')); process.exit(1); }
 "#
         );
@@ -56,6 +64,9 @@ else { console.error('Unexpected gh call: ' + args.join(' ')); process.exit(1); 
             .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.root.join(".gitconfig"))
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_CONFIG_DIR")
             .env(
                 "PATH",
                 format!(
