@@ -3,7 +3,7 @@
 Press **Command+Control+Option+Shift+O** anywhere on macOS to open Issues in
 your default browser at `http://hey-boss.test/`. This uses the same modifiers
 as Quick Add, with **O** for Open. The shortcut is also displayed beside **Issues…** in the Hey Boss
-menu bar. It opens Ready issues with all owners in the browser's selected project.
+menu bar. It opens the normal Issues list in the browser's selected project.
 
 The desktop app must be running. It reuses the local issue service, or starts
 it with the installed CLI when needed. The shortcut checks the same hostname
