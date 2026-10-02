@@ -1036,7 +1036,7 @@ fn live_batch(db: &Connection, nodes: &mut [Value], mode: BodyMode) -> Result<()
             BodyMode::Preview => "coalesce(substr(CAST(i.body AS BLOB),1,2052),x'')",
             BodyMode::Full => "i.body",
         };
-        let mut query = db.prepare(&format!("SELECT json_extract(selected.value,'$[0]'),json_extract(selected.value,'$[1]'),p.name,i.title,{body},i.state,i.assignee,i.version,octet_length(i.body)>0,i.labels
+        let mut query = db.prepare(&format!("SELECT json_extract(selected.value,'$[0]'),json_extract(selected.value,'$[1]'),p.name,i.title,{body},i.state,i.assignee,i.version,octet_length(i.body)>0,i.labels,i.archive_key
             FROM json_each(?1) selected
             LEFT JOIN projects p ON p.id=json_extract(selected.value,'$[0]')
             LEFT JOIN issues i ON i.project_id=json_extract(selected.value,'$[0]') AND i.number=json_extract(selected.value,'$[1]') AND i.deleted_at IS NULL"))?;
@@ -1049,8 +1049,17 @@ fn live_batch(db: &Connection, nodes: &mut [Value], mode: BodyMode) -> Result<()
                 } else { r.get::<_, String>(4)? };
                 Some((json!({"title":title,"body":body,"state":r.get::<_,String>(5)?,"assignee":r.get::<_,Option<String>>(6)?,"resource_version":r.get::<_,i64>(7)?,"has_body":r.get::<_,bool>(8)?}), r.get::<_,String>(9)?))
             } else { None };
-            Ok(((project, r.get::<_,i64>(1)?), (name, issue)))
-        })? { let (key, value) = row?; issues.insert(key, value); }
+            Ok(((project, r.get::<_,i64>(1)?), (name, issue, r.get::<_,Option<String>>(10)?)))
+        })? {
+            let (key, (name, mut issue, archive_key)) = row?;
+            if mode == BodyMode::Full
+                && let Some(archive_key) = archive_key
+                && let Some((issue, _)) = &mut issue
+            {
+                issue["body"] = json!(crate::issues::archive::issue_body(db, &key.0, key.1, &archive_key)?);
+            }
+            issues.insert(key, (name, issue));
+        }
     }
     for node in nodes {
         if node["kind"] == "issue" {

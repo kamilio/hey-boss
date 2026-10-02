@@ -245,7 +245,7 @@ fn issue_archival_preserves_existing_read_responses_and_dependency_readiness() {
         f.db.query_row("SELECT body FROM issues WHERE number=1", [], |r| r
             .get::<_, String>(0))
             .unwrap(),
-        ""
+        "Searchable archive body 🦀"
     );
     assert_eq!(
         f.db.query_row(
@@ -265,6 +265,37 @@ fn issue_archival_preserves_existing_read_responses_and_dependency_readiness() {
         .unwrap()
     );
     assert!(!archive_issue(&f.db, "named:Archive", 2, GRACE_MS + 100).unwrap());
+}
+
+#[test]
+fn archived_issue_descriptions_preserve_every_mindmap_body_mode() {
+    for body in [
+        String::new(),
+        "Short description".into(),
+        format!("\0{}", "🦀".repeat(600)),
+    ] {
+        let mut f = Fixture::new();
+        f.db.execute("UPDATE issues SET body=?1 WHERE number=1", [&body])
+            .unwrap();
+        f.db.execute_batch("INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,reference,reference_project,created_at,updated_at)
+            VALUES('saved','named:Archive',1,'issue','Reference','','1','named:Archive',0,0);").unwrap();
+        let operations = ["none", "preview", "full"].map(
+            |mode| json!({"action":"mindmap","operation":{"command":"show","body_mode":mode}}),
+        );
+        let before: Vec<_> = operations.iter().map(|op| f.read(op.clone())).collect();
+        f.archive();
+        let retained: String =
+            f.db.query_row("SELECT body FROM issues WHERE number=1", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(retained, body.chars().take(513).collect::<String>());
+        for (operation, expected) in operations.into_iter().zip(before) {
+            assert_eq!(
+                f.read(operation.clone()),
+                expected,
+                "Archived map changed for {operation}"
+            );
+        }
+    }
 }
 
 #[test]

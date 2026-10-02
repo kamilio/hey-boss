@@ -280,6 +280,14 @@ pub(crate) fn archive_issue(
     copy.commit()?;
     snapshot.commit()?;
     verify_copy(&archive, &key, project, number)?;
+    // Mindmap metadata and previews stay cheap without loading the cold body.
+    // Keep one extra character so the existing 512-character truncation is exact.
+    let preview: String = original["body"]
+        .as_str()
+        .ok_or_else(|| unavailable("Invalid issue body"))?
+        .chars()
+        .take(513)
+        .collect();
     let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     if issue_record(&tx, project, number)?.as_ref() != Some(&original)
         || fingerprint(&tx, project, number)? != stamp
@@ -288,7 +296,7 @@ pub(crate) fn archive_issue(
     }
     // Publishing the manifest is the only logical switch. Until it commits,
     // readers use hot rows; afterwards they use the complete immutable copy.
-    tx.execute("UPDATE issues SET archive_key=?3,archived_comments=?4,archive_cleanup=1,body='' WHERE project_id=?1 AND number=?2",params![project,number,key,comments])?;
+    tx.execute("UPDATE issues SET archive_key=?3,archived_comments=?4,archive_cleanup=1,body=?5 WHERE project_id=?1 AND number=?2",params![project,number,key,comments,preview])?;
     tx.commit()?;
     Ok(true)
 }

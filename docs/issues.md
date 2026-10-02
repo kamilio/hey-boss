@@ -663,8 +663,9 @@ removing a worktree does not remove its issues.
 
 After five inactive days, closed or deleted issues move their bodies and history
 to a sibling archive: `issues.db.archive.db`. Completed worker payloads, logs,
-and old retry receipts also move there. Compact references stay in the main
-store. Recent activity, active workers, and reservations postpone issue archival;
+and old retry receipts also move there. Compact references and bounded description
+previews stay in the main store. Recent activity, active workers, and reservations
+postpone issue archival;
 existing lists, search, history, and restore keep working. Freed main-database
 pages are reused without a blocking live compaction.
 
