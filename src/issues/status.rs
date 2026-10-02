@@ -85,6 +85,8 @@ pub(super) fn history(
             .and_then(|status| status["created_at"].as_i64())
             .unwrap_or(0)
     });
+    let cold = crate::issues::archive::history_connection(db, &project.id, number)?;
+    let db = cold.as_ref().unwrap_or(db);
     let mut query = db.prepare("SELECT id,author,level,comment,created_at FROM issue_status_updates WHERE project_id=?1 AND issue_number=?2 AND created_at<=?3 ORDER BY created_at DESC,id DESC LIMIT ?4 OFFSET ?5")?;
     let mut updates = query.query_map(params![project.id,number,snapshot_at,limit+1,offset], |r| Ok(json!({"id":r.get::<_,String>(0)?,"author":r.get::<_,String>(1)?,"level":r.get::<_,String>(2)?,"comment":r.get::<_,String>(3)?,"created_at":r.get::<_,i64>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more = updates.len() > limit as usize;

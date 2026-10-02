@@ -196,6 +196,13 @@ impl Connection {
             backend: Backend::Local(rusqlite::Connection::open_in_memory()?),
         })
     }
+    /// A validated, read-only cold store has its own connection lifecycle and
+    /// must never bootstrap an issue owner or join the hot writer queue.
+    pub(crate) fn from_archive(db: rusqlite::Connection) -> Self {
+        Self {
+            backend: Backend::Local(db),
+        }
+    }
     pub fn connect(path: &Path) -> Result<Self> {
         let stream = UnixStream::connect(owner::socket_path(path)).map_err(connection_error)?;
         stream

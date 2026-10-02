@@ -111,7 +111,7 @@ pub(crate) fn archive_runs(db: &HotConnection, now: i64) -> Result<usize> {
     let job_key = archive.put("worker-run", &json!({"job":job,"prompt":prompt}))?;
     let events_key = archive.put("worker-events", &json!(events))?;
     let original: Value = serde_json::from_str(&job)?;
-    let compact = json!({"issue":{"number":original["issue"]["number"],"title":original["issue"]["title"]},"resume_session":original["resume_session"],"config":{"cwd":original["config"]["cwd"]}});
+    let compact = json!({"issue":{"number":original["issue"]["number"],"title":original["issue"]["title"]},"resume_session":original["resume_session"],"session_ref":original["session_ref"],"config":{"cwd":original["config"]["cwd"],"provider":original["config"]["provider"]}});
     let tx = Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute("UPDATE worker_runs SET job=?6,expanded_prompt='',archive_key=?7,events_archive_key=?8 WHERE id=?1 AND job=?2 AND expanded_prompt=?3 AND updated_at=?4 AND finished_at=?5 AND archive_key IS NULL AND (SELECT max(id) FROM worker_events WHERE run_id=?1) IS ?9 AND events_archive_key IS ?10", params![id,job,prompt,updated,finished,compact.to_string(),job_key,events_key,last_id,previous_events])?;
     if changed > 0 {
