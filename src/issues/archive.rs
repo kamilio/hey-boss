@@ -671,4 +671,68 @@ mod tests {
             .unwrap()
         );
     }
+
+    #[test]
+    fn large_worker_histories_copy_in_parts_clean_up_in_batches_and_keep_small_tails() {
+        let f = Fixture::new();
+        let db = Store::open(&f.0.join("issues.db")).unwrap().into_database();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('p','Project',2); INSERT INTO agents VALUES('a','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',1,'Task','','open','a',0,0,1,'[]');
+            INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES('logs','p',1,'{}','a','completed',1,'start','local',1,100,100);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1600) INSERT INTO worker_events(id,run_id,created_at,text) SELECT x,'logs',100,printf('%01990d',x) FROM n;").unwrap();
+        assert_eq!(archive_runs(&db, GRACE_MS + 100).unwrap(), 1);
+        let remaining: i64 = db
+            .query_row("SELECT count(*) FROM worker_events", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            remaining >= 1584,
+            "One maintenance pass removed {remaining} remaining rows without a bounded writer lease"
+        );
+        let archive = Archive::read(&f.path()).unwrap();
+        let key: String = db
+            .query_row("SELECT events_archive_key FROM worker_runs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let header = archive.get("worker-events", &key).unwrap();
+        assert!(serde_json::to_vec(&header).unwrap().len() < 64 * 1024);
+        assert_eq!(header["tail"].as_array().unwrap().len(), 12);
+        let mut events = Vec::new();
+        for part in header["parts"].as_array().unwrap() {
+            let rows = archive
+                .get("worker-event-part", part["key"].as_str().unwrap())
+                .unwrap();
+            assert!(serde_json::to_vec(&rows).unwrap().len() <= 1024 * 1024);
+            events.extend(rows.as_array().unwrap().iter().cloned());
+        }
+        assert_eq!(events.len(), 1600);
+        assert_eq!(events.first().unwrap()["id"], 1);
+        assert_eq!(events.last().unwrap()["id"], 1600);
+        for _ in 0..150 {
+            if archive_runs(&db, GRACE_MS + 100).unwrap() == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM worker_events", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            worker_event_tails(&db, &["logs"]).unwrap()["logs"][0].0,
+            1600
+        );
+        db.execute(
+            "INSERT INTO worker_events(run_id,created_at,text) VALUES('logs',101,'Late event')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(archive_runs(&db, GRACE_MS + 100).unwrap(), 0);
+        assert_eq!(archive_runs(&db, GRACE_MS + 101).unwrap(), 1);
+        assert_eq!(
+            worker_event_tails(&db, &["logs"]).unwrap()["logs"][0].1["text"],
+            "Late event"
+        );
+    }
 }

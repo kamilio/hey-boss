@@ -132,6 +132,21 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("requests", "archive_key", "TEXT"),
     ("worker_runs", "archive_key", "TEXT"),
     ("worker_runs", "events_archive_key", "TEXT"),
+    (
+        "worker_runs",
+        "archive_event_id",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "worker_runs",
+        "archive_pending",
+        "INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "worker_runs",
+        "archive_cleanup",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
     ("issues", "archive_key", "TEXT"),
     ("issues", "archived_comments", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "archive_restoring", "INTEGER NOT NULL DEFAULT 0"),
@@ -1242,6 +1257,10 @@ impl Store {
                 }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_archive_candidates ON worker_runs(finished_at,id) WHERE archive_key IS NULL AND finished_at IS NOT NULL")?;
+                tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_archive_pending ON worker_runs(finished_at,id) WHERE archive_pending=1 AND finished_at IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS worker_archive_cleanup ON worker_runs(id) WHERE archive_cleanup=1 AND finished_at IS NOT NULL;
+                    CREATE TRIGGER IF NOT EXISTS worker_archive_late_event AFTER INSERT ON worker_events WHEN EXISTS(SELECT 1 FROM worker_runs WHERE id=NEW.run_id AND archive_pending=0) BEGIN UPDATE worker_runs SET archive_pending=1 WHERE id=NEW.run_id; END;
+                    CREATE TRIGGER IF NOT EXISTS worker_archive_changed_payload AFTER UPDATE OF archive_key ON worker_runs WHEN NEW.archive_key IS NULL AND OLD.archive_key IS NOT NULL BEGIN UPDATE worker_runs SET archive_pending=1 WHERE id=NEW.id; END;")?;
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS issue_archive_cleanup ON issues(project_id,number) WHERE archive_cleanup=1 AND archive_restoring=0;
                     CREATE INDEX IF NOT EXISTS issue_archive_candidates ON issues(max(updated_at,coalesce(closed_at,0),coalesce(deleted_at,0),archive_touched_at),project_id,number) WHERE archive_key IS NULL AND (state='closed' OR deleted_at IS NOT NULL);
                     CREATE TRIGGER IF NOT EXISTS issue_archive_mutation_guard BEFORE UPDATE ON issues WHEN OLD.archive_key IS NOT NULL AND NEW.archive_key IS OLD.archive_key AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.version IS NOT OLD.version OR NEW.deleted_at IS NOT OLD.deleted_at) BEGIN SELECT RAISE(ABORT,'Restore archived issue before changing it'); END;")?;
