@@ -359,52 +359,52 @@ pub(super) fn execute(
     view(db, p, id)
 }
 
-pub(super) fn execute_import(
+pub(super) struct PreparedImport {
+    uploads: Vec<crate::attachments::PreparedUpload>,
+    replacements: std::collections::BTreeMap<String, String>,
+}
+
+pub(super) fn prepare_import(
     db: &Connection,
     root: &std::path::Path,
     p: &Project,
     op: &Operation,
-    actor: Option<&crate::issues::Actor>,
-    now: i64,
     disk: &mut crate::attachments::DiskChange,
-) -> Result<Value> {
+) -> Result<Option<PreparedImport>> {
     let Operation::Import { operation, files } = op else {
-        return execute(db, p, op, actor, now);
+        return Ok(None);
     };
-    // Validate the document and revision first. The surrounding transaction owns
-    // both document writes and attachment metadata; DiskChange rolls files back.
-    let value = execute(db, p, operation, actor, now)?;
-    let id = value["artifact"]["id"].as_str().unwrap();
+    crate::attachments::check_authority(db)?;
+    // Reject an already-invalid target before touching disk. The mutation still
+    // checks these conditions again after acquiring the writer.
+    match operation.as_ref() {
+        Operation::Create { issue, node, .. } if issue.is_some() || node.is_some() => {
+            target(db, p, *issue, node.as_deref(), true)?;
+        }
+        Operation::Edit { id, if_version, .. } => {
+            if get(db, &p.id, id)?["version"] != *if_version {
+                return Err(Error::conflict(
+                    "Artifact changed on another device. Your draft is preserved; reload the latest revision before merging.",
+                ));
+            }
+        }
+        _ => {}
+    }
     let mut replacements = std::collections::BTreeMap::new();
     let mut uploaded: std::collections::BTreeMap<(String, String), String> =
         std::collections::BTreeMap::new();
+    let mut uploads = Vec::new();
     for file in files {
         use sha2::{Digest, Sha256};
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(crate::attachments::decode(&file.data)?)
-        );
+        let bytes = crate::attachments::decode(&file.data)?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
         let key = (file.name.clone(), digest);
         let file_id = if let Some(id) = uploaded.get(&key) {
             id.clone()
         } else {
-            let result = crate::attachments::execute(
-                db,
-                root,
-                p,
-                &crate::attachments::Operation::Upload {
-                    target: crate::attachments::Target {
-                        kind: crate::attachments::Kind::Artifact,
-                        id: id.into(),
-                    },
-                    name: file.name.clone(),
-                    data: file.data.clone(),
-                },
-                actor.map(|a| a.id.as_str()).unwrap_or(""),
-                now,
-                disk,
-            )?;
-            let id = result["attachment"]["id"].as_str().unwrap().to_owned();
+            let upload = crate::attachments::prepare_upload(root, &file.name, &bytes, disk)?;
+            let id = upload.id.clone();
+            uploads.push(upload);
             uploaded.insert(key, id.clone());
             id
         };
@@ -418,9 +418,46 @@ pub(super) fn execute_import(
             format!("/attachments/{file_id}{suffix}"),
         );
     }
+    Ok(Some(PreparedImport {
+        uploads,
+        replacements,
+    }))
+}
+
+pub(super) fn execute_import(
+    db: &Connection,
+    p: &Project,
+    op: &Operation,
+    actor: Option<&crate::issues::Actor>,
+    now: i64,
+    prepared: Option<&PreparedImport>,
+) -> Result<Value> {
+    let Operation::Import { operation, .. } = op else {
+        return execute(db, p, op, actor, now);
+    };
+    let prepared = prepared.expect("import files prepared before writer");
+    crate::attachments::check_authority(db)?;
+    // Document changes, attachment metadata and the request receipt still commit
+    // together. Failed guards leave DiskChange to remove the staged files.
+    let value = execute(db, p, operation, actor, now)?;
+    let id = value["artifact"]["id"].as_str().unwrap();
+    let target = crate::attachments::Target {
+        kind: crate::attachments::Kind::Artifact,
+        id: id.into(),
+    };
+    for upload in &prepared.uploads {
+        crate::attachments::insert_upload(
+            db,
+            p,
+            &target,
+            upload,
+            actor.map(|a| a.id.as_str()).unwrap_or(""),
+            now,
+        )?;
+    }
     let body = crate::artifacts::import::rewrite(
         value["artifact"]["body"].as_str().unwrap(),
-        &replacements,
+        &prepared.replacements,
     );
     db.execute(
         "UPDATE artifacts SET body=?3 WHERE project_id=?1 AND id=?2",

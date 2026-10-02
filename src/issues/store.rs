@@ -1652,6 +1652,34 @@ impl Store {
             )),
             _ => None,
         };
+        // Declare cleanup before the transaction: on failure, release the writer
+        // before removing any staged files. Preparation errors yield to receipts.
+        let mut attachment_files = crate::attachments::DiskChange::default();
+        let prepared_import = (|| -> Result<Option<artifacts::PreparedImport>> {
+            match &r.operation {
+                Operation::Attachment {
+                    operation: crate::attachments::Operation::Upload { target, name, data },
+                } => {
+                    crate::attachments::check_upload(&self.db, &detected, target)?;
+                    let bytes = crate::attachments::decode(data)?;
+                    attachment_files.upload = Some(crate::attachments::prepare_upload(
+                        &self.attachment_root,
+                        name,
+                        &bytes,
+                        &mut attachment_files,
+                    )?);
+                    Ok(None)
+                }
+                Operation::Artifact { operation } => artifacts::prepare_import(
+                    &self.db,
+                    &self.attachment_root,
+                    &detected,
+                    operation,
+                    &mut attachment_files,
+                ),
+                _ => Ok(None),
+            }
+        })();
         // BEGIN IMMEDIATE is the safe retry boundary: mutation guards are
         // checked under the writer, and the mutation executes exactly once.
         let begin = || {
@@ -1685,6 +1713,7 @@ impl Store {
         // receipt takes precedence even if those files disappeared meanwhile.
         let attempt_hold = attempt_hold.transpose()?;
         let mut attempt_reconcile = attempt_reconcile.transpose()?;
+        let prepared_import = prepared_import?;
         if supervisor_unowned {
             super::authority::guard_unowned(&tx, &project.id, r.operation.number().unwrap())?;
         }
@@ -1723,7 +1752,6 @@ impl Store {
             tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=json_set(excluded.metadata,'$.model',coalesce(json_extract(excluded.metadata,'$.model'),json_extract(agents.metadata,'$.model'))),last_seen=excluded.last_seen",
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
-        let mut attachment_files = crate::attachments::DiskChange::default();
         let mut result = match &r.operation {
             Operation::RefreshGithub { number } => {
                 assignments::fetch::request(&tx, &project, *number, now)?
@@ -1740,12 +1768,11 @@ impl Store {
             Operation::Batch { edits } => batch::execute(&tx, &project, actor, edits, now)?,
             Operation::Artifact { operation } => artifacts::execute_import(
                 &tx,
-                &self.attachment_root,
                 &project,
                 operation,
                 actor,
                 now,
-                &mut attachment_files,
+                prepared_import.as_ref(),
             )?,
             Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
             Operation::Workers { .. }
