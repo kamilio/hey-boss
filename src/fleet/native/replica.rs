@@ -428,10 +428,21 @@ pub(super) fn journal(db: &Connection, after: i64) -> Result<Vec<Value>> {
         .unwrap_or(0);
     let mut result = vec![];
     let mut size = 0;
+    // Indexed raw sizes are a lower bound on the escaped wire representation.
+    // Select its possible prefix before loading bodies; the exact check below
+    // retains the existing batch boundary and oversized-first-record behavior.
     for mut row in rows(
         db,
-        "SELECT * FROM fleet_outbox WHERE seq>? ORDER BY seq LIMIT 300",
-        &[json!(after)],
+        "WITH candidates AS MATERIALIZED (
+            SELECT seq,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0) AS bytes
+            FROM fleet_outbox INDEXED BY fleet_outbox_retention WHERE seq>?1 ORDER BY seq LIMIT 300
+        ), prefix AS MATERIALIZED (
+            SELECT seq,sum(bytes) OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS bytes,
+                row_number() OVER (ORDER BY seq) AS position FROM candidates
+        )
+        SELECT journal.* FROM prefix CROSS JOIN fleet_outbox journal ON journal.seq=prefix.seq
+        WHERE prefix.bytes<=?2 OR prefix.position=1 ORDER BY journal.seq",
+        &[json!(after), json!(crate::issues::WIRE_LIMIT / 3)],
     )? {
         if row["seq"].as_i64().unwrap() <= bootstrap {
             row["bootstrap"] = json!(true);
@@ -2192,6 +2203,124 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn journal_reads_only_payloads_near_its_existing_byte_budget() {
+        let f = Fixture::new();
+        f.capture();
+        // Overflow reads from the main file bypass SQLite's cache counters.
+        // Keep these payloads in WAL so the measured page work includes them.
+        f.db.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+        let payload = json!({"body":"\"🌍\\\n".repeat(32768)}).to_string();
+        let add = |count| {
+            f.db.execute("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<?1) INSERT INTO fleet_outbox(table_name,after_json,created_at) SELECT 'issues',?2,0 FROM n", rusqlite::params![count, payload]).unwrap();
+        };
+        let read = || {
+            f.db.execute_batch("PRAGMA cache_size=-64; PRAGMA shrink_memory")
+                .unwrap();
+            let mut pages = 0;
+            let mut high = 0;
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        f.db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        1
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            let batch = journal(&f.db, 0).unwrap();
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        f.db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        0
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            (batch, pages)
+        };
+        add(24);
+        let (expected, small) = read();
+        assert!(!expected.is_empty());
+        assert!(expected.len() < 24);
+        add(72);
+        let (actual, large) = read();
+        assert_eq!(actual, expected);
+        let cursor = actual.last().unwrap()["seq"].as_i64().unwrap();
+        let next = journal(&f.db, cursor).unwrap();
+        assert_eq!(next[0]["seq"], cursor + 1);
+        eprintln!(
+            "Journal page reads with 24/96 pending large records: {small}/{large}; returned {} records",
+            actual.len()
+        );
+        assert!(
+            large <= small + 32,
+            "Journal loaded payloads beyond its byte budget: {small} -> {large}"
+        );
+    }
+
+    #[test]
+    fn journal_hydration_preserves_batch_boundaries_and_bootstrap_markers() {
+        for payloads in [
+            vec![json!({"small":true}).to_string(); 305],
+            vec![
+                json!({"body":"x".repeat(crate::issues::WIRE_LIMIT / 3)}).to_string(),
+                json!({"body":"\"🌍\\\n".repeat(131072)}).to_string(),
+                json!({"body":"\"🌍\\\n".repeat(131072)}).to_string(),
+                json!({"body":"\"🌍\\\n".repeat(131072)}).to_string(),
+                "{}".into(),
+            ],
+        ] {
+            let f = Fixture::new();
+            f.capture();
+            for payload in &payloads {
+                f.db.execute("INSERT INTO fleet_outbox(table_name,before_json,after_json,created_at) VALUES('issues','{}',?1,0)", [payload]).unwrap();
+            }
+            let all = rows(&f.db, "SELECT * FROM fleet_outbox ORDER BY seq", &[]).unwrap();
+            let bootstrap = all[1]["seq"].as_i64().unwrap();
+            state_set(&f.db, "bootstrap_last_seq", &json!(bootstrap)).unwrap();
+            let mut cursor = 0;
+            let mut seen = 0;
+            loop {
+                let mut expected = Vec::new();
+                let mut size = 0;
+                for mut row in all
+                    .iter()
+                    .filter(|row| row["seq"].as_i64().unwrap() > cursor)
+                    .take(300)
+                    .cloned()
+                {
+                    if row["seq"].as_i64().unwrap() <= bootstrap {
+                        row["bootstrap"] = json!(true);
+                    }
+                    size += row.to_string().len();
+                    if !expected.is_empty() && size > crate::issues::WIRE_LIMIT / 3 {
+                        break;
+                    }
+                    expected.push(row);
+                }
+                let actual = journal(&f.db, cursor).unwrap();
+                assert_eq!(actual, expected);
+                if actual.is_empty() {
+                    break;
+                }
+                if seen == 0 {
+                    assert_eq!(actual.len(), if payloads.len() == 305 { 300 } else { 1 });
+                }
+                seen += actual.len();
+                cursor = actual.last().unwrap()["seq"].as_i64().unwrap();
+            }
+            assert_eq!(seen, payloads.len());
+        }
+    }
+
     #[test]
     fn missing_metadata_tables_are_repaired_without_changing_saved_state() {
         let db = Connection::open_in_memory().unwrap();
