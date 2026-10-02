@@ -146,6 +146,52 @@ pub(super) fn canonical(db: &Connection, project: Project) -> Result<Project> {
     Ok(by_name(db, &project.name)?.unwrap_or(project))
 }
 
+/// Read discovery candidates together. Mutations must resolve their names again.
+pub(super) fn pending_discoveries(
+    db: &Connection,
+    observations: &[(Project, i64)],
+) -> Result<Vec<(Project, i64)>> {
+    let mut query = db.prepare(
+        "SELECT selected.key,canonical.id,canonical.activity_at,exact.activity_at
+         FROM json_each(?1) selected
+         LEFT JOIN project_name_keys k ON k.name=json_extract(selected.value,'$[0].name')
+         LEFT JOIN projects canonical ON canonical.id=k.project_id
+         LEFT JOIN projects exact ON exact.id=json_extract(selected.value,'$[0].id')",
+    )?;
+    let rows = query
+        .query_map([serde_json::to_string(observations)?], |r| {
+            Ok((
+                r.get::<_, usize>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let metadata_ids: BTreeSet<_> = rows
+        .iter()
+        .filter_map(|(_, id, _, _)| id.as_deref())
+        .filter(|id| super::super::identity::is_git_metadata_project(id))
+        .collect();
+    let saved = saved_work(db, &metadata_ids.into_iter().collect::<Vec<_>>())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(index, canonical, canonical_at, exact_at)| {
+            let activity = if canonical.as_deref().is_some_and(|id| {
+                !super::super::identity::is_git_metadata_project(id) || saved.contains(id)
+            }) {
+                canonical_at
+            } else {
+                exact_at
+            };
+            let observation = &observations[index];
+            activity
+                .is_none_or(|at| observation.1 > at)
+                .then(|| observation.clone())
+        })
+        .collect())
+}
+
 /// Batch legacy visibility checks while preserving every kind of saved work.
 pub(super) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<String>> {
     if projects.is_empty() {
