@@ -1905,7 +1905,10 @@ mod tests {
                     started.send(()).unwrap();
                     let deadline = Instant::now() + Duration::from_secs(2);
                     loop {
-                        assert!(Instant::now() < deadline, "Listener did not accept the client");
+                        assert!(
+                            Instant::now() < deadline,
+                            "Listener did not accept the client"
+                        );
                         wait_for_request(listener).unwrap();
                         match listener.accept() {
                             Ok((stream, _)) => {
