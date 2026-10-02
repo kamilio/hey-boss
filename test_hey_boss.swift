@@ -219,7 +219,7 @@ func auditIssuesShortcut() {
     let item = overview.issuesMenuItem
     precondition(item.keyEquivalent == "o" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
-    precondition(urls.count == 1 && urls[0].absoluteString == "http://hey-boss.test/#view=issues&inbox_state=unread&state=ready&owner=all")
+    precondition(urls.count == 1 && urls[0].absoluteString == "http://hey-boss.test/#view=issues", "Issues opens the normal list without imposing filters")
     let shortcut = IssuesShortcut { overview.showIssues() }
     withExtendedLifetime(shortcut) {
         var event: EventRef?
@@ -230,6 +230,7 @@ func auditIssuesShortcut() {
             precondition(SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &identity) == noErr)
             _ = SendEventToEventTarget(event, GetApplicationEventTarget())
             precondition(urls.count == expected, "Only the Issues hotkey opens the browser")
+            precondition(urls.last?.absoluteString == "http://hey-boss.test/#view=issues", "The global shortcut uses the same unfiltered destination as the menu")
         }
     }
     var failures: [String] = []
@@ -442,7 +443,7 @@ func auditInbox(root: URL, sample: Record) {
     launcher.probe = { probes += 1; $0(probes > 1) }
     launcher.open(cli: "/usr/bin/true")
     precondition(launches == 1 && urls.count == 4 && !launcher.launching)
-    precondition(urls.last?.path == "/" && urls.last?.fragment == "view=issues&inbox_state=unread&state=ready&owner=all", "Issues resets the destination to Ready")
+    precondition(urls.last?.path == "/" && urls.last?.fragment == "view=issues", "Issues resets the destination to the normal list")
     launcher.probe = { $0(false) }
     launcher.open(cli: nil)
     precondition(failures.count == 1 && !launcher.launching)

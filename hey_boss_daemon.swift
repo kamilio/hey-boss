@@ -4121,7 +4121,7 @@ final class IssuesShortcut {
 /// Opens the normal browser, reusing or starting the local issue service.
 final class IssuesLauncher {
     enum Page: String {
-        case issues = "/#view=issues&inbox_state=unread&state=ready&owner=all"
+        case issues = "/#view=issues"
         case inbox = "/#view=inbox"
         case mindmaps = "/mm"
         case quickIssue = "/#quick-issue=1"
