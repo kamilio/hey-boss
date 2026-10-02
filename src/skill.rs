@@ -406,7 +406,14 @@ pub fn discover_project_skills(project_dir: &Path) -> Vec<SkillEntry> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AUDIT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn audit_report(home: &Path, project_dir: Option<&Path>) -> Value {
+    #[cfg(test)]
+    AUDIT_COUNT.with(|count| count.set(count.get() + 1));
     let global_skills = discover_global_skills(home);
     let project_skills = project_dir.map(discover_project_skills).unwrap_or_default();
     let selected: Vec<String> = selected_skills(home).into_iter().collect();
