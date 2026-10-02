@@ -473,6 +473,28 @@ fn bootstrap_script() -> String {
     )
 }
 
+fn remote_install(
+    source: &Source,
+    current: Installation,
+    observed: Option<u64>,
+    force: bool,
+    install: impl FnOnce() -> io::Result<Installation>,
+) -> io::Result<Installation> {
+    // Earlier hosts may have taken minutes to build. Recheck before sending an
+    // archive or compiling a guard; the destination still checks under its lock.
+    authorize(source, current.receipt.as_ref(), observed)?;
+    if !force
+        && current.build.as_deref() == Some(&source.build)
+        && current
+            .receipt
+            .as_ref()
+            .is_some_and(|r| r.source.same_release(source))
+    {
+        return Ok(current);
+    }
+    install()
+}
+
 fn remote_apply(
     snapshot: &Path,
     host: &str,
@@ -688,7 +710,13 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
                 } else if host == "local" {
                     apply(&temp.0, binary, observed, options.force)?
                 } else {
-                    remote_apply(&temp.0, &host, observed, options.force)?
+                    remote_install(
+                        &source,
+                        target_inspect(&host, binary)?,
+                        observed,
+                        options.force,
+                        || remote_apply(&temp.0, &host, observed, options.force),
+                    )?
                 };
                 if installed.build.as_deref() != Some(&source.build)
                     || !installed
@@ -817,6 +845,91 @@ pub fn run(options: &Options) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn installation(source: Source, generation: u64) -> Installation {
+        Installation {
+            build: Some(source.build.clone()),
+            receipt: Some(Receipt {
+                source,
+                generation,
+                installed_at: now(),
+            }),
+        }
+    }
+
+    #[test]
+    fn remote_preflight_rejects_superseded_sources_without_bootstrapping() {
+        let newer = installation(source("new", &["new", "old"], "main"), 2);
+        for (requested, observed) in [
+            (source("old", &["old"], "main"), Some(1)),
+            (source("new", &["new", "old"], "development"), Some(1)),
+        ] {
+            for force in [false, true] {
+                let built = std::cell::Cell::new(false);
+                let result = remote_install(&requested, newer.clone(), observed, force, || {
+                    built.set(true);
+                    Ok(newer.clone())
+                });
+                assert!(result.is_err(), "Superseded source was admitted");
+                assert!(!built.get(), "Superseded source compiled a remote guard");
+            }
+        }
+    }
+
+    #[test]
+    fn remote_preflight_skips_verified_releases_but_preserves_force_and_bootstrap() {
+        let requested = source("new", &["new", "old"], "main");
+        let current = installation(requested.clone(), 2);
+        for (existing, force, should_build) in [
+            (current.clone(), false, false),
+            (current.clone(), true, true),
+            (
+                installation(source("old", &["old"], "main"), 1),
+                false,
+                true,
+            ),
+            (
+                Installation {
+                    build: current.build.clone(),
+                    receipt: None,
+                },
+                false,
+                true,
+            ),
+        ] {
+            let built = std::cell::Cell::new(false);
+            let installed = remote_install(&requested, existing, Some(1), force, || {
+                built.set(true);
+                Ok(current.clone())
+            })
+            .unwrap();
+            assert_eq!(built.get(), should_build);
+            assert_eq!(installed, current);
+        }
+    }
+
+    #[test]
+    fn remote_preflight_keeps_the_locked_destination_check() {
+        let temp = Temp::new().unwrap();
+        let old = installation(source("old", &["old"], "main"), 1);
+        let requested = source("middle", &["middle", "old"], "main");
+        let entered = std::cell::Cell::new(false);
+        let result = remote_install(&requested, old, Some(1), false, || {
+            entered.set(true);
+            save(
+                &temp.0,
+                source("new", &["new", "middle", "old"], "main"),
+                None,
+            )?;
+            ordered_install(&temp.0, &requested, Some(1), |_| {
+                fs::write(temp.0.join("published"), "stale")?;
+                Ok(installation(requested.clone(), 2))
+            })
+        });
+        assert!(entered.get());
+        assert!(result.unwrap_err().to_string().contains("stale"));
+        assert!(!temp.0.join("published").exists());
+    }
 
     #[test]
     fn archived_snapshots_rebuild_companion_libraries_and_executables() {
