@@ -197,10 +197,16 @@ impl Download {
                 "Archive transfer must precede the hot transaction",
             ));
         }
+        let archive = Archive::open(&archive_path(db)?)?;
+        let staging = format!("download-{}", crate::issues::worker::random_id()?);
+        archive.db.execute(
+            "INSERT INTO archive_downloads VALUES(?1,?2)",
+            params![staging, crate::issues::worker::now()],
+        )?;
         Ok(Self {
-            archive: Archive::open(&archive_path(db)?)?,
+            archive,
             key: key.into(),
-            staging: format!("download-{}", crate::issues::worker::random_id()?),
+            staging,
             project: project.into(),
             number,
             cursor: Value::Null,
@@ -229,6 +235,13 @@ impl Download {
             .ok_or_else(|| unavailable("Missing archive chunks"))?;
         if chunks.len() > PAGE_RECORDS {
             return Err(unavailable("Archive page exceeds record limit"));
+        }
+        if self.archive.db.execute(
+            "UPDATE archive_downloads SET updated_at=?2 WHERE staging=?1",
+            params![self.staging, crate::issues::worker::now()],
+        )? != 1
+        {
+            return Err(unavailable("Archive transfer expired; fetch a fresh copy"));
         }
         let mut page_bytes = 0;
         for chunk in chunks {
@@ -327,6 +340,10 @@ impl Download {
                 }
                 tx.execute("UPDATE issue_copies SET key=?2,comments=(SELECT count(*) FROM issue_history WHERE archive_key=?2 AND kind='comments') WHERE key=?1",params![self.staging,self.key])?;
             }
+            tx.execute(
+                "DELETE FROM archive_downloads WHERE staging=?1",
+                [&self.staging],
+            )?;
             tx.commit()?;
             self.done = true;
         } else if page["done"] != false || page["next"].is_null() || chunks.is_empty() {
@@ -398,6 +415,10 @@ impl Drop for Download {
                     )?;
                 }
                 tx.execute("DELETE FROM issue_copies WHERE key=?1", [&self.staging])?;
+                tx.execute(
+                    "DELETE FROM archive_downloads WHERE staging=?1",
+                    [&self.staging],
+                )?;
                 Ok(())
             })();
             if cleanup.is_ok() {
@@ -405,6 +426,30 @@ impl Drop for Download {
             }
         }
     }
+}
+
+/// A killed downloader can leave partial copies, which are never visible to
+/// readers. Reclaim only stale staging rows; published generations remain valid
+/// for old snapshots, peers, and backups. Each cold transaction is bounded too.
+pub(super) fn cleanup_downloads(db: &HotConnection, now: i64) -> Result<usize> {
+    let path = archive_path(db)?;
+    if !path.try_exists()? {
+        return Ok(0);
+    }
+    let archive = Archive::open(&path)?;
+    let tx = archive.db.unchecked_transaction()?;
+    let staging: Option<String> = tx.query_row("SELECT staging FROM archive_downloads WHERE updated_at<=?1 ORDER BY updated_at LIMIT 1", [now.saturating_sub(GRACE_MS)], |r|r.get(0)).optional()?;
+    let Some(staging) = staging else {
+        return Ok(0);
+    };
+    let mut removed = tx.execute("DELETE FROM issue_history WHERE archive_key=?1 AND (kind,text_id) IN (SELECT kind,text_id FROM issue_history WHERE archive_key=?1 LIMIT 16)", [&staging])?;
+    removed += tx.execute("DELETE FROM issue_origins WHERE archive_key=?1 AND (kind,source_id) IN (SELECT kind,source_id FROM issue_origins WHERE archive_key=?1 LIMIT 16)", [&staging])?;
+    if !tx.query_row("SELECT EXISTS(SELECT 1 FROM issue_history WHERE archive_key=?1) OR EXISTS(SELECT 1 FROM issue_origins WHERE archive_key=?1)", [&staging], |r|r.get::<_,bool>(0))? {
+        removed += tx.execute("DELETE FROM issue_copies WHERE key=?1", [&staging])?;
+        removed += tx.execute("DELETE FROM archive_downloads WHERE staging=?1", [&staging])?;
+    }
+    tx.commit()?;
+    Ok(removed)
 }
 
 /// Reserve local append identities before publishing an imported manifest.
