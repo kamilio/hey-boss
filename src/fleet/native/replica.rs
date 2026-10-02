@@ -1782,61 +1782,63 @@ pub(super) fn apply_pull(
             )?;
         }
     }
-    for r in payload["ranges"]
+    let ranges = payload["ranges"]
         .as_array()
-        .ok_or_else(|| invalid("Missing fleet number ranges"))?
-    {
-        let previous = rows(
-            db,
-            "SELECT first_number,last_number FROM fleet_number_ranges WHERE project_id=?",
-            &[r["project_id"].clone()],
-        )?;
-        // A pull may have been prepared before an on-demand reservation reply.
-        // Never restore the older range or rewind its local allocation cursor.
-        if previous
-            .first()
-            .is_some_and(|p| p["first_number"].as_i64() > r["first_number"].as_i64())
-        {
-            continue;
-        }
-        execute(
-            db,
-            "INSERT INTO fleet_number_ranges VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number",
-            &[
-                r["project_id"].clone(),
-                r["first_number"].clone(),
-                r["last_number"].clone(),
-            ],
-        )?;
-        if !previous.first().is_some_and(|p| {
-            p["first_number"] == r["first_number"] && p["last_number"] == r["last_number"]
-        }) {
-            let used = rows(
+        .ok_or_else(|| invalid("Missing fleet number ranges"))?;
+    if !number_ranges_unchanged(db, ranges)? {
+        for r in ranges {
+            let previous = rows(
                 db,
-                "SELECT coalesce(max(number),?-1)+1 next FROM issues WHERE project_id=? AND number BETWEEN ? AND ?",
+                "SELECT first_number,last_number FROM fleet_number_ranges WHERE project_id=?",
+                &[r["project_id"].clone()],
+            )?;
+            // A pull may have been prepared before an on-demand reservation reply.
+            // Never restore the older range or rewind its local allocation cursor.
+            if previous
+                .first()
+                .is_some_and(|p| p["first_number"].as_i64() > r["first_number"].as_i64())
+            {
+                continue;
+            }
+            execute(
+                db,
+                "INSERT INTO fleet_number_ranges VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET first_number=excluded.first_number,last_number=excluded.last_number",
                 &[
-                    r["first_number"].clone(),
                     r["project_id"].clone(),
                     r["first_number"].clone(),
                     r["last_number"].clone(),
                 ],
             )?;
-            execute(
-                db,
-                "UPDATE projects SET next_number=? WHERE id=?",
-                &[used[0]["next"].clone(), r["project_id"].clone()],
-            )?;
-        } else {
-            execute(
-                db,
-                "UPDATE projects SET next_number=? WHERE id=? AND next_number NOT BETWEEN ? AND ?",
-                &[
-                    r["first_number"].clone(),
-                    r["project_id"].clone(),
-                    r["first_number"].clone(),
-                    json!(r["last_number"].as_i64().unwrap() + 1),
-                ],
-            )?;
+            if !previous.first().is_some_and(|p| {
+                p["first_number"] == r["first_number"] && p["last_number"] == r["last_number"]
+            }) {
+                let used = rows(
+                    db,
+                    "SELECT coalesce(max(number),?-1)+1 next FROM issues WHERE project_id=? AND number BETWEEN ? AND ?",
+                    &[
+                        r["first_number"].clone(),
+                        r["project_id"].clone(),
+                        r["first_number"].clone(),
+                        r["last_number"].clone(),
+                    ],
+                )?;
+                execute(
+                    db,
+                    "UPDATE projects SET next_number=? WHERE id=?",
+                    &[used[0]["next"].clone(), r["project_id"].clone()],
+                )?;
+            } else {
+                execute(
+                    db,
+                    "UPDATE projects SET next_number=? WHERE id=? AND next_number NOT BETWEEN ? AND ?",
+                    &[
+                        r["first_number"].clone(),
+                        r["project_id"].clone(),
+                        r["first_number"].clone(),
+                        json!(r["last_number"].as_i64().unwrap() + 1),
+                    ],
+                )?;
+            }
         }
     }
     state_set(db, "cursor", &payload["cursor"])?;
@@ -1851,6 +1853,33 @@ pub(super) fn apply_pull(
     }
     Ok(())
 }
+fn number_ranges_unchanged(db: &Connection, ranges: &[Value]) -> Result<bool> {
+    if ranges.is_empty() {
+        return Ok(true);
+    }
+    // Canonical idle pulls need one indexed read. Changed or legacy batches
+    // retain the ordered range/cursor repair path in the same transaction.
+    if !ranges.iter().all(|r| {
+        r["project_id"].is_string()
+            && r["first_number"].as_i64().is_some()
+            && r["last_number"].as_i64().is_some()
+    }) {
+        return Ok(false);
+    }
+    let matching: i64 = db.query_row(
+        "SELECT count(*) FROM json_each(?1) requested
+         CROSS JOIN fleet_number_ranges r
+         LEFT JOIN projects p ON p.id=r.project_id
+         WHERE r.project_id=json_extract(requested.value,'$.project_id')
+           AND r.first_number=json_extract(requested.value,'$.first_number')
+           AND r.last_number=json_extract(requested.value,'$.last_number')
+           AND (p.id IS NULL OR p.next_number BETWEEN r.first_number AND r.last_number+1)",
+        [serde_json::to_string(ranges)?],
+        |r| r.get(0),
+    )?;
+    Ok(matching as usize == ranges.len())
+}
+
 fn tags(config: &Value) -> BTreeSet<String> {
     config["tags"]
         .as_array()
@@ -2174,6 +2203,78 @@ mod tests {
             .unwrap()[0]["count"],
             4
         );
+    }
+
+    #[test]
+    fn unchanged_number_ranges_do_not_scale_owner_calls_or_rewrite_rows() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            install_capture(&f.db, "agent", "peer").unwrap();
+            f.db.execute_batch(&format!(
+                "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                 INSERT INTO projects(id,name,next_number) SELECT 'range-'||id,'Range '||id,10 FROM n;
+                 INSERT INTO fleet_number_ranges SELECT id,10,109 FROM projects WHERE id LIKE 'range-%';
+                 WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+                 INSERT INTO fleet_number_ranges SELECT 'unrelated-'||id,10,109 FROM n;
+                 DELETE FROM fleet_outbox;
+                 CREATE TABLE range_updates(project_id TEXT);
+                 CREATE TRIGGER range_update_audit AFTER UPDATE ON fleet_number_ranges BEGIN INSERT INTO range_updates VALUES(NEW.project_id); END;"
+            )).unwrap();
+            let ranges: Vec<_> = (1..=count).map(|number| json!({"project_id":format!("range-{number}"),"first_number":10,"last_number":109})).collect();
+            let mut payload =
+                json!({"cursor":0,"allocations":[],"allocation_deadlines":[],"ranges":ranges});
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            apply_pull(&db, "peer", &payload, &[]).unwrap();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            let updates: i64 =
+                f.db.query_row("SELECT count(*) FROM range_updates", [], |r| r.get(0))
+                    .unwrap();
+            eprintln!(
+                "{count} unchanged ranges: {commands} RPCs, {steps} query VM steps, {updates} rewrites"
+            );
+            measurements.push((count, commands, steps, updates));
+            // Unchanged range boundaries must still repair an out-of-range cursor.
+            f.db.execute("UPDATE projects SET next_number=500 WHERE id='range-1'", [])
+                .unwrap();
+            apply_pull(&f.db, "peer", &payload, &[]).unwrap();
+            let next: i64 =
+                f.db.query_row(
+                    "SELECT next_number FROM projects WHERE id='range-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(next, 10);
+            // A later range wins even if an older duplicate follows it in the pull.
+            let old = payload["ranges"][0].clone();
+            payload["ranges"][0] =
+                json!({"project_id":"range-1","first_number":110,"last_number":209});
+            payload["ranges"].as_array_mut().unwrap().push(old);
+            apply_pull(&f.db, "peer", &payload, &[]).unwrap();
+            let next: i64 =
+                f.db.query_row(
+                    "SELECT next_number FROM projects WHERE id='range-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(next, 110);
+        }
+        for (count, commands, steps, updates) in measurements {
+            assert!(
+                commands < 25,
+                "{count} unchanged ranges required {commands} RPCs"
+            );
+            assert_eq!(updates, 0);
+            assert!(
+                steps < count * 100 + 1000,
+                "Unrelated ranges were scanned: {steps} query VM steps"
+            );
+        }
     }
 
     #[test]
