@@ -425,7 +425,7 @@ impl Mobile {
         let mut machines = vec![];
         for m in status["machines"].as_array().into_iter().flatten() {
             let workers=m["workers"].as_array().into_iter().flatten().map(|w|json!({"id":w["id"],"pid":w["pid"],"managed":w["managed"],"retiring":w["retiring"],"intent":w["intent"],"active":w["active"],"free":w["free"],"eligible":w["eligible"],"error":w["error"],"retry_at":w["retry_at"],"config":{"name":w["config"]["name"],"enabled":w["config"]["enabled"],"concurrency":w["config"]["concurrency"],"projects":w["config"]["projects"],"directory":w["config"]["directory"],"directories":w["config"]["directories"]},"chiefs":w["chiefs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>(),"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})).collect::<Vec<_>>();
-            machines.push(json!({"host":m["host"],"hostname":m["hostname"],"state":m["state"],"heartbeat":m["heartbeat"],"desired_revision":m["desired_revision"],"applied_revision":m["applied_revision"],"configuration_error":m["configuration_error"],"workers":workers}));
+            machines.push(json!({"host":m["host"],"hostname":m["hostname"],"state":m["state"],"heartbeat":m["heartbeat"],"desired_revision":m["desired_revision"],"applied_revision":m["applied_revision"],"configuration_error":m["configuration_error"],"projects":m["projects"],"workspace":m["workspace"],"workers":workers}));
         }
         self.call(
             "/api/bridge/agents/status",

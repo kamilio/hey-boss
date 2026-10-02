@@ -149,7 +149,16 @@ pub(super) fn run(apply: bool, config_only: bool) -> Result<Value> {
         .filter(|w| w["id"].as_str().is_some_and(|id| ids.contains(id)))
         .cloned()
         .collect();
-    let definitions = definitions(&json!(selected))?;
+    let selected = if apply && role == "controller" {
+        super::projects::prepare(
+            &ctx,
+            &super::projects::desired(&ctx, "local")?,
+            &json!(selected),
+        )?
+    } else {
+        json!(selected)
+    };
+    let definitions = definitions(&selected)?;
     let source = fleet_source.clone();
     if config_only {
         return Ok(
