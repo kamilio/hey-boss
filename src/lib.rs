@@ -20,8 +20,8 @@ pub mod issues;
 pub mod markdown;
 pub mod mindmap;
 pub mod notices;
-pub mod routes;
 pub mod quiet_hours;
+pub mod routes;
 pub mod skill;
 #[doc(hidden)]
 pub mod ssh;
