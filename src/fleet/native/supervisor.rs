@@ -2440,6 +2440,135 @@ mod tests {
     }
 
     #[test]
+    fn configuration_file_waits_leave_the_service_writer_available() {
+        const PROBE: &str = "HEY_BOSS_CONFIG_WRITER_PROBE";
+        let Ok(operation) = std::env::var(PROBE) else {
+            let mut failures = Vec::new();
+            for operation in ["signal", "yaml"] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "fleet::native::supervisor::tests::configuration_file_waits_leave_the_service_writer_available", "--nocapture"])
+                    .env(PROBE, operation)
+                    .output().unwrap();
+                if !output.status.success() {
+                    failures.push(format!(
+                        "{operation}: {}{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+            return;
+        };
+        let (_directory, mut fixture) = test_supervisor();
+        fixture.ctx.desired = fixture.ctx.state.join("fleet.yaml");
+        std::fs::write(
+            &fixture.ctx.desired,
+            "machines: {local: {workers: [{id: one, intent: pause, config: {}}]}}\n",
+        )
+        .unwrap();
+        let workers =
+            configuration::load(&fixture.ctx).unwrap()["runtime"]["machines"]["local"]["workers"]
+                .clone();
+        let change = json!({"id":"one","config":workers[0]["config"],"intent":"stop","local_revision":1,"base_revision":control::revision(&fixture.ctx.node, &workers)});
+        let mut owner = crate::database::Owner::start(&fixture.ctx.path)
+            .unwrap()
+            .unwrap();
+        crate::database::use_service();
+        let app = Arc::new(fixture);
+        let file_lock = app.ctx.lock("fleet-config-file.lock", true).unwrap();
+        let slow = app.clone();
+        let (waiting, blocked) = mpsc::channel();
+        let (completed, completion) = mpsc::channel();
+        let operation_thread = std::thread::spawn(move || {
+            super::super::context::LOCK_WAITING
+                .with(|observer| *observer.borrow_mut() = Some(waiting));
+            let result = if operation == "signal" {
+                slow.signal(
+                    &json!({"id":"held-file","host":"local","worker":"one","signal":"stop"}),
+                )
+            } else {
+                slow.local_config("local", &[change], &workers)
+            };
+            completed.send(result.map_err(|e| e.to_string())).unwrap();
+        });
+        let entered = blocked.recv_timeout(Duration::from_secs(5));
+        // BEGIN reserves the service writer even without a SQLite write. Probe
+        // the actual owner only after the operation reaches the held file lock.
+        let path = app.ctx.path.clone();
+        let (written, writes) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let db = crate::database::Connection::connect(&path).unwrap();
+            replica::state_set(&db, "unrelated-progress", &json!(true)).unwrap();
+            written.send(()).unwrap();
+        });
+        let progress = writes.recv_timeout(Duration::from_secs(3));
+        let still_waiting = completion.try_recv().is_err();
+        drop(file_lock);
+        let result = completion.recv_timeout(Duration::from_secs(5));
+        operation_thread.join().unwrap();
+        writer.join().unwrap();
+        owner.stop();
+        assert_eq!(entered.unwrap(), "fleet-config-file.lock");
+        assert!(
+            still_waiting,
+            "Operation did not wait for the held file lock"
+        );
+        result.unwrap().unwrap();
+        progress.expect("Configuration file wait held the shared database writer");
+    }
+
+    #[test]
+    fn signal_receipts_follow_file_saves_and_preserve_retries() {
+        for yaml in [false, true] {
+            let (_directory, mut app) = test_supervisor();
+            let saved = json!({"machines":{"local":{"workers":[{"id":"one","intent":"pause","config":{}}]}}});
+            if yaml {
+                app.ctx.desired = app.ctx.state.join("fleet.yaml");
+            }
+            app.ctx.atomic_json(&app.ctx.desired, &saved).unwrap();
+            let request = json!({"id":"retry","host":"local","worker":"one","signal":"resume"});
+            let db = app.ctx.db().unwrap();
+            if yaml {
+                let backup = app.ctx.desired.with_extension("yaml.previous");
+                std::fs::remove_file(&backup).unwrap();
+                std::fs::create_dir(&backup).unwrap();
+                assert!(app.signal(&request).is_err());
+                assert!(
+                    replica::rows(&db, "SELECT * FROM fleet_signals", &[])
+                        .unwrap()
+                        .is_empty()
+                );
+                std::fs::remove_dir(backup).unwrap();
+            }
+            let receipt = app.signal(&request).unwrap();
+            assert_eq!(receipt["state"], "pending");
+            db.execute(
+                "UPDATE fleet_signals SET state='acknowledged' WHERE id='retry'",
+                [],
+            )
+            .unwrap();
+            let text = std::fs::read(&app.ctx.desired).unwrap();
+            assert_eq!(app.signal(&request).unwrap()["state"], "acknowledged");
+            let mut different = request;
+            different["signal"] = json!("stop");
+            assert!(
+                app.signal(&different)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different payload")
+            );
+            assert_eq!(std::fs::read(&app.ctx.desired).unwrap(), text);
+            assert_eq!(
+                replica::rows(&db, "SELECT * FROM fleet_signals", &[])
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn yaml_signals_update_the_same_document_and_reject_unknown_workers() {
         let (_directory, mut app) = test_supervisor();
         app.ctx.desired = app.ctx.state.join("fleet.yaml");
