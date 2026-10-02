@@ -3798,7 +3798,7 @@ mod tests {
             main.db
                 .execute_batch(&format!("CREATE VIEW{legacy_view}"))
                 .unwrap();
-            main.db.execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
+            main.db.execute_batch("DROP INDEX issue_list_summary; DROP INDEX issue_dependency_sources; DROP INDEX issue_active_graph; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;").unwrap();
             main.capture();
             if partial {
                 main.db.execute_batch("ALTER TABLE issues ADD COLUMN manual_blocked INTEGER NOT NULL DEFAULT 0; ALTER TABLE issues ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]';").unwrap();

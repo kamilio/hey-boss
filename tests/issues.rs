@@ -4156,7 +4156,7 @@ fn dependency_migration_normalizes_legacy_parents_and_preserves_manual_blocks() 
     f.pre_notice_sql()
         .execute_batch(
             "UPDATE issues SET state='open',assignee='session-a' WHERE number=1;
-        DROP INDEX issue_list_summary; DROP VIEW issue_pickup_ready; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
+        DROP INDEX issue_list_summary; DROP INDEX issue_dependency_sources; DROP INDEX issue_active_graph; DROP VIEW issue_pickup_ready; ALTER TABLE issues DROP COLUMN blockers; ALTER TABLE issues DROP COLUMN manual_blocked;",
         )
         .unwrap();
     // A pre-blocker database used the earlier readiness view as well.
