@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 thread_local! {
     static DESCENDANT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VALIDATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) fn migrate(db: &mut Connection) -> Result<()> {
@@ -257,9 +258,69 @@ impl Graph {
         issue
     }
     fn validate_edges(&self) -> Result<()> {
+        if self.links.values().all(Vec::is_empty) {
+            return Ok(());
+        }
+        // Two iterative passes find strongly connected components without
+        // walking the same dependency chain once for every declared link.
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        for &root in self.children.keys().chain(self.links.keys()) {
+            if seen.contains(&root) {
+                continue;
+            }
+            let mut todo = vec![(root, false)];
+            while let Some((number, finished)) = todo.pop() {
+                #[cfg(test)]
+                VALIDATION_VISITS.with(|count| count.set(count.get() + 1));
+                if finished {
+                    order.push(number);
+                } else if seen.insert(number) {
+                    todo.push((number, true));
+                    todo.extend(
+                        self.children
+                            .get(&number)
+                            .into_iter()
+                            .flatten()
+                            .chain(self.links.get(&number).into_iter().flatten())
+                            .map(|&target| (target, false)),
+                    );
+                }
+            }
+        }
+        let mut reverse: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+        for (&source, targets) in self.children.iter().chain(&self.links) {
+            for &target in targets {
+                #[cfg(test)]
+                VALIDATION_VISITS.with(|count| count.set(count.get() + 1));
+                reverse.entry(target).or_default().push(source);
+            }
+        }
+        let mut components = BTreeMap::new();
+        for root in order.into_iter().rev() {
+            if components.contains_key(&root) {
+                continue;
+            }
+            let mut todo = vec![root];
+            while let Some(number) = todo.pop() {
+                #[cfg(test)]
+                VALIDATION_VISITS.with(|count| count.set(count.get() + 1));
+                if components.contains_key(&number) {
+                    continue;
+                }
+                components.insert(number, root);
+                todo.extend(reverse.get(&number).into_iter().flatten());
+            }
+        }
+        // Keep the original linked-edge order and error wording. Subtask-only
+        // cycles in damaged legacy data must not make an unrelated link fail.
         for (&number, links) in &self.links {
             for &target in links {
-                self.validate_edge(number, target)?;
+                #[cfg(test)]
+                VALIDATION_VISITS.with(|count| count.set(count.get() + 1));
+                if components.get(&number) == components.get(&target) {
+                    return self.validate_edge(number, target);
+                }
             }
         }
         Ok(())
@@ -271,6 +332,8 @@ impl Graph {
         let mut seen = BTreeSet::new();
         let mut todo = vec![target];
         while let Some(n) = todo.pop() {
+            #[cfg(test)]
+            VALIDATION_VISITS.with(|count| count.set(count.get() + 1));
             if n == source {
                 return Err(Error::invalid("This dependency would create a cycle"));
             }
@@ -647,6 +710,95 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_cycle_validation_does_not_rewalk_every_dependency_chain() {
+        let mut work = Vec::new();
+        for count in [128, 1024] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-dependency-validation-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            drop(crate::issues::Store::open(&path).unwrap());
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',2000); INSERT INTO agents VALUES('human:test','{}',0)").unwrap();
+            db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,blockers) SELECT 'named:test',x,'Task','',CASE WHEN x=1 THEN 'open' ELSE 'blocked' END,'human:test',0,0,1,'[]',x,CASE WHEN x=1 THEN '[]' ELSE json_array(x-1) END FROM n", [count]).unwrap();
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            VALIDATION_VISITS.set(0);
+            let started = std::time::Instant::now();
+            reconcile_subtasks(&db, "named:test", Some("human:test"), 1).unwrap();
+            let visits = VALIDATION_VISITS.get();
+            eprintln!(
+                "{count}-issue dependency chain validation: {visits} visits in {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                db.query_row("SELECT sum(version) FROM issues", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                count
+            );
+            db.execute_batch("COMMIT").unwrap();
+            work.push((count, visits));
+            drop(db);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        assert!(
+            work.iter()
+                .all(|(count, visits)| *visits <= *count as usize * 8),
+            "Repeated cycle traversals: {work:?}"
+        );
+    }
+
+    #[test]
+    fn whole_graph_validation_matches_individual_link_validation() {
+        for mask in 0..4096 {
+            let mut graph = Graph {
+                satisfied: RefCell::default(),
+                prs_enabled: false,
+                issues: BTreeMap::new(),
+                children: BTreeMap::new(),
+                links: BTreeMap::new(),
+                dependents: BTreeMap::new(),
+                active_cache: RefCell::default(),
+            };
+            let mut bit = 0;
+            for source in 1..=4 {
+                for target in 1..=4 {
+                    if source == target {
+                        continue;
+                    }
+                    if mask & (1 << bit) != 0 {
+                        let edges = if (source + target) % 2 == 0 {
+                            &mut graph.children
+                        } else {
+                            &mut graph.links
+                        };
+                        edges.entry(source).or_default().push(target);
+                    }
+                    bit += 1;
+                }
+            }
+            for self_link in [None, Some(3)] {
+                if let Some(n) = self_link {
+                    graph.links.entry(n).or_default().push(n);
+                }
+                let expected = graph.links.iter().try_for_each(|(&source, links)| {
+                    links
+                        .iter()
+                        .try_for_each(|&target| graph.validate_edge(source, target))
+                });
+                let error = |result: Result<()>| result.err().map(|e| (e.code, e.message));
+                assert_eq!(
+                    error(graph.validate_edges()),
+                    error(expected),
+                    "mask={mask}, self_link={self_link:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn dependency_predicates_match_ready_completion_closure() {
