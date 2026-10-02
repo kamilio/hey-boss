@@ -280,6 +280,24 @@ fn serve(
         next: AtomicUsize::new(0),
     });
     let clients = Arc::new(AtomicUsize::new(0));
+    // Maintenance uses an ordinary service session. Cold compression and disk
+    // writes never hold the hot writer lease; cancellation joins before this
+    // owner releases its runtime identity.
+    let (archive_cancel, archive_wait) = std::sync::mpsc::channel::<()>();
+    let archive_path = path.clone();
+    let archive_thread = std::thread::spawn(move || {
+        while matches!(
+            archive_wait.recv_timeout(Duration::from_secs(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let result = Connection::connect(&archive_path)
+                .map_err(crate::issues::Error::from)
+                .and_then(|db| crate::issues::archive::maintain(&db, crate::issues::worker::now()));
+            if let Err(error) = result {
+                eprintln!("Archive maintenance: {error}");
+            }
+        }
+    });
     let mut sessions = Vec::new();
     while !stop.load(Ordering::Acquire) {
         if !ownership.current() {
@@ -321,9 +339,11 @@ fn serve(
         sessions.retain(|thread| !thread.is_finished());
     }
     stop.store(true, Ordering::Release);
+    drop(archive_cancel);
     for thread in sessions {
         let _ = thread.join();
     }
+    let _ = archive_thread.join();
     // Keep the listener present throughout draining so another election cannot
     // open a second writer while old sessions are still committing.
     drop(listener);

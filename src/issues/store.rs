@@ -58,7 +58,7 @@ mod transfer;
 use super::provenance;
 
 const APPLICATION_ID: i64 = 0x48424953;
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const CONTENTION_BUDGET: Duration = Duration::from_secs(6);
 
 fn cached_response(
@@ -78,10 +78,10 @@ fn cached_response(
     };
     identifier(&project.id, "project ID", 8192)?;
     identifier(&project.name, "project name", 1024)?;
-    let previous: Option<(String, String)> = db.query_row(
-        "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
-        params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-    let Some((old, response)) = previous else {
+    let previous: Option<(String, String, Option<String>)> = db.query_row(
+        "SELECT payload,response,archive_key FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
+        params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+    let Some((old, response, archive_key)) = previous else {
         return Ok(None);
     };
     if old != payload {
@@ -89,7 +89,7 @@ fn cached_response(
             "Request ID was already used for a different operation",
         ));
     }
-    let response: Value = serde_json::from_str(&response)?;
+    let response = super::archive::receipt_response(db, &response, archive_key.as_deref())?;
     // Retain request identity so an old create cannot recreate a deleted
     // document, but never replay a saved document after permanent deletion.
     if matches!(request.operation, Operation::Artifact { .. })
@@ -128,6 +128,8 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    ("requests", "created_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("requests", "archive_key", "TEXT"),
     (
         "issues",
         "attempt_hold",
@@ -1216,6 +1218,12 @@ impl Store {
                 } else {
                     tx.execute_batch(include_str!("subtask-readiness.sql"))?;
                 }
+                // Legacy receipts have no reliable creation timestamp. Start
+                // their grace period here rather than guessing from a response.
+                if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='request_archive_candidates')", [], |r| r.get::<_,bool>(0))? {
+                    tx.execute("UPDATE requests SET created_at=?1 WHERE created_at=0", [super::worker::now()])?;
+                    tx.execute_batch("CREATE INDEX request_archive_candidates ON requests(created_at) WHERE archive_key IS NULL")?;
+                }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.commit()?;
                 Ok(())
@@ -1539,13 +1547,13 @@ impl Store {
             let snapshot = self.db.read_transaction()?;
             let project = resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
             let actor = &r.actor.as_ref().unwrap().id;
-            let saved: Option<(String, String)> = snapshot.query_row(
-                "SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
-                params![project.id, actor, id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            let saved: Option<(String, String, Option<String>)> = snapshot.query_row(
+                "SELECT payload,response,archive_key FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
+                params![project.id, actor, id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
             let (operation, response) = match saved {
-                Some((payload, response)) => (
+                Some((payload, response, archive_key)) => (
                     serde_json::from_str::<Value>(&payload)?,
-                    serde_json::from_str::<Value>(&response)?,
+                    super::archive::receipt_response(&snapshot, &response, archive_key.as_deref())?,
                 ),
                 None => (Value::Null, Value::Null),
             };
@@ -2354,8 +2362,8 @@ impl Store {
             }
         }
         if let (Some(key), Some(actor)) = (&r.request_id, actor) {
-            tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response) VALUES(?1,?2,?3,?4,?5)",
-                params![project.id,actor.id,key,payload,serde_json::to_string(&result)?])?;
+            tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![project.id,actor.id,key,payload,serde_json::to_string(&result)?,now])?;
         }
         tx.commit()?;
         attachment_files.new.clear();
