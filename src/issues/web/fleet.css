@@ -316,3 +316,25 @@
  .activity-task-meta {grid-column:1;flex-direction:row;font-size:9px}.activity-task-copy {grid-column:1/-1;grid-row:2}.activity-task-state {grid-column:1;grid-row:3;font-size:9px}.activity-task time {grid-column:2;grid-row:1;font-size:9px}.activity-task-arrow {grid-column:3;grid-row:1}
  .activity-task-copy strong {font-size:12px}.activity-inactive {padding-left:27px}.activity-worker-footer {font-size:10px}
 }
+
+/* Machine capacity and checkouts stay close to the workers they configure. */
+.machine-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:16px 20px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--input) }
+.worker-machine>.machine-controls { border:1px solid var(--line); border-radius:12px; margin:12px 0 18px }
+.worker-stepper { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surface) }
+.worker-step { border:0; background:transparent; color:var(--accent); width:40px; height:40px; font-family:inherit; font-size:24px; line-height:1; cursor:pointer }
+.worker-step:hover { background:var(--accent-soft) }
+.worker-step:disabled { color:var(--muted); opacity:.45; cursor:default }
+.worker-step:focus-visible { outline:2px solid var(--accent); outline-offset:-3px }
+.worker-count { min-width:36px; text-align:center; font-weight:650; font-variant-numeric:tabular-nums }
+.machine-control-label,.machine-draining { color:var(--muted); font-size:12px }
+.machine-controls>.button { margin-left:auto }
+.machine-projects { display:grid; gap:8px; margin:0 0 18px }
+.machine-projects:empty { display:none }
+.machine-project { display:flex; align-items:center; gap:16px; padding:12px 14px; border:1px solid var(--line); border-radius:10px }
+.machine-project>div { display:grid; flex:1; min-width:0; gap:4px }
+.machine-project strong { font-size:13px }
+.machine-project code,.machine-project small { font-size:11px; color:var(--muted); overflow-wrap:anywhere }
+#machine-editor-description { color:var(--muted); font-size:14px; line-height:1.6 }
+#machine-editor-status { font-size:13px; line-height:1.6; overflow-wrap:anywhere }
+#machine-form [hidden] { display:none!important }
+@media(max-width:600px){.machine-controls{padding:12px}.worker-machine>.machine-controls{padding:10px}.machine-draining{flex-basis:100%}.machine-project{gap:10px}.worker-step{width:44px;height:44px}}

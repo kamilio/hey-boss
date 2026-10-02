@@ -121,6 +121,11 @@ and redeploys changed source builds. Open **Agents** (`/agents`) for a project
 view of each task and the device where it runs. Open a task for its live Codex
 conversation: the original request, saved replies, and expandable tool activity.
 Conversations open at the latest activity; load earlier messages above it.
+Use the machine’s **+ / −** controls to add or remove workers. Removal finishes
+current work; **Kill now** stops a finishing worker immediately. **Add project**
+saves a Git repository and checkout path on that machine and can assign it to a
+worker. The workspace folder defaults to `~/Workspace` and remembers each machine’s
+last choice. Existing checkouts must match the repository; files are preserved.
 Choose **Steer** in a live conversation to add an instruction while the agent keeps
 working. **This agent** sends a message to that session; **This issue** also appends
 the requirement to the saved issue; **This project** also appends it to the project’s

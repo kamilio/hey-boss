@@ -10,7 +10,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  let snapshot=null,seen=0;const pending=new Map();
  const visible=()=>new Set(store.issueProjects().map(p=>p.id));
  const filtered=()=>{
-  const projects=visible();return {...snapshot,signals:snapshot?.signals||[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,desired_revision:m.desired_revision,applied_revision:m.applied_revision,configuration_error:m.configuration_error,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,intent:w.intent,managed:w.managed,retiring:w.retiring,active:w.active,free:w.free,eligible:w.eligible,error:w.error,retry_at:w.retry_at,config:{name:w.config?.name,enabled:w.config?.enabled,concurrency:w.config?.concurrency,projects:w.config?.projects,directory:w.config?.directory,directories:w.config?.directories},chiefs:(w.chiefs||[]).filter(r=>projects.has(r.project_id)),runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
+  const projects=visible();return {...snapshot,signals:snapshot?.signals||[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,desired_revision:m.desired_revision,applied_revision:m.applied_revision,configuration_error:m.configuration_error,projects:m.projects,workspace:m.workspace,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,intent:w.intent,managed:w.managed,retiring:w.retiring,active:w.active,free:w.free,eligible:w.eligible,error:w.error,retry_at:w.retry_at,config:{name:w.config?.name,enabled:w.config?.enabled,concurrency:w.config?.concurrency,projects:w.config?.projects,directory:w.config?.directory,directories:w.config?.directories},chiefs:(w.chiefs||[]).filter(r=>projects.has(r.project_id)),runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
  };
  const page=fileURLToPath(new URL('../dist/agent-web/fleet.html',import.meta.url));
  for(const route of ['/agents','/agents/session','/workers'])app.get(route,auth,(req,res)=>res.sendFile(page));
@@ -41,11 +41,11 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
   if(!snapshot||now()-seen>15000)throw new HubError(503,'Connect your supervisor to edit worker configuration.');
   const input=req.method==='GET'?{}:req.body;
   if(action==='chief_run'&&(typeof input.project!=='string'||!visible().has(input.project)||typeof input.id!=='string'||!/^[a-zA-Z0-9_-]{1,128}$/.test(input.id)))throw new HubError(400,'Choose a visible project and a request ID.');
-  if(action==='configuration'&&req.method==='POST'&&((typeof input.text!=='string'&&!input.worker_update)||Buffer.byteLength(JSON.stringify(input))>1048576||typeof input.revision!=='string'||typeof input.save!=='boolean'))throw new HubError(400,'Provide YAML text, its revision, and whether to save.');
+  if(action==='configuration'&&req.method==='POST'&&((typeof input.text!=='string'&&!input.worker_update&&!input.machine_update)||Buffer.byteLength(JSON.stringify(input))>1048576||typeof input.revision!=='string'||typeof input.save!=='boolean'))throw new HubError(400,'Provide YAML text, its revision, and whether to save.');
   if(action==='signal'&&(!['pause','resume','stop','restart'].includes(input.signal)||typeof input.host!=='string'||typeof input.worker!=='string'||typeof input.id!=='string'))throw new HubError(400,'Invalid worker action');
   if(pending.size>=32||[...pending.values()].filter(p=>p.device===req.device.id).length>=2)throw new HubError(429,'Wait for your current request to finish.');
   const id=randomUUID(),timer=setTimeout(()=>{pending.delete(id);if(!res.destroyed)res.status(504).json({error:'No confirmation from your supervisor. Reload to check whether the change was saved.'});},20000);timer.unref();
-  pending.set(id,{id,action,project:input.project,text:input.text,worker_update:input.worker_update,revision:input.revision,save:input.save,host:input.host,worker:input.worker,signal:input.signal,signal_id:input.id,device:req.device.id,res,timer});
+  pending.set(id,{id,action,project:input.project,text:input.text,worker_update:input.worker_update,machine_update:input.machine_update,revision:input.revision,save:input.save,host:input.host,worker:input.worker,signal:input.signal,signal_id:input.id,device:req.device.id,res,timer});
   res.on('close',()=>{clearTimeout(timer);pending.delete(id);});
  }
  app.get('/api/fleet/configuration',auth,(req,res)=>requestFleet(req,res,'configuration'));
@@ -60,7 +60,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
   if(!Array.isArray(req.body.machines)||req.body.machines.length>100)throw new HubError(400,'Invalid agent snapshot');
   snapshot=req.body;seen=now();res.json({ok:true});
  });
- app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id,worker_update})=>({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id,worker_update}))}));
+ app.get('/api/bridge/agents',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id,worker_update,machine_update})=>({id,action,host,run,cursor,before,latest,at,project,issue,agent,scope,text,request_id,revision,save,worker,signal,signal_id,worker_update,machine_update}))}));
  app.post('/api/bridge/agents/:id/result',bridge,(req,res)=>{
   const request=pending.get(req.params.id);
   if(request){
