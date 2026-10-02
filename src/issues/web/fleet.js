@@ -371,7 +371,7 @@ if (typeof document !== 'undefined') (() => {
       if(delta){item.type='button';Object.assign(item.dataset,{capacityDelta:delta,worker:worker.id,host:machine.host,focus:machine.host+':'+worker.id+':capacity:'+delta});item.setAttribute('aria-label',(delta>0?'Increase':'Decrease')+' agent limit for '+label);item.disabled=capacityBusy||worker.retiring||delta<0&&limit<=1||delta>0&&limit>=1024;}
       count.append(item);
     }
-    controls.append(count,element('span','capacity-caption','agent limit'));return controls;
+    controls.append(count,element('span','capacity-caption','limit'));return controls;
   }
   function machineProjects(machine){
     const panel=element('div','machine-projects');

@@ -319,16 +319,16 @@
 /* Agent capacity belongs to a project worker; machines only own checkouts. */
 .machine-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:8px 20px }
 .worker-machine>.machine-controls { margin:8px 0 }
-.capacity-controls { display:inline-flex; flex-direction:column; align-items:center; gap:3px; vertical-align:middle }
+.capacity-controls { display:inline-flex; align-items:center; gap:5px; vertical-align:middle; color:var(--muted) }
 .capacity-caption { color:var(--muted); font-size:10px; font-weight:400; white-space:nowrap }
 .activity-columns,.activity-worker-summary { grid-template-columns:minmax(130px,1fr) 110px 150px minmax(0,2fr) }
 .worker-column-labels,.worker-record-summary { grid-template-columns:minmax(130px,1fr) 120px 150px 70px }
-.worker-stepper { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surface) }
-.worker-step { border:0; background:transparent; color:var(--accent); width:40px; height:40px; font-family:inherit; font-size:24px; line-height:1; cursor:pointer }
-.worker-step:hover { background:var(--accent-soft) }
-.worker-step:disabled { color:var(--muted); opacity:.45; cursor:default }
+.worker-stepper { display:inline-flex; align-items:center }
+.worker-step { border:0; border-radius:4px; background:transparent; color:var(--muted); width:26px; height:28px; padding:0; font-family:inherit; font-size:16px; line-height:1; cursor:pointer; opacity:.6 }
+.worker-step:hover,.worker-step:focus-visible { color:var(--accent); background:var(--accent-soft); opacity:1 }
+.worker-step:disabled { color:var(--muted); background:transparent; opacity:.25; cursor:default }
 .worker-step:focus-visible { outline:2px solid var(--accent); outline-offset:-3px }
-.worker-count { min-width:36px; text-align:center; font-weight:650; font-variant-numeric:tabular-nums }
+.worker-count { min-width:20px; text-align:center; font-size:12px; font-weight:500; font-variant-numeric:tabular-nums }
 .machine-control-label,.machine-draining { color:var(--muted); font-size:12px }
 .machine-controls>.button { margin-left:auto }
 .machine-projects { display:grid; gap:8px; margin:0 0 18px }
@@ -343,9 +343,9 @@
 @media(max-width:600px){.machine-controls{padding:12px}.worker-machine>.machine-controls{padding:10px}.machine-draining{flex-basis:100%}.machine-project{gap:10px}.worker-step{width:44px;height:44px}}
 @media(max-width:680px){
  .activity-worker-summary,.worker-record-summary {grid-template-columns:minmax(0,1fr) auto;gap:8px}
- .activity-worker-summary>.capacity-controls,.worker-record-summary>.capacity-controls {grid-column:1;align-items:flex-start}
+ .activity-worker-summary>.capacity-controls,.worker-record-summary>.capacity-controls {grid-column:1;justify-content:flex-start}
  .activity-worker-current {grid-column:1/-1}
  .settings-scope>.worker-scope-heading h3 {grid-column:1/-1}
- .worker-scope-heading>.capacity-controls {align-items:flex-start}
+ .worker-scope-heading>.capacity-controls {justify-content:flex-start}
  .activity-worker-slots {grid-column:1/-1}
 }
