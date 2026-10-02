@@ -23,6 +23,7 @@ fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
         "edit" => value["if_version"].is_null() && (supervisor || value["draft"] == true),
         "reopen" | "set_blockers" => supervisor && value["if_version"].is_null(),
         "ready" => value["guard"].is_null(),
+        "close" => supervisor && value["guard"].is_null(),
         "batch" => value["edits"]
             .as_array()
             .is_some_and(|edits| edits.iter().any(|edit| missing(&edit["if_version"]))),
@@ -74,6 +75,42 @@ fn receipt_payload(operation: &Value) -> Result<Value> {
     Ok(value)
 }
 
+fn replay_receipt(
+    request: &Request,
+    operation: &Value,
+    authority: bool,
+    supervisor: bool,
+    call: &mut impl FnMut(&Request, bool) -> Result<Value>,
+) -> Result<Option<Value>> {
+    if let Some(id) = &request.request_id {
+        let mut read = request.clone();
+        read.request_id = None;
+        read.operation = Operation::RequestStatus { id: id.clone() };
+        let receipt = call(&read, authority || operation["action"] == "artifact")?;
+        if receipt["request"]["state"] == "recorded" {
+            let mut saved_operation = receipt["request"]["operation"].clone();
+            let mut saved = saved_operation.clone();
+            let mut wanted = receipt_payload(operation)?;
+            logical_command(&mut saved, operation);
+            logical_command(&mut wanted, operation);
+            if saved != wanted {
+                return Err(Error::conflict(
+                    "Request ID was already used for a different command",
+                ));
+            }
+            if operation["action"] == "artifact" && operation["operation"]["command"] == "import" {
+                saved_operation["operation"]["files"] = operation["operation"]["files"].clone();
+            }
+            // Replay the saved guards through the normal route so its receipt
+            // lookup also preserves companion routing and response metadata.
+            let mut request = request.clone();
+            request.operation = serde_json::from_value(saved_operation)?;
+            return call(&request, supervisor).map(Some);
+        }
+    }
+    Ok(None)
+}
+
 fn prepare(
     request: &Request,
     supervisor: bool,
@@ -84,37 +121,32 @@ fn prepare(
     }
     let mut request = request.clone();
     let mut operation = serde_json::to_value(&request.operation)?;
+    // Keep the absent wire field for compatibility, but normalize the CLI
+    // template so receipt comparison ignores only automatically captured guards.
+    if operation["action"] == "ready" || supervisor && operation["action"] == "close" {
+        if operation["action"] == "close" && operation["force"] == true {
+            return Err(Error::invalid(
+                "--supervisor close does not support --force",
+            ));
+        }
+        operation
+            .as_object_mut()
+            .unwrap()
+            .entry("guard")
+            .or_insert(Value::Null);
+    }
     let automatic = needs_snapshot(&operation, supervisor);
+    let template = operation.clone();
     let authority = supervisor
         || matches!(operation["action"].as_str(), Some("assign" | "ready"))
         || (operation["action"] == "edit" && operation["draft"] == true);
     if automatic {
         let mut read = request.clone();
         read.request_id = None;
-        if let Some(id) = &request.request_id {
-            read.operation = Operation::RequestStatus { id: id.clone() };
-            let receipt = call(&read, authority || operation["action"] == "artifact")?;
-            if receipt["request"]["state"] == "recorded" {
-                let mut saved_operation = receipt["request"]["operation"].clone();
-                let mut saved = saved_operation.clone();
-                let mut wanted = receipt_payload(&operation)?;
-                logical_command(&mut saved, &operation);
-                logical_command(&mut wanted, &operation);
-                if saved != wanted {
-                    return Err(Error::conflict(
-                        "Request ID was already used for a different command",
-                    ));
-                }
-                if operation["action"] == "artifact"
-                    && operation["operation"]["command"] == "import"
-                {
-                    saved_operation["operation"]["files"] = operation["operation"]["files"].clone();
-                }
-                // Replay the saved guards through the normal route so its receipt
-                // lookup also preserves companion routing and response metadata.
-                request.operation = serde_json::from_value(saved_operation)?;
-                return call(&request, supervisor);
-            }
+        if let Some(result) =
+            replay_receipt(&request, &operation, authority, supervisor, &mut call)?
+        {
+            return Ok(result);
         }
         if operation["action"] == "artifact" {
             let edit = artifact_edit(&mut operation["operation"]);
@@ -138,7 +170,7 @@ fn prepare(
                 number: operation["number"].as_i64().unwrap(),
             };
             let current = call(&read, authority)?;
-            if operation["action"] == "ready" {
+            if matches!(operation["action"].as_str(), Some("ready" | "close")) {
                 operation["guard"] = current["ready_guard"].clone();
             } else {
                 operation["if_version"] = current["issue"]["version"].clone();
@@ -162,7 +194,16 @@ fn prepare(
         ]))?;
         request.request_id = Some(format!("cli-{:x}", Sha256::digest(key)));
     }
-    call(&request, supervisor)
+    let result = call(&request, supervisor);
+    // Another identical caller may commit between our receipt lookup and
+    // snapshot. Replay only its proven receipt, never refresh a failed guard.
+    if automatic
+        && result.as_ref().is_err_and(|error| error.code == "conflict")
+        && let Some(saved) = replay_receipt(&request, &template, authority, supervisor, &mut call)?
+    {
+        return Ok(saved);
+    }
+    result
 }
 
 pub(crate) fn execute(request: &Request, host: Option<&str>, supervisor: bool) -> Result<Value> {
@@ -220,6 +261,81 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "offline");
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn lifecycle_retry_recovers_a_receipt_committed_before_its_snapshot() {
+        for action in ["ready", "close"] {
+            let mut request = request(if action == "ready" {
+                json!({"action":action,"number":1,"force":false})
+            } else {
+                json!({"action":action,"number":1,"force":false,"comment":"Verified"})
+            });
+            request.request_id = Some("lifecycle-once".into());
+            let mut original = serde_json::to_value(&request.operation).unwrap();
+            original["guard"] =
+                json!({"if_version":7,"expected_assignee":null,"expected_reservation":"before"});
+            let mut calls = 0;
+            let result = prepare(&request, true, |r, authority| {
+                assert!(authority);
+                calls += 1;
+                match calls {
+                    1 => Ok(json!({"request":{"state":"not_recorded"}})),
+                    2 => Ok(json!({"ready_guard":{"if_version":8,"expected_assignee":null,"expected_reservation":"after"}})),
+                    3 => Err(Error::conflict("Request ID used with different guards")),
+                    4 => Ok(json!({"request":{"state":"recorded","operation":original}})),
+                    5 => {
+                        assert_eq!(serde_json::to_value(&r.operation).unwrap(), original);
+                        Ok(json!({"ok":true,"issue":{"state":if action == "ready" {"ready"} else {"closed"}}}))
+                    }
+                    _ => panic!("Unexpected retry"),
+                }
+            }).unwrap();
+            assert_eq!(result["ok"], true);
+            assert_eq!(calls, 5);
+        }
+    }
+
+    #[test]
+    fn close_retries_a_lost_acknowledgement_without_repeating_the_write() {
+        let mut request =
+            request(json!({"action":"close","number":1,"force":false,"comment":"Verified"}));
+        request.request_id = Some("lost-close".into());
+        let mut saved = None;
+        let mut writes = 0;
+        let mut call = |r: &Request, authority: bool| {
+            assert!(authority);
+            match &r.operation {
+                Operation::RequestStatus { .. } => Ok(match &saved {
+                    Some(operation) => {
+                        json!({"request":{"state":"recorded","operation":operation}})
+                    }
+                    None => json!({"request":{"state":"not_recorded"}}),
+                }),
+                Operation::View { .. } => Ok(
+                    json!({"ready_guard":{"if_version":1,"expected_assignee":null,"expected_reservation":"snapshot"}}),
+                ),
+                Operation::Close { .. } if saved.is_none() => {
+                    writes += 1;
+                    saved = Some(serde_json::to_value(&r.operation).unwrap());
+                    Err(Error::new(
+                        "fleet_unavailable",
+                        "Acknowledgement lost after commit",
+                    ))
+                }
+                Operation::Close { .. } => Ok(json!({"ok":true,"issue":{"state":"closed"}})),
+                _ => panic!("Unexpected request"),
+            }
+        };
+        assert_eq!(
+            prepare(&request, true, &mut call).unwrap_err().code,
+            "fleet_unavailable"
+        );
+        assert_eq!(
+            prepare(&request, true, &mut call).unwrap()["issue"]["state"],
+            "closed"
+        );
+        assert_eq!(writes, 1);
     }
 
     #[test]

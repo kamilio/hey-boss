@@ -550,6 +550,8 @@ pub enum Operation {
         number: i64,
         comment: Option<String>,
         force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guard: Option<ReadyGuard>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_long_comment: bool,
     },

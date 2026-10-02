@@ -22,12 +22,16 @@ pub(super) fn snapshot(db: &Connection, project: &str, issue: &Issue) -> Result<
             ]))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let watcher: (Option<String>, Option<String>) = db.query_row(
+        "SELECT github_ack_event,(SELECT json_extract(status,'$.event') FROM issue_github_watches WHERE project_id=?1 AND issue_number=?2) FROM issues WHERE project_id=?1 AND number=?2",
+        params![project,issue.number], |r| Ok((r.get(0)?,r.get(1)?)),
+    )?;
     Ok(ReadyGuard {
         if_version: issue.version,
         expected_assignee: issue.assignee.clone(),
         expected_reservation: format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&(allocation, runs))?)
+            Sha256::digest(serde_json::to_vec(&(allocation, runs, watcher))?)
         ),
     })
 }
@@ -44,6 +48,63 @@ pub(super) fn register_boss(db: &Connection, actor: &Actor, now: i64) -> Result<
         "INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING",
         params![boss.id, serde_json::to_string(&boss)?, now],
     )?;
+    Ok(())
+}
+
+fn check_snapshot(
+    db: &Connection,
+    project: &str,
+    issue: &Issue,
+    expected: &ReadyGuard,
+    action: &str,
+) -> Result<()> {
+    let current = snapshot(db, project, issue)?;
+    if expected.if_version != current.if_version {
+        return Err(Error::conflict(format!(
+            "{action} version guard mismatch: expected {}, current {}",
+            expected.if_version, current.if_version
+        )));
+    }
+    if expected.expected_assignee != current.expected_assignee {
+        return Err(Error::conflict(format!(
+            "{action} assignee guard mismatch; refresh issue view"
+        )));
+    }
+    if expected.expected_reservation != current.expected_reservation {
+        return Err(Error::conflict(format!(
+            "{action} reservation guard mismatch: allocation, worker claim or GitHub event changed; refresh issue view"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn guard_close(
+    db: &Connection,
+    project: &Project,
+    issue: &Issue,
+    actor: &Actor,
+    guard: &ReadyGuard,
+) -> Result<()> {
+    check_snapshot(db, &project.id, issue, guard, "Close")?;
+    let protected: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?4) OR EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL AND (actor_id<>?3 OR claimed_at IS NULL OR ?5 IS NOT ?3))",
+        params![project.id,issue.number,actor.id,actor.machine,issue.assignee], |r| r.get(0),
+    )?;
+    if protected {
+        return Err(Error::conflict(
+            "Close blocked by a fleet reservation or unfinished/unclaimed worker attempt; ownership and reservations preserved",
+        ));
+    }
+    // Ready delegates completed work to Boss/the watcher, not to another agent.
+    // An exact snapshot never authorizes taking a different agent's claim.
+    if issue.assignee.as_deref().is_some_and(|owner| {
+        owner != actor.id
+            && !(issue.state == "ready" && matches!(owner, "human:boss" | "watcher:github"))
+    }) {
+        return Err(Error::conflict(
+            "Close requires unassigned work, your own claim, or an idle Ready handoff to Boss/GitHub; ownership preserved",
+        ));
+    }
     Ok(())
 }
 
@@ -67,24 +128,7 @@ pub(super) fn handoff(
     let guard = guard.as_ref();
     let clear_manual_hold = *clear_manual_hold;
     if let Some(expected) = guard {
-        let current = snapshot(db, &project.id, issue)?;
-        if expected.if_version != current.if_version {
-            return Err(Error::conflict(format!(
-                "Ready version guard mismatch: expected {}, current {}",
-                expected.if_version, current.if_version
-            )));
-        }
-        if expected.expected_assignee != current.expected_assignee {
-            return Err(Error::conflict(format!(
-                "Ready assignee guard mismatch: current {}",
-                current.expected_assignee.as_deref().unwrap_or("unassigned")
-            )));
-        }
-        if expected.expected_reservation != current.expected_reservation {
-            return Err(Error::conflict(
-                "Ready reservation guard mismatch: allocation or worker claim changed; refresh issue view",
-            ));
-        }
+        check_snapshot(db, &project.id, issue, expected, "Ready")?;
     }
     // Even a matching snapshot or --force cannot release a foreign live attempt.
     // Include expired, unclaimed attempts: expiry is not evidence of safe release.
@@ -178,14 +222,20 @@ pub(super) fn handoff(
     if issue.state == "ready" && issue.assignee.as_deref() == Some("human:boss") {
         return Ok(None);
     }
-    let (assignee, pending) = if watching {
-        assignments::ready_assignment(db, &project.id, issue.number, issue.assignee.as_deref())?
+    let assignee = if watching {
+        assignments::ready_assignment(
+            db,
+            &project.id,
+            issue.number,
+            issue.assignee.as_deref(),
+            guard.is_some(),
+        )?
     } else {
         register_boss(db, actor, now)?;
-        (Some("human:boss".into()), false)
+        Some("human:boss".into())
     };
     let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":assignee,"previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
-    issue.state = if pending { "open" } else { "ready" }.into();
+    issue.state = "ready".into();
     issue.assignee = assignee;
     issue.manual_blocked = false;
     Ok(Some(data))
