@@ -1850,6 +1850,7 @@ pub(super) fn refresh_allocation_deadlines(
     node: &str,
     workers: &[Value],
 ) -> Result<()> {
+    let mut deadlines = BTreeMap::new();
     for run in workers
         .iter()
         .flat_map(|w| w["runs"].as_array().into_iter().flatten())
@@ -1860,12 +1861,26 @@ pub(super) fn refresh_allocation_deadlines(
             && let (Some(project), Some(number)) =
                 (run["project_id"].as_str(), run["number"].as_i64())
         {
-            execute(
-                db,
-                "UPDATE fleet_allocation_deadlines SET expires_at=?1 WHERE project_id=?2 AND issue_number=?3 AND EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=?2 AND a.issue_number=?3 AND a.node=?4)",
-                &[json!(expires), json!(project), json!(number), json!(node)],
-            )?;
+            // Preserve the last eligible observation for duplicate run keys.
+            deadlines.insert((project, number), expires);
         }
+    }
+    if !deadlines.is_empty() {
+        let deadlines: Vec<_> = deadlines
+            .into_iter()
+            .map(|((project, number), expires)| (project, number, expires))
+            .collect();
+        execute(
+            db,
+            "UPDATE fleet_allocation_deadlines AS d
+             SET expires_at=json_extract(requested.value,'$[2]')
+             FROM json_each(?1) requested CROSS JOIN fleet_allocations a
+             WHERE a.project_id=json_extract(requested.value,'$[0]')
+               AND a.issue_number=json_extract(requested.value,'$[1]') AND a.node=?2
+               AND d.project_id=a.project_id AND d.issue_number=a.issue_number
+               AND d.expires_at<>json_extract(requested.value,'$[2]')",
+            &[json!(serde_json::to_string(&deadlines)?), json!(node)],
+        )?;
     }
     Ok(())
 }
@@ -5563,6 +5578,81 @@ mod tests {
             rows(&f.db, "SELECT node FROM fleet_allocations", &[]).unwrap()[0]["node"],
             "other"
         );
+    }
+
+    #[test]
+    fn allocation_heartbeat_batches_changed_deadlines_and_keeps_machine_scope() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            f.capture();
+            f.db.execute_batch(&format!(
+                "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{})
+                 INSERT INTO fleet_allocations SELECT 'named:Native fleet',id,CASE WHEN id={} THEN 'other' ELSE 'peer' END FROM n;
+                 UPDATE fleet_allocation_deadlines SET expires_at=100;
+                 CREATE TABLE deadline_updates(number INTEGER);
+                 CREATE TRIGGER record_deadline_update AFTER UPDATE ON fleet_allocation_deadlines
+                 BEGIN INSERT INTO deadline_updates VALUES(NEW.issue_number); END;", count + 3, count + 1
+            )).unwrap();
+            let mut runs: Vec<_> = (1..=count + 4)
+                .map(|number| {
+                    json!({
+                        "project_id":"named:Native fleet", "number":number,
+                        "reservation_expires":1000 + number,
+                        "claimed_at":if number == count + 2 { json!(1) } else { Value::Null },
+                        "finished_at":if number == count + 3 { json!(1) } else { Value::Null }
+                    })
+                })
+                .collect();
+            runs.push(
+                json!({"project_id":"named:Native fleet","number":1,"reservation_expires":2001}),
+            );
+            let workers = [json!({"runs":runs})];
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            refresh_allocation_deadlines(&db, "peer", &workers).unwrap();
+            db.execute_batch("COMMIT").unwrap();
+            drop(db);
+            let (commands, _) = transport.join().unwrap();
+            owner.stop();
+            let changed: i64 =
+                f.db.query_row("SELECT count(*) FROM deadline_updates", [], |r| r.get(0))
+                    .unwrap();
+            f.db.execute("DELETE FROM deadline_updates", []).unwrap();
+            refresh_allocation_deadlines(&f.db, "peer", &workers).unwrap();
+            let repeated: i64 =
+                f.db.query_row("SELECT count(*) FROM deadline_updates", [], |r| r.get(0))
+                    .unwrap();
+            eprintln!(
+                "{count} leases: {commands} owner RPCs, {changed} first writes, {repeated} repeated writes"
+            );
+            for row in rows(
+                &f.db,
+                "SELECT issue_number,expires_at FROM fleet_allocation_deadlines",
+                &[],
+            )
+            .unwrap()
+            {
+                let number = row["issue_number"].as_i64().unwrap();
+                assert_eq!(
+                    row["expires_at"],
+                    if number > count {
+                        100
+                    } else if number == 1 {
+                        2001
+                    } else {
+                        1000 + number
+                    }
+                );
+            }
+            measurements.push((count, commands, changed, repeated));
+        }
+        for (count, commands, changed, repeated) in measurements {
+            assert!(commands <= 4, "{count} leases needed {commands} RPCs");
+            assert_eq!(changed, count);
+            assert_eq!(repeated, 0, "An unchanged heartbeat rewrote deadlines");
+        }
     }
 
     #[test]
