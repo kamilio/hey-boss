@@ -4382,6 +4382,11 @@ async fn account_cursor_pages_long_poll_expiry_and_watch_restart_are_safe() {
     assert!(c.watches().await.unwrap().iter().any(|w| w.id == watch.id));
     api.stop().await;
     h.phase(8);
+    // A restarted monitor may reuse REST evidence for thirty seconds. Make
+    // this upstream change due for validation instead of depending on a
+    // concurrent policy read to happen to refresh the closed PR first.
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
     let restarted = hey_gh::api::Api::new(c.clone()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
