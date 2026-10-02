@@ -971,7 +971,7 @@ document.addEventListener("keydown", event => {
 
 
 function renderIssueComment(comment, deleted) {
-  const header = `${avatar(comment.author)}<strong>${esc(actorName(comment.author))}</strong><span>commented ${date(comment.created_at)}</span>`;
+  const header = `${avatar(comment.author)}<strong>${esc(actorName(comment.author, comment.actor_model))}</strong><span>commented ${date(comment.created_at)}</span>`;
   const action = deleted ? "" : `<button type="button" class="comment-resolve" data-resolve-comment="${comment.id}" data-resolved="${!comment.resolved}" aria-label="${comment.resolved ? "Unresolve" : "Resolve"} comment ${comment.id}">${comment.resolved ? "Unresolve" : "Resolve"}</button>`;
   const body = `<div class="comment-body markdown">${comment.body_html}</div>`;
   if (comment.resolved) {
@@ -1112,7 +1112,7 @@ function renderDetail(value) {
   const description =
     i.body_html || '<p class="muted-text">No description provided.</p>';
   $("#detail-view").innerHTML =
-    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1>${renderIssueHeadingActions(i)}</div><div class="detail-meta"><span class="state-pill ${state} ${IssueBlockers.kind(i) === "hold" ? "on-hold" : ""}">${icon(deleted ? "trash" : i.attempt_hold ? "blocked" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.attempt_hold ? "Attempt protected" : i.state === "ready" ? i.draft ? "Development handoff" : "Ready" : i.state === "blocked" ? (i.manual_blocked ? "On hold" : "Waiting for dependencies") : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2><div class="history-section"><button class="history-toggle" id="history-toggle" aria-expanded="false">${icon("clock")}View activity</button></div></div><div id="activity-timeline" hidden></div><div id="comments">${value.more_comments ? '<p class="field-help">Showing recent comments. View activity to read the full history.</p>' : ""}${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderCommits(i, value.prs_enabled)}${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
+    `<button class="back-link" data-back>${icon("arrow-left")}All issues</button>${IssueSubtasks.parent(i)}<div class="detail-top"><h1>${esc(i.title)} <span class="detail-number">#${i.number}</span></h1>${renderIssueHeadingActions(i)}</div><div class="detail-meta"><span class="state-pill ${state} ${IssueBlockers.kind(i) === "hold" ? "on-hold" : ""}">${icon(deleted ? "trash" : i.attempt_hold ? "blocked" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.attempt_hold ? "Attempt protected" : i.state === "ready" ? i.draft ? "Development handoff" : "Ready" : i.state === "blocked" ? (i.manual_blocked ? "On hold" : "Waiting for dependencies") : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>·</span><span>${value.comments.length}${value.more_comments ? "+" : ""} comments</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2></div><div id="comments" class="issue-timeline">${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderCommits(i, value.prs_enabled)}${renderPullRequests(i)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
   mountIssueSection(".issue-progress-card", "Progress", () => mountIssueProgress(i));
   placeIssueWork();
   document.title = `${i.title} · Hey Boss`;
@@ -1143,7 +1143,7 @@ function renderDetail(value) {
   mountIssueSection("#issue-attachments", "Attachments", () => HeyBossAttachments.mount(document.querySelector("#issue-attachments"), {project:model.project.id,target:{kind:"issue",id:String(i.number)},host:model.route.host,csrf:model.csrf,readonly:deleted}, document.querySelector("#comment-form .markdown-editor")));
   mountIssueSection("#issue-artifacts", "Linked documents", () => HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || []}));
   mountIssueSection(".subtasks-card", "Subtasks", () => IssueSubtasks.rendered());
-  $("#history-toggle").onclick = loadHistory;
+  loadIssueTimeline($("#comments"), value);
   if ($("#pr-form"))
     $("#pr-form").onsubmit = (event) => {
       event.preventDefault();
@@ -1379,21 +1379,6 @@ async function submitComment(e) {
     button.disabled = false;
   }
 }
-let historyOffset = 0;
-async function loadHistory() {
-  const target = $("#activity-timeline");
-  if (!target.hidden) {
-    target.hidden = true;
-    $("#history-toggle").setAttribute("aria-expanded", "false");
-    return;
-  }
-  target.hidden = false;
-  $("#history-toggle").setAttribute("aria-expanded", "true");
-  target.innerHTML =
-    '<div class="loading-state"><span class="spinner"></span></div>';
-  historyOffset = 0;
-  await historyPage(true);
-}
 function queueActivity(event) {
   const data = event.data || {};
   if (event.action === "created" && ["top", "bottom"].includes(data.placement)) {
@@ -1403,68 +1388,96 @@ function queueActivity(event) {
   const tags = data.required_tags?.length ? data.required_tags.join(", ") : "None";
   return `<p>${esc(data.worker_name || "Worker")} reserved this issue as the first eligible task in queue order.</p><p class="muted-text">Required tags: ${esc(tags)}. Drafts, claims, reservations, dependencies and retry holds are excluded.</p><details><summary>Selection details</summary><pre>${esc(JSON.stringify(data, null, 2))}</pre></details>`;
 }
-async function historyPage(reset = false) {
-  const project = model.project.id,
-    number = model.detail.issue.number;
-  try {
-    const result = await api(
-      { action: "history", number, limit: 20, offset: historyOffset },
-      project,
-    );
-    if (model.project.id !== project || model.route.issue !== number) return;
-    const target = $("#activity-timeline");
-    if (reset) target.innerHTML = '<div class="timeline"></div>';
-    $(".history-more", target)?.remove();
-    const verbs = {
-      created: "created this issue",
-      worker_selected: "selected this issue for a worker",
-      edited: "edited the description or labels",
-      triaged: "updated labels or ownership",
-      claimed: "claimed this issue",
-      unassigned: "released the claim",
-      allocation_released: "released the fleet reservation",
-      commented: "added a comment",
-      comment_resolved: "resolved a comment",
-      comment_unresolved: "unresolved a comment",
-      ready: "marked the PR ready for review",
-      blocked: "blocked this issue",
-      blockers_changed: "changed the blocking issues",
-      dependency_rework: "notified dependent work of upstream changes",
-      closed: "closed this issue",
-      reopened: "reopened this issue",
-      manual_hold_cleared: "released the hold",
-      deleted: "deleted this issue",
-      restored: "restored this issue",
-      reordered: "changed this issue’s order",
-      transferred: "moved this issue from another project",
-      subtask_added: "added a subtask",
-      subtask_removed: "unlinked a subtask",
-      parent_added: "added a parent issue",
-      parent_removed: "unlinked the parent issue",
-      subtask_change_conflict: "attempted a subtask change that conflicted during sync",
-    };
-    $(".timeline", target).insertAdjacentHTML(
-      "beforeend",
-      result.events
-        .map(
-          (event) =>
-            `<div class="timeline-item"><strong>${esc(event.action === "worker_selected" ? event.data.worker_name || "Worker" : actorName(event.actor, event.data.actor_model))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${queueActivity(event)}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : ["edited", "triaged"].includes(event.action) ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
-        )
-        .join(""),
-    );
-    if (result.next_offset !== null) {
-      historyOffset = result.next_offset;
-      target.insertAdjacentHTML(
-        "beforeend",
-        '<button class="button small history-more">Load more activity</button>',
-      );
-      $(".history-more", target).onclick = () => historyPage();
-    }
-  } catch (e) {
-    toast(e.message, true);
-    $("#activity-timeline").innerHTML =
-      '<p class="form-error">Activity could not be loaded. Close and reopen activity to retry.</p>';
+function issueActivity(event) {
+  const data = event.data || {}, before = data.before || {}, after = data.after || {};
+  const who = id => `<strong>${esc(actorName(id, id === event.actor ? data.actor_model : data.assignee_model))}</strong>`;
+  const label = value => `<span class="activity-label">${esc(value)}</span>`;
+  const assignment = (from, to) => to
+    ? `assigned this issue to ${who(to)}${from && from !== to ? ` (previously ${who(from)})` : ""}`
+    : `unassigned ${who(from)}`;
+  let changes = [], symbol = "clock";
+  if (["assigned", "claimed", "unassigned"].includes(event.action)) {
+    symbol = "user";
+    const target = data.target === "github" ? "watcher:github" : data.target === "boss" ? "human:boss" : data.target === "unassigned" ? null : data.target || data.assignee;
+    changes.push(event.action === "claimed" && target === event.actor ? "claimed this issue" : event.action === "unassigned" && data.previous_assignee === event.actor ? "released their assignment" : assignment(data.previous_assignee, event.action === "unassigned" ? null : target));
+    if (data.target === "github" && data.assignee && data.assignee !== "watcher:github") changes.push(`kept ${who(data.assignee)} working until handoff`);
+  } else if (["edited", "triaged"].includes(event.action)) {
+    symbol = "edit";
+    if (Object.hasOwn(after, "assignee") && before.assignee !== after.assignee) changes.push(assignment(before.assignee, after.assignee));
+    const added = (after.labels || []).filter(l => !(before.labels || []).includes(l));
+    const removed = (before.labels || []).filter(l => !(after.labels || []).includes(l));
+    if (added.length) changes.push(`added ${added.map(label).join(" ")}`);
+    if (removed.length) changes.push(`removed ${removed.map(label).join(" ")}`);
+    if (Object.hasOwn(after,"title") && before.title !== after.title) changes.push(`renamed <span class="activity-old">${esc(before.title)}</span> to <strong>${esc(after.title)}</strong>`);
+    if (Object.hasOwn(after,"body") && before.body !== after.body) changes.push("edited the description");
+    if (Object.hasOwn(after,"draft") && before.draft !== after.draft) changes.push(after.draft ? "moved this issue to draft" : "marked this issue ready for work");
+    if (Object.hasOwn(after,"state") && before.state !== after.state) changes.push(`changed the state from ${esc(before.state)} to ${esc(after.state)}`);
   }
+  const verbs = {
+    created:"opened this issue", worker_selected:"selected this issue for a worker", allocation_released:"released the fleet reservation",
+    comment_resolved:"resolved a comment", comment_unresolved:"reopened a comment", ready:"marked the PR ready for review",
+    blocked:"blocked this issue", blockers_changed:"changed the blocking issues", dependency_rework:"notified dependent work of upstream changes",
+    closed:"closed this issue", reopened:"reopened this issue", manual_hold_cleared:"released the hold", deleted:"deleted this issue", restored:"restored this issue",
+    reordered:"changed this issue’s queue order", transferred:"moved this issue from another project", subtask_added:"added a subtask", subtask_removed:"unlinked a subtask",
+    parent_added:"added a parent issue", parent_removed:"unlinked the parent issue", subtask_change_conflict:"recorded a subtask conflict",
+    undrafted:"marked this issue ready for work", plan_bound:"linked a plan", pr_attached:"attached a pull request", pr_removed:"removed a pull request",
+    pr_classified:"changed a pull request’s purpose", commit_attached:"attached a commit", commit_removed:"removed a commit",
+  };
+  if (!changes.length) changes.push(verbs[event.action] || "updated this issue");
+  if (event.action === "ready" && data.previous_assignee !== data.assignee) changes.push(assignment(data.previous_assignee, data.assignee));
+  if (["pr_attached", "pr_removed", "pr_classified", "commit_attached", "commit_removed"].includes(event.action)) {
+    if (/^https?:\/\//i.test(data.url || "")) changes.push(`<a href="${esc(data.url)}">${esc(data.url)}</a>`);
+    if (data.purpose) changes.push(`purpose: ${esc(data.purpose)}`);
+  }
+  if (event.action === "closed") symbol = "closed";
+  if (event.action === "reopened" || event.action === "created") symbol = "issue";
+  const relation = data.parent && data.child ? ` <a data-issue="${esc(data.child)}" href="${esc(routeHash({...model.route,issue:data.child}))}">#${esc(data.parent)} → #${esc(data.child)}</a>` : "";
+  return `<div class="issue-activity" data-event-id="${event.id}"><span class="activity-icon" aria-hidden="true">${icon(symbol)}</span><div class="activity-content"><div>${who(event.actor)} ${changes.join("; ")}${relation}</div><div class="activity-time">${date(event.created_at)}</div>${queueActivity(event)}${data.sync_conflict ? `<p>${esc(data.sync_conflict)}</p>` : ""}</div></div>`;
+}
+async function loadIssueTimeline(target, detail) {
+  const project = model.project.id, number = detail.issue.number, host = model.route.host;
+  let before = null, loading = false;
+  const current = () => target.isConnected && model.detail === detail && model.route.host === host;
+  async function page(older = false) {
+    if (loading) return;
+    loading = true;
+    const button = target.querySelector(".history-more");
+    if (button) { button.disabled = true; button.textContent = "Loading…"; }
+    try {
+      const result = await api({action:"timeline",number,limit:30,before}, project, null, host);
+      if (!current()) return;
+      const anchor = older ? target.querySelector("[data-event-id], [data-comment-id]") : null;
+      const top = anchor?.getBoundingClientRect().top;
+      const comments = new Map(result.comments.map(c => [c.id,c]));
+      const events = new Map(result.events.map(e => [e.id,e]));
+      for (const comment of result.comments) {
+        const index = detail.comments.findIndex(c => c.id === comment.id);
+        if (index < 0) detail.comments.push(comment); else detail.comments[index] = comment;
+      }
+      const html = result.entries.map(entry => entry.kind === "comment" ? renderIssueComment(comments.get(entry.id), !!detail.issue.deleted_at) : issueActivity(events.get(entry.id))).join("");
+      target.querySelector(".timeline-error")?.remove();
+      target.querySelector(".history-more")?.remove();
+      if (!older) target.innerHTML = html || '<p class="muted-text">No activity yet.</p>';
+      else target.insertAdjacentHTML("afterbegin", html);
+      before = result.next_before;
+      if (before) {
+        target.insertAdjacentHTML("afterbegin", '<button type="button" class="button history-more">Load earlier activity</button>');
+        target.querySelector(".history-more").onclick = () => page(true);
+      }
+      target.querySelectorAll("[data-resolve-comment]").forEach(b => { b.onclick = e => resolveComment(e.currentTarget); });
+      secureLinks();
+      if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+    } catch (error) {
+      if (!current()) return;
+      target.querySelector(".timeline-error")?.remove();
+      target.insertAdjacentHTML("afterbegin", '<p class="timeline-error form-error" role="alert">Activity could not be loaded. <button type="button" class="button small">Try again</button></p>');
+      target.querySelector(".timeline-error button").onclick = () => page(older);
+    } finally {
+      loading = false;
+      if (button?.isConnected) { button.disabled = false; button.textContent = "Load earlier activity"; }
+    }
+  }
+  await page();
 }
 function editorValues() {
   return {
