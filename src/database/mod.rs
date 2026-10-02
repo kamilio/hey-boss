@@ -281,6 +281,43 @@ impl Connection {
     pub fn prepare_cached(&self, sql: &str) -> Result<Statement<'_>> {
         self.prepare(sql)
     }
+    /// Map rows using the Query response's metadata without a Prepare round trip.
+    /// Local connections still step rows directly, stopping on the first error.
+    pub fn query_collect<T, P: Params, E: From<rusqlite::Error>>(
+        &self,
+        sql: &str,
+        params: P,
+        mut map: impl FnMut(&Row<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<Vec<T>, E> {
+        let values = params.values()?;
+        match &self.backend {
+            Backend::Local(db) => {
+                let mut statement = db.prepare(sql)?;
+                let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next()? {
+                    result.push(map(&Row::Local(row))?);
+                }
+                Ok(result)
+            }
+            Backend::Remote(remote) => {
+                let reply = remote.call(Command::Query {
+                    sql: sql.into(),
+                    values: values.into_iter().map(SqlValue::from).collect(),
+                })?;
+                reply
+                    .rows
+                    .iter()
+                    .map(|values| {
+                        map(&Row::Remote {
+                            columns: &reply.columns,
+                            values,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
     pub fn query_row<T, P: Params>(
         &self,
         sql: &str,
@@ -697,6 +734,21 @@ impl RowIndex for &str {
     }
 }
 impl Row<'_> {
+    pub fn column_count(&self) -> usize {
+        match self {
+            Self::Local(row) => row.as_ref().column_count(),
+            Self::Remote { columns, .. } => columns.len(),
+        }
+    }
+    pub fn column_name(&self, index: usize) -> Result<&str> {
+        match self {
+            Self::Local(row) => row.as_ref().column_name(index),
+            Self::Remote { columns, .. } => columns
+                .get(index)
+                .map(String::as_str)
+                .ok_or(rusqlite::Error::InvalidColumnIndex(index)),
+        }
+    }
     pub fn get<I: RowIndex, T: FromSql>(&self, index: I) -> Result<T> {
         match self {
             Self::Local(row) => index.local(row),

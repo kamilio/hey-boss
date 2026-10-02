@@ -770,6 +770,36 @@ fn idle_sessions_reconnect_automatically_after_a_service_restart() {
 }
 
 #[test]
+fn collected_queries_stop_mapping_on_error_and_retain_column_metadata() {
+    let fixture = Fixture::new();
+    for db in [Connection::open_in_memory().unwrap(), fixture.connect()] {
+        let mut calls = 0;
+        let result: rusqlite::Result<Vec<i64>> = db.query_collect(
+            "SELECT 7 value UNION ALL SELECT 'invalid' UNION ALL SELECT 9",
+            [],
+            |row| {
+                calls += 1;
+                assert_eq!(row.column_count(), 1);
+                assert_eq!(row.column_name(0)?, "value");
+                assert!(matches!(
+                    row.column_name(1),
+                    Err(rusqlite::Error::InvalidColumnIndex(1))
+                ));
+                row.get(0)
+            },
+        );
+        assert_eq!(calls, 2);
+        assert!(
+            matches!(result, Err(rusqlite::Error::InvalidColumnType(0, name, _)) if name == "value")
+        );
+        let rows: Vec<i64> = db
+            .query_collect("SELECT ?1 AS value", [42], |row| row.get("value"))
+            .unwrap();
+        assert_eq!(rows, [42]);
+    }
+}
+
+#[test]
 fn read_snapshots_do_not_reserve_the_writer_and_large_results_stream() {
     let fixture = Fixture::new();
     let reader = fixture.connect();
