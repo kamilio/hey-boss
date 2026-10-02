@@ -406,7 +406,10 @@ mod tests {
             let registration = launchctl.with_extension("plist");
             fs::write(&registration, "existing registration").unwrap();
             let domain = format!("gui/{}", unsafe { libc::getuid() });
-            script(&launchctl, &format!(r#"
+            script(
+                &launchctl,
+                &format!(
+                    r#"
 case "$1" in
   bootout)
     test "$#" = 2 && test "$2" = '{domain}/local.hey-boss' || exit 19
@@ -420,7 +423,9 @@ case "$1" in
     if test '{failure}' = temporary && ! test -f "$0.retried"; then touch "$0.retried"; exit 5; fi;;
   *) echo obsolete-kickstart >&2; exit 21;;
 esac
-"#));
+"#
+                ),
+            );
             let result = reload_desktop_registration(&launchctl, &registration);
             if failure == "permanent" {
                 assert!(result.unwrap_err().to_string().contains("denied"));
@@ -428,12 +433,18 @@ esac
                 result.unwrap();
             }
             let calls = fs::read_to_string(launchctl.with_extension("calls")).unwrap();
-            assert_eq!(calls, if failure == "temporary" {
-                "bootout\nbootstrap\nbootstrap\n"
-            } else {
-                "bootout\nbootstrap\n"
-            });
-            assert_eq!(fs::read_to_string(&registration).unwrap(), "existing registration");
+            assert_eq!(
+                calls,
+                if failure == "temporary" {
+                    "bootout\nbootstrap\nbootstrap\n"
+                } else {
+                    "bootout\nbootstrap\n"
+                }
+            );
+            assert_eq!(
+                fs::read_to_string(&registration).unwrap(),
+                "existing registration"
+            );
         }
     }
 

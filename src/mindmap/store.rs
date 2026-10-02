@@ -1380,7 +1380,7 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .map(|n| id(n))
+                        .map(id)
                         .collect::<Vec<_>>(),
                     external_ids
                 );
@@ -1483,8 +1483,8 @@ mod tests {
                 {
                     let number: usize = node["reference"].as_str().unwrap().parse().unwrap();
                     assert_eq!(node["reference_project_name"], "Tasks");
-                    assert_eq!(node["available"], number % 8 != 0);
-                    if number % 8 == 0 {
+                    assert_eq!(node["available"], !number.is_multiple_of(8));
+                    if number.is_multiple_of(8) {
                         continue;
                     }
                     assert_eq!(node["original_title"], format!("Live {number}"));

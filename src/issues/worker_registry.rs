@@ -2095,13 +2095,13 @@ mod tests {
             let sql =
                 unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast())) }
                     .to_string_lossy();
-            if sql == "BEGIN IMMEDIATE" && !change.attempted.replace(true) {
-                if let Err(error) = change
+            if sql == "BEGIN IMMEDIATE"
+                && !change.attempted.replace(true)
+                && let Err(error) = change
                     .writer
                     .execute("UPDATE issues SET draft=1 WHERE number=1", [])
-                {
-                    *change.error.borrow_mut() = Some(error.to_string());
-                }
+            {
+                *change.error.borrow_mut() = Some(error.to_string());
             }
             0
         }
