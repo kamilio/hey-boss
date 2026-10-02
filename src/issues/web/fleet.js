@@ -297,6 +297,7 @@ if (typeof document !== 'undefined') (() => {
   const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
   const workerLabel=w=>w.config?.name&&!/^Worker(?: \d+)?$/.test(w.config.name)?w.config.name:(w.config?.projects||[]).map(projectLabel).join(' + ')||'Worker '+w.id.slice(0,8);
   const scopeLabel=group=>group.projects.map(projectLabel).join(' + ')||'All projects';
+  const projectHasWorker=(machine,id)=>(machine.workers||[]).some(w=>!w.retiring&&(!(w.config?.projects||[]).length||w.config.projects.includes(id)));
   function runtime(run){
     const time=element('time','agent-runtime',elapsed(run));time.hidden=!time.textContent;time.title='Agent runtime';
     if(!time.hidden&&run.finished_at==null)time.dataset.startedAt=run.started_at;
@@ -351,13 +352,15 @@ if (typeof document !== 'undefined') (() => {
     const sections=[];
     for(const d of devices.sort((a,b)=>b.active-a.active||Number(b.online)-Number(a.online))){
       const own=entries.filter(e=>e.device===d),shown=relevant.filter(e=>e.device===d&&matches(e));
-      if(!shown.length&&(search||activityFilter!=='all'))continue;
+      const pendingProjects=Object.fromEntries(Object.entries(d.machine.projects||{}).filter(([id])=>!projectHasWorker(d.machine,id)&&(activityFilter==='all'||activityFilter==='attention'&&d.machine.configuration_error)&&(!search||[id,projectLabel(id),d.machine.host,d.machine.hostname].join(' ').toLowerCase().includes(search))));
+      if(!shown.length&&!Object.keys(pendingProjects).length&&(search||activityFilter!=='all'))continue;
       const total=own.reduce((n,e)=>{for(const k of ['capacity','occupied','available','paused'])n[k]+=e.usage[k];return n;},{capacity:0,occupied:0,available:0,paused:0});
       const section=element('details','activity-machine');section.dataset.host=d.machine.host;section.dataset.key='machine:'+d.machine.host;section.open=known.has(section.dataset.key)?expanded.has(section.dataset.key):true;
       const heading=element('summary','activity-machine-heading');heading.dataset.focus=section.dataset.key;
       const name=element('h2','',d.machine.host==='local'?'This machine':d.machine.hostname||d.machine.host);
       heading.append(name,element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline'),element('span','activity-machine-usage',d.online?total.occupied+' agents running · '+total.available+' available'+(total.paused?' · '+total.paused+' paused':''):'Last known activity'));section.append(heading);section.append(machineControls(d.machine));
       if(d.machine.configuration_error)section.append(configurationRecovery(d.machine,expanded));
+      section.append(machineProjects({...d.machine,projects:pendingProjects}));
       shown.sort((a,b)=>b.usage.occupied-a.usage.occupied||Number(b.phase.group==='attention')-Number(a.phase.group==='attention')||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));
       for(const group of workerScopeGroups(shown)){
         const scope=element('details','worker-scope-group');scope.dataset.key=section.dataset.key+':scope:'+group.key;scope.open=expanded.has(scope.dataset.key);
@@ -370,7 +373,7 @@ if (typeof document !== 'undefined') (() => {
         const labels=element('div','activity-columns');labels.append(element('span','','Worker'),element('span','','Status'),element('span','',group.entries.length===1?'Agents':'Agent limit'),element('span','','Current task · latest activity'));scope.append(labels);
         for(const entry of group.entries)scope.append(worker(entry,group.labels.get(entry.worker.id),group.entries.length>1));section.append(scope);
       }
-      if(!shown.length)section.append(element('p','activity-note','No running workers.'));
+      if(!shown.length&&!Object.keys(pendingProjects).length)section.append(element('p','activity-note','No running workers.'));
       const inactive=own.filter(e=>!relevant.includes(e)).length;
       if(inactive){const a=element('a','activity-inactive',inactive+' paused or stopped workers →');a.href='/workers#view=configuration&find='+encodeURIComponent(d.machine.host);section.append(a);}sections.push(section);
     }
@@ -432,7 +435,8 @@ if (typeof document !== 'undefined') (() => {
     const panel=element('div','machine-projects');
     for(const [id,project] of Object.entries(machine.projects||{})){
       const row=element('div','machine-project');const copy=element('div');copy.append(element('strong','',projectLabel(id)),element('code','',project.resolved_path||project.path),element('small','',project.git));
-      const add=element('button','button small','Assign');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,project:id});add.setAttribute('aria-label','Assign '+projectLabel(id)+' to a worker');row.append(copy,add);panel.append(row);
+      row.append(copy);panel.append(row);
+      if((machine.workers||[]).some(w=>!w.retiring)){const add=element('button','button small','Assign');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,project:id});add.setAttribute('aria-label','Assign '+projectLabel(id)+' to a worker');row.append(add);}
       const worker=element('button','button small','Add worker');worker.type='button';Object.assign(worker.dataset,{machineAction:'add',host:machine.host,project:id});worker.setAttribute('aria-label','Add worker for '+projectLabel(id));row.append(worker);
     }
     return panel;
@@ -911,6 +915,7 @@ if (typeof document !== 'undefined') (() => {
       $('machine-git').required=['project','edit-project'].includes(action);$('machine-workspace').required=['project','edit-project'].includes(action);$('machine-path').required=false;
       const options=(select,empty)=>{select.replaceChildren();if(empty){const option=element('option','',empty);option.value='';select.append(option);}for(const worker of workers){const option=element('option','',workerLabel(worker)+' · '+worker.id.slice(0,12));option.value=worker.id;select.append(option);}};
       options($('machine-template'),template?null:Object.keys(machine.projects||{}).length?'New settings · machine projects':'New settings · all projects');options($('machine-worker'),action==='project'?'Machine only · assign later':null);
+      if(action==='project'&&!workers.length){$('machine-worker-field').hidden=true;$('machine-editor-description').textContent='Set up the checkout, then add a worker and choose its agent limit.';}
       if(template){$('machine-template').value=template.id;$('machine-slots-field').hidden=true;$('machine-editor-context').textContent=scopeLabel({projects:template.config?.projects||[]})+' · '+name;}
       if(action==='add'&&projectId){$('machine-template-field').hidden=true;$('machine-template').value='';$('machine-editor-context').textContent=projectLabel(projectId)+' · '+name;}
       if(workerId)$('machine-worker').value=workerId;
@@ -936,6 +941,13 @@ if (typeof document !== 'undefined') (() => {
       const saved=await configRequest({machine_update:update,revision,save:true});
       if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
       $('worker-save-note').textContent=action==='remove'?'Worker is finishing its current work. Expand it to kill it now.':['project','edit-project'].includes(action)?'Project saved. Its machine will prepare the checkout and apply worker settings.':'Worker added. Its machine will start it automatically.';$('worker-save-note').hidden=false;
+      if(action==='project'){
+        const machine=saved.document?.machines?.[host],project=Object.entries(machine?.projects||{}).find(([,p])=>p.git===update.git)?.[0];
+        if(project&&!projectHasWorker(machine,project)){
+          $('worker-save-note').textContent='Project saved. Add a worker to start agents. ';
+          const next=element('button','button small','Add worker');next.type='button';next.onclick=()=>openMachineEditor(host,'add',null,project);$('worker-save-note').append(next);
+        }
+      }
       if(action==='edit-project')await configRequest({retry_project:{host,project:projectId}});
       $('machine-editor').close();machineEdit=null;await refresh();
     }catch(error){$('machine-editor-status').textContent=error.message;}finally{machineBusy=false;machineButtons();}
