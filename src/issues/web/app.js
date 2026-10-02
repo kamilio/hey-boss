@@ -1432,7 +1432,8 @@ function issueActivity(event) {
   if (event.action === "closed") symbol = "closed";
   if (event.action === "reopened" || event.action === "created") symbol = "issue";
   const relation = data.parent && data.child ? ` <a data-issue="${esc(data.child)}" href="${esc(routeHash({...model.route,issue:data.child}))}">#${esc(data.parent)} → #${esc(data.child)}</a>` : "";
-  return `<div class="issue-activity" data-event-id="${event.id}"><span class="activity-icon" aria-hidden="true">${icon(symbol)}</span><div class="activity-content"><div>${who(event.actor)} ${changes.join("; ")}${relation}</div><div class="activity-time">${date(event.created_at)}</div>${queueActivity(event)}${data.sync_conflict ? `<p>${esc(data.sync_conflict)}</p>` : ""}</div></div>`;
+  const author = event.action === "worker_selected" ? `<strong>${esc(data.worker_name || "Worker")}</strong>` : who(event.actor);
+  return `<div class="issue-activity" data-event-id="${event.id}"><span class="activity-icon" aria-hidden="true">${icon(symbol)}</span><div class="activity-content"><div>${author} ${changes.join("; ")}${relation}</div><div class="activity-time">${date(event.created_at)}</div>${queueActivity(event)}${data.sync_conflict ? `<p>${esc(data.sync_conflict)}</p>` : ""}</div></div>`;
 }
 async function loadIssueTimeline(target, detail) {
   const project = model.project.id, number = detail.issue.number, host = model.route.host;

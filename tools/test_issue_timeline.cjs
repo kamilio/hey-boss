@@ -16,4 +16,7 @@ assert.match(render('edited',{before:{draft:true},after:{draft:false}}),/marked.
 assert.match(render('triaged',{before:{assignee:'human:boss',labels:[]},after:{assignee:null,labels:['bug']}}),/unassigned.*Boss.*added.*bug/s);
 assert.match(render('closed'),/Codex astra.*closed this issue/s);
 assert.doesNotMatch(render('future_event'),/future_event/);
-console.log('Timeline presentation: 9 checks passed');
+const worker = context.issueActivity({id:2,actor:'reservation:internal-id',action:'worker_selected',created_at:1,data:{worker_name:'Review worker'}});
+assert.match(worker,/Review worker.*selected this issue/s);
+assert.doesNotMatch(worker,/reservation:internal-id/);
+console.log('Timeline presentation: 11 checks passed');
