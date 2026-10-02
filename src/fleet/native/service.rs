@@ -38,6 +38,8 @@ fn xml(value: &str) -> String {
 }
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn mac_definition(ctx: &Context, role: &str) -> String {
+    // These services answer foreground database/UI requests over Unix sockets,
+    // which do not provide the XPC activity signals needed by Adaptive jobs.
     let name = if role == "controller" {
         "supervisor"
     } else {
@@ -49,7 +51,7 @@ pub(super) fn mac_definition(ctx: &Context, role: &str) -> String {
         .join(format!("fleet-{role}.log"))
         .to_string_lossy());
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array><string>{}</string><string>fleet</string><string>{name}</string></array><key>EnvironmentVariables</key><dict><key>HEY_BOSS_FLEET_SUPERVISED</key><string>1</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>AbandonProcessGroup</key><true/><key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array><string>{}</string><string>fleet</string><string>{name}</string></array><key>EnvironmentVariables</key><dict><key>HEY_BOSS_FLEET_SUPERVISED</key><string>1</string></dict><key>ProcessType</key><string>Interactive</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>AbandonProcessGroup</key><true/><key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>\n",
         xml(&ctx.binary.to_string_lossy())
     )
 }
@@ -223,6 +225,7 @@ mod tests {
         };
         for role in ["controller", "agent"] {
             let mac = mac_definition(&ctx, role);
+            assert!(mac.contains("<key>ProcessType</key><string>Interactive</string>"));
             assert!(mac.contains("<key>AbandonProcessGroup</key><true/>"));
             assert!(mac.contains(&format!("local.hey-boss-fleet-{role}")));
             assert!(mac.contains("&amp;"));
