@@ -258,13 +258,31 @@ impl Store {
             // Queue counts depend on these sets, not the worker ID or capacity.
             // Cache only within this transaction so each poll sees fresh data.
             let mut eligible_counts = HashMap::new();
+            let mut directories: HashMap<&String, String> = HashMap::new();
             for worker in &mut workers {
                 let config: Settings = serde_json::from_value(worker["config"].clone())?;
                 let mut chief_scope = Vec::new();
                 for project in &chief_projects {
-                    if (config.projects.is_empty() || config.projects.contains(&project.id))
-                        && std::path::Path::new(&checkout(&tx, &config, project)?).is_dir()
+                    if !config.projects.is_empty() && !config.projects.contains(&project.id) {
+                        continue;
+                    }
+                    let cwd = if config.directories.contains_key(&project.id)
+                        || !config.directory.is_empty()
                     {
+                        checkout(&tx, &config, project)?
+                    } else {
+                        // Inference is shared; explicit worker paths, including
+                        // empty overrides, retain their own scope.
+                        match directories.entry(&project.id) {
+                            std::collections::hash_map::Entry::Occupied(entry) => {
+                                entry.get().clone()
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(directory(&tx, project)?).clone()
+                            }
+                        }
+                    };
+                    if std::path::Path::new(&cwd).is_dir() {
                         chief_scope.push(project.id.clone());
                     }
                 }
@@ -1374,6 +1392,125 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fleet_poll_reuses_inferred_chief_checkouts_and_refreshes_each_snapshot() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root =
+                std::env::temp_dir().join(format!("hb-fleet-checkouts-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let inferred = root.join("inferred");
+            let explicit = root.join("explicit");
+            fs::create_dir(&inferred).unwrap();
+            fs::create_dir(&explicit).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO agents VALUES('creator',?1,0)",
+                    [json!({"cwd":inferred}).to_string()],
+                )
+                .unwrap();
+            for n in 0..5 {
+                let project = format!("named:Project-{n}");
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO projects(id,name,next_number,hidden_at) VALUES(?1,?1,2,?2)",
+                        params![project, if n == 4 { Some(1) } else { None }],
+                    )
+                    .unwrap();
+                store.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,chief_enabled) VALUES(?1,'',0,1,?2)", params![project,n!=3]).unwrap();
+                store.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES(?1,1,'Task','','open','creator',0,0,1,'[]')", [&project]).unwrap();
+            }
+            let mut ids = std::collections::HashSet::new();
+            for n in 0..count {
+                let mut config = Settings::default();
+                match n % 4 {
+                    1 => config.directory = root.join("missing").to_string_lossy().into(),
+                    2 => {
+                        config.directory = root.join("missing").to_string_lossy().into();
+                        config
+                            .directories
+                            .insert("named:Project-0".into(), String::new());
+                        config
+                            .directories
+                            .insert("named:Project-1".into(), explicit.to_string_lossy().into());
+                    }
+                    3 => config.projects = vec!["named:Project-1".into()],
+                    _ => {}
+                }
+                let id = format!("worker-{n}");
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)", params![id,serde_json::to_string(&config).unwrap()]).unwrap();
+                ids.insert(id);
+            }
+            let expected = store.fleet_workers_for(Some(&ids)).unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            let workers = store.fleet_workers_for(Some(&ids)).unwrap();
+            assert_eq!(workers, expected);
+            assert_eq!(workers.len(), count);
+            for worker in &workers {
+                let n: usize = worker["id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("worker-")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut actual: Vec<_> = worker["chief_projects"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                actual.sort_unstable();
+                assert_eq!(
+                    actual,
+                    match n % 4 {
+                        0 => vec!["named:Project-0", "named:Project-1", "named:Project-2"],
+                        1 => vec![],
+                        _ => vec!["named:Project-1"],
+                    }
+                );
+            }
+            store.db = Connection::connect(&path).unwrap();
+            let (commands, steps) = transport.join().unwrap();
+            fs::remove_dir(&inferred).unwrap();
+            for worker in store.fleet_workers_for(Some(&ids)).unwrap() {
+                let n: usize = worker["id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("worker-")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert_eq!(
+                    worker["chief_projects"],
+                    if n % 4 == 2 {
+                        json!(["named:Project-1"])
+                    } else {
+                        json!([])
+                    }
+                );
+            }
+            drop(store);
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!("{count} workers with inferred checkouts: {commands} RPCs/{steps} steps");
+            measurements.push((count, commands));
+        }
+        for (count, commands) in measurements {
+            assert!(
+                commands < 40,
+                "{count} workers repeated checkout discovery: {commands} RPCs"
+            );
+        }
+    }
+
     #[test]
     fn chief_preflight_batches_shared_prompts_and_ownership() {
         let mut measurements = Vec::new();
