@@ -1230,7 +1230,7 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_comment_resolution')", [], |r| r.get::<_, i64>(0))? < 9 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_comment_resolution','issue_attempt_recovery')", [], |r| r.get::<_, i64>(0))? < 10 {
             db.execute_batch(mindmap::INDEXES)?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
@@ -1238,6 +1238,7 @@ impl Store {
             db.execute_batch(registry::LEGACY_RUNTIME_INDEX)?;
             db.execute_batch(registry::PR_ORIGIN_INDEX)?;
             db.execute_batch(COMMENT_RESOLUTION_INDEX)?;
+            db.execute_batch(attempts::INDEX)?;
             db.execute_batch(transfer::INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
@@ -3085,6 +3086,49 @@ mod contention_tests {
             steps < 1000,
             "Hidden resolution history caused {steps} query steps"
         );
+    }
+
+    #[test]
+    fn attempt_recovery_skips_unrelated_event_history() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-attempt-recovery-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Recovery','Recovery',3),('named:Other','Other',2);
+            INSERT INTO agents VALUES('creator','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            VALUES('named:Recovery',1,'One','','open','creator',0,0,1,'[]',1),('named:Recovery',2,'Two','','open','creator',0,0,1,'[]',2),('named:Other',1,'Other','','open','creator',0,0,1,'[]',1);
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES
+            ('named:Recovery',1,'creator','attempt_reconciled',20,'{\"attempt_id\":\"old\"}'),
+            ('named:Recovery',1,'creator','attempt_reconciled',10,'{\"attempt_id\":\"latest-id\"}'),
+            ('named:Other',1,'creator','attempt_reconciled',30,'{\"attempt_id\":\"other-project\"}');
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+            SELECT 'named:Recovery',1+id%2,'creator','commented',id,'{}' FROM n;").unwrap();
+        // Existing installations acquire the additive index on migration too.
+        store.db.execute_batch("DROP INDEX IF EXISTS issue_attempt_recovery").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&path);
+        let mut recovered = json!({"number":1});
+        let mut untouched = json!({"number":2});
+        let mut other = json!({"number":1});
+        attempts::enrich(&db, "named:Recovery", &mut recovered).unwrap();
+        attempts::enrich(&db, "named:Recovery", &mut untouched).unwrap();
+        attempts::enrich(&db, "named:Other", &mut other).unwrap();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(recovered["attempt_recovery"]["attempt_id"], "latest-id");
+        assert!(untouched.get("attempt_recovery").is_none());
+        assert_eq!(other["attempt_recovery"]["attempt_id"], "other-project");
+        eprintln!("Attempt recovery: {commands} RPCs, {steps} query steps");
+        assert!(steps < 100, "Unrelated event history caused {steps} query steps");
     }
 
     #[test]

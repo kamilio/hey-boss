@@ -5,6 +5,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+pub(super) const INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_attempt_recovery ON events(project_id,issue_number,id DESC) WHERE action='attempt_reconciled';";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptReport {
