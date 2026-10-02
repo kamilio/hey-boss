@@ -282,6 +282,7 @@ final class Database {
         db = opened
         sqlite3_busy_timeout(db, 3000)
         try execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS dialogs (id TEXT PRIMARY KEY, status TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pending ON dialogs(status);")
+        try execute("CREATE INDEX IF NOT EXISTS inbox_issue ON dialogs(json_extract(body,'$.issue.project'),json_extract(body,'$.issue.number'),coalesce(json_extract(body,'$.issue.host'),'')) WHERE json_valid(body)")
         try execute("UPDATE dialogs SET body=json_set(body, '$.title', json_extract(body, '$.description')) WHERE json_valid(body) AND json_extract(body, '$.kind')='update' AND json_extract(body, '$.title') IS NULL;")
         try execute("CREATE VIEW IF NOT EXISTS notifications AS SELECT id, json_extract(body, '$.project') AS project, json_extract(body, '$.title') AS title, json_extract(body, '$.kind') AS kind, json_extract(body, '$.question') AS message, json_extract(body, '$.description') AS summary, status, json_extract(body, '$.createdAt') AS created_at, json_extract(body, '$.presentedAt') AS presented_at, json_extract(body, '$.completedAt') AS completed_at FROM dialogs;")
     }
@@ -363,6 +364,21 @@ final class Database {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { throw failure() }
         return Int(sqlite3_column_int64(stmt,0))
+    }
+    func inboxRelatedRows(_ issue: IssueReference) throws -> [[String: Any]] {
+        let stmt = try statement("SELECT json_object('taskID',id,'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'kind',json_extract(body,'$.kind'),'status',status,'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue')) FROM dialogs WHERE json_valid(body) AND json_extract(body,'$.issue.project')=?1 AND json_extract(body,'$.issue.number')=?2 AND coalesce(json_extract(body,'$.issue.host'),'')=?3 ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        guard sqlite3_bind_text(stmt,1,issue.project,-1,transient)==SQLITE_OK,
+              sqlite3_bind_int64(stmt,2,issue.number)==SQLITE_OK,
+              sqlite3_bind_text(stmt,3,issue.host ?? "",-1,transient)==SQLITE_OK else { throw failure() }
+        var rows: [[String: Any]] = []
+        while true {
+            let code = sqlite3_step(stmt)
+            if code == SQLITE_DONE { return rows }
+            guard code == SQLITE_ROW else { throw failure() }
+            if let raw = sqlite3_column_text(stmt,0), let row = try JSONSerialization.jsonObject(with: Data(String(cString:raw).utf8)) as? [String:Any] { rows.append(row) }
+        }
     }
     func transaction(_ action: () throws -> Void) throws {
         try execute("BEGIN IMMEDIATE")
@@ -609,6 +625,12 @@ final class Store {
         reply.send(["task_id":task?.taskID ?? "inbox", "status":"ok","result":String(decoding:data,as:UTF8.self)])
     }
     func processInbox(_ request: Request, _ reply: Reply) throws {
+        if request.command == "inbox_list", let issue = request.issue {
+            try issue.validate()
+            let data = try JSONSerialization.data(withJSONObject:["tasks":database.inboxRelatedRows(issue),"unread":database.inboxUnreadCount()])
+            reply.send(["task_id":"inbox", "status":"ok", "result":String(decoding:data,as:UTF8.self)])
+            return
+        }
         if request.command == "inbox_list" && request.count_only == true {
             let data = try JSONSerialization.data(withJSONObject:["unread":database.inboxUnreadCount()])
             reply.send(["task_id":"inbox", "status":"ok", "result":String(decoding:data,as:UTF8.self)])

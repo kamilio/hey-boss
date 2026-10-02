@@ -2395,6 +2395,38 @@ func auditWebInbox(root:URL) {
     let finalList=request("inbox_list")
     precondition(finalCount["unread"] as? Int==finalList["unread"] as? Int && finalCount["unread"] as? Int==1)
     precondition(finalCount["tasks"]==nil && (try! JSONSerialization.data(withJSONObject:finalCount)).count<100)
+    let linked=request("inbox_list",nil,["issue":["project":"github.com/example/repo","number":9]])
+    let linkedRows=linked["tasks"] as! [[String:Any]]
+    precondition(linkedRows.count==1 && linkedRows[0]["taskID"] as? String==id, "Related notices must exclude other issues and unlinked history")
+    precondition(linked["unread"] as? Int==finalCount["unread"] as? Int, "Related reads must keep the global unread total")
+    for reference in [["project":"github.com/example/repo","number":8],["project":"github.com/other/repo","number":9],["project":"github.com/example/repo","number":9,"host":"remote"]] as [[String:Any]] {
+        precondition((request("inbox_list",nil,["issue":reference])["tasks"] as! [[String:Any]]).isEmpty)
+    }
+    precondition(request("inbox_list",nil,["issue":["project":"","number":0]])["status"] as? String=="error")
+    let relatedReference=IssueReference(project:"github.com/example/repo",number:9,host:nil)
+    func relatedReadSteps() -> Int {
+        var steps=0
+        withUnsafeMutablePointer(to:&steps) { pointer in
+            sqlite3_trace_v2(store.database.db,UInt32(SQLITE_TRACE_PROFILE),{ _,context,statement,_ in
+                if let context, let statement {
+                    context.assumingMemoryBound(to:Int.self).pointee += Int(sqlite3_stmt_status(OpaquePointer(statement),SQLITE_STMTSTATUS_VM_STEP,0))
+                }
+                return 0
+            },pointer)
+            defer { sqlite3_trace_v2(store.database.db,0,nil,nil) }
+            precondition((try! store.database.inboxRelatedRows(relatedReference)).count==1)
+            precondition((try! store.database.inboxUnreadCount())==1)
+        }
+        return steps
+    }
+    let stepsBefore=relatedReadSteps()
+    try! store.database.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<8192) INSERT INTO dialogs SELECT 'history-'||x,'ok',json_object('kind','update','title','Unrelated history','issue',json_object('project','other','number',9)) FROM n")
+    let stepsAfter=relatedReadSteps()
+    precondition(stepsAfter <= stepsBefore+20, "Related reads must not scan unrelated history")
+    print("Related notice lookup: \(stepsBefore) → \(stepsAfter) VM steps after 8192 unrelated records")
+    _=request("inbox_link",id,["issue":["project":"github.com/example/repo","number":9,"host":"remote"]])
+    precondition((try! store.database.inboxRelatedRows(relatedReference)).isEmpty)
+    precondition((request("inbox_list",nil,["issue":["project":"github.com/example/repo","number":9,"host":"remote"]])["tasks"] as! [[String:Any]]).count==1)
     print("Passed: web Inbox summaries, Markdown, creation links, relationship-only link/unlink, archived linking, read receipts, question read safety, invalid answers, winning answer preservation, cancellation, review comments and finish")
 }
 

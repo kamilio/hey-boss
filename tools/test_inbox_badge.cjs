@@ -8,15 +8,16 @@ function fixture() {
   const requests = [], elements = new Map();
   const context = vm.createContext({
     document: {hidden: false},
-    model: {route: {view: 'issues'}, detail: null, project: {id: 'fixture'}},
+    model: {sequence: 0, route: {view: 'issues'}, detail: null, project: {id: 'fixture'}},
     Date,
+    icon: () => '', esc: value => value, routeHash: route => '#notice=' + route.notice,
     $: selector => {
-      if (!elements.has(selector)) elements.set(selector, {hidden: false, setAttribute() {}});
+      if (!elements.has(selector)) elements.set(selector, {hidden: false, setAttribute() {}, contains() {return false}, querySelector() {return null}});
       return elements.get(selector);
     },
     post: async (_url, action) => {
       requests.push(action.action);
-      return action.action === 'count' ? {ok: true, unread: 4} : {ok: true, unread: 4, tasks: [{taskID: 'notice', status: 'pending'}]};
+      return action.action === 'count' ? {ok: true, unread: 4} : {ok: true, unread: 4, tasks: [{taskID: 'notice', title: 'Linked notice', status: 'pending', issue: {project: 'fixture', number: 7}}]};
     },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/issues/web/inbox.js'), 'utf8'), context);
@@ -34,23 +35,45 @@ test('inactive inbox badge coalesces count requests without loading notice rows'
   assert.equal(f.run('inboxTasks.length'), 1);
 });
 
-test('detail and inbox views retain complete notice lookup; hidden pages do not poll', async () => {
+test('details request related notices; inbox retains complete lookup and hidden pages do not poll', async () => {
   const f = fixture();
   f.context.document.hidden = true;
   await f.run('refreshInboxBadge()');
   assert.equal(f.requests.length, 0);
   f.context.document.hidden = false;
   f.context.model.detail = {issue: {number: 7}};
-  let related;
-  f.context.loadRelatedNotices = async (...args) => { related = args; };
+  f.context.model.route.issue = 7;
   await f.run('refreshInboxBadge()');
-  assert.deepEqual(f.requests, ['list']);
-  assert.equal(related[0], 7);
-  assert.equal(related[3][0].taskID, 'notice');
+  assert.deepEqual(f.requests, ['related']);
+  assert.match(f.elements.get('#related-notices').innerHTML, /Linked notice/);
+  assert.equal(f.run('inboxTasks.length'), 0);
+  assert.equal(f.elements.get('#inbox-unread').textContent, 4);
   f.context.model.detail = null;
   f.context.model.route.view = 'inbox';
   await f.run('refreshInboxBadge()');
-  assert.deepEqual(f.requests, ['list']);
+  assert.deepEqual(f.requests, ['related', 'list']);
+});
+
+test('related reads coalesce by full reference and discard replies after navigation', async () => {
+  const f = fixture();
+  f.context.model.detail = {issue: {number: 7}};
+  Object.assign(f.context.model.route, {issue: 7, host: 'remote'});
+  const pending = [];
+  f.context.post = async (_url, action) => new Promise(resolve => pending.push({action, resolve}));
+  const first = f.run('refreshInboxBadge()');
+  const duplicate = f.run('loadRelatedNotices(7, "fixture", "remote")');
+  assert.equal(pending.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(pending[0].action)), {action: 'related', issue: {project: 'fixture', number: 7, host: 'remote'}});
+  f.context.model.route.host = '';
+  ++f.context.model.sequence;
+  const second = f.run('refreshInboxBadge()');
+  assert.equal(pending.length, 2);
+  pending[1].resolve({ok: true, unread: 3, tasks: []});
+  await second;
+  pending[0].resolve({ok: true, unread: 99, tasks: [{title: 'Stale notice'}]});
+  await Promise.all([first, duplicate]);
+  assert.equal(f.elements.get('#inbox-unread').textContent, 3);
+  assert.doesNotMatch(f.elements.get('#related-notices').innerHTML, /Stale notice/);
 });
 
 test('failed count reads release their in-flight slot for the next refresh', async () => {
@@ -74,6 +97,23 @@ test('a late count cannot overwrite the badge refreshed by opening Inbox', async
   const counting = f.run('refreshInboxBadge()');
   f.context.model.route.view = 'inbox';
   await f.run('inboxSnapshot()');
+  resolve({ok: true, unread: 99});
+  await counting;
+  assert.equal(f.elements.get('#inbox-unread').textContent, 4);
+});
+
+test('a late count cannot overwrite a related-notice update after returning to the list', async () => {
+  const f = fixture();
+  const post = f.context.post;
+  let resolve;
+  f.context.post = async (url, action) => action.action === 'count'
+    ? new Promise(done => { resolve = done; }) : post(url, action);
+  const counting = f.run('refreshInboxBadge()');
+  f.context.model.detail = {issue: {number: 7}};
+  f.context.model.route.issue = 7;
+  await f.run('refreshInboxBadge()');
+  f.context.model.detail = null;
+  f.context.model.route.issue = null;
   resolve({ok: true, unread: 99});
   await counting;
   assert.equal(f.elements.get('#inbox-unread').textContent, 4);
