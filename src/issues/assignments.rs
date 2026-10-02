@@ -21,12 +21,21 @@ pub(super) fn links_changed(
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=5 FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_assignment_summary','issue_github_destinations','github_fetch_status')",[],|r|r.get::<_,bool>(0))? { return Ok(()); }
-    db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_watches(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,status TEXT NOT NULL CHECK(json_valid(status)),PRIMARY KEY(project_id,issue_number),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)); CREATE INDEX IF NOT EXISTS issue_assignment_summary ON issues(project_id,number,assignment_target); CREATE INDEX IF NOT EXISTS issue_github_destinations ON issues(project_id,number) WHERE assignment_target='github';")?;
-    fetch::migrate(db)?;
-    // The supervisor retains exact event identities locally. Peers need only
-    // current evidence and its event generation, not an ever-growing history.
-    db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_signals(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,url TEXT NOT NULL,head TEXT NOT NULL,signal TEXT NOT NULL,PRIMARY KEY(project_id,issue_number,url,head,signal),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)) WITHOUT ROWID;")?;
+    let (metadata_ready, summary_ready) = db.query_row("SELECT count(*)=4,EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_assignment_summary' AND type='index' AND instr(sql,'assignee')>0) FROM sqlite_master WHERE name IN ('issue_github_watches','issue_github_signals','issue_github_destinations','github_fetch_status')",[],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,bool>(1)?)))?;
+    if !metadata_ready {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_watches(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,status TEXT NOT NULL CHECK(json_valid(status)),PRIMARY KEY(project_id,issue_number),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)); CREATE INDEX IF NOT EXISTS issue_github_destinations ON issues(project_id,number) WHERE assignment_target='github';")?;
+        fetch::migrate(db)?;
+        // The supervisor retains exact event identities locally. Peers need only
+        // current evidence and its event generation, not an ever-growing history.
+        db.execute_batch("CREATE TABLE IF NOT EXISTS issue_github_signals(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,url TEXT NOT NULL,head TEXT NOT NULL,signal TEXT NOT NULL,PRIMARY KEY(project_id,issue_number,url,head,signal),FOREIGN KEY(project_id,issue_number) REFERENCES issues(project_id,number)) WITHOUT ROWID;")?;
+    }
+    if !summary_ready {
+        // Assignee is after body in issue records; cover it so the actor join
+        // never walks large body overflow chains just to read an assignment.
+        let tx = db.unchecked_transaction()?;
+        tx.execute_batch("DROP INDEX IF EXISTS issue_assignment_summary; CREATE INDEX issue_assignment_summary ON issues(project_id,number,assignment_target,assignee)")?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -830,6 +839,66 @@ pub(super) fn release_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn assignment_metadata_does_not_read_large_issue_body_pages() {
+        let f = Fixture::new();
+        let db = &f.store.db;
+        db.execute_batch("DROP INDEX issue_assignment_summary; CREATE INDEX issue_assignment_summary ON issues(project_id,number,assignment_target);
+            INSERT INTO agents VALUES('worker','{\"machine\":\"remote\",\"host\":\"worker-host\"}',0);
+            WITH RECURSIVE n(id) AS (VALUES(2) UNION ALL SELECT id+1 FROM n WHERE id<16)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT 'named:test',id,'Task '||id,'','open','human:test',0,0,1,'[]',id FROM n;
+            UPDATE issues SET assignee='worker',assignment_target='machine:remote';").unwrap();
+        migrate(db).unwrap();
+        let numbers: Vec<i64> = (1..=16).collect();
+        let read_pages = || {
+            db.execute_batch("PRAGMA cache_size=-64; PRAGMA shrink_memory")
+                .unwrap();
+            let mut pages = 0;
+            let mut high = 0;
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        1
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            let found = metadata(db, "named:test", &numbers).unwrap();
+            assert_eq!(found.len(), 16);
+            for value in found.values() {
+                assert_eq!(value.target.as_deref(), Some("machine:remote"));
+                assert_eq!(value.actor_machine.as_deref(), Some("remote"));
+                assert_eq!(value.actor_host.as_deref(), Some("worker-host"));
+            }
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        0
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            pages
+        };
+        let small = read_pages();
+        db.execute("UPDATE issues SET body=?1", ["x".repeat(1024 * 1024)])
+            .unwrap();
+        let large = read_pages();
+        eprintln!("Assignment metadata cache misses for empty/1-MiB bodies: {small}/{large}");
+        assert!(
+            large <= small + 16,
+            "Assignment lookup read body overflow pages: {small} -> {large}"
+        );
+    }
     struct Fixture {
         store: Store,
         request: Request,
