@@ -1728,35 +1728,59 @@ pub(super) fn apply_pull(
     }
     apply_graph(&mut writer, &pending, payload, acknowledged)?;
     writer.reconcile()?;
-    db.execute("DELETE FROM fleet_allocations", [])?;
-    for row in payload["allocations"]
+    let allocations = payload["allocations"]
         .as_array()
-        .ok_or_else(|| invalid("Missing fleet allocations"))?
-    {
-        execute(
-            db,
-            "INSERT INTO fleet_allocations VALUES(?,?,?)",
-            &[
-                row["project_id"].clone(),
-                row["issue_number"].clone(),
-                row["node"].clone(),
-            ],
-        )?;
+        .ok_or_else(|| invalid("Missing fleet allocations"))?;
+    let mut unchanged_allocations = false;
+    if let Some(deadlines) = payload["allocation_deadlines"].as_array() {
+        unchanged_allocations = true;
+        for (table, incoming) in [
+            ("fleet_allocations", allocations),
+            ("fleet_allocation_deadlines", deadlines),
+        ] {
+            let mut current: Vec<_> = rows(db, &format!("SELECT * FROM {table}"), &[])?
+                .iter()
+                .map(Value::to_string)
+                .collect();
+            let mut incoming: Vec<_> = incoming.iter().map(Value::to_string).collect();
+            current.sort_unstable();
+            incoming.sort_unstable();
+            if current != incoming {
+                unchanged_allocations = false;
+                break;
+            }
+        }
     }
-    for row in payload["allocation_deadlines"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        execute(
-            db,
-            "UPDATE fleet_allocation_deadlines SET expires_at=? WHERE project_id=? AND issue_number=?",
-            &[
-                row["expires_at"].clone(),
-                row["project_id"].clone(),
-                row["issue_number"].clone(),
-            ],
-        )?;
+    // Compare full row multisets in this pull's transaction. Missing/partial
+    // legacy deadlines and malformed duplicates retain normal refresh/validation.
+    if !unchanged_allocations {
+        db.execute("DELETE FROM fleet_allocations", [])?;
+        for row in allocations {
+            execute(
+                db,
+                "INSERT INTO fleet_allocations VALUES(?,?,?)",
+                &[
+                    row["project_id"].clone(),
+                    row["issue_number"].clone(),
+                    row["node"].clone(),
+                ],
+            )?;
+        }
+        for row in payload["allocation_deadlines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            execute(
+                db,
+                "UPDATE fleet_allocation_deadlines SET expires_at=? WHERE project_id=? AND issue_number=?",
+                &[
+                    row["expires_at"].clone(),
+                    row["project_id"].clone(),
+                    row["issue_number"].clone(),
+                ],
+            )?;
+        }
     }
     for r in payload["ranges"]
         .as_array()
@@ -5683,6 +5707,97 @@ mod tests {
             rows(&f.db, "SELECT node FROM fleet_allocations", &[]).unwrap()[0]["node"],
             "agent"
         );
+    }
+
+    #[test]
+    fn unchanged_allocation_pulls_preserve_rows_and_legacy_refresh() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            install_capture(&f.db, "agent", "peer").unwrap();
+            let mut payload = json!({"cursor":0,"ranges":[],
+                "allocations":(1..=count).map(|number| json!({"project_id":"named:Native fleet","issue_number":number,"node":"peer"})).collect::<Vec<_>>(),
+                "allocation_deadlines":(1..=count).map(|number| json!({"project_id":"named:Native fleet","issue_number":number,"expires_at":1000+number})).collect::<Vec<_>>()});
+            apply_pull(&f.db, "peer", &payload, &[]).unwrap();
+            f.db.execute_batch("CREATE TABLE allocation_mutations(kind TEXT);
+                CREATE TRIGGER allocation_insert_audit AFTER INSERT ON fleet_allocations BEGIN INSERT INTO allocation_mutations VALUES('insert'); END;
+                CREATE TRIGGER allocation_delete_audit AFTER DELETE ON fleet_allocations BEGIN INSERT INTO allocation_mutations VALUES('delete'); END;
+                CREATE TRIGGER allocation_deadline_audit AFTER UPDATE ON fleet_allocation_deadlines BEGIN INSERT INTO allocation_mutations VALUES('deadline'); END;").unwrap();
+            // Wire order is not meaningful; compare the complete row multiset.
+            payload["allocations"].as_array_mut().unwrap().reverse();
+            payload["allocation_deadlines"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            apply_pull(&db, "peer", &payload, &[]).unwrap();
+            drop(db);
+            let (commands, _) = transport.join().unwrap();
+            owner.stop();
+            let mutations: i64 =
+                f.db.query_row("SELECT count(*) FROM allocation_mutations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            eprintln!(
+                "{count} unchanged allocations: {commands} owner RPCs, {mutations} allocation mutations"
+            );
+            measurements.push((count, commands, mutations));
+
+            payload["allocation_deadlines"][0]["expires_at"] = json!(9876);
+            apply_pull(&f.db, "peer", &payload, &[]).unwrap();
+            assert_eq!(
+                rows(
+                    &f.db,
+                    "SELECT expires_at FROM fleet_allocation_deadlines WHERE issue_number=?",
+                    &[json!(count)]
+                )
+                .unwrap()[0]["expires_at"],
+                9876
+            );
+            let before = rows(
+                &f.db,
+                "SELECT * FROM fleet_allocations ORDER BY issue_number",
+                &[],
+            )
+            .unwrap();
+            let mut invalid = payload.clone();
+            invalid["allocations"][0] = invalid["allocations"][1].clone();
+            assert!(apply_pull(&f.db, "peer", &invalid, &[]).is_err());
+            assert_eq!(
+                rows(
+                    &f.db,
+                    "SELECT * FROM fleet_allocations ORDER BY issue_number",
+                    &[]
+                )
+                .unwrap(),
+                before
+            );
+            payload
+                .as_object_mut()
+                .unwrap()
+                .remove("allocation_deadlines");
+            apply_pull(&f.db, "peer", &payload, &[]).unwrap();
+            let minimum: i64 =
+                f.db.query_row(
+                    "SELECT min(expires_at) FROM fleet_allocation_deadlines",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                minimum > (super::super::context::now() * 1000.0) as i64,
+                "Legacy snapshots retain their default lease refresh"
+            );
+        }
+        for (count, commands, mutations) in measurements {
+            assert!(
+                commands < 25,
+                "{count} unchanged allocations needed {commands} RPCs"
+            );
+            assert_eq!(mutations, 0, "Unchanged allocation snapshots rewrote rows");
+        }
     }
 
     #[test]
