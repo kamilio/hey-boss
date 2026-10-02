@@ -1636,15 +1636,34 @@ impl Store {
             )),
             _ => None,
         };
+        let attempt_reconcile = match &r.operation {
+            Operation::ReconcileAttempt {
+                number,
+                if_version,
+                evidence,
+                outcome,
+            } => Some(attempts::prepare_reconciliation(
+                &self.db,
+                &detected,
+                *number,
+                *if_version,
+                evidence,
+                outcome,
+            )),
+            _ => None,
+        };
         // BEGIN IMMEDIATE is the safe retry boundary: mutation guards are
         // checked under the writer, and the mutation executes exactly once.
-        let tx = retry_contention(deadline, || {
-            Ok(if matches!(behavior, TransactionBehavior::Deferred) {
-                self.db.read_transaction()?
-            } else {
-                crate::database::Transaction::new_unchecked(&self.db, behavior)?
+        let begin = || {
+            retry_contention(deadline, || {
+                Ok(if matches!(behavior, TransactionBehavior::Deferred) {
+                    self.db.read_transaction()?
+                } else {
+                    crate::database::Transaction::new_unchecked(&self.db, behavior)?
+                })
             })
-        })?;
+        };
+        let mut tx = begin()?;
         if matches!(
             r.operation,
             Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
@@ -1653,7 +1672,7 @@ impl Store {
             tx.commit()?;
             return Ok(result);
         }
-        let project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
+        let mut project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
         identifier(&project.id, "project ID", 8192)?;
         identifier(&project.name, "project name", 1024)?;
         let actor = r.actor.as_ref();
@@ -1665,8 +1684,32 @@ impl Store {
         // A duplicate may finish while Git is being inspected. Its durable
         // receipt takes precedence even if those files disappeared meanwhile.
         let attempt_hold = attempt_hold.transpose()?;
+        let mut attempt_reconcile = attempt_reconcile.transpose()?;
         if supervisor_unowned {
             super::authority::guard_unowned(&tx, &project.id, r.operation.number().unwrap())?;
+        }
+        if let Some(prepared) = attempt_reconcile.as_mut()
+            && let Operation::ReconcileAttempt {
+                number,
+                if_version,
+                evidence,
+                ..
+            } = &r.operation
+            && prepared.request_stop(&tx, &project, *number, *if_version)?
+        {
+            // Commit only the worker's stop intent. Keep its reservation and
+            // the issue hold until shutdown and evidence validation finish.
+            tx.commit()?;
+            let stopped = prepared.stop_worker(evidence);
+            tx = begin()?;
+            project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
+            if let Some(response) = cached_response(&tx, &project, r, &payload)? {
+                return self.finish_replay(r, response);
+            }
+            stopped?;
+            if supervisor_unowned {
+                super::authority::guard_unowned(&tx, &project.id, r.operation.number().unwrap())?;
+            }
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1962,15 +2005,15 @@ impl Store {
             Operation::ReconcileAttempt {
                 number,
                 if_version,
-                evidence,
                 outcome,
+                ..
             } => attempts::reconcile(
                 &tx,
                 &project,
                 actor.unwrap(),
                 *number,
                 *if_version,
-                evidence,
+                attempt_reconcile.as_ref().unwrap(),
                 outcome,
                 now,
             )?,

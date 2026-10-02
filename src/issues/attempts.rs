@@ -53,16 +53,16 @@ struct Hold {
     git_branch: String,
 }
 
-fn read(db: &Connection, project: &str, number: i64) -> Result<Hold> {
+fn stored_hold(db: &Connection, project: &str, number: i64) -> Result<String> {
     let text: Option<String> = db.query_row(
         "SELECT attempt_hold FROM issues WHERE project_id=?1 AND number=?2",
         params![project, number],
         |r| r.get(0),
     )?;
-    serde_json::from_str(
-        &text.ok_or_else(|| Error::conflict("This issue has no surviving attempt hold"))?,
-    )
-    .map_err(Into::into)
+    text.ok_or_else(|| Error::conflict("This issue has no surviving attempt hold"))
+}
+fn read(db: &Connection, project: &str, number: i64) -> Result<Hold> {
+    serde_json::from_str(&stored_hold(db, project, number)?).map_err(Into::into)
 }
 
 pub(in crate::issues) fn guard(db: &Connection, project: &str, number: i64) -> Result<()> {
@@ -380,26 +380,23 @@ pub(super) fn inspect(db: &Connection, project: &Project, number: i64) -> Result
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn reconcile(
-    db: &Connection,
-    project: &Project,
-    actor: &Actor,
-    number: i64,
-    version: i64,
-    reviewed: &AttemptEvidence,
-    outcome: &str,
-    now: i64,
-) -> Result<Value> {
-    let issue = get_issue(db, &project.id, number, false)?;
-    if issue.version != version {
-        return Err(Error::conflict(
-            "Issue changed; inspect the attempt again before reconciliation",
-        ));
-    }
-    body(outcome, true)?;
-    let hold = read(db, &project.id, number)?;
-    let current = evidence(&hold)?;
+#[derive(PartialEq, Eq)]
+struct WorkerStop {
+    run: String,
+    pid: u32,
+    start: String,
+}
+
+pub(super) struct PreparedReconciliation {
+    project: String,
+    stored: String,
+    hold: Hold,
+    current: AttemptEvidence,
+    stop: Option<WorkerStop>,
+}
+
+fn reviewed_evidence(hold: &Hold, reviewed: &AttemptEvidence) -> Result<AttemptEvidence> {
+    let current = evidence(hold)?;
     if current.process != "terminal" {
         return Err(Error::conflict(
             "The retained process is live or unknown; no hold was released",
@@ -410,26 +407,129 @@ pub(super) fn reconcile(
             "Process, log or Git evidence changed; review the current outcome before releasing the hold",
         ));
     }
-    if let Some(run) = &hold.worker_run {
-        let state: Option<String> = db
-            .query_row(
-                "SELECT state FROM worker_runs WHERE id=?1 AND finished_at IS NULL",
-                [run],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if state.as_deref().is_some_and(|s| s != "attempt_held") {
+    Ok(current)
+}
+
+pub(super) fn prepare_reconciliation(
+    db: &Connection,
+    project: &Project,
+    number: i64,
+    version: i64,
+    reviewed: &AttemptEvidence,
+    outcome: &str,
+) -> Result<PreparedReconciliation> {
+    let tx = db.read_transaction()?;
+    let issue = get_issue(&tx, &project.id, number, false)?;
+    if issue.version != version {
+        return Err(Error::conflict(
+            "Issue changed; inspect the attempt again before reconciliation",
+        ));
+    }
+    body(outcome, true)?;
+    let stored = stored_hold(&tx, &project.id, number)?;
+    tx.commit()?;
+    let hold = serde_json::from_str(&stored)?;
+    let current = reviewed_evidence(&hold, reviewed)?;
+    Ok(PreparedReconciliation {
+        project: project.id.clone(),
+        stored,
+        hold,
+        current,
+        stop: None,
+    })
+}
+
+impl PreparedReconciliation {
+    fn check(&self, db: &Connection, project: &Project, number: i64, version: i64) -> Result<()> {
+        let issue = get_issue(db, &project.id, number, false)?;
+        if project.id != self.project
+            || issue.version != version
+            || stored_hold(db, &project.id, number)? != self.stored
+        {
+            return Err(Error::conflict(
+                "Issue changed; inspect the attempt again before reconciliation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn worker(&self, db: &Connection) -> Result<Option<WorkerStop>> {
+        let Some(run) = &self.hold.worker_run else {
+            return Ok(None);
+        };
+        let row: Option<(String, Option<u32>, Option<String>)> = db.query_row(
+            "SELECT state,pid,process_start FROM worker_runs WHERE id=?1 AND finished_at IS NULL",
+            [run], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+        let Some((state, pid, start)) = row else {
+            return Ok(None);
+        };
+        if state != "attempt_held" {
             return Err(Error::conflict(
                 "The original agent is still working; wait for its blocked/interrupted result before reconciliation",
             ));
         }
-        if let Some((Some(pid), Some(start))) = db.query_row(
-            "SELECT pid,process_start FROM worker_runs WHERE id=?1 AND state='attempt_held' AND finished_at IS NULL",
-            [run], |r| Ok((r.get::<_,Option<u32>>(0)?,r.get::<_,Option<String>>(1)?)),
-        ).optional()? {
-            // Only after reviewing terminal task evidence may its retained app-server group stop.
-            super::super::worker::stop_group(pid, &start)?;
+        Ok(pid.zip(start).map(|(pid, start)| WorkerStop {
+            run: run.clone(),
+            pid,
+            start,
+        }))
+    }
+
+    // Called under the writer after request-receipt validation. Persist only a
+    // stop intent here; the issue hold and unfinished reservation stay intact.
+    pub(super) fn request_stop(
+        &mut self,
+        db: &Connection,
+        project: &Project,
+        number: i64,
+        version: i64,
+    ) -> Result<bool> {
+        self.check(db, project, number, version)?;
+        self.stop = self.worker(db)?;
+        if let Some(stop) = &self.stop {
+            db.execute(
+                "UPDATE worker_runs SET stop_requested=1 WHERE id=?1 AND stop_requested=0",
+                [&stop.run],
+            )?;
         }
+        Ok(self.stop.is_some())
+    }
+
+    pub(super) fn stop_worker(&mut self, reviewed: &AttemptEvidence) -> Result<()> {
+        let stop = self.stop.as_ref().unwrap();
+        #[cfg(test)]
+        tests::before_stop()?;
+        super::super::worker::stop_group(stop.pid, &stop.start)?;
+        // Shutdown may wait. Recheck the reviewed filesystem evidence outside
+        // the writer before attempting the guarded final release.
+        self.current = reviewed_evidence(&self.hold, reviewed)?;
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconcile(
+    db: &Connection,
+    project: &Project,
+    actor: &Actor,
+    number: i64,
+    version: i64,
+    prepared: &PreparedReconciliation,
+    outcome: &str,
+    now: i64,
+) -> Result<Value> {
+    prepared.check(db, project, number, version)?;
+    if let Some(worker) = prepared.worker(db)?
+        && prepared.stop.as_ref() != Some(&worker)
+    {
+        return Err(Error::conflict(
+            "The retained worker changed; inspect the attempt again before reconciliation",
+        ));
+    }
+    let hold = &prepared.hold;
+    let current = &prepared.current;
+    if let Some(run) = &hold.worker_run {
         db.execute("UPDATE worker_runs SET state='interrupted',finished_at=?2,updated_at=?2,retry_allowed=1,retry_at=NULL,summary=?3 WHERE id=?1 AND state='attempt_held' AND finished_at IS NULL", params![run,now,outcome])?;
     }
     // Preserve user state, dependencies and destination. Only this attempt's claim is released.
@@ -456,11 +556,186 @@ mod tests {
 
     thread_local! {
         static GIT_PAUSE: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+        static STOP_PAUSE: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
     }
     pub(super) fn before_git() {
         if let Some((entered, release)) = GIT_PAUSE.with(|pause| pause.borrow_mut().take()) {
             entered.send(()).unwrap();
             release.recv().unwrap();
+        }
+    }
+    pub(super) fn before_stop() -> Result<()> {
+        if let Some((entered, release)) = STOP_PAUSE.with(|pause| pause.borrow_mut().take()) {
+            entered.send(()).unwrap();
+            release
+                .recv()
+                .map_err(|_| Error::conflict("Worker shutdown interrupted"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_does_not_hold_the_writer_during_git_or_worker_shutdown() {
+        for (stage, change) in [
+            ("git", "unchanged"),
+            ("git", "version"),
+            ("git", "hold"),
+            ("stop", "unchanged"),
+            ("stop", "version"),
+            ("stop", "worker"),
+            ("stop", "cancel"),
+            ("stop", "evidence"),
+            ("stop", "replay"),
+        ] {
+            let mut fixture = Fixture::new();
+            let mut worker = if stage == "stop" {
+                let child = Command::new("sleep")
+                    .arg("30")
+                    .process_group(0)
+                    .spawn()
+                    .unwrap();
+                let start = crate::agents::process_identity(child.id()).unwrap();
+                fixture.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,pid,process_start) VALUES('retained-run',?1,1,'{}',?2,'blocked',1,'old',?3,1,2,2,?4,?5)", params![fixture.project.id,fixture.actor.id,fixture.actor.machine,child.id(),start]).unwrap();
+                Some(child)
+            } else {
+                None
+            };
+            fixture.hold();
+            fixture.finish(0);
+            let reviewed = fixture.inspect();
+            let version = fixture.version();
+            let request = Request {
+                version: 1,
+                project: fixture.project.clone(),
+                project_override: None,
+                actor: Some(fixture.actor.clone()),
+                request_id: Some("reconcile-once".into()),
+                operation: Operation::ReconcileAttempt {
+                    number: 1,
+                    if_version: version,
+                    evidence: reviewed,
+                    outcome: "Reviewed terminal result".into(),
+                },
+            };
+            let competing_request = request.clone();
+            let retry = request.clone();
+            let path = fixture.root.join("issues.db");
+            let root = fixture.root.clone();
+            let project = fixture.project.id.clone();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            fixture
+                .store
+                .replace_connection_for_test(Connection::connect(&path).unwrap());
+            let writer = Connection::connect(&path).unwrap();
+            let (entered, paused) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let reconciling = std::thread::spawn(move || {
+                if stage == "git" {
+                    GIT_PAUSE.with(|pause| *pause.borrow_mut() = Some((entered, released)));
+                } else {
+                    STOP_PAUSE.with(|pause| *pause.borrow_mut() = Some((entered, released)));
+                }
+                let result = fixture.store.execute(&request);
+                (fixture, result)
+            });
+            paused
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let (written, completed) = std::sync::mpsc::channel();
+            let editing = std::thread::spawn(move || {
+                let result: Result<()> = (|| {
+                    match change {
+                        "version" => {
+                            writer.execute("UPDATE issues SET version=version+1 WHERE project_id=?1 AND number=1", [project])?;
+                        }
+                        "hold" => {
+                            writer.execute("UPDATE issues SET attempt_hold=json_set(attempt_hold,'$.reported_at',1+json_extract(attempt_hold,'$.reported_at')) WHERE project_id=?1 AND number=1", [project])?;
+                        }
+                        "worker" => {
+                            writer.execute("UPDATE worker_runs SET process_start='replacement-identity' WHERE id='retained-run'", [])?;
+                        }
+                        "replay" => {
+                            let mut competing = Store::open(&path)?;
+                            competing.replace_connection_for_test(writer);
+                            competing.execute(&competing_request)?;
+                            fs::rename(root.join(".git"), root.join("saved-git"))?;
+                        }
+                        _ => {
+                            writer.execute(
+                                "UPDATE projects SET activity_at=activity_at+1 WHERE id=?1",
+                                [project],
+                            )?;
+                            if change == "evidence" {
+                                fs::write(root.join("task.log"), "changed during shutdown\n")?;
+                            }
+                        }
+                    }
+                    Ok(())
+                })();
+                written.send(result.is_ok()).unwrap();
+                result
+            });
+            let finished_while_paused = completed
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .ok()
+                == Some(true);
+            if change == "cancel" {
+                drop(release);
+            } else {
+                release.send(()).unwrap();
+            }
+            let (mut fixture, result) = reconciling.join().unwrap();
+            let edited = editing.join().unwrap();
+            let retained = held(&fixture.store.db, &fixture.project.id, 1).unwrap();
+            let interrupted_stop_preserved = if change == "cancel" {
+                let pending: bool = fixture.store.db.query_row("SELECT stop_requested=1 AND finished_at IS NULL AND state='attempt_held' FROM worker_runs WHERE id='retained-run'", [], |r| r.get(0)).unwrap();
+                let alive = worker.as_mut().unwrap().try_wait().unwrap().is_none();
+                fixture.store.execute(&retry).unwrap();
+                pending && alive && !held(&fixture.store.db, &fixture.project.id, 1).unwrap()
+            } else {
+                true
+            };
+            let events: i64 = fixture
+                .store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM events WHERE action='attempt_reconciled'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            owner.stop();
+            drop(fixture);
+            if let Some(child) = worker.as_mut() {
+                let _ = child.kill();
+                child.wait().unwrap();
+            }
+            assert!(
+                finished_while_paused,
+                "Reconciliation held the writer during {stage}/{change}"
+            );
+            edited.unwrap();
+            assert!(
+                interrupted_stop_preserved,
+                "Interrupted shutdown lost protection or could not retry"
+            );
+            if matches!(change, "unchanged" | "replay") {
+                result.unwrap();
+                assert!(!retained);
+                assert_eq!(events, 1);
+            } else {
+                let expected = match change {
+                    "version" | "hold" => "Issue changed",
+                    "worker" => "worker changed",
+                    "cancel" => "shutdown interrupted",
+                    "evidence" => "evidence changed",
+                    _ => unreachable!(),
+                };
+                let error = result.unwrap_err();
+                assert!(error.message.contains(expected), "{}", error.message);
+                assert!(retained);
+                assert_eq!(events, i64::from(change == "cancel"));
+            }
         }
     }
 
