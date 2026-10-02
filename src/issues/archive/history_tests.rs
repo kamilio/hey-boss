@@ -470,6 +470,21 @@ fn recent_history_extends_the_grace_period_and_deleted_issues_remain_readable() 
 }
 
 #[test]
+fn many_maximum_size_comments_archive_through_the_database_service() {
+    let f = Fixture::new();
+    f.db.execute("WITH RECURSIVE n(x) AS (VALUES(3) UNION ALL SELECT x+1 FROM n WHERE x<18)
+        INSERT INTO comments(id,project_id,issue_number,author,body,created_at) SELECT x,'named:Archive',1,'human:boss',?1,50 FROM n", ["x".repeat(crate::issues::BODY_LIMIT)]).unwrap();
+    let _owner = crate::database::Owner::start(&f.root.join("issues.db")).unwrap().unwrap();
+    let db = crate::database::Connection::connect(&f.root.join("issues.db")).unwrap();
+    assert!(archive_issue(&db, "named:Archive", 1, GRACE_MS + 100).unwrap());
+    while cleanup_history(&db).unwrap() > 0 {}
+    let cold = history_connection(&db, "named:Archive", 1).unwrap().unwrap();
+    assert_eq!(cold.query_row("SELECT count(*) FROM comments WHERE length(body)=?1", [crate::issues::BODY_LIMIT], |r|r.get::<_,i64>(0)).unwrap(), 16);
+    restore_issue(&db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM comments WHERE length(body)=?1", [crate::issues::BODY_LIMIT], |r|r.get::<_,i64>(0)).unwrap(), 16);
+}
+
+#[test]
 fn abandoned_download_cleanup_preserves_verified_copies_and_recent_transfers() {
     let source = Fixture::new();
     source.archive();
