@@ -465,6 +465,14 @@ fn target_inspect(host: &str, binary: &Path) -> io::Result<Installation> {
         }
     }
 }
+fn bootstrap_script() -> String {
+    // Only the staged guard runs here. The installer builds release artifacts
+    // after taking its lock and validating provenance and generation ordering.
+    format!(
+        "{REFRESH_BUILD_INPUTS}; cargo build --quiet --locked --profile dev --bin hey-boss --manifest-path \"$upgrade_stage/Cargo.toml\"; cp \"$CARGO_TARGET_DIR/debug/hey-boss\" \"$upgrade_stage/guard\""
+    )
+}
+
 fn remote_apply(
     snapshot: &Path,
     host: &str,
@@ -485,7 +493,8 @@ fn remote_apply(
     // Compile the staged implementation on the target, so old installed CLIs also
     // enter the new guard on their very first upgrade. No downloaded executable.
     let script = format!(
-        "set -eu; export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:$PATH\"; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; tar -xzf - -C \"$stage\"; upgrade_stage=\"$stage\"; {REFRESH_BUILD_INPUTS}; export CARGO_TARGET_DIR=\"$HOME/.cache/hey-boss/bootstrap\"; cargo build --quiet --locked --release --manifest-path \"$stage/Cargo.toml\"; cp \"$CARGO_TARGET_DIR/release/hey-boss\" \"$stage/guard\"; \"$stage/guard\" upgrade --apply-snapshot \"$stage\" --binary \"$HOME/.local/bin/hey-boss\" --json{}{}",
+        "set -eu; export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:$PATH\"; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; tar -xzf - -C \"$stage\"; upgrade_stage=\"$stage\"; export CARGO_TARGET_DIR=\"$HOME/.cache/hey-boss/bootstrap\"; {}; \"$stage/guard\" upgrade --apply-snapshot \"$stage\" --binary \"$HOME/.local/bin/hey-boss\" --json{}{}",
+        bootstrap_script(),
         observed
             .map(|n| format!(" --observed-generation {n}"))
             .unwrap_or_default(),
@@ -873,6 +882,29 @@ mod tests {
                     .unwrap()
                     .set_modified(old)
                     .unwrap();
+            }
+            let bootstrap = temp.0.join("bootstrap");
+            output(
+                Command::new("sh")
+                    .args(["-ec", &bootstrap_script()])
+                    .env("upgrade_stage", &root)
+                    .env("CARGO_TARGET_DIR", &bootstrap),
+            )
+            .unwrap();
+            assert_eq!(
+                installed_id(&root.join("guard")).as_deref(),
+                Some(stamp),
+                "The guard and its libraries must come from the new archived snapshot"
+            );
+            assert!(
+                !bootstrap.join("release").exists(),
+                "Bootstrap must leave release compilation to the installer"
+            );
+            for package in ["hey-harvester", "hey-gh"] {
+                assert!(
+                    !bootstrap.join("debug").join(package).exists(),
+                    "Bootstrap must not build companion executables"
+                );
             }
             let binary = build(&root, &target).unwrap();
             for package in ["hey-harvester", "hey-gh"] {
