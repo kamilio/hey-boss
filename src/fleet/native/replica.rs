@@ -1764,6 +1764,7 @@ pub(super) fn apply_pull(
             }
         }
     }
+    super::archive::validate_pull(db, payload)?;
     // Apply endpoints before edges and history, regardless of JSON object order.
     for (table, _) in TABLES {
         for row in payload["tables"][*table].as_array().into_iter().flatten() {
@@ -4222,6 +4223,125 @@ mod tests {
                 .is_err()
             );
             owner.stop();
+        }
+    }
+
+    #[test]
+    fn archived_resolution_history_survives_fleet_identity_translation() {
+        use super::super::archive as archive_sync;
+        use crate::issues::archive as cold;
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("UPDATE issues SET state='closed',closed_at=100,closed_by='human:fixture',updated_at=100; UPDATE events SET created_at=1;
+            INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(45,'named:Native fleet',1,'human:fixture','From offline peer',10);
+            INSERT INTO fleet_row_ids VALUES('offline','comments',77,45);
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Native fleet',1,'human:fixture','comment_resolved',20,'{\"comment_id\":45}');").unwrap();
+        let agent = Fixture::new();
+        agent.db.execute("DELETE FROM events", []).unwrap();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let before = rows(
+            &agent.db,
+            "SELECT * FROM events WHERE action='comment_resolved'",
+            &[],
+        )
+        .unwrap();
+        assert!(
+            before[0]["data"]
+                .as_str()
+                .unwrap()
+                .contains("comment_origin")
+        );
+        assert!(
+            cold::archive_issue(&main.db, "named:Native fleet", 1, cold::GRACE_MS + 100).unwrap()
+        );
+        let payload = snapshot(&main.db, "agent").unwrap();
+        let prepared =
+            archive_sync::prepare_pull(&agent.db, &payload, |key, project, number, cursor| {
+                cold::transfer::export_page(&main.db, key, project, number, cursor)
+            })
+            .unwrap();
+        apply_pull(&agent.db, "agent", &prepared, &[]).unwrap();
+        while cold::cleanup_history(&agent.db).unwrap() != 0 {}
+        cold::restore_issue(&agent.db, "named:Native fleet", 1, cold::GRACE_MS + 101).unwrap();
+        let after = rows(
+            &agent.db,
+            "SELECT * FROM events WHERE action='comment_resolved'",
+            &[],
+        )
+        .unwrap();
+        let before_data: Value = serde_json::from_str(before[0]["data"].as_str().unwrap()).unwrap();
+        let after_data: Value = serde_json::from_str(after[0]["data"].as_str().unwrap()).unwrap();
+        assert_eq!(before[0]["id"], after[0]["id"]);
+        assert_eq!(before_data["comment_id"], after_data["comment_id"]);
+        assert_eq!(journal_count(&agent), 0);
+        for fixture in [&main, &agent] {
+            std::fs::remove_file(format!("{}.archive.db", fixture.path.display())).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_edit_after_archive_preparation_cannot_disappear_behind_the_manifest() {
+        use super::super::archive as archive_sync;
+        use crate::issues::archive as cold;
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("UPDATE issues SET state='closed',closed_at=100,closed_by='human:fixture',updated_at=100; UPDATE events SET created_at=1;
+            INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Native fleet',1,'human:fixture','Original comment',10);").unwrap();
+        let agent = Fixture::new();
+        agent.db.execute("DELETE FROM events", []).unwrap();
+        install_capture(&agent.db, "agent", "agent").unwrap();
+        apply_pull(
+            &agent.db,
+            "agent",
+            &snapshot(&main.db, "agent").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            cold::archive_issue(&main.db, "named:Native fleet", 1, cold::GRACE_MS + 100).unwrap()
+        );
+        let payload = snapshot(&main.db, "agent").unwrap();
+        let prepared =
+            archive_sync::prepare_pull(&agent.db, &payload, |key, project, number, cursor| {
+                cold::transfer::export_page(&main.db, key, project, number, cursor)
+            })
+            .unwrap();
+        let mut store = Store::open(&agent.path).unwrap();
+        let request:Request=serde_json::from_value(json!({"version":1,"project":{"id":"named:Native fleet","name":"Native fleet"},"actor":{"id":"human:fixture","kind":"human","machine":"agent","host":"fixture","cwd":std::env::temp_dir(),"source":"test"},"operation":{"action":"comment","number":1,"body":"Arrived during archive preparation"}})).unwrap();
+        store.execute(&request).unwrap();
+        let error = apply_pull(&agent.db, "agent", &prepared, &[]).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::issues::Error>().unwrap().code,
+            "archive_retry"
+        );
+        assert!(
+            agent
+                .db
+                .query_row("SELECT archive_key IS NULL FROM issues", [], |r| r
+                    .get::<_, bool>(0))
+                .unwrap()
+        );
+        let retry = archive_sync::prepare_pull(&agent.db, &payload, |_, _, _, _| {
+            panic!("Copy already available")
+        })
+        .unwrap();
+        apply_pull(&agent.db, "agent", &retry, &[]).unwrap();
+        assert_eq!(
+            agent
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        for fixture in [&main, &agent] {
+            std::fs::remove_file(format!("{}.archive.db", fixture.path.display())).unwrap();
         }
     }
 

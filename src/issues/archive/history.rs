@@ -473,6 +473,18 @@ fn same_record(table: &str, expected: &Value, actual: &Value) -> bool {
                 let parse = |v: &Value| {
                     v.as_str()
                         .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                        .map(|mut data| {
+                            // Fleet transport adds canonical provenance. The
+                            // mapped local comment_id already identifies the
+                            // same comment; transport hints are not user data.
+                            if data["comment_id"].is_i64()
+                                && let Some(fields) = data.as_object_mut()
+                            {
+                                fields.remove("comment_origin");
+                                fields.remove("comment_origin_id");
+                            }
+                            data
+                        })
                 };
                 let expected = parse(value);
                 expected.is_some() && expected == parse(&actual[field])

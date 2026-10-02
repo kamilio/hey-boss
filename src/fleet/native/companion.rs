@@ -372,26 +372,40 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 reply(&output, control::configure_companion(&ctx, &message)?)?;
             }
             Some("pull") => {
-                let payload = super::archive::prepare_pull(
-                    &db,
-                    &message["payload"],
-                    |key, project, number, cursor| {
-                        authority::call(
-                            &ctx.state,
-                            &ctx.path,
-                            json!({"kind":"issue_archive","key":key,"project":project,"number":number,"cursor":cursor}),
-                        )
-                    },
-                )?;
-                replica::apply_pull(
-                    &db,
-                    &ctx.node,
-                    &payload,
-                    message["receipts"]
-                        .as_array()
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]),
-                )?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let payload = super::archive::prepare_pull(
+                        &db,
+                        &message["payload"],
+                        |key, project, number, cursor| {
+                            authority::call(
+                                &ctx.state,
+                                &ctx.path,
+                                json!({"kind":"issue_archive","key":key,"project":project,"number":number,"cursor":cursor}),
+                            )
+                        },
+                    )?;
+                    match replica::apply_pull(
+                        &db,
+                        &ctx.node,
+                        &payload,
+                        message["receipts"]
+                            .as_array()
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    ) {
+                        Ok(()) => break,
+                        Err(error)
+                            if error
+                                .downcast_ref::<crate::issues::Error>()
+                                .is_some_and(|e| e.code == "archive_retry")
+                                && Instant::now() < deadline =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 crate::chief_ownership::stop_unassigned(&db)?;
                 status.lock().unwrap().synced()?;
                 control::reconcile(
